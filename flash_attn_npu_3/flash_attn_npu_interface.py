@@ -106,6 +106,67 @@ def round_up_headdim(head_size: int) -> int:
     return round_multiple(head_size, _HEADDIM_BWD_ALIGN)
 
 
+def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged_kv=False):
+    """Reject MLA before copies, metadata generation or ordinary FA dispatch.
+
+    Uses only tensor metadata, including for fake tensors. Keep in sync with
+    ascend910/flash_attn_npu_3/mla/mla_validation.h. Outer strides and storage
+    offsets are legal; no view is materialized by this boundary.
+    """
+
+    def check(condition, message):
+        if not condition:
+            raise RuntimeError(message)
+
+    check(q.ndim == (3 if varlen_q else 4), "FlashAttention: q rank must match BSND/TND layout")
+    check(
+        k.ndim == (3 if varlen_k else 4) and v.ndim == k.ndim,
+        "FlashAttention: k/v rank must match dense, TND or paged KV layout",
+    )
+    check(q.shape[-1] == k.shape[-1], "FlashAttention: q and k head dimensions must match")
+    if qv is None and q.shape[-1] == v.shape[-1]:
+        return
+    check(not paged_kv or not varlen_k, "MLA: page_table and cu_seqlens_k cannot be combined")
+    check(q.dtype in (torch.float16, torch.bfloat16), "MLA: inputs must have FP16 or BF16 dtype")
+    check(q.device.type == "npu", "MLA: inputs must be NPU tensors")
+    for tensor in (q, k, v) + (() if qv is None else (qv,)):
+        check(tensor.dtype == q.dtype, "MLA: all inputs must have the same dtype")
+        check(tensor.device == q.device, "MLA: all inputs must be on the same device")
+        check(
+            tensor.ndim > 0 and tensor.stride(-1) == 1,
+            "MLA: inputs must have contiguous last dimension",
+        )
+    check(k.shape[:-1] == v.shape[:-1], "MLA: k/v shapes must match except for head dimension")
+    heads_q, heads_kv = q.shape[-2], k.shape[-2]
+    check(
+        heads_q > 0 and heads_kv > 0 and heads_q % heads_kv == 0,
+        "MLA: positive KV head count must divide query head count",
+    )
+    if qv is not None:
+        check(
+            qv.shape == (*q.shape[:-1], v.shape[-1]),
+            "MLA: qv shape must match q with the value head dimension",
+        )
+        check(
+            q.shape[-1] == 64 and v.shape[-1] == 512,
+            "MLA: supported qv representation requires Dq=64 and Dv=512",
+        )
+        check(heads_kv == 1, "MLA: compressed representation requires one KV head")
+        raise RuntimeError("NPU FlashAttention MLA compressed forward is not implemented yet")
+    check(
+        q.shape[-1] == 192 and v.shape[-1] == 128,
+        "MLA: supported representation without qv requires Dq=192 and Dv=128",
+    )
+    raise RuntimeError("NPU FlashAttention MLA prefill forward is not implemented yet")
+
+
+def _check_mla_metadata(headdim, headdim_v):
+    # Dimensions alone do not imply qv. Both unequal-dimension paths need the
+    # future MLA scheduler and must not receive ordinary byte metadata.
+    if headdim != headdim_v:
+        raise RuntimeError("NPU FlashAttention MLA scheduler metadata is not implemented yet")
+
+
 @_torch_custom_op_wrapper(
     "flash_attn_npu_3::_flash_attn_forward", mutates_args=(), device_types="npu"
 )
@@ -145,6 +206,15 @@ def _flash_attn_forward(
     pack_gqa: Optional[bool] = None,
     sm_margin: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    _check_mla_inputs(
+        q,
+        k,
+        v,
+        qv,
+        varlen_q=cu_seqlens_q is not None,
+        varlen_k=cu_seqlens_k is not None,
+        paged_kv=page_table is not None,
+    )
     q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
     v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
     cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new = [
@@ -243,11 +313,21 @@ def _flash_attn_forward_fake(
     Symbolic fake implementation of flash attention forward.
     Returns tensors with the correct shapes and dtypes without actual computation.
     """
+    _check_mla_inputs(
+        q,
+        k,
+        v,
+        qv,
+        varlen_q=cu_seqlens_q is not None,
+        varlen_k=cu_seqlens_k is not None,
+        paged_kv=page_table is not None,
+    )
 
     # Determine if we're in varlen mode
     is_varlen_q = cu_seqlens_q is not None
     if is_varlen_q:
         _validate_varlen_query(q, cu_seqlens_q)
+        _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True)
 
     # Get dimensions from query tensor
     if is_varlen_q:
@@ -653,6 +733,7 @@ class FlashAttnFunc(torch.autograd.Function):
         sm_margin=0,
         return_softmax=False,
     ):
+        _check_mla_inputs(q, k, v, qv)
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
         # Training interfaces do not expose scheduler_metadata (aligned with
@@ -670,6 +751,7 @@ class FlashAttnFunc(torch.autograd.Function):
             head_size,
             cache_seqlens,
             qkv_dtype=q.dtype,
+            headdim_v=v.shape[-1],
             causal=causal,
             window_size=window_size,
             has_softcap=softcap > 0.0,
@@ -807,6 +889,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         return_softmax=False,
     ):
         _validate_varlen_query(q, cu_seqlens_q)
+        _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True)
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
         # Training interfaces do not expose scheduler_metadata (aligned with
@@ -832,7 +915,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
             num_heads,
             num_heads_k,
             head_size,
-            headdim_v=head_size,
+            headdim_v=v.shape[-1],
             qkv_dtype=q.dtype,
             cache_seqlens=maybe_contiguous(cache_seqlens),
             seqlens_q=seqlens_q,
@@ -1294,6 +1377,14 @@ def flash_attn_with_kvcache(
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
     """
+    _check_mla_inputs(
+        q,
+        k_cache,
+        v_cache,
+        qv,
+        varlen_q=cu_seqlens_q is not None,
+        paged_kv=page_table is not None,
+    )
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
     if softmax_scale is None:
@@ -1452,6 +1543,7 @@ def _get_scheduler_metadata_op(
     pack_gqa: Optional[bool],
     sm_margin: int,
 ) -> torch.Tensor:
+    _check_mla_metadata(headdim, headdim_v)
     scheduler_metadata = flash_attn_npu_3.get_scheduler_metadata(
         batch_size,
         max_seqlen_q,
@@ -1518,6 +1610,7 @@ def _get_scheduler_metadata_fake(
     pack_gqa: Optional[bool],
     sm_margin: int,
 ) -> torch.Tensor:
+    _check_mla_metadata(headdim, headdim_v)
     return torch.empty(
         (_SCHEDULER_METADATA_TILING_BYTES,),
         dtype=torch.uint8,
@@ -1552,6 +1645,7 @@ def get_scheduler_metadata(
     seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1] if cu_seqlens_q is not None else None
     if headdim_v is None:
         headdim_v = headdim
+    _check_mla_metadata(headdim, headdim_v)
     # Route through the custom op so torch.compile / FakeTensor can use the
     # registered fake instead of tracing into the raw pybind extension.
     scheduler_metadata = _get_scheduler_metadata_op(
