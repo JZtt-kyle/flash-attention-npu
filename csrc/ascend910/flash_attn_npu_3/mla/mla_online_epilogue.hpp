@@ -122,11 +122,7 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
         if (tile == 0) {
             AscendC::DataCopy(numerator, output, rows * 512);
         } else {
-            Broadcast(alpha[tile % 2], rows);
-            for (uint32_t column = 0; column < 512; column += 64) {
-                AscendC::Mul<float>(numerator[column], numerator[column], temporary, 64, rows,
-                                    AscendC::BinaryRepeatParams(1, 1, 0, 64, 64, 1));
-            }
+            ScaleNumerator<false>(alpha[tile % 2], rows);
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Add(numerator, numerator, output, rows * 512);
         }
@@ -134,11 +130,7 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
         if (!last) {
             return;
         }
-        Broadcast(runningSum, rows);
-        for (uint32_t column = 0; column < 512; column += 64) {
-            AscendC::Div<float>(numerator[column], numerator[column], temporary, 64, rows,
-                                AscendC::BinaryRepeatParams(1, 1, 0, 64, 64, 1));
-        }
+        ScaleNumerator<true>(runningSum, rows);
         AscendC::PipeBarrier<PIPE_V>();
         Cast(outputHalf, numerator, rows * 512);
         AscendC::Ln(logsum, runningSum, rows);
@@ -155,6 +147,30 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
     }
 
   private:
+    template <bool Divide>
+    CATLASS_DEVICE void ScaleNumerator(AscendC::LocalTensor<float> factors, uint32_t rows)
+    {
+        Broadcast(factors, rows);
+        // Each factor occupies one 32-byte block. For fewer than eight rows,
+        // repeat along the 512 columns of a row and reuse its factor in every
+        // repeat. This issues rows instructions instead of eight. Wider tasks
+        // keep the column-wise traversal, including C1V1's sixteen-row case.
+        const bool byRow = rows < 8;
+        const uint32_t instructions = byRow ? rows : 8;
+        const uint32_t repeats = byRow ? 8 : rows;
+        const AscendC::BinaryRepeatParams strides =
+            byRow ? AscendC::BinaryRepeatParams(1, 1, 0, 8, 8, 0) : AscendC::BinaryRepeatParams(1, 1, 0, 64, 64, 1);
+        for (uint32_t index = 0; index < instructions; ++index) {
+            auto values = numerator[index * (byRow ? 512 : 64)];
+            auto factor = temporary[byRow ? index * 8 : 0];
+            if constexpr (Divide) {
+                AscendC::Div<float>(values, values, factor, 64, repeats, strides);
+            } else {
+                AscendC::Mul<float>(values, values, factor, 64, repeats, strides);
+            }
+        }
+    }
+
     CATLASS_DEVICE
     void Broadcast(AscendC::LocalTensor<float> source, uint32_t rows)
     {

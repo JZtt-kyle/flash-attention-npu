@@ -66,6 +66,14 @@ def test_online_accuracy(case, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("heads", [2, 4, 6, 8, 10, 11, 12, 13, 14, 15, 16])
+def test_online_output_rows(heads, dtype):
+    # On C1V2 this covers one through eight output rows per vector lane,
+    # including unequal lane sizes around the rescale traversal boundary.
+    _check_accuracy(Case("output-rows", "compressed", 1, 3, 383, heads, 1), dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("length", [527, 528, 529, 575, 576, 577])
 def test_online_reduction_tail(length, dtype):
     # Exercise both the Cube's 16-column padding and the in-place reduction's

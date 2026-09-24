@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-状态：方案已确认，M02a、M02b1、M02b2、M03、M04a、M04b1、M04b2a 已完成。512+64 的连续 BSND 前向支持 KV 1..1024；双 reference、固定源码 CANN、逐例性能和普通 FA3 回归通过。M04b2 在实现前拆为双缓冲流水 M04b2a 与更长 KV 调度 M04b2b，下一步 M04b2b。
+状态：方案已确认，M02a、M02b1、M02b2、M03、M04a、M04b1、M04b2a、M04b2b1 已完成。512+64 的连续 BSND 前向支持 KV 1..1024；双 reference、固定源码 CANN、逐例性能和普通 FA3 回归通过。M04b2b 在实现前拆为在线输出累积优化 M04b2b1 与更长 KV 调度 M04b2b2，下一步 M04b2b2。
 进度、确认及证据入口为 [status.md](status.md)，源能力与代表用例见 [design.md](design.md) 4.1/4.2。后续在已确认范围内不逐步重复审批。
 
 ## 提交粒度
@@ -19,7 +19,8 @@
 | M04a | 已完成 | 512+64、连续 BSND、短 KV（1..128）、无 mask、显式 `num_splits=1` 的 CATLASS 前向 | 910B MLA 374 项、普通 FA3 11 项、CPU 88 项通过；24 组 CANN/新实现精度与分派溯源通过；D02 及同形单 query × 两种 dtype 的 kernel 比值 0.652..0.672、调用比值 0.885..0.923，逐例不退化 |
 | M04b1 | 已完成 | 上述路径 KV 129..512 的在线 softmax、FP32 输出累积及紧凑 dense MLA 调用入口 | 910B MLA 476 项、普通 FA3 11 项、CPU 88 项通过；30 组 CANN/新实现精度与分派通过；D01 默认/显式 scale、511 单/多 query 和短路径共 12 例 kernel 比值 0.651..0.912、调用比值 0.822..0.871，逐例不退化；更长 KV 明确拒绝 |
 | M04b2a | 已完成 | 上述路径双缓冲输出累积、归约及空闲核 head 分工，支持 KV 513..1024 | 910B MLA 564 项（完整 552 + 归约尾块 12）、普通 FA3 11 项、CPU 88 项通过；72 组 CANN/新实现精度与分派通过；24 例 kernel 比值 0.589..0.988、调用比值 0.780..0.864，逐例不退化；保持显式 num_splits=1，>1024 明确拒绝 |
-| M04b2b | 待开始 | 上述路径 KV >1024 的流水与长 KV 调度优化 | KV 尾块、单/多 query，含 8193 的 FP16/BF16 O/LSE、重复执行及同轮 CANN 性能通过；保持显式 num_splits=1，不走生产 CANN 回退 |
+| M04b2b1 | 已完成 | 缩短在线输出累积的逐 tile 向量指令序列，保持 KV 1..1024 | 910B MLA 586 项、普通 FA3 11 项通过；94 组 CANN/新实现精度与分派通过；32 例 kernel 比值 0.603..0.975、调用比值 0.833..0.882，逐例不退化；旧新版 32 例 O/LSE 逐位一致，少行任务获得小幅 kernel 收益 |
+| M04b2b2 | 待开始 | 上述路径 KV >1024 的流水与长 KV 调度优化 | KV 尾块、单/多 query，含 8193 的 FP16/BF16 O/LSE、重复执行及同轮 CANN 性能通过；保持显式 num_splits=1，不走生产 CANN 回退 |
 | M05 | 待开始 | 上述路径的 MLA metadata：AICPU 调度、官方参数入口和运行时 scale 分离 | 有/无 metadata 等价；默认与自定义 scale、连续多次复用正确；常规 FA byte metadata 兼容回归通过 |
 | M06 | 待开始 | 512+64 非分页 TND、真实长度与外层 stride | 不均匀 Q/KV、`seqused_*`、前缀和、零长度、尾块与 poison padding 通过；steady-state 无长度 D2H；相应用例性能通过 |
 | M07 | 待开始 | 512+64 的 ND paged cache | BSND/TND query，页表乱序/尾页、16..1024 的源有效页大小、K/V 独立首维 stride；精度、越界保护和 PA 性能通过 |
@@ -43,7 +44,7 @@ M17 如果发现退化，按具体用例/瓶颈拆独立优化步并验证，不
 - 结束：检查差异；更新本表状态及 status 的结果、命令、证据、下一步；一句话 commit；停止。
 
 测试产物随功能逐步增加。M01 提供 `tests/common/mla_ref.py` 与 `tests/test_flash_attn_npu_v3_mla_reference.py`；M02a 增加 `tests/mla_cann_baseline.py` 与 `tests/test_flash_attn_npu_v3_mla_cann.py`，覆盖安装包的 BSND 执行与计时。M02b1 增加执行器 `--expected-vendor` 检查与 `tests/test_flash_attn_npu_v3_mla_provenance.py`。M02b2 扩展到 P02、长 KV 和较长 prefill，新增 `--profile-dir`、`tests/mla_cann_profile.py` 及 CPU 数据完整性检查；全部实际 keys 已在 M02b1 包内，无需补编译。源码包、逐例分派和原始 profiler 证据见 status。M03 增加 `tests/test_flash_attn_npu_v3_mla_contract.py`，验证两种表示在 dense/TND/PA 的拒绝契约、非法输入、合法外层 stride、空输入及普通 fake shape。M04a 新增 `tests/test_flash_attn_npu_v3_mla_short.py`，覆盖短 KV 的精度、两种 dtype、尾块、连续非零 storage offset、重复执行与真实/fake/C++ 参数边界。M04b1 新增 `tests/test_flash_attn_npu_v3_mla_online.py`，覆盖 129..512 的尾块、跨 tile 最大值变化、FP32/零/负 scale、状态复用及紧凑公开入口的真实/fake 边界；静态 dense 调度随 kernel 参数传递，尚无 MLA metadata 协议。后续按步骤增加更长 KV、metadata 与 TND/PA 设备解析，不提前创建空脚手架。
-M04b2a 将在线用例扩至 1024，覆盖两组缓冲的跨任务复用、异长调用连续入队、8/16-head 分工及 16/64 列归约边界，保留 1025/8193 的拒绝检查。更长 KV 与 8193 性能验收留在 M04b2b。
+M04b2a 将在线用例扩至 1024，覆盖两组缓冲的跨任务复用、异长调用连续入队、8/16-head 分工及 16/64 列归约边界，保留 1025/8193 的拒绝检查。M04b2b1 先优化每个 tile 的 FP32 输出重缩放与最终归一化，复用现有数学和跨核流水；更长 KV 与 8193 性能验收留在 M04b2b2。
 原始性能数据保留用例 ID、shape、dtype、布局、mask、split、metadata 模式、软件版本和每轮计时。日志存放位置由执行步骤确定并写进 status，避免把大结果表加入代码仓。
 
 ## 构建与检查约束
