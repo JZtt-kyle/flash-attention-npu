@@ -162,7 +162,11 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 
 [独立 CPU reference](../../tests/common/mla_ref.py) 当前只接受规范 BSND 逻辑张量。高精度用 FP64，低精度对照用输入 dtype 点积与 FP32 softmax，最终 O 为输入 dtype、LSE 为 FP32；两者都不调用 FA3/CANN 或现仓普通 attention golden。`fa3_to_cann_inputs` 显式传同一 scale，prefill 可返回 stride 保真的 split 视图或 combined 表示；反向映射要求 512 维 K/V 为同一 storage view，拒绝数值暂时相等的独立 buffer。
 
-[CPU 验收](../../tests/test_flash_attn_npu_v3_mla_reference.py) 用独立标量求和/指数 oracle 和手写可见列矩阵核对上述数学规则；不共用 reference 的 mask 或张量收缩。M01 覆盖 D/P 数学、共享边界、scale、GQA、stride、mask、softcap 与全局空张量；TND/PA 解析、metadata、split accumulator、图与设备数值仍按计划逐步验证。逻辑映射不等于可直接执行的 FIA 适配器；M02 要核实源布局、实际算子及 split/combined prefill 的可运行性。
+[CPU 验收](../../tests/test_flash_attn_npu_v3_mla_reference.py) 用独立标量求和/指数 oracle 和手写可见列矩阵核对上述数学规则；不共用 reference 的 mask 或张量收缩。M01 覆盖 D/P 数学、共享边界、scale、GQA、stride、mask、softcap 与全局空张量；TND/PA 解析、metadata、split accumulator 和图仍按计划逐步验证。
+
+M02a 的 [CANN 执行器](../../tests/mla_cann_baseline.py) 与 [910B 验收](../../tests/test_flash_attn_npu_v3_mla_cann.py) 仅覆盖无 mask 的 BSND D01/D02/P01，显式传入相同 scale 并保留 prefill split 视图的 192 行 stride。使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv 维输出，避免 torch_npu 2.7.1 默认包装器将 combined 192/128 的输出错分配为 192。O/LSE 均调用原仓 `assert_fa_close`，无 softcap 时阈值固定为 `max(2 * max|pt-ref| + 2 * ULP(ref), 1e-5)`；不因基线误差修改阈值。
+
+该执行器记录安装版本、进程实际加载的算子库及 SHA256、输入 shape/stride/offset、每轮 event span 和逐调用同步端到端时间。输入 H2D 与一次性视图创建不计时，输出分配及包装器内转换计时；event span 可能含 host 发射间隙，不当作纯 kernel 时间。安装包与固定源码的二进制对应关系未经验证时，结果仅验收执行器；M02b 必须建立固定源码基线并用 profiler 核实模板、kernel 时间与转换成本，之后才能用于迁移性能验收。
 
 ## 5. metadata 设计
 
