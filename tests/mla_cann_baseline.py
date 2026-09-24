@@ -226,7 +226,96 @@ def git_output(root, *args):
     return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
 
 
-def environment(cann_source=None):
+def check_vendor_configuration(vendor):
+    """Keep a requested custom-source run from silently using the installed OPP."""
+    vendor = Path(vendor).resolve()
+    configured = [
+        path for path in os.environ.get("ASCEND_CUSTOM_OPP_PATH", "").split(os.pathsep) if path
+    ]
+    if len(configured) != 1 or Path(configured[0]).resolve() != vendor:
+        raise RuntimeError("ASCEND_CUSTOM_OPP_PATH must contain exactly the requested CANN vendor")
+    if not vendor.is_dir():
+        raise RuntimeError(f"CANN vendor directory does not exist: {vendor}")
+    # A JIT-only custom package can load new tiling with an installed, incompatible
+    # device binary. Require both dense floating-point binaries before any NPU call.
+    vendor_kernel_files(vendor)
+    return vendor
+
+
+def vendor_kernel_files(vendor):
+    kernel_root = Path(vendor) / "op_impl/ai_core/tbe/kernel"
+    if not kernel_root.resolve().is_relative_to(Path(vendor).resolve()):
+        raise RuntimeError("Custom FIA kernel directory escapes the vendor directory")
+    configs = sorted(kernel_root.glob("config/ascend910b/**/fused_infer_attention_score.json"))
+    if len(configs) != 1:
+        raise RuntimeError("Custom CANN requires a unique compiled 910B FIA kernel configuration")
+    bins = json.loads(configs[0].read_text())["binList"]
+    artifacts = [file_info(configs[0])]
+    for dtype in ("float16", "bfloat16"):
+        matching = [
+            item
+            for item in bins
+            if item["inputs"][0]["dtype"] == dtype and item["outputs"][0]["dtype"] == dtype
+        ]
+        if len(matching) != 1:
+            raise RuntimeError(f"Custom CANN requires one dense {dtype} FIA binary")
+        metadata = (kernel_root / matching[0]["binInfo"]["jsonFilePath"]).resolve()
+        if not metadata.is_relative_to(kernel_root.resolve()):
+            raise RuntimeError("Custom FIA kernel metadata escapes the vendor directory")
+        info = json.loads(metadata.read_text())
+        binary = (metadata.parent / (info["binFileName"] + info["binFileSuffix"])).resolve()
+        if not binary.is_relative_to(kernel_root.resolve()) or not binary.is_file():
+            raise RuntimeError(f"Custom CANN device binary is missing or outside vendor: {dtype}")
+        binary_info = file_info(binary)
+        if info.get("sha256") != binary_info["sha256"] or not info.get("kernelList"):
+            raise RuntimeError(f"Custom CANN device binary does not match its metadata: {dtype}")
+        artifacts.extend((file_info(metadata), binary_info))
+    return artifacts
+
+
+def verify_loaded_vendor(vendor, source, loaded_paths):
+    """Check package loading and source bytes, not device dispatch or timing.
+
+    Native build logs and device dispatch evidence are still needed to connect these
+    loaded host libraries and packaged headers to an executed device binary.
+    """
+    vendor = check_vendor_configuration(vendor)
+    if git_output(source, "rev-parse", "HEAD") != PINNED_CANN:
+        raise RuntimeError("Custom vendor verification requires the pinned CANN checkout")
+    libraries = []
+    for name in ("libcust_opapi.so", "libcust_opmaster_rt2.0.so"):
+        candidates = sorted({path.resolve() for path in vendor.rglob(name) if path.is_file()})
+        if (
+            len(candidates) != 1
+            or not candidates[0].is_relative_to(vendor)
+            or str(candidates[0]) not in loaded_paths
+        ):
+            raise RuntimeError(f"Requested custom CANN library was not uniquely loaded: {name}")
+        libraries.append(file_info(candidates[0]))
+    headers = []
+    for name in (
+        "fia_kernel_nonquant_mla.h",
+        "fia_block_cube_nonquant_mla.h",
+        "fia_block_vec_nonquant_mla.h",
+        "fia_kernel_nonquant.h",
+    ):
+        relative = f"attention/fused_infer_attention_score/op_kernel/arch22/{name}"
+        pinned = subprocess.check_output(
+            ["git", "-C", str(source), "show", f"{PINNED_CANN}:{relative}"]
+        )
+        candidates = sorted(vendor.glob(f"**/arch22/{name}"))
+        if len(candidates) != 1 or candidates[0].read_bytes() != pinned:
+            raise RuntimeError(f"Custom CANN header does not match the pinned source: {name}")
+        headers.append(file_info(candidates[0]))
+    return dict(
+        path=str(vendor),
+        loaded_libraries=libraries,
+        pinned_headers=headers,
+        packaged_kernels=vendor_kernel_files(vendor),
+    )
+
+
+def environment(cann_source=None, expected_vendor=None):
     """Capture loaded libraries AFTER running FIA, not just environment paths."""
     import torch_npu
 
@@ -240,7 +329,15 @@ def environment(cann_source=None):
         path
         for path in paths
         if any(
-            name in Path(path).name for name in ("libopapi", "libophost_transformer", "liboptiling")
+            name in Path(path).name
+            for name in (
+                "libopapi",
+                "libophost_transformer",
+                "liboptiling",
+                "libcust_opapi",
+                "libcust_opmaster",
+                "libcust_opsproto",
+            )
         )
     )
     version_paths = (opp / "version.info", toolkit / "share/info/ops_transformer/version.info")
@@ -310,6 +407,15 @@ def environment(cann_source=None):
                 )
             ],
         )
+    if expected_vendor is not None:
+        if cann_source is None:
+            raise ValueError("Custom vendor verification requires a CANN source checkout")
+        result["custom_vendor"] = verify_loaded_vendor(expected_vendor, cann_source, paths)
+        result["pinned_source_binary_correspondence"] = (
+            "custom host libraries loaded and four packaged headers match the pinned commit; "
+            "packaged device binaries match their compiler metadata; "
+            "native build and executed device binary provenance require separate evidence"
+        )
     return result
 
 
@@ -328,16 +434,25 @@ def main():
     parser.add_argument(
         "--cann-source", type=Path, help="Optional read-only checkout for provenance"
     )
+    parser.add_argument(
+        "--expected-vendor",
+        type=Path,
+        help="Require this custom OPP's host libraries and pinned headers; needs --cann-source",
+    )
     args = parser.parse_args()
     if min(args.warmup, args.iterations, args.rounds) <= 0:
         parser.error("warmup, iterations and rounds must be positive")
     if args.output.exists():
         parser.error("output already exists; choose a new path to preserve raw evidence")
+    if args.expected_vendor is not None:
+        if args.cann_source is None:
+            parser.error("--expected-vendor requires --cann-source")
+        check_vendor_configuration(args.expected_vendor)
     require_910b(args.device)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report = dict(
         status="running",
-        scope="installed-package executor validation; not the pinned-source performance baseline",
+        scope="CANN package executor validation; not the pinned-source performance baseline",
         timing_contract="event spans include dispatch gaps/copies; host samples include output allocation, dispatch and synchronization; excludes H2D and one-time input views; no isolated kernel timing",
         settings={
             key: str(value) if isinstance(value, Path) else value
@@ -369,7 +484,7 @@ def main():
                     f"PASS {case.name} {dtype_name}: O/LSE; event span {row['timing']['median_event_call_us']:.3f} us/call",
                     flush=True,
                 )
-        report["environment"] = environment(args.cann_source)
+        report["environment"] = environment(args.cann_source, args.expected_vendor)
         report["status"] = "passed"
     except Exception as exc:
         report["status"] = "failed"

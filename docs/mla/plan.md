@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-状态：方案已确认，M02a 已完成；M02 因安装包与固定源码的对应关系尚未建立，拆为执行器闭环 M02a 与固定源码性能基线 M02b。下一步 M02b。
+状态：方案已确认，M02a、M02b1 已完成；M02b 在实现前拆为固定源码构建与精度闭环 M02b1，以及 profiler 性能基线 M02b2。下一步 M02b2。
 进度、确认及证据入口为 [status.md](status.md)，源能力与代表用例见 [design.md](design.md) 4.1/4.2。后续在已确认范围内不逐步重复审批。
 
 ## 提交粒度
@@ -13,7 +13,8 @@
 | M00 | 已完成，方案已确认 | 范围、接口适配、文档约定和候选计划 | 来源固定，关键冲突有处理结论，文档链接及空白检查通过 |
 | M01 | 已完成 | 两种 MLA 的独立 reference、CANN↔FA3 输入映射及源能力用例清单 | CPU 71 例通过：两项点积、共享 KV 边界、192/128、GQA、scale、stride、右下 mask、窗口归一化和空行符号；源能力逐项给出来源及纳入/排除结论 |
 | M02a | 已完成 | 910B CANN 执行器、安装包溯源与普通 FA3 重建回归 | 12 组 D01/D02/P01 的 FP16/BF16 O/LSE 双 reference 及重复执行通过；split/combined prefill 通过；两轮计时、加载库/哈希/安装版本已保存；强制重建普通 FA3 后 8 项回归通过。安装包结果仅验收执行器 |
-| M02b | 待开始 | 固定 CANN 源码的隔离构建与性能基线 | 在源仓外构建或验证与固定 commit 对应的 FIA；重跑 M02a 用例并扩展代表输入；保存 profiler kernel 时间与调用端到端时间，核实模板及转换成本，形成后续迁移的正式比较基线 |
+| M02b1 | 已完成 | 固定 CANN 源码的隔离构建与加载溯源 | 固定 commit 导出及原生 host/tiling 构建通过；FP16/BF16 各编译 12 个 dense keys，实际 48 次 FIA launch 均来自配套 vendor 二进制；12 组精度/重复执行、6 项包校验 CPU 回归及 8 项普通 FA3 回归通过。JIT-only 混用旧 device binary 的问题已定位并拦截；计时仍非正式性能基线 |
+| M02b2 | 待开始 | 固定源码的 profiler 性能基线 | 在 M02b1 构建上扩展代表输入；保存 profiler kernel 时间与调用端到端时间，核实模板及转换成本，形成后续迁移的正式比较基线 |
 | M03 | 待开始 | MLA 入口识别、形状/stride 参数和明确的未支持拦截 | `qv` 不再被静默忽略；无效组合和未接通组合明确报错；fake/真实契约及普通 FA3 回归通过 |
 | M04 | 待开始 | 512+64、BSND、无 mask、无 split 的 CATLASS 前向 | FP16/BF16，单/多 query，O/LSE 与 reference、CANN 一致；选定 dense 用例性能不退化；不走生产 CANN 回退 |
 | M05 | 待开始 | 上述路径的 MLA metadata：AICPU 调度、官方参数入口和运行时 scale 分离 | 有/无 metadata 等价；默认与自定义 scale、连续多次复用正确；常规 FA byte metadata 兼容回归通过 |
@@ -38,7 +39,7 @@ M17 如果发现退化，按具体用例/瓶颈拆独立优化步并验证，不
 - 实现：代码、针对性验证、必要的构建接入一起完成。测试命令选择本步用例，加受公共改动影响的最小回归。
 - 结束：检查差异；更新本表状态及 status 的结果、命令、证据、下一步；一句话 commit；停止。
 
-测试产物随功能逐步增加。M01 提供 `tests/common/mla_ref.py` 与 `tests/test_flash_attn_npu_v3_mla_reference.py`；M02a 增加 `tests/mla_cann_baseline.py` 与 `tests/test_flash_attn_npu_v3_mla_cann.py`，覆盖安装包的 BSND 执行与计时。后续按步骤增加固定源码基线、TND/PA 解析，不提前创建空脚手架。
+测试产物随功能逐步增加。M01 提供 `tests/common/mla_ref.py` 与 `tests/test_flash_attn_npu_v3_mla_reference.py`；M02a 增加 `tests/mla_cann_baseline.py` 与 `tests/test_flash_attn_npu_v3_mla_cann.py`，覆盖安装包的 BSND 执行与计时。M02b1 增加执行器 `--expected-vendor` 检查与 `tests/test_flash_attn_npu_v3_mla_provenance.py`，固定源码产物及加载证据位置见 status。M02b2 扩展用例时须核对已编译 keys，必要时补编译；后续按步骤增加 TND/PA 解析，不提前创建空脚手架。
 原始性能数据保留用例 ID、shape、dtype、布局、mask、split、metadata 模式、软件版本和每轮计时。日志存放位置由执行步骤确定并写进 status，避免把大结果表加入代码仓。
 
 ## 构建与检查约束
