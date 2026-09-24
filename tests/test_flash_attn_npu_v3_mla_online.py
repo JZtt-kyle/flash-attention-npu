@@ -74,6 +74,33 @@ def test_online_output_rows(heads, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("length", [129, 383, 1024])
+def test_online_cached_query_components(dtype, length):
+    # Select content coordinates on both sides of every Cube K-slice boundary,
+    # plus the first/last RoPE coordinate. More tasks than cores force cached Q
+    # to change, including a one-head tail and both L1 KV buffers.
+    case = Case("cached-query", "compressed", 2, 21, length, 17, 1, scale=0.23)
+    cpu = make_inputs(case, dtype, 20260924)
+    cpu["q"].zero_()
+    cpu["qv"].zero_()
+    coordinates = [0, 127, 128, 255, 256, 383, 384, 511, 512, 575]
+    for row in range(case.batch * case.seqlen_q * case.heads_q):
+        coordinate = coordinates[row % len(coordinates)]
+        component = cpu["qv"] if coordinate < 512 else cpu["q"]
+        index = coordinate if coordinate < 512 else coordinate - 512
+        component.view(-1, component.shape[-1])[row, index] = 1 if row % 2 else -1
+    refs = mla_reference_pair(**cpu, softmax_scale=case.scale)
+    inputs = {name: tensor.npu() for name, tensor in cpu.items()}
+    first = api.flash_attn_func(**inputs, softmax_scale=case.scale, return_attn_probs=True)
+    second = api.flash_attn_func(**inputs, softmax_scale=case.scale, return_attn_probs=True)
+    for name, tensor, repeated, ref, pt in zip(("out", "lse"), first, second, refs[:2], refs[2:]):
+        assert_fa_close(tensor.cpu(), ref, pt, name=name)
+        torch.testing.assert_close(tensor, repeated, rtol=0, atol=0)
+    for name, tensor in inputs.items():
+        torch.testing.assert_close(tensor.cpu(), cpu[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("length", [527, 528, 529, 575, 576, 577])
 def test_online_reduction_tail(length, dtype):
     # Exercise both the Cube's 16-column padding and the in-place reduction's

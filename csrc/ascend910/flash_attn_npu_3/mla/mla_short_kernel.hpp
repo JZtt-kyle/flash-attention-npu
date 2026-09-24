@@ -12,6 +12,7 @@
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/gemm/block/block_mmad.hpp"
 #include "mla_online_epilogue.hpp"
+#include "mla_online_mmad.hpp"
 
 namespace flash_attn::mla {
 
@@ -59,8 +60,8 @@ class DenseKernel {
                                                                 stages * (kScoreBytes + kProbabilityBytes)));
         Catlass::Arch::CrossCoreFlag qkReady(1), softmaxReady(2), pvReady(3), outputReady(4);
 #ifdef __DAV_CUBE__
-        QK qk(resource);
-        PV pv(resource);
+        std::conditional_t<Online, CachedQueryQK<Element>, QK> qk(resource);
+        std::conditional_t<Online, CachedQueryPV<Element>, PV> pv(resource);
         for (uint32_t event = 0; event < 4; ++event) {
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(event);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(event);
