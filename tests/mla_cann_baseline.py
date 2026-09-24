@@ -1,14 +1,15 @@
-"""Dense MLA CANN execution and diagnostic timing, independent of FA3 kernels.
+"""Dense MLA CANN accuracy and profiling, independent of FA3 kernels.
 
 Run from the repository root with ``python -m tests.mla_cann_baseline --help``.
-The D01/D02/P01 cases and mappings follow docs/mla/design.md. No CANN kernel
+The D/P/FD01 cases and mappings follow docs/mla/design.md. No CANN kernel
 code is copied. Only BSND, no mask, native automatic splitting, and O/LSE are
 covered here. This is a test adapter, never a production fallback.
 
 NPU event spans include dispatch gaps and possible adapter copies; they are
 NOT isolated kernel timings. Installed-package measurements do not establish
-equivalence to the pinned CANN source. M02b must establish that provenance and
-collect profiler kernel timings before migration performance comparisons.
+equivalence to the pinned CANN source. Optional --profile-dir records isolated
+kernel durations and Slice conversion costs in a separate profiler capture.
+Native build and actual device dispatch evidence must accompany comparisons.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import torch
 
 from tests.common.compare import assert_fa_close
 from tests.common.mla_ref import fa3_to_cann_inputs, mla_reference_pair
+from tests.mla_cann_profile import profile_calls
 
 
 PINNED_CANN = "ca18aee610729ca5270a44e2d84c751bc687fbf0"
@@ -55,6 +57,19 @@ CASES = (
     Case("D02", "compressed", 1, 7, 65, 16, 1),
     Case("P01-split", "prefill", 2, 17, 31, 8, 2),
     Case("P01-combined", "prefill", 2, 17, 31, 8, 2, split_rope=False),
+    Case("P02-mha-split", "prefill", 1, 33, 129, 8, 8),
+    Case("P02-mha-combined", "prefill", 1, 33, 129, 8, 8, split_rope=False),
+    Case("P02-mqa-split", "prefill", 1, 33, 129, 8, 1),
+    Case("P02-mqa-combined", "prefill", 1, 33, 129, 8, 1, split_rope=False),
+    # Dense, unmasked FD01 inputs use CANN's native automatic split policy.
+    Case("FD01-D-q1", "compressed", 1, 1, 8193, 16, 1),
+    Case("FD01-D-q7", "compressed", 1, 7, 8193, 16, 1),
+    Case("FD01-P-q1-split", "prefill", 1, 1, 8193, 8, 1),
+    Case("FD01-P-q1-combined", "prefill", 1, 1, 8193, 8, 1, split_rope=False),
+    Case("FD01-P-q7-split", "prefill", 1, 7, 8193, 8, 1),
+    Case("FD01-P-q7-combined", "prefill", 1, 7, 8193, 8, 1, split_rope=False),
+    Case("P-long-split", "prefill", 1, 257, 1025, 8, 2),
+    Case("P-long-combined", "prefill", 1, 257, 1025, 8, 2, split_rope=False),
 )
 
 
@@ -345,6 +360,7 @@ def environment(cann_source=None, expected_vendor=None):
         timestamp_utc=datetime.now(timezone.utc).isoformat(),
         python=sys.version,
         executable=sys.executable,
+        cpu_affinity=sorted(os.sched_getaffinity(0)),
         torch=dict(version=torch.__version__, path=torch.__file__),
         torch_npu=dict(version=torch_npu.__version__, path=torch_npu.__file__),
         device=torch.npu.get_device_name(torch.npu.current_device()),
@@ -359,6 +375,9 @@ def environment(cann_source=None, expected_vendor=None):
                 "LD_LIBRARY_PATH",
                 "OMP_NUM_THREADS",
                 "MKL_NUM_THREADS",
+                "PYTHONPATH",
+                "ASCEND_GLOBAL_LOG_LEVEL",
+                "ASCEND_SLOG_PRINT_TO_STDOUT",
             )
         },
         repository_head=git_output(root, "rev-parse", "HEAD"),
@@ -367,6 +386,7 @@ def environment(cann_source=None, expected_vendor=None):
             file_info(root / path)
             for path in (
                 "tests/mla_cann_baseline.py",
+                "tests/mla_cann_profile.py",
                 "tests/common/mla_ref.py",
                 "tests/common/compare.py",
             )
@@ -431,6 +451,9 @@ def main():
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--rounds", type=int, default=5)
+    parser.add_argument("--profile-dir", type=Path, help="New directory for raw profiler evidence")
+    parser.add_argument("--profile-iterations", type=int, default=10)
+    parser.add_argument("--profile-rounds", type=int, default=3)
     parser.add_argument(
         "--cann-source", type=Path, help="Optional read-only checkout for provenance"
     )
@@ -440,10 +463,17 @@ def main():
         help="Require this custom OPP's host libraries and pinned headers; needs --cann-source",
     )
     args = parser.parse_args()
-    if min(args.warmup, args.iterations, args.rounds) <= 0:
+    if (
+        min(args.warmup, args.iterations, args.rounds, args.profile_iterations, args.profile_rounds)
+        <= 0
+    ):
         parser.error("warmup, iterations and rounds must be positive")
     if args.output.exists():
         parser.error("output already exists; choose a new path to preserve raw evidence")
+    if args.profile_dir is not None and args.profile_dir.exists():
+        parser.error("profile directory already exists; choose a new path")
+    if args.profile_dir is not None and os.environ.get("ASCEND_GLOBAL_LOG_LEVEL", "3") != "3":
+        parser.error("profiling requires ASCEND_GLOBAL_LOG_LEVEL=3 to exclude debug logging")
     if args.expected_vendor is not None:
         if args.cann_source is None:
             parser.error("--expected-vendor requires --cann-source")
@@ -452,8 +482,8 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     report = dict(
         status="running",
-        scope="CANN package executor validation; not the pinned-source performance baseline",
-        timing_contract="event spans include dispatch gaps/copies; host samples include output allocation, dispatch and synchronization; excludes H2D and one-time input views; no isolated kernel timing",
+        scope="Dense BSND CANN baseline; pinned-source attribution requires build and dispatch evidence",
+        timing_contract="event spans include dispatch gaps/copies; unprofiled host samples include output allocation, dispatch and synchronization; excludes H2D and one-time input views; profiler durations exclude dispatch gaps and report FIA and Slice kernels separately; kernel sums are device work, not wall latency",
         settings={
             key: str(value) if isinstance(value, Path) else value
             for key, value in vars(args).items()
@@ -466,6 +496,7 @@ def main():
 
     save()
     try:
+        calls = []
         for case in CASES:
             if args.cases and case.name not in args.cases:
                 continue
@@ -475,6 +506,8 @@ def main():
                 save()
                 call, accuracy = check_case(case, DTYPES[dtype_name], args.device, args.seed)
                 row.update(accuracy=accuracy, inputs=call.description())
+                if args.profile_dir is not None:
+                    calls.append(call)
                 row["timing"] = measure(
                     call, warmup=args.warmup, iterations=args.iterations, rounds=args.rounds
                 )
@@ -484,6 +517,20 @@ def main():
                     f"PASS {case.name} {dtype_name}: O/LSE; event span {row['timing']['median_event_call_us']:.3f} us/call",
                     flush=True,
                 )
+        if args.profile_dir is not None:
+            csv_path, profiles = profile_calls(
+                calls,
+                args.profile_dir,
+                iterations=args.profile_iterations,
+                rounds=args.profile_rounds,
+            )
+            report["profiler"] = dict(
+                kernel_details=file_info(csv_path),
+                level="Level0, CPU+NPU, no shapes/stacks/memory/AI-core metrics",
+                attribution="serialized synchronized calls; chronological Slice* then FIA; validated counts; CSV Step Id is not used",
+            )
+            for row, profile in zip(report["results"], profiles):
+                row["profile"] = profile
         report["environment"] = environment(args.cann_source, args.expected_vendor)
         report["status"] = "passed"
     except Exception as exc:
