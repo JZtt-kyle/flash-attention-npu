@@ -8,7 +8,7 @@
 // Keep the corresponding Python/fake checks in _check_mla_inputs in sync.
 namespace flash_attn::mla {
 
-inline void CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                  const std::optional<at::Tensor>& qv, bool varlenQ, bool varlenK, bool pagedKV)
 {
     TORCH_CHECK(q.dim() == (varlenQ ? 3 : 4), "FlashAttention: q rank must match BSND/TND layout");
@@ -16,7 +16,7 @@ inline void CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
                 "FlashAttention: k/v rank must match dense, TND or paged KV layout");
     TORCH_CHECK(q.size(-1) == k.size(-1), "FlashAttention: q and k head dimensions must match");
     if (!qv.has_value() && q.size(-1) == v.size(-1)) {
-        return;
+        return false;
     }
 
     TORCH_CHECK(!pagedKV || !varlenK, "MLA: page_table and cu_seqlens_k cannot be combined");
@@ -48,7 +48,7 @@ inline void CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
         TORCH_CHECK(q.size(-1) == 64 && v.size(-1) == 512,
                     "MLA: supported qv representation requires Dq=64 and Dv=512");
         TORCH_CHECK(headsKV == 1, "MLA: compressed representation requires one KV head");
-        TORCH_CHECK(false, "NPU FlashAttention MLA compressed forward is not implemented yet");
+        return true;
     }
     TORCH_CHECK(q.size(-1) == 192 && v.size(-1) == 128,
                 "MLA: supported representation without qv requires Dq=192 and Dv=128");

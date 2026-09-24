@@ -1,7 +1,7 @@
-"""MLA rejection contract on 910B, including registered fake and raw C++ entries.
+"""Unsupported MLA contracts on 910B, including registered fake and raw C++ entries.
 
-These checks do not claim MLA numerical support. All MLA calls must fail before
-ordinary metadata/kernel dispatch until the corresponding migration step lands.
+The supported short dense path has separate numerical tests. Other combinations
+must fail before ordinary metadata/kernel dispatch.
 """
 
 from contextlib import nullcontext
@@ -75,6 +75,10 @@ def _forward(entry, args):
 @pytest.mark.parametrize("strided", [False, True])
 def test_mla_unimplemented(entry, representation, layout, dtype, strided):
     args = _inputs(representation, layout, dtype, strided)
+    if representation == "compressed" and layout == "dense" and not strided:
+        # Contiguous short dense inputs are now supported; long KV is M04b.
+        args["k"] = args["k"].repeat(1, 8, 1, 1)
+        args["v"] = args["v"].repeat(1, 8, 1, 1)
     if strided:
         for name in ("q", "k", "v"):
             assert args[name].stride(-1) == 1
@@ -171,9 +175,15 @@ def test_public_rejects_before_metadata_or_dispatch(
         pytest.fail("MLA reached ordinary metadata/kernel dispatch")
 
     monkeypatch.setattr(api, "get_scheduler_metadata", unexpected)
-    monkeypatch.setattr(api, "_flash_attn_forward", unexpected)
+    # Dense qv now enters the MLA-aware custom op, whose real C++ / fake guards
+    # must reject before allocation. Other representations still stop earlier.
+    if representation != "compressed" or public_entry != "dense":
+        monkeypatch.setattr(api, "_flash_attn_forward", unexpected)
     with FakeTensorMode() if fake else nullcontext():
         args = _inputs(representation, "tnd" if public_entry == "varlen" else "dense")
+        if representation == "compressed" and public_entry == "dense":
+            args["k"] = args["k"].repeat(1, 8, 1, 1)
+            args["v"] = args["v"].repeat(1, 8, 1, 1)
         with pytest.raises(RuntimeError, match="forward is not implemented yet"):
             if public_entry == "dense":
                 api.flash_attn_func(**args)

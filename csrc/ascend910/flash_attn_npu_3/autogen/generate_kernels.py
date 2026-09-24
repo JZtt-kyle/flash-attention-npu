@@ -31,7 +31,7 @@ DTYPE_MAP = {
 # layout key -> (display name, fwd IS_TND bool token, bwd layout constant token)
 LAYOUTS = [
     ("bsnd", "BSND", "false", "BSND"),
-    ("tnd",  "TND",  "true",  "TND"),
+    ("tnd", "TND", "true", "TND"),
 ]
 
 PRELUDE = (
@@ -44,8 +44,7 @@ PRELUDE = (
 
 def _header(family_desc: str, layout_display: str) -> str:
     return (
-        PRELUDE
-        + f"// v3 {family_desc}, {layout_display} variant. One explicit instantiation per\n"
+        PRELUDE + f"// v3 {family_desc}, {layout_display} variant. One explicit instantiation per\n"
         "// translation unit so the kernel templates compile in parallel across\n"
         "// cores; head_dim is a runtime axis (switch/tiling inside the impl), not a\n"
         "// template parameter, so it is not a generation axis.\n\n"
@@ -88,6 +87,22 @@ def bwd_kernel(dtype_key: str, layout: tuple) -> "Kernel":
     )
 
 
+def mla_short_kernel(dtype_key: str) -> "Kernel":
+    ctype = DTYPE_MAP[dtype_key]
+    return Kernel(
+        family="mla_short",
+        dtype=dtype_key,
+        layout="bsnd",
+        filename=f"mla_short_{dtype_key}.cpp",
+        content=(
+            PRELUDE
+            + '#include "../mla/mla_short_kernel.hpp"\n\n'
+            + f"template void flash_attn::mla::LaunchShort<{ctype}>(\n"
+            + "    const flash_attn::mla::ShortParams &, uint32_t, uint64_t, aclrtStream);\n"
+        ),
+    )
+
+
 @dataclass
 class Kernel:
     family: str
@@ -100,6 +115,7 @@ class Kernel:
 def get_all_kernels() -> List[Kernel]:
     kernels: List[Kernel] = []
     for dtype in DTYPE_MAP:
+        kernels.append(mla_short_kernel(dtype))
         for layout in LAYOUTS:
             kernels.append(fwd_kernel(dtype, layout))
             kernels.append(bwd_kernel(dtype, layout))
@@ -107,7 +123,9 @@ def get_all_kernels() -> List[Kernel]:
 
 
 def write_kernel(kernel: Kernel, output_dir: Path) -> None:
-    (output_dir / kernel.filename).write_text(kernel.content)
+    path = output_dir / kernel.filename
+    if not path.exists() or path.read_text() != kernel.content:
+        path.write_text(kernel.content)
 
 
 def main(output_dir: Optional[str]) -> None:
