@@ -15,7 +15,7 @@ inline std::vector<at::Tensor> ForwardDense(const at::Tensor& q, const at::Tenso
     TORCH_CHECK(q.is_contiguous() && k.is_contiguous() && v.is_contiguous() && qv.is_contiguous(),
                 "NPU FlashAttention MLA compressed forward is not implemented yet for outer strides");
     TORCH_CHECK(q.size(0) > 0 && q.size(1) > 0 && k.size(1) > 0 && k.size(1) <= kOnlineKvLimit,
-                "NPU FlashAttention MLA compressed forward is not implemented yet outside nonempty KV (1..512)");
+                "NPU FlashAttention MLA compressed forward is not implemented yet outside nonempty KV (1..1024)");
     for (int axis = 0; axis < 3; ++axis) {
         TORCH_CHECK(q.size(axis) <= std::numeric_limits<uint32_t>::max(), "MLA: dense dimension exceeds uint32 range");
     }
@@ -29,7 +29,13 @@ inline std::vector<at::Tensor> ForwardDense(const at::Tensor& q, const at::Tenso
     const uint32_t vectorCores = platform->GetCoreNumAiv();
     TORCH_CHECK(cubeCores > 0 && (vectorCores == cubeCores || vectorCores == 2 * cubeCores),
                 "MLA: expected C1V1 or C1V2 resources");
-    const uint64_t tasks = uint64_t(q.size(0)) * q.size(1) * ((q.size(2) + kHeadsPerTile - 1) / kHeadsPerTile);
+    const uint64_t tokens = uint64_t(q.size(0)) * q.size(1);
+    const uint64_t wideTasks = tokens * ((q.size(2) + kHeadsPerTile - 1) / kHeadsPerTile);
+    // With long KV and spare cores, divide independent heads more finely to
+    // reduce each vector lane's FP32 accumulation work. Every task still
+    // processes the entire KV sequence; there is no split-KV or merge.
+    const uint32_t headsPerTask = k.size(1) > 512 && wideTasks <= cubeCores / 2 ? kHeadsPerTile / 2 : kHeadsPerTile;
+    const uint64_t tasks = tokens * ((q.size(2) + headsPerTask - 1) / headsPerTask);
     const uint32_t blocks = std::min<uint64_t>(cubeCores, tasks);
     auto out = at::empty({q.size(0), q.size(1), q.size(2), 512}, q.options());
     auto lse = at::empty({q.size(0), q.size(2), q.size(1)}, q.options().dtype(at::kFloat));
@@ -51,6 +57,7 @@ inline std::vector<at::Tensor> ForwardDense(const at::Tensor& q, const at::Tenso
                        uint32_t(q.size(1)),
                        uint32_t(k.size(1)),
                        uint32_t(q.size(2)),
+                       headsPerTask,
                        softmaxScale};
     auto stream = c10_npu::getCurrentNPUStream().stream(false);
     const bool bf16 = q.scalar_type() == at::kBFloat16;

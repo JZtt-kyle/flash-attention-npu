@@ -75,7 +75,13 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
         reduction.TensorSubValueRepeatM(scores, scores, maximum, temporary, rows, ::RoundUp<16>(rows), columns, stride);
         AscendC::Exp(scores, scores, count);
         AscendC::PipeBarrier<PIPE_V>();
-        reduction.RowsumTAILTILE(scores, sum, temporary, rows, columns, stride);
+        // Preserve P before using CATLASS's in-place row reduction. The two
+        // 64-element halves are added once, avoiding repeated block reductions
+        // on every full KV tile. The sum still uses the FP32 exponentials.
+        Cast(probabilities, scores, count);
+        AscendC::PipeBarrier<PIPE_V>();
+        reduction.ReduceSumRepeatM(sum, scores, rows, columns, stride);
+        AscendC::PipeBarrier<PIPE_V>();
         if (tile == 0) {
             AscendC::DataCopy(runningSum, sum, ::RoundUp<8>(rows));
         } else {
@@ -83,8 +89,6 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::Add(runningSum, runningSum, sum, rows);
         }
-        AscendC::PipeBarrier<PIPE_V>();
-        Cast(probabilities, scores, count);
         AscendC::PipeBarrier<PIPE_V>();
         // The last tile may end inside the Cube's K alignment. Padding must
         // contribute neither to the denominator nor to the PV numerator.

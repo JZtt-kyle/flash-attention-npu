@@ -69,13 +69,14 @@ class DenseKernel {
         AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID7);
 #endif
-        const uint32_t headTiles = ::CeilDiv(p.heads, kHeadsPerTile);
+        const uint32_t headsPerTask = Online ? p.headsPerTask : kHeadsPerTile;
+        const uint32_t headTiles = ::CeilDiv(p.heads, headsPerTask);
         for (uint64_t task = core; task < p.tasks; task += AscendC::GetBlockNum()) {
             const uint64_t token = task / headTiles;
             const uint32_t batch = token / p.queryLength;
             const uint32_t query = token % p.queryLength;
-            const uint32_t firstHead = (task % headTiles) * kHeadsPerTile;
-            const uint32_t rows = ::Min(kHeadsPerTile, p.heads - firstHead);
+            const uint32_t firstHead = (task % headTiles) * headsPerTask;
+            const uint32_t rows = ::Min(headsPerTask, p.heads - firstHead);
             const uint32_t columns = ::RoundUp<16>(p.kvLength);
             const uint64_t queryRow = token * p.heads + firstHead;
 #ifdef __DAV_VEC__
@@ -133,14 +134,22 @@ class DenseKernel {
                     if (step > 0) {
                         uint32_t pingpong = step;
                         const uint32_t width = ::Min(kShortKvLimit, p.kvLength - (step - 1) * kShortKvLimit);
-                        pv(probabilities[((step - 1) % 2) * kHeadsPerTile * kShortKvLimit], partial,
-                           Row(rows, width, ::RoundUp<16>(width)), Row(512, width), Row(::RoundUp<16>(rows), 512),
-                           Catlass::GemmCoord(rows, 512, width), step, pingpong, softmaxReady, localPingpong);
+                        // Two partial slots allow PV(i+1) and QK(i+2) to run
+                        // while Vector accumulates PV(i). Consume the oldest
+                        // completion before reusing that slot, then drain the
+                        // remaining completions before the next task.
+                        if (step > 2) {
+                            Catlass::Arch::CrossCoreWaitFlag(outputReady);
+                        }
+                        pv(probabilities[((step - 1) % 2) * kHeadsPerTile * kShortKvLimit],
+                           partial[((step - 1) % 2) * kHeadsPerTile * 512], Row(rows, width, ::RoundUp<16>(width)),
+                           Row(512, width), Row(::RoundUp<16>(rows), 512), Catlass::GemmCoord(rows, 512, width), step,
+                           pingpong, softmaxReady, localPingpong);
                         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(pvReady);
-                        // Both vector lanes finish before partial workspace or
-                        // the two score/probability slots can be overwritten.
-                        Catlass::Arch::CrossCoreWaitFlag(outputReady);
                     }
+                }
+                for (uint32_t pending = 0; pending < ::Min(tiles, 2U); ++pending) {
+                    Catlass::Arch::CrossCoreWaitFlag(outputReady);
                 }
 #endif
 #ifdef __DAV_VEC__
@@ -155,8 +164,9 @@ class DenseKernel {
                     }
                     if (step > 0) {
                         Catlass::Arch::CrossCoreWaitFlag(pvReady);
-                        epilogue.Accumulate(partial[firstRow * 512], out[(queryRow + firstRow) * 512], lse[lseOffset],
-                                            laneRows, p.queryLength, step - 1, step == tiles);
+                        epilogue.Accumulate(partial[(((step - 1) % 2) * kHeadsPerTile + firstRow) * 512],
+                                            out[(queryRow + firstRow) * 512], lse[lseOffset], laneRows, p.queryLength,
+                                            step - 1, step == tiles);
                         // Intermediate tiles do not write GM. Release partial
                         // only after MTE2 and vector accumulation have finished.
                         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_V>(outputReady);

@@ -1,4 +1,4 @@
-"""910B dense MLA online accumulation, currently bounded to KV <= 512."""
+"""910B dense MLA online accumulation, currently bounded to KV <= 1024."""
 
 from contextlib import nullcontext
 
@@ -35,6 +35,27 @@ CASES = [
     Case("task-reuse", "compressed", 2, 65, 257, 32, 1),
     Case("scale-fp32", "compressed", 2, 3, 511, 16, 1, scale=0.230013),
     Case("negative", "compressed", 1, 7, 511, 17, 1, scale=-0.130017),
+    Case("kv513-one-head", "compressed", 1, 1, 513, 1, 1),
+    Case("kv513-q1", "compressed", 1, 1, 513, 16, 1),
+    Case("kv513-q7", "compressed", 1, 7, 513, 16, 1),
+    Case("kv639", "compressed", 2, 3, 639, 7, 1),
+    Case("kv640", "compressed", 2, 1, 640, 8, 1),
+    Case("kv641", "compressed", 1, 2, 641, 31, 1),
+    Case("kv767", "compressed", 1, 3, 767, 17, 1),
+    Case("kv768", "compressed", 2, 7, 768, 128, 1),
+    Case("kv769", "compressed", 1, 1, 769, 17, 1),
+    Case("kv895", "compressed", 1, 3, 895, 7, 1),
+    Case("kv896", "compressed", 2, 1, 896, 8, 1),
+    Case("kv897", "compressed", 1, 2, 897, 31, 1),
+    Case("kv1023-q1", "compressed", 1, 1, 1023, 16, 1),
+    Case("kv1023-q7", "compressed", 1, 7, 1023, 16, 1),
+    Case("kv1024-q1", "compressed", 1, 1, 1024, 16, 1),
+    Case("kv1024-q7", "compressed", 1, 7, 1024, 16, 1),
+    Case("long-task-reuse-odd", "compressed", 2, 33, 769, 17, 1),
+    Case("long-task-reuse-even", "compressed", 2, 33, 1024, 32, 1),
+    Case("long-scale-fp32", "compressed", 2, 3, 1023, 16, 1, scale=0.230013),
+    Case("long-zero", "compressed", 2, 3, 1024, 17, 1, scale=0.0),
+    Case("long-negative", "compressed", 1, 7, 1023, 17, 1, scale=-0.130017),
 ]
 
 
@@ -45,11 +66,29 @@ def test_online_accuracy(case, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("biases", [(-80, -20, 35, 100), (100, 35, -20, -80), (-80, 100, -20, 35)])
+@pytest.mark.parametrize("length", [527, 528, 529, 575, 576, 577])
+def test_online_reduction_tail(length, dtype):
+    # Exercise both the Cube's 16-column padding and the in-place reduction's
+    # 64-element boundary, including a one-row head tail.
+    _check_accuracy(Case("reduction-tail", "compressed", 1, 3, length, 17, 1), dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize(
+    "biases",
+    [
+        (-80, -20, 35, 100),
+        (100, 35, -20, -80),
+        (-80, 100, -20, 35),
+        (-80, -60, -40, -20, 20, 40, 60, 100),
+        (100, 60, 40, 20, -20, -40, -60, -80),
+        (-80, 100, -20, 35, 120, -120, 0, 150),
+    ],
+)
 def test_online_changing_maximum(dtype, biases):
     # Scores are controlled by one content coordinate. Opposite query heads
     # exercise both increasing and decreasing maxima, including exp underflow.
-    case = Case("maximum", "compressed", 1, 3, 385, 17, 1, scale=1.0)
+    case = Case("maximum", "compressed", 1, 3, (len(biases) - 1) * 128 + 1, 17, 1, scale=1.0)
     cpu = make_inputs(case, dtype, 20260924)
     cpu["q"].zero_()
     cpu["qv"].zero_()
@@ -69,8 +108,9 @@ def test_online_changing_maximum(dtype, biases):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_online_contiguous_storage_offset(dtype):
-    cpu = make_inputs(Case("offset", "compressed", 2, 3, 511, 17, 1), dtype, 20260924)
+@pytest.mark.parametrize("length", [511, 1023])
+def test_online_contiguous_storage_offset(dtype, length):
+    cpu = make_inputs(Case("offset", "compressed", 2, 3, length, 17, 1), dtype, 20260924)
     refs = mla_reference_pair(**cpu)
     inputs, guards = {}, []
     for name, tensor in cpu.items():
@@ -87,24 +127,40 @@ def test_online_contiguous_storage_offset(dtype):
         assert storage[0].isnan() and storage[-1].isnan()
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_online_queued_calls(dtype):
+    # Queue mixed odd/even tile counts without synchronizing each call. Reuse
+    # each core across query/head tasks, then check every retained result.
+    expected, inputs = [], []
+    for seed, length in enumerate((513, 1024, 129, 1023, 257, 640, 65, 897)):
+        cpu = make_inputs(Case("queued", "compressed", 1, 17, length, 17, 1), dtype, seed)
+        expected.append(mla_reference_pair(**cpu))
+        inputs.append({name: tensor.npu() for name, tensor in cpu.items()})
+    results = [api.flash_attn_func(**args, return_attn_probs=True) for args in inputs]
+    for actual, refs in zip(results, expected):
+        for name, tensor, ref, pt in zip(("out", "lse"), actual, refs[:2], refs[2:]):
+            assert_fa_close(tensor.cpu(), ref, pt, name=name)
+
+
 @pytest.mark.parametrize("entry", ["eager", "fake", "cpp"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_online_entries(entry, dtype):
+@pytest.mark.parametrize("length", [512, 513, 1024])
+def test_online_entries(entry, dtype, length):
     with FakeTensorMode() if entry == "fake" else nullcontext():
         args = _inputs(dtype=dtype)
-        args["k"] = torch.zeros((2, 512, 1, 64), dtype=dtype, device="npu")
-        args["v"] = torch.zeros((2, 512, 1, 512), dtype=dtype, device="npu")
+        args["k"] = torch.zeros((2, length, 1, 64), dtype=dtype, device="npu")
+        args["v"] = torch.zeros((2, length, 1, 512), dtype=dtype, device="npu")
         out, lse, oa, la = _forward(entry, args)
         assert out.shape == (2, 3, 4, 512) and out.dtype == dtype
         assert lse.shape == (2, 4, 3) and lse.dtype == torch.float32
         assert oa.numel() == la.numel() == 0
         if entry != "fake":
             torch.testing.assert_close(out, torch.zeros_like(out), rtol=0, atol=0)
-            torch.testing.assert_close(lse, torch.full_like(lse, 512.0).log())
+            torch.testing.assert_close(lse, torch.full_like(lse, float(length)).log())
 
 
 @pytest.mark.parametrize("entry", ["eager", "fake", "cpp"])
-@pytest.mark.parametrize("length", [513, 8193])
+@pytest.mark.parametrize("length", [1025, 8193])
 def test_longer_kv_rejected(entry, length):
     with FakeTensorMode() if entry == "fake" else nullcontext():
         args = _inputs()
@@ -116,7 +172,7 @@ def test_longer_kv_rejected(entry, length):
 
 @pytest.mark.parametrize("fake", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("length", [17, 257, 511])
+@pytest.mark.parametrize("length", [17, 257, 511, 513, 1023, 1024])
 def test_dense_public_entries(fake, dtype, length):
     with FakeTensorMode() if fake else nullcontext():
         args = _inputs(dtype=dtype)

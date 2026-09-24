@@ -162,8 +162,8 @@ def _check_mla_inputs(
             unsupported + " for outer strides",
         )
         check(
-            q.shape[0] > 0 and q.shape[1] > 0 and 0 < k.shape[1] <= 512,
-            unsupported + " outside nonempty KV (1..512)",
+            q.shape[0] > 0 and q.shape[1] > 0 and 0 < k.shape[1] <= 1024,
+            unsupported + " outside nonempty KV (1..1024)",
         )
         check(
             all(size <= 2**32 - 1 for size in q.shape[:3]),
