@@ -107,12 +107,12 @@ def round_up_headdim(head_size: int) -> int:
 
 
 def _check_mla_inputs(
-    q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged_kv=False, allow_short=False
+    q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged_kv=False, allow_dense=False
 ):
     """Validate MLA using tensor metadata, including for fake tensors.
 
     Keep in sync with ascend910/flash_attn_npu_3/mla/mla_validation.h and
-    mla_host.h. The enabled short kernel requires contiguous BSND; other
+    mla_host.h. The enabled dense kernels require contiguous BSND; other
     layouts and outer strides remain unimplemented. No view is materialized.
     """
 
@@ -155,15 +155,15 @@ def _check_mla_inputs(
         )
         check(heads_kv == 1, "MLA: compressed representation requires one KV head")
         unsupported = "NPU FlashAttention MLA compressed forward is not implemented yet"
-        check(allow_short and not (varlen_q or varlen_k or paged_kv), unsupported)
+        check(allow_dense and not (varlen_q or varlen_k or paged_kv), unsupported)
         check(q.shape[0] == k.shape[0], "MLA: q and k/v batch dimensions must match")
         check(
             all(t.is_contiguous() for t in (q, k, v, qv)),
             unsupported + " for outer strides",
         )
         check(
-            q.shape[0] > 0 and q.shape[1] > 0 and 0 < k.shape[1] <= 128,
-            unsupported + " outside nonempty short KV (1..128)",
+            q.shape[0] > 0 and q.shape[1] > 0 and 0 < k.shape[1] <= 512,
+            unsupported + " outside nonempty KV (1..512)",
         )
         check(
             all(size <= 2**32 - 1 for size in q.shape[:3]),
@@ -178,8 +178,8 @@ def _check_mla_inputs(
     raise RuntimeError("NPU FlashAttention MLA prefill forward is not implemented yet")
 
 
-def _check_mla_short_options(arguments):
-    """Match the C++ short-path guard, before allocation and for fake tensors."""
+def _check_mla_dense_options(arguments):
+    """Match the C++ dense-path guard, before allocation and for fake tensors."""
     optional = (
         "k_new",
         "v_new",
@@ -281,7 +281,7 @@ def _flash_attn_forward(
             varlen_q=cu_seqlens_q is not None,
             varlen_k=cu_seqlens_k is not None,
             paged_kv=page_table is not None,
-            allow_short=True,
+            allow_dense=True,
         )
         q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
         v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
@@ -389,10 +389,10 @@ def _flash_attn_forward_fake(
         varlen_q=cu_seqlens_q is not None,
         varlen_k=cu_seqlens_k is not None,
         paged_kv=page_table is not None,
-        allow_short=True,
+        allow_dense=True,
     )
     if is_mla:
-        _check_mla_short_options(locals())
+        _check_mla_dense_options(locals())
 
     # Determine if we're in varlen mode
     is_varlen_q = cu_seqlens_q is not None
@@ -480,6 +480,91 @@ def _flash_attn_forward_fake(
         softmax_lse_accum = torch.tensor([], device=out.device)
 
     return out, softmax_lse, out_accum, softmax_lse_accum
+
+
+@_torch_custom_op_wrapper(
+    "flash_attn_npu_3::_mla_dense_forward", mutates_args=(), device_types="npu"
+)
+def _mla_dense_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    qv: torch.Tensor,
+    softmax_scale: Optional[float] = None,
+    causal: bool = False,
+    window_size_left: int = -1,
+    window_size_right: int = -1,
+    attention_chunk: int = 0,
+    softcap: float = 0.0,
+    num_splits: int = 1,
+    pack_gqa: Optional[bool] = None,
+    sm_margin: int = 0,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    # Keep scale adjacent to the tensors: PyTorch pads positional arguments
+    # through the last nondefault value before autograd/alias traversal. The
+    # general op puts scale after unused cache/length arguments. All validation
+    # still belongs to the same C++ boundary, including unsupported options.
+    return flash_attn_npu_3.fwd(
+        q,
+        k,
+        v,
+        None,  # k_new
+        None,  # v_new
+        qv,
+        None,  # out
+        None,  # cu_seqlens_q
+        None,  # cu_seqlens_k
+        None,  # cu_seqlens_k_new
+        None,  # seqused_q
+        None,  # seqused_k
+        None,  # max_seqlen_q
+        None,  # max_seqlen_k
+        None,  # page_table
+        None,  # kv_batch_idx
+        None,  # leftpad_k
+        None,  # rotary_cos
+        None,  # rotary_sin
+        None,  # seqlens_rotary
+        q_descale,
+        k_descale,
+        v_descale,
+        softmax_scale,
+        causal,
+        window_size_left,
+        window_size_right,
+        attention_chunk,
+        softcap,
+        True,  # rotary_interleaved
+        None,  # scheduler_metadata
+        num_splits,
+        pack_gqa,
+        sm_margin,
+    )[:2]
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_dense_forward")
+def _mla_dense_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    softmax_scale=None,
+    causal=False,
+    window_size_left=-1,
+    window_size_right=-1,
+    attention_chunk=0,
+    softcap=0.0,
+    num_splits=1,
+    pack_gqa=None,
+    sm_margin=0,
+    q_descale=None,
+    k_descale=None,
+    v_descale=None,
+):
+    return _flash_attn_forward_fake(**locals())[:2]
 
 
 @_torch_custom_op_wrapper(
@@ -1244,7 +1329,7 @@ def flash_attn_func(
             normalization factor).
     """
     if qv is not None:
-        out, lse, *_ = _flash_attn_forward(
+        out, lse = _mla_dense_forward(
             q,
             k,
             v,

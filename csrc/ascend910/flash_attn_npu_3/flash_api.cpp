@@ -188,7 +188,7 @@ std::vector<at::Tensor> mha_fwd(
             !is_causal && window_size_left == -1 && window_size_right == -1 && attention_chunk == 0 &&
                 softcap == 0.0f && is_rotary_interleaved && num_splits == 1 && !pack_gqa_ && sm_margin == 0,
             "NPU FlashAttention MLA compressed forward is not implemented yet for mask/split/scheduling options");
-        return flash_attn::mla::ForwardShort(q, k, v, *q_v_, softmax_scale_);
+        return flash_attn::mla::ForwardDense(q, k, v, *q_v_, softmax_scale_);
     }
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto hostStart = std::chrono::steady_clock::now();

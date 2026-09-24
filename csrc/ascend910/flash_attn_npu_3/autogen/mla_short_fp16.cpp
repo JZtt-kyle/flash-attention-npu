@@ -5,4 +5,4 @@
 #include "../mla/mla_short_kernel.hpp"
 
 template void flash_attn::mla::LaunchShort<half>(
-    const flash_attn::mla::ShortParams &, uint32_t, uint64_t, aclrtStream);
+    const flash_attn::mla::DenseParams &, uint32_t, uint64_t, aclrtStream);

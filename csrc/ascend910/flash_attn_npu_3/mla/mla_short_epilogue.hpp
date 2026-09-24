@@ -114,7 +114,7 @@ class ShortEpilogue {
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
 
-  private:
+  protected:
     CATLASS_DEVICE
     void Cast(AscendC::LocalTensor<Element> dest, AscendC::LocalTensor<float> source, uint32_t count)
     {

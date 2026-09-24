@@ -9,12 +9,14 @@ namespace flash_attn::mla {
 // No device lengths, packed inputs, or host-to-device schedule copy are needed.
 constexpr uint32_t kHeadsPerTile = 16;
 constexpr uint32_t kShortKvLimit = 128;
+constexpr uint32_t kOnlineKvLimit = 512;
 constexpr uint32_t kScoreBytes = kHeadsPerTile * kShortKvLimit * sizeof(float);
 constexpr uint32_t kProbabilityBytes = kHeadsPerTile * kShortKvLimit * 2;
 constexpr uint32_t kOutputBytes = kHeadsPerTile * 512 * sizeof(float);
 constexpr uint32_t kWorkspaceBytesPerCore = kScoreBytes + kProbabilityBytes + kOutputBytes;
+constexpr uint32_t kOnlineWorkspaceBytesPerCore = 2 * (kScoreBytes + kProbabilityBytes) + kOutputBytes;
 
-struct ShortParams {
+struct DenseParams {
     uint64_t q;
     uint64_t k;
     uint64_t v;
@@ -30,6 +32,9 @@ struct ShortParams {
 };
 
 template <typename Element>
-void LaunchShort(const ShortParams& params, uint32_t blocks, uint64_t syncAddress, aclrtStream stream);
+void LaunchShort(const DenseParams& params, uint32_t blocks, uint64_t syncAddress, aclrtStream stream);
+
+template <typename Element>
+void LaunchOnline(const DenseParams& params, uint32_t blocks, uint64_t syncAddress, aclrtStream stream);
 
 } // namespace flash_attn::mla

@@ -87,18 +87,20 @@ def bwd_kernel(dtype_key: str, layout: tuple) -> "Kernel":
     )
 
 
-def mla_short_kernel(dtype_key: str) -> "Kernel":
+def mla_kernel(dtype_key: str, online: bool) -> "Kernel":
     ctype = DTYPE_MAP[dtype_key]
+    family = "mla_online" if online else "mla_short"
+    launch = "LaunchOnline" if online else "LaunchShort"
     return Kernel(
-        family="mla_short",
+        family=family,
         dtype=dtype_key,
         layout="bsnd",
-        filename=f"mla_short_{dtype_key}.cpp",
+        filename=f"{family}_{dtype_key}.cpp",
         content=(
             PRELUDE
             + '#include "../mla/mla_short_kernel.hpp"\n\n'
-            + f"template void flash_attn::mla::LaunchShort<{ctype}>(\n"
-            + "    const flash_attn::mla::ShortParams &, uint32_t, uint64_t, aclrtStream);\n"
+            + f"template void flash_attn::mla::{launch}<{ctype}>(\n"
+            + "    const flash_attn::mla::DenseParams &, uint32_t, uint64_t, aclrtStream);\n"
         ),
     )
 
@@ -115,7 +117,8 @@ class Kernel:
 def get_all_kernels() -> List[Kernel]:
     kernels: List[Kernel] = []
     for dtype in DTYPE_MAP:
-        kernels.append(mla_short_kernel(dtype))
+        kernels.append(mla_kernel(dtype, online=False))
+        kernels.append(mla_kernel(dtype, online=True))
         for layout in LAYOUTS:
             kernels.append(fwd_kernel(dtype, layout))
             kernels.append(bwd_kernel(dtype, layout))

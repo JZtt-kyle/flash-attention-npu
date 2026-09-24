@@ -1,6 +1,6 @@
 """Unsupported MLA contracts on 910B, including registered fake and raw C++ entries.
 
-The supported short dense path has separate numerical tests. Other combinations
+The supported dense paths have separate numerical tests. Other combinations
 must fail before ordinary metadata/kernel dispatch.
 """
 
@@ -76,9 +76,9 @@ def _forward(entry, args):
 def test_mla_unimplemented(entry, representation, layout, dtype, strided):
     args = _inputs(representation, layout, dtype, strided)
     if representation == "compressed" and layout == "dense" and not strided:
-        # Contiguous short dense inputs are now supported; long KV is M04b.
-        args["k"] = args["k"].repeat(1, 8, 1, 1)
-        args["v"] = args["v"].repeat(1, 8, 1, 1)
+        # Contiguous dense KV up to 512 is supported; longer KV is M04b2.
+        args["k"] = args["k"].repeat(1, 31, 1, 1)
+        args["v"] = args["v"].repeat(1, 31, 1, 1)
     if strided:
         for name in ("q", "k", "v"):
             assert args[name].stride(-1) == 1
@@ -182,8 +182,8 @@ def test_public_rejects_before_metadata_or_dispatch(
     with FakeTensorMode() if fake else nullcontext():
         args = _inputs(representation, "tnd" if public_entry == "varlen" else "dense")
         if representation == "compressed" and public_entry == "dense":
-            args["k"] = args["k"].repeat(1, 8, 1, 1)
-            args["v"] = args["v"].repeat(1, 8, 1, 1)
+            args["k"] = args["k"].repeat(1, 31, 1, 1)
+            args["v"] = args["v"].repeat(1, 31, 1, 1)
         with pytest.raises(RuntimeError, match="forward is not implemented yet"):
             if public_entry == "dense":
                 api.flash_attn_func(**args)
