@@ -20,7 +20,7 @@ namespace flash_attn::mla {
 // dot products accumulate in one L0C tile, and PV reuses the content KV in L1.
 // This is the shared-KV subset of pinned CANN ca18aee's arch22 MLA algorithm
 // (fia_block_cube_nonquant_mla.h); no FIA launch or tiling-key machinery is used.
-template <typename Element, bool Online = false>
+template <typename Element, bool Online = false, bool PrefetchKv = false>
 class DenseKernel {
     using Row = Catlass::layout::RowMajor;
     using Column = Catlass::layout::ColumnMajor;
@@ -60,11 +60,18 @@ class DenseKernel {
                                                                 stages * (kScoreBytes + kProbabilityBytes)));
         Catlass::Arch::CrossCoreFlag qkReady(1), softmaxReady(2), pvReady(3), outputReady(4);
 #ifdef __DAV_CUBE__
-        std::conditional_t<Online, CachedQueryQK<Element>, QK> qk(resource);
-        std::conditional_t<Online, CachedQueryPV<Element>, PV> pv(resource);
+        std::conditional_t<Online, CachedQueryQK<Element, PrefetchKv>, QK> qk(resource);
+        std::conditional_t<Online, CachedQueryPV<Element, PrefetchKv>, PV> pv(resource);
         for (uint32_t event = 0; event < 4; ++event) {
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(event);
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(event);
+            if constexpr (!Online || !PrefetchKv) {
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(event);
+            }
+        }
+        if constexpr (Online && PrefetchKv) {
+            for (uint32_t event = 0; event < 2 * kOnlineKvStages; ++event) {
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(event);
+            }
         }
         AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
         AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
@@ -117,23 +124,33 @@ class DenseKernel {
             } else {
                 const uint32_t tiles = ::CeilDiv(p.kvLength, kShortKvLimit);
 #ifdef __DAV_CUBE__
-                uint32_t heads = p.heads, localPingpong = 0;
-                // Prime QK(0), then overlap QK(i+1) with softmax(i), and
-                // softmax(i+1) with PV(i). Q stays in L1 for the entire task.
+                uint32_t localPingpong = 0;
+                qk.LoadQuery(qv[queryRow * 512], q[queryRow * 64], Row(rows, 512), Row(rows, 64), p.heads);
+                if constexpr (PrefetchKv) {
+                    qk.Prefetch(v[uint64_t(batch) * p.kvLength * 512], k[uint64_t(batch) * p.kvLength * 64],
+                                Column(512, kShortKvLimit), Column(64, kShortKvLimit), 0);
+                }
+                // Prime KV(0), then overlap QK(i+1) with softmax(i), and
+                // softmax(i+1) with PV(i). Three L1 slots also let KV(i+2)
+                // load before PV(i) waits for its probabilities. Q stays in L0A.
                 for (uint32_t step = 0; step <= tiles; ++step) {
                     if (step < tiles) {
-                        uint32_t pingpong = step;
                         const uint32_t width = ::Min(kShortKvLimit, p.kvLength - step * kShortKvLimit);
-                        const uint64_t kvRow = uint64_t(batch) * p.kvLength + step * kShortKvLimit;
-                        qk(qv[queryRow * 512], q[queryRow * 64], v[kvRow * 512], k[kvRow * 64],
-                           scores[(step % 2) * kHeadsPerTile * kShortKvLimit], Row(rows, 512), Row(rows, 64),
-                           Column(512, width), Column(64, width), Row(::RoundUp<16>(rows), ::RoundUp<16>(width)),
-                           Catlass::GemmCoord(rows, width, 576), Catlass::MatrixCoord(rows, 512), heads, step,
-                           pingpong);
+                        if constexpr (!PrefetchKv) {
+                            const uint64_t kvRow = uint64_t(batch) * p.kvLength + step * kShortKvLimit;
+                            qk.Prefetch(v[kvRow * 512], k[kvRow * 64], Column(512, width), Column(64, width), step);
+                        }
+                        qk(scores[(step % 2) * kHeadsPerTile * kShortKvLimit], Column(512, width), Column(64, width),
+                           Row(::RoundUp<16>(rows), ::RoundUp<16>(width)), Catlass::GemmCoord(rows, width, 576), step);
                         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(qkReady);
+                        if (PrefetchKv && step + 1 < tiles) {
+                            const uint32_t nextWidth = ::Min(kShortKvLimit, p.kvLength - (step + 1) * kShortKvLimit);
+                            const uint64_t nextRow = uint64_t(batch) * p.kvLength + (step + 1) * kShortKvLimit;
+                            qk.Prefetch(v[nextRow * 512], k[nextRow * 64], Column(512, nextWidth),
+                                        Column(64, nextWidth), step + 1);
+                        }
                     }
                     if (step > 0) {
-                        uint32_t pingpong = step;
                         const uint32_t width = ::Min(kShortKvLimit, p.kvLength - (step - 1) * kShortKvLimit);
                         // Two partial slots allow PV(i+1) and QK(i+2) to run
                         // while Vector accumulates PV(i). Consume the oldest
@@ -145,7 +162,7 @@ class DenseKernel {
                         pv(probabilities[((step - 1) % 2) * kHeadsPerTile * kShortKvLimit],
                            partial[((step - 1) % 2) * kHeadsPerTile * 512], Row(rows, width, ::RoundUp<16>(width)),
                            Row(512, width), Row(::RoundUp<16>(rows), 512), Catlass::GemmCoord(rows, 512, width), step,
-                           pingpong, softmaxReady, localPingpong);
+                           softmaxReady, localPingpong);
                         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(pvReady);
                     }
                 }
@@ -180,7 +197,14 @@ class DenseKernel {
 #ifdef __DAV_CUBE__
         for (uint32_t event = 0; event < 4; ++event) {
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(event);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(event);
+            if constexpr (!Online || !PrefetchKv) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(event);
+            }
+        }
+        if constexpr (Online && PrefetchKv) {
+            for (uint32_t event = 0; event < 2 * kOnlineKvStages; ++event) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(event);
+            }
         }
         AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID1);
@@ -203,18 +227,24 @@ void LaunchShort(const DenseParams& params, uint32_t blocks, uint64_t syncAddres
     MlaShort<Element><<<blocks, nullptr, stream>>>(syncAddress, params);
 }
 
-template <typename Element>
+template <typename Element, bool PrefetchKv>
 CATLASS_GLOBAL void MlaOnline(uint64_t syncAddress, DenseParams params)
 {
     AscendC::SetSyncBaseAddr(syncAddress);
-    DenseKernel<Element, true> kernel;
+    DenseKernel<Element, true, PrefetchKv> kernel;
     kernel(params);
 }
 
 template <typename Element>
 void LaunchOnline(const DenseParams& params, uint32_t blocks, uint64_t syncAddress, aclrtStream stream)
 {
-    MlaOnline<Element><<<blocks, nullptr, stream>>>(syncAddress, params);
+    // Up to three tiles, extra prefetch slots add startup work without
+    // enough steady-state overlap to recover it (notably a one-column tail).
+    if (params.kvLength > 3 * kShortKvLimit) {
+        MlaOnline<Element, true><<<blocks, nullptr, stream>>>(syncAddress, params);
+    } else {
+        MlaOnline<Element, false><<<blocks, nullptr, stream>>>(syncAddress, params);
+    }
 }
 
 } // namespace flash_attn::mla

@@ -74,11 +74,13 @@ def test_online_output_rows(heads, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("length", [129, 383, 1024])
+@pytest.mark.parametrize("length", [129, 383, 385, 641, 769, 897, 1024])
 def test_online_cached_query_components(dtype, length):
     # Select content coordinates on both sides of every Cube K-slice boundary,
     # plus the first/last RoPE coordinate. More tasks than cores force cached Q
-    # to change, including a one-head tail and both L1 KV buffers.
+    # to change, including a one-head tail and all three L1 KV buffers.
+    # Final tiles rotate through the three L1 slots independently of the
+    # two GM score/partial slots, including a short tile after slot reuse.
     case = Case("cached-query", "compressed", 2, 21, length, 17, 1, scale=0.23)
     cpu = make_inputs(case, dtype, 20260924)
     cpu["q"].zero_()
@@ -101,7 +103,7 @@ def test_online_cached_query_components(dtype, length):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("length", [129, 383, 1024])
+@pytest.mark.parametrize("length", [129, 383, 385, 641, 897, 1024])
 def test_online_output_columns(dtype, length):
     # Distinguish both sides of every output slice boundary while reusing each
     # core for full and one-head tasks, with odd/even numbers of KV tiles.
@@ -212,7 +214,7 @@ def test_online_vector_buffer_reuse(dtype, heads):
     # partial final tiles exercise scaling before the PV wait/load;
     # three and five tiles exercise both alpha slots before the final drain.
     inputs, expected, originals = [], [], []
-    for length in (129, 255, 257, 384, 513, 1024):
+    for length in (129, 255, 257, 384, 385, 513, 641, 769, 897, 1024):
         case = Case("vector-buffer-reuse", "compressed", 2, 19, length, heads, 1, scale=1.0)
         cpu = make_inputs(case, dtype, length + heads)
         cpu["q"].zero_()
