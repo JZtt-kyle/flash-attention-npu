@@ -1,56 +1,60 @@
-# MLA 当前交接
+# MLA 当前状态
 
-## 状态与唯一下一步
+## 当前能力与下一步
 
-- 当前步骤：M00a **metadata E2E 验收口径澄清，纯文档**。用户明确“不劣化指的是走 metadata 路径端到端 E2E 不劣化”；本次更新 design、plan 和 status，未修改生产代码、测试或构建产物。
-- 当前分支：`feat/mla-cann-migration`。接手 HEAD 为 `7b84028`，工作区干净；生产代码仍与 `23d7304` 一致，支持连续 BSND、512+64、FP16/BF16、KV `1..1280`、显式 `num_splits=1`。更长 KV 及 MLA metadata 继续明确拒绝。
-- 验收口径以 [design 第 7 节](design.md#7-验收口径) 为准：逐例比较 **FA3 metadata 路径 E2E / 原 CANN E2E <= 1.0**，kernel 时间用于诊断。现有无 metadata 的 kernel/同步调用数据不能证明此项验收已通过。
-- 唯一下一步：**M05 提前到长 KV 优化之前**，在当前已支持范围接通 MLA metadata、AICPU 调度和运行时 scale 分离，完成有/无 metadata 精度、复用、普通 FA3 回归及同轮 CANN E2E 对照。按真实调用段记录 metadata 生成/更新与复用成本，再据 E2E 瓶颈选择优化。
-- M04b2b2b2b2b2b 的 `KV >1280`（含 8193）接通留待 M05 之后；split-KV 仍在 M10。本轮不开始实现，文档提交成功后停止。
+- 分支：`feat/mla-cann-migration`。M03 接口边界的构建与回归验收已完成。
+- 生产入口识别 512+64 压缩 MLA 与 192/128 prefill，校验 rank、shape、dtype、device、头数和 stride；MLA 前向与 MLA metadata 明确报未实现。
+- Python 公开入口、自定义算子、fake 和 C++ 入口采用一致的拒绝契约。普通 FA3 使用既有计算与 metadata 路径。
+- 独立数学 reference、CANN 输入映射、固定源码基线包、分派溯源和 profiler 工具可用。
+- 实现原则：保持固定 CANN 的计算顺序、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码；必要 FA3 接口差异单独映射。
+- 唯一下一步：M04a，核对源文件/函数、调度字段、资源布局和事件依赖，确定首个 dense 有界实现范围及独立验收子步骤。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。本次提交成功后停止。
 
-## 本次闭环证据
+## 本步验证
 
-| 检查 | 结果 |
+证据目录：`build/mla-interface-guard-validation/`。
+
+| 项目 | 结果 |
 | --- | --- |
-| 接手与上步复核 | PASS：分支、干净工作区、最近提交和 `7b84028` 差异一致；上步最终 JSON/XML 记录为恢复基线的 36 项极值回归及 11 项普通 FA3，无 kernel 候选合入 |
-| 代码依据 | PASS：`mla_short_kernel.hpp` 标明从 CATLASS MLA 改编；`mla_online_mmad.hpp`、`mla_online_epilogue.hpp` 实现设备流水适配；Python/C++ 仍明确拒绝 MLA metadata |
-| 文档一致性 | PASS：链接、支持范围、E2E 计时边界及 M05 唯一下一步一致；历史性能证据未重标为 metadata E2E 通过 |
-| 提交质量 | PASS：仅三个 MLA 文档，`git diff --check`、暂存差异检查及 `ci/code_quality.sh --staged` 的适用检查通过 |
-| 构建与 NPU | 未运行：本轮仅文档，无源码或构建变化，不将上轮实测记为本轮重跑 |
+| 源码边界 | PASS：MLA 目录仅含校验 header；生成器输出 8 个普通 FA3 编译单元；reference 和 CANN 基线可用 |
+| 强制构建 | PASS：v3/910，9 个 C++ 编译单元和 1 个 AICPU 对象；实际加载扩展与链接产物哈希一致，普通 FA3 的 8 个 kernel 对象一致性检查通过 |
+| CPU reference / provenance / profile | PASS：88 项，无 skip |
+| MLA 拒绝契约 | PASS：233 项，无 skip；覆盖两种表示、dense/TND/PA、真实/fake/C++/公开入口、非法参数及未实现选项 |
+| 普通 FA3 | PASS：11 项，无 skip；精度、metadata、dense/varlen backward、kvcache/FlashDecode 及编译图回归 |
+| 设备记录 | 完整：物理 2 号共享 Warning 卡，21 个快照；前后告警为 81078603，ECC 八项计数均为 0 |
+| 文档及质量 | PASS：文档链接、当前状态、差异检查和 6 项适用质量检查；仅暂存本步 20 个文件 |
 
-本轮文档检查与质量日志：`build/mla-m00a-metadata-e2e/`。复现命令：
+上述实机结果为功能回归；MLA 数值与 metadata E2E 在对应实现步骤验收。
+
+## 环境与设备
+
+| 项目 | 实际记录 |
+| --- | --- |
+| Python / 包 | `/usr/local/python3.11.15/bin/python3` 3.11.15；torch `2.7.1+cpu`，torch_npu `2.7.1` |
+| CANN | `/usr/local/Ascend/cann-9.0.0-beta.2` |
+| 固定 FIA | `ca18aee610729ca5270a44e2d84c751bc687fbf0`；基线包 `build/mla-m02b-validation/opp-dense/` |
+| CATLASS | `769cd40a8716b28650b6bebb08db4834eea4462f`，子模块干净 |
+| 实际加载扩展 | 本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so` |
+| 扩展 SHA256 | `955ecbe4c2b199b2e1131d9c86c38ce23b15ed8704c55cf2e35de37986b84877` |
+| 芯片 | Ascend910B3，物理 2 号，进程内 npu:0 |
+
+设备为共享 Warning 条件，告警表示端口链路状态变化。开始时 AICore 0%，后台 PID 3724055 占 140 MB；监控文件保存测试期间的实际占用。该记录仅说明本轮功能验证条件，不作为健康、独占设备或性能验收结论。
+
+CANN 源仓只读，已有工作区改动保留；来源核对使用固定 commit。CANN 基线精度与 profiler 数据分别见 `build/mla-m02b-validation/` 和 `build/mla-m02b2-validation/`。
+
+## 证据与复现
+
+- `build-command.json`、`build.log`、`build-provenance.json`：编译参数、10 个链接对象、源码哈希及实际加载扩展。
+- `cpu-command.json`、`cpu.xml`、`npu-command.json`、`npu.xml`：88 项 CPU、233 项契约和 11 项普通 FA3 的精确参数与结果。
+- `device-readiness.json`、`npu-device-monitor.json`：设备健康、告警、ECC 和共享占用。
+- `acceptance-integrity.json`、`source-repositories.json`、`document-check.json`、`quality-final.log`、`checksums.sha256`：来源、结果及提交完整性。
+
+最小命令如下；实机运行前重新检查设备和扩展，保持 CANN PYTHONPATH，使用新日志标签与 JUnit 路径保存本轮结果：
 
 ```bash
-python3 build/mla-m00a-metadata-e2e/check_docs.py
-git diff --check
-git diff --cached --check
+FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910 FLASH_ATTN_SKIP_SUBMODULE_INIT=1 FLASH_ATTN_FORCE_REBUILD=TRUE python3 setup.py build_ext --inplace
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_reference.py tests/test_flash_attn_npu_v3_mla_profile.py tests/test_flash_attn_npu_v3_mla_provenance.py
+ASCEND_RT_VISIBLE_DEVICES=2 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_contract.py
 PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache bash ci/code_quality.sh --staged
 ```
 
-## 最近一次实机基线与证据入口
-
-上次实机闭环为 `7b84028` 的 M04b2b2b2b2b2a。恢复后的 14 个构建对象与 `23d7304` 逐字节一致；最终 36 项跨半区极值回归及 11 项普通 FA3 通过。两种 softmax 候选均撤回：候选 A 的有效旧新 kernel 对照为 0 改善、2 微退化、62 区间跨 1，候选 B 的 12 例区间均包含 1。既有撤回决定保持原样，不能将其记为 kernel 优化已上线。
-
-证据根目录：`/home/zhangqijia/repo/flash-attention-npu/build/mla-m04b2b2b6-validation/`。
-
-- `restored-baseline/acceptance-integrity.json`、`baseline-maxima-final.xml`、`baseline-regression.xml`：最终合入内容的验收；`verify_restored.py --staged` 为当时提交前检查，依赖当时 HEAD/暂存区，不能直接作为后续提交的通用检查脚本。
-- `restored-baseline/build-provenance-restored.json`、`link-order-proof.json`、`environment-restored.json`、测试命令及 monitor 文件：源码、重建与设备溯源。
-- `full-tile-candidate/`、`direct-max/`、`versions-summary.json`、`performance-acceptance.json`：未采用候选的源码及实测。A 首轮因新增外部进程而无效的性能采集仍保留，不能混作有效性能数据。
-- `checksums.sha256` 保存上步证据完整性。此前 700 项 MLA 及 56 例 CANN 性能证据见 `23d7304` 的 status；完整上步命令及条件见 `git show 7b84028:docs/mla/status.md`。
-
-## 环境与设备条件
-
-本轮只检查文档，未加载扩展或访问 NPU；没有新的设备健康、占用或运行环境验收结论。CATLASS 当前为 `769cd40a8716b28650b6bebb08db4834eea4462f`，子模块干净。
-
-以下为上次实机记录，下一次开发或验证前须重新核实：
-
-| 项目 | 上次实测记录 |
-| --- | --- |
-| Python / 包 | `/usr/local/python3.11.15/bin/python` 3.11.15；torch `2.7.1+cpu`，torch_npu `2.7.1` |
-| 芯片 / CANN | Ascend910B3；`/usr/local/Ascend/cann-9.0.0-beta.2` |
-| 固定 FIA | `ca18aee610729ca5270a44e2d84c751bc687fbf0`；固定源码包 `build/mla-m02b-validation/opp-dense/` |
-| 实际加载扩展 | 本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so` |
-| 恢复扩展 SHA256 | `e267a7fb331430dd1e1aeca5becd6ee3c6b5cd07f7c4c0756d76c4579306006b` |
-| 设备条件 | 用户仅授权上步使用物理 2 号共享 Warning 卡，告警 `81078603`，前后 ECC 八项计数均为 0；该授权不扩展至下一步 |
-
-下次验收仍须检查实际加载扩展与源码/构建一致性，重新确定设备。不得把历史共享 Warning 条件记为健康、独占设备验收。
+普通 FA3 的精确节点保存在 `npu-command.json`。提交前完整性检查使用 `python3 build/mla-interface-guard-validation/verify_acceptance.py --staged`，该命令对应本步暂存状态。

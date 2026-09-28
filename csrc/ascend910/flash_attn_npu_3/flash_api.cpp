@@ -36,7 +36,6 @@ using namespace KernelCommon;
 #include "fwd_dispatch.hpp"
 #include "bwd_dispatch.hpp"
 #include "mla/mla_validation.h"
-#include "mla/mla_host.h"
 #include <cmath>
 
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
@@ -176,20 +175,8 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::Tensor> scheduler_metadata_, // (b + 1)
     int64_t num_splits, std::optional<bool> pack_gqa_, int64_t sm_margin)
 {
-    if (flash_attn::mla::CheckForwardBoundary(q, k, v, q_v_, cu_seqlens_q_.has_value(), cu_seqlens_k_.has_value(),
-                                              page_table_.has_value())) {
-        TORCH_CHECK(
-            !k_new_ && !v_new_ && !out_ && !cu_seqlens_q_ && !cu_seqlens_k_ && !cu_seqlens_k_new_ && !seqused_q_ &&
-                !seqused_k_ && !max_seqlen_q_ && !max_seqlen_k_ && !page_table_ && !kv_batch_idx_ && !leftpad_k_ &&
-                !rotary_cos_ && !rotary_sin_ && !seqlens_rotary_ && !q_descale_ && !k_descale_ && !v_descale_ &&
-                !scheduler_metadata_,
-            "NPU FlashAttention MLA compressed forward is not implemented yet for optional tensor/length arguments");
-        TORCH_CHECK(
-            !is_causal && window_size_left == -1 && window_size_right == -1 && attention_chunk == 0 &&
-                softcap == 0.0f && is_rotary_interleaved && num_splits == 1 && !pack_gqa_ && sm_margin == 0,
-            "NPU FlashAttention MLA compressed forward is not implemented yet for mask/split/scheduling options");
-        return flash_attn::mla::ForwardDense(q, k, v, *q_v_, softmax_scale_);
-    }
+    flash_attn::mla::CheckForwardBoundary(q, k, v, q_v_, cu_seqlens_q_.has_value(), cu_seqlens_k_.has_value(),
+                                          page_table_.has_value());
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto hostStart = std::chrono::steady_clock::now();
 

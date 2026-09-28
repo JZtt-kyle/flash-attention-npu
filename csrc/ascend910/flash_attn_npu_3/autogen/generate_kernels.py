@@ -87,24 +87,6 @@ def bwd_kernel(dtype_key: str, layout: tuple) -> "Kernel":
     )
 
 
-def mla_kernel(dtype_key: str, online: bool) -> "Kernel":
-    ctype = DTYPE_MAP[dtype_key]
-    family = "mla_online" if online else "mla_short"
-    launch = "LaunchOnline" if online else "LaunchShort"
-    return Kernel(
-        family=family,
-        dtype=dtype_key,
-        layout="bsnd",
-        filename=f"{family}_{dtype_key}.cpp",
-        content=(
-            PRELUDE
-            + '#include "../mla/mla_short_kernel.hpp"\n\n'
-            + f"template void flash_attn::mla::{launch}<{ctype}>(\n"
-            + "    const flash_attn::mla::DenseParams &, uint32_t, uint64_t, aclrtStream);\n"
-        ),
-    )
-
-
 @dataclass
 class Kernel:
     family: str
@@ -117,8 +99,6 @@ class Kernel:
 def get_all_kernels() -> List[Kernel]:
     kernels: List[Kernel] = []
     for dtype in DTYPE_MAP:
-        kernels.append(mla_kernel(dtype, online=False))
-        kernels.append(mla_kernel(dtype, online=True))
         for layout in LAYOUTS:
             kernels.append(fwd_kernel(dtype, layout))
             kernels.append(bwd_kernel(dtype, layout))
@@ -126,9 +106,7 @@ def get_all_kernels() -> List[Kernel]:
 
 
 def write_kernel(kernel: Kernel, output_dir: Path) -> None:
-    path = output_dir / kernel.filename
-    if not path.exists() or path.read_text() != kernel.content:
-        path.write_text(kernel.content)
+    (output_dir / kernel.filename).write_text(kernel.content)
 
 
 def main(output_dir: Optional[str]) -> None:

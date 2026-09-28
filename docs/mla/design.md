@@ -7,6 +7,8 @@
 
 迁移集合是 **910B/C 上 CANN FIA 已有 MLA 前向能力，与官方 FA3 可表达能力的交集**，再加接入所必需的 metadata 支持。接口冲突按 FA3 调整；不搬迁普通 MHA/GQA、量化大框架、950 专用模板或反向算子。MLA prefill 中使用 GQA 的分组语义仍在范围内。
 
+**迁移原则：保留固定 CANN 实现的行为，只做 CATLASS 风格的结构重构和必要的 FA3 接入。** 以源实现的验证积累为基础，保持数值路径与设备流水，具体边界见第 6 节。
+
 | 依据 | 固定版本 | 用途 |
 | --- | --- | --- |
 | 本仓 | `cab322eda3112fdbfefd99c8632b6393273562f3` | 迁移前基线 |
@@ -34,14 +36,14 @@ CANN 根目录：`/home/zhangqijia/repo/ops-transformer/attention/fused_infer_at
 
 源码与文档可能不一致。例如 V5 文档对 decode 的 K/V 复用描述不能替代上述 kernel 与测试；TensorList 的文档描述也必须经过 arch22 host 校验核实。实现时将实际可运行组合固定为用例，未证实组合标为待核实，不能静默删减。
 
-## 2. 现仓缺口
+## 2. FA3 接入要求
 
-- [Python FA3 入口](../../flash_attn_npu_3/flash_attn_npu_interface.py) 已透传 `qv`；[910 C++ 前向](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp) 的 `q_v_` 目前只出现在参数声明，没有参与计算。这是数值正确性缺口。
-- C++ 用 `empty_like(q)` 分配输出，并把 `embeddingSizeV` 设置为 Q 的维度；Python fake 却已经按 V 维度分配。MLA 的 64/512 和 192/128 都需要真实路径与 fake 一起核对。
-- dense/varlen 包装器自动生成 metadata，却未传入 `headdim_v=v.shape[-1]`。仅修改 kernel 无法修复整个调用链。
-- [metadata 参数](../../csrc/ascend910/flash_attn_npu_3/fa_metadata_args.h) 和 [AICPU 实现](../../csrc/ascend910/flash_attn_npu_3/fa_metadata.aicpu) 已存在，可以复用启动和流同步方式，不能直接把等维 FA 的 tiling 当作 MLA tiling。
-- 现仓 metadata 为固定 2384 字节的 `uint8` tensor，并附加 Python 属性校验；预计算含 scale/softcap。官方为设备 `int32` 调度 tensor，公开参数是 `has_softcap`，没有 metadata 的 `softmax_scale` 参数。
-- 现仓的窗口归一化、split 范围也与固定官方版本有差异。MLA 路径应独立核对官方分支，不能复用带有“对齐 GPU”注释的代码就视为已经对齐。
+- [Python FA3 入口](../../flash_attn_npu_3/flash_attn_npu_interface.py) 与 [910 C++ 前向](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp) 按 `qv` 和维度识别两种 MLA 表示，透传内容与 RoPE 分量，明确校验支持边界。
+- 输出按 V 维度分配，真实路径与 fake 对齐 MLA 64/512、192/128 的 O/LSE shape。
+- dense/varlen metadata 调用传入实际 `headdim_v=v.shape[-1]`，使入口、调度和设备执行使用同一组维度。
+- 复用 [metadata 参数](../../csrc/ascend910/flash_attn_npu_3/fa_metadata_args.h) 和 [AICPU 实现](../../csrc/ascend910/flash_attn_npu_3/fa_metadata.aicpu) 的启动与流同步机制，MLA 使用与源实现对应的调度字段。
+- 普通 FA 保持现有 `uint8` metadata 协议兼容；MLA 提供设备 `int32` 调度 tensor，公开使用 `has_softcap`，计算 scale/softcap 数值由前向传入。
+- 窗口归一化、split 范围及未支持参数按固定官方 FA3 分支逐项核对。
 
 ## 3. 两种 MLA 的接口映射
 
@@ -174,7 +176,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 1. **公开签名以官方为准。** 使用 `headdim`、`headdim_v`、`has_softcap` 等官方参数及顺序。现仓额外 `softcap` / `softmax_scale` 如需兼容，只作为旧调用的关键字兼容层，不占官方位置参数、不成为 MLA 必填项；新调用和测试统一用官方形式。
 2. **分离调度与计算数值。** metadata 保存切块、分核、split、长度等调度结果；前向本次调用提供 scale、softcap 数值、张量地址及 stride。metadata 接口没有 qv 参数，不应依据维度臆测 qv 存在，也不应把缺省 `1/sqrt(Dq)` 写死。只有 `has_softcap` 这类影响调度的特征进入调度契约。
-3. **设备侧准备。** 复用现仓 AICPU 启动与事件同步，抽取不依赖 gert/optiling 的 MLA 调度函数。host 只用 shape、dtype、stride 等静态信息；长度读取与解析在设备侧完成，steady-state 不调用 `.cpu()`、`.item()` 或主机同步。
+3. **设备侧准备。** 复用现仓 AICPU 启动与事件同步，从固定 CANN 抽取不依赖 gert/optiling 的 MLA 调度函数，保留源判断条件和调度结果；FA3 显式 split 等契约差异单独映射。迁移调度计算位置和复用结果不等于重新设计切块、分核或 split 启发式。host 只用 shape、dtype、stride 等静态信息；长度读取与解析在设备侧完成，steady-state 不调用 `.cpu()`、`.item()` 或主机同步。
 4. **不复制 GPU 内部二进制布局。** 新 MLA metadata 使用 NPU 上连续 int32 tensor，内容由 NPU 后端管理，带版本/类型及边界信息；兼容的是调用语义，不是 CUDA 与 NPU buffer 互换。普通 FA 现有 byte metadata 的过渡需保持既有调用可用，不能误送入 MLA kernel。
 5. **有/无 metadata 共用调度。** 不传时内部生成；显式生成时可以复用相同调度条件。两条路径共享计算函数，不能分别维护两套容易漂移的 tiling 算法。
 6. **生命周期明确。** 同设备、同调度参数与长度下可跨层复用；实际长度改变要重新计算。图内捕获 metadata 计算时，每次 replay 重新读取设备长度；图外生成的旧快照不会自动跟随长度张量变化。读写 workspace、计数器和 stream 的所有权要明确，禁止共享可变 scratch 造成并发污染。
@@ -191,22 +193,25 @@ C++ 校验、形状与 stride 解析、MHA/MLA 分派
         ↓
 MlaLaunchParams（本次地址、scale 等） + MlaSchedule（可复用调度）
         ↓
-CATLASS Kernel：tile 循环、缓冲、Cube/Vector 同步
+CATLASS Kernel：保留 CANN tile 循环、缓冲、Cube/Vector 同步
         ↓
 Block：QK + RoPE / online softmax / PV / rescale / split combine
         ↓
 CATLASS Tile copy、Mmad、布局与硬件资源
 ```
 
-- CANN 提供算法、调度和流水优化来源；CATLASS `examples/19_mla` 及 `include/catlass/*` 提供可复用组件和风格。示例不能替代完整 CANN 功能盘点。
-- 采用 CATLASS 组件表达 MLA 会形成适配后的 Kernel / Block，并不保证与原 CANN 使用同一设备 kernel。分核、切块、缓冲、预取和 Cube/Vector 同步均属于设备实现的一部分；数学公式相同不能作为 kernel 耗时相同的依据。
-- 迁移中保留适用的双缓冲、预取和压缩 KV 复用，逐步用组件表达；不把整个 FIA 大签名、图引擎注册、量化分支和 tiling key 树搬进本仓。
+- **以固定 CANN 源码为实现起点。** 将其已有 Kernel / Cube / Vector / FlashDecode 逻辑对应到 CATLASS Kernel / Block / Tile；保留函数来源及版权。CATLASS `examples/19_mla` 用于理解分层，不能替代 CANN 的实际执行流程。
+- **允许的结构改动。** 文件拆分、类和模板组织、命名、参数封装、构建接入及框架依赖解耦；已有 Block / Tile 仅在运算、数据布局、精度及资源/同步契约等价时复用。无法等价复用时在本仓封装源逻辑，不为套用现成组件改变 CANN 行为。
+- **保留的设备行为。** 对应输入和资源下的切块/分核策略、矩阵乘与 softmax/输出更新顺序、中间 dtype、累加和舍入位置、尾块处理、内部数据布局、缓冲数量与生命周期、预取时机及事件依赖。这些执行策略按固定 CANN 保持一致，结构重构围绕其接口和代码组织展开。
+- **必要的接口差异单独处理。** 按第 3/5 节完成 FA3 参数、长度/stride、scale、mask、split 及 metadata 映射；保留原流水所需的调度字段。每项确需偏离 CANN 的行为要注明契约依据和最小影响范围，不能借接口适配顺带优化 kernel；不搬入范围外的 FIA 大签名、图引擎注册或量化框架。
 - 910B/C 共用适用的算法，但 Cube/Vector 比例、可用核数和存储资源从平台信息获取；保留源 MLA 的 C1V1/C1V2 适配分支，不能用 910B 实测参数硬编码替代 910C 兼容性。
-- 复用已有 Tile；MLA 特有 Block 与 Kernel 先放本仓，避免每步改子模块。编译分派沿用轻量 host 头和独立实例化单元，更新生成器而非仅手改 autogen。
+- 满足上述等价条件时复用已有 Tile；MLA 特有 Block 与 Kernel 先放本仓，避免每步改子模块。编译分派沿用轻量 host 头和独立实例化单元，更新生成器而非仅手改 autogen。
 - metadata 的新 AICPU 源如独立成文件，必须同时修改 `setup.py`：当前构建只寻找固定的 `fa_metadata.aicpu`。header 改动的增量依赖也必须核查，防止链接旧对象。
 - 测试使用独立数学 reference 和 CANN 基线适配器。生产入口不能直接调用 `torch_npu.npu_fused_infer_attention_score*` 充当移植实现。
 
 ## 7. 验收口径
+
+**源实现对照：** 每个迁移模块须能追溯到固定 CANN 的文件/函数，注明结构重构和必要接口适配的对应关系。风格重构须经过构建、精度、边界、重复执行和相关性能检查；迁移结果以本仓实际构建和测试为依据。保留源级执行行为不承诺编译后二进制或耗时完全相同。
 
 **功能和精度：** 对同一逻辑输入同时检查独立高精度 reference、低精度 PyTorch 对照和原 CANN。CANN 对照先统一 scale、mask、布局与共享 KV 语义；本次按 FA3 调整的差异以官方为准，不要求重现源不兼容行为。reference 不能调用待测 kernel，也不能在两个实现中共用同一个错误的长度/页表解析。复用仓库双 reference 精度准则，单独检查 LSE、inf 符号、NaN、空行和 padding；阈值在基线步骤固定，不为通过用例而放宽。
 
@@ -216,13 +221,9 @@ E2E 从公开 Python 入口开始，测至对应调用段的 O/LSE 完成，计�
 
 每个代表用例须在采集前固定 metadata 生命周期和复用次数。预生成后复用时，记录复用前向的 E2E，并单列 metadata 生成时间；实际调用段需要生成或更新 metadata 时，从 `get_scheduler_metadata` 开始计时。跨层复用须记录实际次数 R、包含一次生成及 R 次前向的完整调用段 E2E 和摊销值，并与 CANN 完成相同 R 次前向比较，不能任意增加 R 隐藏准备成本。生成加一次前向与复用前向分别报告，不能将复用数据标为包含生成成本。
 
-kernel 时间及无 metadata 调用时间继续作为瓶颈诊断数据；不把 kernel 单项相对 CANN 的比值另设为“不劣化”的硬门槛。MLA metadata 尚未接通时，已有精度及性能结果只证明已实现路径的表现，不能宣布 metadata E2E 已验收。优先接通完整调用链，依据 E2E 分解定位调度、重复准备、发射、同步和设备计算成本，再选择有实际收益的优化。
+kernel 时间及无 metadata 调用时间作为瓶颈诊断数据，性能验收使用上述 metadata E2E 门槛。实现按源对照完成 CATLASS 分层、FA3 接入和 metadata 支持后进行对应验收；E2E 优化限定在保持源设备行为的接口、调度结果生成/复用、重复准备和发射开销。设备计算瓶颈按源实现对照定位。
 
-M04b2b2b2b2b1 的设备条件例外：用户于 2026-09-28 明确要求“就用当前的卡测一下性能，验收一下”，授权使用当前物理 2 号 910B 的 Warning（`81078603`）及共享占用条件完成本步性能验收。结果须保留设备快照、告警和后台进程记录，注明实际测量条件；逐例性能门槛及噪声补测要求保持不变。该次授权仅适用于本步，不改变后续步骤默认的健康、空闲设备口径。
-
-M04b2b2b2b2b2a 沿用告警卡的本轮例外：用户于 2026-09-28 明确授权“允许本轮使用 2 号卡，记录告警和占用”。本步精度与性能验证可使用物理 2 号共享 Warning 卡，保留告警、ECC 和实际后台进程记录；计时窗口新增外部进程的采集须重测，逐例性能门槛不变。本轮结果不得记作健康、独占设备验收，授权不扩展至后续步骤。
-
-分别报告 kernel 时间、无 metadata 调用 E2E、metadata 生成时间、复用前向 E2E 及上述完整调用段 E2E；图模式单列。接口适配导致的必要转换计入相应端到端成本，不拿 CANN 较慢的回退模板充当基线。对于原 CANN 的原生 NZ 等不同布局优势，可另列原生最佳路径结果并解释表示差异，不能隐藏转换成本后混为同一口径。
+分别报告 kernel 时间、无 metadata 调用 E2E、metadata 生成时间、复用前向 E2E 及上述完整调用段 E2E；图模式单列。接口适配导致的必要转换计入相应端到端成本，CANN 基线使用固定版本的原生正确分派。对于原 CANN 的原生 NZ 等不同布局优势，另列原生最佳路径结果并解释表示差异，转换成本单独明确。
 
 **覆盖：** 两种表示 × FP16/BF16 × dense/TND/PA × mask × 长短 KV × 单/多 query × 分组/尾块/stride；加 metadata 有无、重复使用、不同 scale、长度变更、split 自动/显式、graph replay。可采用代表性组合加针对性边界测试，不要求机械的全笛卡尔积，但每项源能力都要能追溯到用例或明确排除理由。
 
