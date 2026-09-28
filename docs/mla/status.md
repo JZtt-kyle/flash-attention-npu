@@ -2,64 +2,74 @@
 
 ## 当前能力与下一步
 
-- 分支：`feat/mla-cann-migration`；接手 HEAD 为 `783e73f`，接手时工作区干净。M04b1 独立调度实现、CPU 固定源对照和 sanitizer 验收已完成。
-- 新增 `mla/mla_schedule.h/.cpp` 和私有 `detail/cann_split_core.h/.cpp`，位于 FA3 的 910 目录。只依赖 C++17 标准库，尚未接入生产构建或 AICPU；保留固定 CANN 来源、版权和 `LICENSE.cann`。
-- 生产 MLA 前向与 MLA metadata 仍明确报未实现；普通 FA3 源码、已链接对象和实际加载扩展均与 M03 一致。
-- 独立调度范围为连续 BSND、512+64 共享 KV、B>0、`1<=Sq*Hq<=256`、KV `1..512`、Hkv=1、无 mask、显式 `num_splits=1`；FP16/BF16 共用调度。它不校验 tensor 地址或实际布局，不能作为生产前向入口。
-- 唯一下一步：M04b2，按 design 6 实现同范围 FP16 CATLASS Kernel / Block / Tile 和 FA3 接入，完成 910B 精度、同轮 CANN 性能诊断及普通 FA3 回归。本步提交后停止。
+- 分支：`feat/mla-cann-migration`；接手 HEAD 为 `959df6d`，接手时工作区干净。M04b2 拆为 Cube、Vector/Kernel、FA3 接入三步；本次完成 M04b2a。
+- 新增 `mla/block/mla_cube.hpp`、`mla/tile/mla_copy.hpp`、`mla/tile/mla_mmad.hpp`。从固定 CANN 源迁移 FP16 QK/PV，保留版权和 `LICENSE.cann`；复用 CATLASS `TileMmad`、FP32 `CopyL0CToGm`，CATLASS 子模块未修改。
+- 组件范围：连续 BSND、512+64 共享 KV、B>0、`1<=Sq*Hq<=256`、KV `1..512`、Hkv=1。保留源 N→K→M 顺序、Q/RoPE 跨槽复制、七个 L1 槽、L0 双缓冲、unitFlag、本地事件和跨核事件；调用方负责验证范围及 workspace。
+- 独立设备探针以外部 FP16 P 检查 PV，Vector 仅执行源事件协议，没有 softmax/aMLA、scale、O/LSE 或完整 MLA 前向。测试使用 C1V2、独立循环分批，不代表 M04b1 调度已接设备；保留的跨 S2 原子加分支尚未验收。
+- 生产 MLA 前向与 MLA metadata 仍明确报未实现；公共入口、生产构建、普通 FA3 源码、已链接对象和实际加载扩展均保持 M03 状态。
+- 唯一下一步：M04b2b，按 [design 6](design.md#6-代码结构) 接通 FP16 Vector Block 与 dense Kernel，完成独立 D01/D02、边界、scale、O/LSE、重复执行及同轮 CANN 性能诊断；FA3 接入在 M04b2c。本步提交后停止。
 
 ## 本步验证
 
-证据目录：`build/mla-m04b1-schedule/`。
+证据目录：`build/mla-m04b2a-cube/`，最终验收为物理 7 号 910B3。
 
 | 项目 | 结果 |
 | --- | --- |
-| 接手及上步复核 | PASS：重跑 M04a 的 `check_docs.py`，98 个源码锚点及既有文档检查通过；复核上步质量记录；源码仓状态、M03 生产源码/对象/扩展哈希一致 |
-| 独立 C++ 构建与 CPU 对照 | PASS：85 项，无 skip；49,251 组输入与固定源基本块、完整端点数组、核数、cost、FD 字段、workspace、启动维度及 BATCH_MODE 完全一致 |
-| 边界与复用 | PASS：1..26 个 Cube 核、C1V1/C1V2、batch 在核数及其倍数两侧、M 的 16/128/256 边界、KV 的 16/32/128/256/512 边界、多 query、反序重复调用及相同 cost 的取舍 |
-| 字段与资源 | PASS：尺寸窄化、行乘积、源 uint32 LCM/总块数、端点容量、uint64 workspace 加法；L1/UB/L0 刚好足够与少 1 字节；失败不改写原调度，GM 四段边界不超预算 |
-| ASan / UBSan / LSan | PASS：沙箱外完整重跑同组 85 项，无 skip，49,251 组结果哈希与普通构建一致；首次沙箱内 LSan 因进程检查受限退出失败，其日志单独保留 |
-| 来源与序列化 | PASS：私有 SplitCore 去掉日志、命名空间、include guard 和初始化次序差异后算法 token 与固定源一致；C1V1 FD 端点按源 vector 实际长度复制，见 design 6.2 |
-| 文档及提交质量 | PASS：16 处本地链接/锚点、唯一下一步和 metadata E2E 口径一致；差异及 6 项适用质量检查通过；只暂存本步 10 个文件 |
-| 生产扩展构建、NPU 精度/性能、普通 FA3 回归 | 未运行：新调度尚未被生产构建引用，公共入口、metadata、kernel 及现有构建未修改；本步没有新的设备精度或性能结论 |
+| 上步最小闭环 | PASS：重跑 M04b1 CPU 对照 85 项，无 skip，49,251 组源结果一致；原调度和测试未修改，既有 sanitizer 通过记录已复核，本轮未重跑 sanitizer |
+| 910B 组件精度 | PASS：最终新构建 155 项，无 skip；157 组记录、546 个有效双缓冲槽；QK/PV 与固定源 FP32 输出逐元素一致；独立 CPU FP64 计算的最大绝对误差分别为 `3.666e-5` / `2.825e-5`，均满足逐元素 FP32 累加误差界 |
+| 边界和复用 | PASS：M 的 1/15/16/17/127/128/129/255/256，KV 的 16/32/128/256/512 两侧，内容/RoPE 四段分别扰动；多 query、非零 storage offset、batch 在 20/40 两侧、反序异形调用、输入及分配边界保护 |
+| 构建与来源 | PASS：每次从固定 Git blob 导出原 Cube 及依赖、独立构建两份探针；实际加载路径、源文件/二进制哈希、命令及设备头文件依赖齐全；oracle 不包含迁移代码，迁移探针不依赖原 Cube |
+| 代表性组件性能 | 完成诊断：同轮交替 800 次探针调用、400 次 kernel 采样；4 组结果见下表；kernel CSV 与原始 CANN op summary 的名称、设备、时间和时长逐条一致 |
+| 文档及提交质量 | PASS：17 处本地链接/锚点、唯一下一步和 metadata E2E 口径一致；差异及 6 项适用质量检查通过；仅本步 9 个文件，最终结果见 `quality-final.log`、`acceptance.json` |
+| 完整 MLA、生产扩展构建、普通 FA3 回归 | 未运行：本次未改生产入口、metadata 或既有构建；相关接入及回归留在 M04b2c。M03 的 233 项 MLA 契约和 11 项普通 FA3 证据仍在 `build/mla-interface-guard-validation/` |
 
-oracle 从固定 commit 的 Git blob 导出原 `split_core.h/.cpp`，直接编译；另外抽取原 MLA host 的 10 个计算函数，仅用最小数据和平台 API shim 去除 gert。oracle 不包含或链接待测调度。比较原 SplitCore vector，不执行源 C1V1 可能越界的 `SetSplitOutput` 序列化循环。平台结果表由调用方提供，首步仅在 CPU 检查；M04b2 仍须核对真实发射与设备行为。
+最终组件诊断（单位 μs，中位数；shape 为 `B,Sq,Hq,Sk`）：
 
-metadata 性能门槛仍为逐例 `FA3 metadata 路径 E2E / 原 CANN E2E <= 1.0`；M04b 无 metadata 数据仅作诊断。
+| shape | 原 Cube kernel | 迁移 Cube kernel | kernel 比值 | 原/迁移探针调用耗时 |
+| --- | ---: | ---: | ---: | ---: |
+| 2,1,8,257（D01 几何） | 20.690 | 20.511 | 0.9913 | 148.430 / 150.990 |
+| 1,7,16,65（D02 几何） | 21.730 | 21.711 | 0.9991 | 180.595 / 172.535 |
+| 1,1,128,512 | 46.471 | 46.521 | 1.0011 | 192.290 / 191.590 |
+| 2,2,128,511 | 70.451 | 70.652 | 1.0028 | 192.905 / 193.125 |
 
-## 环境与最近实机证据
+每例每实现预热 5 次，5 轮交替顺序；每轮墙钟 20 次、profiler 10 次。输入/输出预分配；墙钟包括 Python/ctypes 发射、运行时准备和同步。这里只计 QK 与独立 P×V，没有完整 CANN/FA3 前向或 metadata E2E，不作“不劣化”验收结论。metadata 门槛仍为逐例 `FA3 metadata 路径 E2E / 原 CANN E2E <= 1.0`。
+
+## 环境、失败与限制
 
 | 项目 | 本轮复核 |
 | --- | --- |
-| Python / 包 | `/usr/local/python3.11.15/bin/python3` 3.11.15；torch `2.7.1+cpu`，torch_npu `2.7.1`；CPU C++ 使用 g++ 11.4.0 |
-| CANN / 芯片 | `/usr/local/Ascend/cann-9.0.0-beta.2`；只读查询物理 2 号 Ascend910B3，Warning 且有共享进程；最终探测进程 `npu_initialized=false`，未运行算子 |
+| Python / 包 | `/usr/local/python3.11.15/bin/python3` 3.11.15；torch `2.7.1+cpu`、torch_npu `2.7.1` |
+| CANN / 编译器 | `/usr/local/Ascend/cann-9.0.0-beta.2`；bisheng clang 15，`dav-2201`、`-O2`；最终两组探针均从当前源码重新编译 |
+| 芯片与占用 | 7 号 Ascend910B3；Warning `81078603` 为端口 link down，查询时 ECC 计数均为 0；最终性能采样前后仅有本次探针进程。此前 3 号卡采样出现共享进程，仅保留作诊断 |
 | 固定来源 | FIA `ca18aee610729ca5270a44e2d84c751bc687fbf0`；CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`，子模块干净；CANN 源仓已有删除/未跟踪文件保持原样 |
-| 平台 API | 910B3 配置为 20 AIC / 40 AIV，L1 524032 B、UB 196352 B、L0A/B/C 为 65536/65536/131072 B，libapi 16 MiB；`CalcTschBlockDim` 已逐核查询；另查 910_9391 配置，不代表 910C 实机验证 |
-| 实际加载扩展 | 本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`；SHA256 `955ecbe4c2b199b2e1131d9c86c38ce23b15ed8704c55cf2e35de37986b84877`；直接加载并确认 `npu_initialized=false`，仍是 M03 构建产物 |
+| 实际生产扩展 | 本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`；SHA256 `955ecbe4c2b199b2e1131d9c86c38ce23b15ed8704c55cf2e35de37986b84877`，直接加载核实；仍为 M03 产物，不能用于证明新增 Cube 构建 |
 
-环境探测最初遇到沙箱驱动限制；一次包入口探测因覆盖 PYTHONPATH 缺失 tbe 失败。保留原 CANN PYTHONPATH、直接加载扩展并在沙箱外只读查询后复核通过。上述卡状态仅为环境快照，不作为性能验收条件。
+早期探针曾编译失败和设备超时：修正源头文件的 host/device 编译隔离、CANN include 路径、探针 Vector 事件顺序，以及迁移时遗漏的 PV FP32 写回后，完成两轮 155 项精度验收；失败日志保留，未计为通过。最终编译/进程退出仍有 CANN 重复 tiling 类型注册警告。源和 CATLASS 的同等写回继续使用原 unitFlag 时序，未通过删除同步规避超时。
 
-最近 NPU 闭环仍为 M03（`677c14e`），`build/mla-interface-guard-validation/` 保存 233 项 MLA 契约和 11 项普通 FA3 的通过证据；本轮没有重跑。进入 M04b2 需重新选择设备、强制核查新增编译单元/header 依赖及实际加载产物，再完成 910B FP16 精度、重复执行、同轮固定源码 CANN 性能诊断和普通 FA3 回归。
+Profiler 的框架调用关联解析报 `Failed to get acl to npu flow events` / `fwk_api_db` 失败；探针直接发射 runtime kernel，没有框架算子父节点。最终 400 条 kernel task 数据及原始 CANN CSV 交叉核对通过；不使用框架 flow、CSV 的 block dimension 或硬件计数器作证据。普通 FA3 端到端性能仍待后续接入。
 
 ## 证据与复现
 
-- `previous-step-docs-check.log`、`source-review.log`、`source-repositories.json`：上步复核、源算法 token 核对及只读仓库状态。
-- `environment.json`、`environment.log`、`npu-smi.log`、`platform-910b3.log`、`platform-910c.log`、`compiler-version.txt`：实际扩展加载、平台和芯片快照。
-- `cpu-final/`、`sanitizers-host/`：原始 Git blob、抽取函数、来源哈希、精确编译命令、独立可执行文件及各组用例/输出摘要哈希；对应 `*-command.json`、`*-exit.json`、`*.log`、`*.xml` 保存运行结果。`sanitizers.log` 记录沙箱内 LSan 失败。
-- 最终 `binary-provenance.json`、`acceptance.json`、`quality-final.log`、`checksums.sha256` 保存二进制隔离、生产产物未变化及提交前完整性检查结果。
+- `previous-schedule.xml`、`previous-schedule/`：上步 CPU 重跑及逐组源对照记录；sanitizer 的既有证据在 `build/mla-m04b1-schedule/sanitizers-host/`。
+- `environment-initial.json`、`source-repositories.json`、`npu-final-before.json`、`production-unchanged.json`：环境、源仓初始状态、芯片和生产源码/对象/扩展未变化证明。
+- `accuracy-final/`、`accuracy-final.log`、`accuracy-final.xml`：固定源原始文件及哈希、两份独立动态库、精确编译/设备依赖命令、构建 manifest、157 组精度记录。
+- `performance-final/`、`performance-final.log`：同轮重编译产物、卡占用快照、800 条墙钟记录、400 条 kernel 记录、完整 profiler 原始输出和解析失败日志；`*-command.json`、`*-exit.json` 保存命令、环境与退出状态。
+- `smoke*.log`、`debug*.log`、`raw-fixpipe.log` 保存失败；`pv-restored.log`、`accuracy/`、`performance/` 保存修复后及 3 号卡的早期结果，不替代最终记录。
+- `verify_acceptance.py`、`acceptance.json`、`quality-final.log`、`checksums.sha256` 保存提交前完整性与质量检查。
 
-调度最小闭环（从仓库根目录；第二条需要允许 LSan 进程检查的环境）：
+从仓库根目录复现（需可访问 910B 驱动；复跑使用新的 artifact 目录，保留旧证据）：
 
 ```bash
-MLA_CANN_SOURCE_ROOT=/home/zhangqijia/repo/ops-transformer MLA_SCHEDULE_ARTIFACT_DIR=build/mla-m04b1-schedule/cpu-final python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_schedule.py --junitxml=build/mla-m04b1-schedule/cpu-final.xml
-MLA_CANN_SOURCE_ROOT=/home/zhangqijia/repo/ops-transformer MLA_SCHEDULE_SANITIZE=1 MLA_SCHEDULE_ARTIFACT_DIR=build/mla-m04b1-schedule/sanitizers-host python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_schedule.py --junitxml=build/mla-m04b1-schedule/sanitizers-host.xml
+MLA_CANN_SOURCE_ROOT=/home/zhangqijia/repo/ops-transformer MLA_SCHEDULE_ARTIFACT_DIR=build/mla-m04b2a-cube/recheck-schedule python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_schedule.py
+ASCEND_RT_VISIBLE_DEVICES=7 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MLA_CANN_SOURCE_ROOT=/home/zhangqijia/repo/ops-transformer MLA_CUBE_ARTIFACT_DIR=build/mla-m04b2a-cube/recheck-accuracy python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_cube.py
+ASCEND_RT_VISIBLE_DEVICES=7 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 MLA_CANN_SOURCE_ROOT=/home/zhangqijia/repo/ops-transformer MLA_CUBE_ARTIFACT_DIR=build/mla-m04b2a-cube/recheck-performance python3 -m tests.mla_cube_profile
 ```
 
 最终暂存检查：
 
 ```bash
 PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache bash ci/code_quality.sh --staged
-python3 build/mla-m04b1-schedule/verify_acceptance.py --staged
+python3 build/mla-m04b2a-cube/verify_acceptance.py --staged
 git diff --check
 git diff --cached --check
 ```

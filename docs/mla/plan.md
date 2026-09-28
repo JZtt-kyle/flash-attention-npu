@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前具备 MLA 接口校验、独立 reference、固定源码 CANN 基线和首步 dense 的独立调度模块。生产 MLA 前向与 MLA metadata 明确报未实现；普通 FA3 继续使用既有计算路径。M04b1 调度及 CPU 源码对照已完成，唯一下一步为 M04b2。
+当前具备 MLA 接口校验、独立 reference、固定源码 CANN 基线、首步 dense 的独立调度及 FP16 Cube 组件。生产 MLA 前向与 MLA metadata 明确报未实现；普通 FA3 继续使用既有计算路径。M04b2 按设备组件和入口接入拆为三步；M04b2a 的 910B 组件验收已完成，唯一下一步为 M04b2b。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。
 
@@ -18,8 +18,10 @@
 | M03 | 已完成 | MLA 入口识别、参数校验和未实现拦截 | 构建只含普通 FA3 kernel；MLA 真实/fake/C++/公开入口明确拒绝；契约、普通 FA3 精度/metadata/编译图及 CPU reference 回归通过 |
 | M04a | 已完成（纯文档） | CANN 源实现映射及 dense 实现拆分 | design 6.1..6.5 固定源函数、字段、数值顺序、资源/事件和组件复用条件；首步范围与验收子步骤明确，源码锚点及文档检查通过 |
 | M04b1 | 已完成 | 首步 dense 的无 gert 调度模块及源输出对照 | 85 项 CPU 检查通过，49,251 组输入与固定源的基本块、端点、核数、无 FD 和 workspace 完全一致；字段/资源/溢出检查及 sanitizer 通过；尚不接生产前向或 metadata |
-| M04b2 | 唯一下一步 | 首步范围的 FP16 CATLASS 前向与 FA3 接入 | 按 design 6 的源 Kernel/Block/Tile 完成可运行闭环；910B D01/D02、边界、O/LSE、重复执行、同轮 CANN 性能诊断及公共入口普通 FA3 回归通过；BF16 及范围外组合继续明确拒绝 |
-| M04b3 | 待 M04b2 完成 | 同范围 BF16 实例化及验收 | 保留源的 BF16 中间/输出舍入；BF16 精度与性能对照、FP16 针对性回归及公共入口普通 FA3 回归通过；两种 dtype 边界一致 |
+| M04b2a | 已完成 | FP16 QK/PV 的 Cube Block 与 Tile | 155 项 910B 检查通过，FP32 QK/PV 与固定源逐元素一致并满足独立 FP64 误差界；覆盖内容/RoPE 两半、M/N/K 尾块、多 query、非零 offset、缓冲复用；四组组件性能诊断完成；不接生产前向 |
+| M04b2b | 唯一下一步 | FP16 Vector Block 与 dense Kernel | 复用已验收 Cube，按源接通 softmax/aMLA、三项任务环、排空和 O/LSE；独立设备驱动完成 D01/D02、边界、scale、重复执行及同轮 CANN 性能诊断；不接公共入口 |
+| M04b2c | 待 M04b2b 完成 | 首步 FP16 的 FA3 接入与构建 | 接通已验收 Kernel、静态调度和生产构建，核查编译依赖及加载产物；真实/fake/C++ 边界、910B 精度、公开调用 E2E 诊断及普通 FA3 回归通过；BF16 及范围外组合明确拒绝 |
+| M04b3 | 待 M04b2c 完成 | 同范围 BF16 实例化及验收 | 保留源的 BF16 中间/输出舍入；BF16 精度与性能对照、FP16 针对性回归及公共入口普通 FA3 回归通过；两种 dtype 边界一致 |
 | M05 | 待开始 | 已验收 dense 范围的 MLA metadata | 将源调度计算接入 AICPU，保持调度结果；官方参数、运行时 scale、有/无 metadata、连续复用和普通 FA 兼容正确；metadata E2E 逐例不劣于同轮 CANN |
 | M04c1 | 待 M05 完成 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | KV 仍为 1..512；按源 M 切块/分核接通，覆盖 257/511/512/513 行及跨核尾块；两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过 |
 | M04c2 | 待 M04c1 完成 | dense 的 KV 513..1024、显式 num_splits=1 | 保留源 aMLA nUpdate、PV 原子加和事件依赖；单列禁止 FD 的必要调度映射；跨块最大值变化、O/LSE、重复执行、metadata、普通 FA3 回归和 E2E 通过 |
@@ -40,7 +42,7 @@
 
 M04b 的临时范围与验收切面见 [design 6.2](design.md#62-调度字段和首步边界) 和 [6.5](design.md#65-必要的-fa3-差异与验收切面)：连续 BSND、B>0、`1<=Sq*Hq<=256`、`1<=Sk<=512`、Hkv=1、无 mask、显式 `num_splits=1`；先接 `flash_attn_func`。FP16/BF16 分两次接通，各自验收前保持明确拒绝。M04c 的范围扩展不改变最终需求；TND、PA、mask、split 等仍按后续行推进。
 
-M04b1 是有独立验收的调度实现，不创建未实现 kernel 或返回占位 metadata。源对照从固定 commit 读取原算法，覆盖 design 6.5 的边界；新模块尚未被生产构建引用时不要求重跑 NPU。接入生产的 M04b2 必须强制核查构建依赖、实际加载扩展和源组件对应关系。每个实现步骤保持源设备行为，组件替换按运算、数据布局、精度和资源/同步契约核对等价性。
+M04b1 是有独立验收的调度实现，不创建未实现 kernel 或返回占位 metadata。源对照从固定 commit 读取原算法，覆盖 design 6.5 的边界；该调度尚未被生产构建引用时不要求重跑 NPU。M04b2a/b 的测试驱动只用于设备组件验收，不提供 MLA 前向接口；两步均须完成相关 910B 精度和性能诊断。M04b2c 接入生产时必须强制核查构建依赖、实际加载扩展和源组件对应关系。每个实现步骤保持源设备行为，组件替换按运算、数据布局、精度和资源/同步契约核对等价性。
 
 E2E 优化集中于接口、调度计算位置、metadata 复用、重复准备与发射成本。设备计算耗时用于检查源行为一致性。新增能力及时验收相应精度和 E2E，普通 FA3 回归覆盖公共入口及 metadata 变化。
 
