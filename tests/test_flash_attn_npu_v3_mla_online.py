@@ -1,4 +1,4 @@
-"""910B dense MLA online accumulation, currently bounded to KV <= 1024."""
+"""910B dense MLA online accumulation, currently bounded to KV <= 1280."""
 
 from contextlib import nullcontext
 
@@ -56,6 +56,21 @@ CASES = [
     Case("long-scale-fp32", "compressed", 2, 3, 1023, 16, 1, scale=0.230013),
     Case("long-zero", "compressed", 2, 3, 1024, 17, 1, scale=0.0),
     Case("long-negative", "compressed", 1, 7, 1023, 17, 1, scale=-0.130017),
+    Case("kv1025-one-head", "compressed", 1, 1, 1025, 1, 1),
+    Case("kv1025-q1", "compressed", 1, 1, 1025, 16, 1),
+    Case("kv1025-q7", "compressed", 1, 7, 1025, 16, 1),
+    Case("kv1151", "compressed", 2, 3, 1151, 7, 1),
+    Case("kv1152", "compressed", 2, 1, 1152, 8, 1),
+    Case("kv1153", "compressed", 1, 2, 1153, 31, 1),
+    Case("kv1279-q1", "compressed", 1, 1, 1279, 16, 1),
+    Case("kv1279-q7", "compressed", 1, 7, 1279, 16, 1),
+    Case("kv1280-q1", "compressed", 1, 1, 1280, 16, 1),
+    Case("kv1280-q7", "compressed", 1, 7, 1280, 16, 1),
+    Case("extended-task-reuse-odd", "compressed", 2, 11, 1153, 33, 1),
+    Case("extended-task-reuse-even", "compressed", 2, 11, 1280, 32, 1),
+    Case("extended-scale-fp32", "compressed", 2, 3, 1279, 16, 1, scale=0.230013),
+    Case("extended-zero", "compressed", 2, 3, 1280, 17, 1, scale=0.0),
+    Case("extended-negative", "compressed", 1, 7, 1279, 17, 1, scale=-0.130017),
 ]
 
 
@@ -74,7 +89,7 @@ def test_online_output_rows(heads, dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("length", [129, 383, 385, 641, 769, 897, 1024])
+@pytest.mark.parametrize("length", [129, 383, 385, 641, 769, 897, 1024, 1025, 1153, 1280])
 def test_online_cached_query_components(dtype, length):
     # Select content coordinates on both sides of every Cube K-slice boundary,
     # plus the first/last RoPE coordinate. More tasks than cores force cached Q
@@ -103,7 +118,7 @@ def test_online_cached_query_components(dtype, length):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("length", [129, 383, 385, 641, 897, 1024])
+@pytest.mark.parametrize("length", [129, 383, 385, 641, 897, 1024, 1025, 1153, 1280])
 def test_online_output_columns(dtype, length):
     # Distinguish both sides of every output slice boundary while reusing each
     # core for full and one-head tasks, with odd/even numbers of KV tiles.
@@ -128,7 +143,9 @@ def test_online_output_columns(dtype, length):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("length", [527, 528, 529, 575, 576, 577])
+@pytest.mark.parametrize(
+    "length", [527, 528, 529, 575, 576, 577, 1039, 1040, 1041, 1087, 1088, 1089]
+)
 def test_online_reduction_tail(length, dtype):
     # Exercise both the Cube's 16-column padding and the in-place reduction's
     # 64-element boundary, including a one-row head tail.
@@ -145,6 +162,8 @@ def test_online_reduction_tail(length, dtype):
         (-80, -60, -40, -20, 20, 40, 60, 100),
         (100, 60, 40, 20, -20, -40, -60, -80),
         (-80, 100, -20, 35, 120, -120, 0, 150),
+        (-80, -60, -40, -20, 0, 20, 40, 60, 80, 100),
+        (100, 80, 60, 40, 20, 0, -20, -40, -60, -80),
     ],
 )
 def test_online_changing_maximum(dtype, biases):
@@ -170,7 +189,7 @@ def test_online_changing_maximum(dtype, biases):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("length", [511, 1023])
+@pytest.mark.parametrize("length", [511, 1023, 1279])
 def test_online_contiguous_storage_offset(dtype, length):
     cpu = make_inputs(Case("offset", "compressed", 2, 3, length, 17, 1), dtype, 20260924)
     refs = mla_reference_pair(**cpu)
@@ -194,7 +213,7 @@ def test_online_queued_calls(dtype):
     # Queue mixed odd/even tile counts without synchronizing each call. Reuse
     # each core across query/head tasks, then check every retained result.
     expected, inputs = [], []
-    for seed, length in enumerate((513, 1024, 129, 1023, 257, 640, 65, 897)):
+    for seed, length in enumerate((513, 1024, 129, 1280, 1023, 257, 1025, 640, 65, 897, 1153)):
         cpu = make_inputs(Case("queued", "compressed", 1, 17, length, 17, 1), dtype, seed)
         expected.append(mla_reference_pair(**cpu))
         inputs.append({name: tensor.npu() for name, tensor in cpu.items()})
@@ -211,17 +230,18 @@ def test_online_vector_buffer_reuse(dtype, heads):
     # One-head tasks leave a vector lane empty; 33 heads rotate three head
     # tiles across 910B3's 20 cores, alternating full and one-head tasks on each
     # core. Changing maxima makes premature buffer reuse observable. Full and
-    # partial final tiles exercise scaling before the PV wait/load;
-    # three and five tiles exercise both alpha slots before the final drain.
+    # partial final tiles exercise scaling before the PV wait/load.
+    # Nine and ten tiles also rotate the three L1 KV slots independently of
+    # the two workspace/alpha slots after crossing the old 1024 boundary.
     inputs, expected, originals = [], [], []
-    for length in (129, 255, 257, 384, 385, 513, 641, 769, 897, 1024):
+    for length in (129, 255, 257, 384, 385, 513, 641, 769, 897, 1024, 1025, 1280):
         case = Case("vector-buffer-reuse", "compressed", 2, 19, length, heads, 1, scale=1.0)
         cpu = make_inputs(case, dtype, length + heads)
         cpu["q"].zero_()
         cpu["qv"].zero_()
         signs = (torch.arange(case.batch * case.seqlen_q * heads) % 2) * 2 - 1
         cpu["qv"][..., 0] = signs.reshape(case.batch, case.seqlen_q, heads)
-        for tile, bias in enumerate((-70, 30, -25, 45, 10, -90, 60, -10)):
+        for tile, bias in enumerate((-70, 30, -25, 45, 10, -90, 60, -10, 100, -120)):
             cpu["v"][:, tile * 128 : (tile + 1) * 128, :, 0] = bias
         originals.append(cpu)
         expected.append(mla_reference_pair(**cpu, softmax_scale=case.scale))
@@ -243,7 +263,7 @@ def test_online_vector_buffer_reuse(dtype, heads):
 
 @pytest.mark.parametrize("entry", ["eager", "fake", "cpp"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("length", [512, 513, 1024])
+@pytest.mark.parametrize("length", [512, 513, 1024, 1025, 1280])
 def test_online_entries(entry, dtype, length):
     with FakeTensorMode() if entry == "fake" else nullcontext():
         args = _inputs(dtype=dtype)
@@ -259,7 +279,7 @@ def test_online_entries(entry, dtype, length):
 
 
 @pytest.mark.parametrize("entry", ["eager", "fake", "cpp"])
-@pytest.mark.parametrize("length", [1025, 8193])
+@pytest.mark.parametrize("length", [1281, 8193])
 def test_longer_kv_rejected(entry, length):
     with FakeTensorMode() if entry == "fake" else nullcontext():
         args = _inputs()
@@ -271,7 +291,7 @@ def test_longer_kv_rejected(entry, length):
 
 @pytest.mark.parametrize("fake", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("length", [17, 257, 511, 513, 1023, 1024])
+@pytest.mark.parametrize("length", [17, 257, 511, 513, 1023, 1024, 1025, 1280])
 def test_dense_public_entries(fake, dtype, length):
     with FakeTensorMode() if fake else nullcontext():
         args = _inputs(dtype=dtype)

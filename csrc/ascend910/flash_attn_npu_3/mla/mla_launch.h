@@ -9,7 +9,7 @@ namespace flash_attn::mla {
 // No device lengths, packed inputs, or host-to-device schedule copy are needed.
 constexpr uint32_t kHeadsPerTile = 16;
 constexpr uint32_t kShortKvLimit = 128;
-constexpr uint32_t kOnlineKvLimit = 1024;
+constexpr uint32_t kOnlineKvLimit = 1280;
 constexpr uint32_t kScoreBytes = kHeadsPerTile * kShortKvLimit * sizeof(float);
 constexpr uint32_t kProbabilityBytes = kHeadsPerTile * kShortKvLimit * 2;
 constexpr uint32_t kOutputBytes = kHeadsPerTile * 512 * sizeof(float);

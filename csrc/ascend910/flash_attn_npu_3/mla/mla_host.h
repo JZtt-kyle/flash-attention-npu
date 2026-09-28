@@ -15,7 +15,7 @@ inline std::vector<at::Tensor> ForwardDense(const at::Tensor& q, const at::Tenso
     TORCH_CHECK(q.is_contiguous() && k.is_contiguous() && v.is_contiguous() && qv.is_contiguous(),
                 "NPU FlashAttention MLA compressed forward is not implemented yet for outer strides");
     TORCH_CHECK(q.size(0) > 0 && q.size(1) > 0 && k.size(1) > 0 && k.size(1) <= kOnlineKvLimit,
-                "NPU FlashAttention MLA compressed forward is not implemented yet outside nonempty KV (1..1024)");
+                "NPU FlashAttention MLA compressed forward is not implemented yet outside nonempty KV (1..1280)");
     for (int axis = 0; axis < 3; ++axis) {
         TORCH_CHECK(q.size(axis) <= std::numeric_limits<uint32_t>::max(), "MLA: dense dimension exceeds uint32 range");
     }
