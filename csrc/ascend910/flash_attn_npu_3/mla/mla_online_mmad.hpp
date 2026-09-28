@@ -198,6 +198,8 @@ class CachedQueryPV : public OnlineMmadTypes<Element>::PV {
     using Base::Base;
     static_assert(kHeadsPerTile <= 16 && 16 * 576 * sizeof(Element) <= Base::L0A_PINGPONG_BUF_SIZE,
                   "Cached Q needs one sixteen-row fractal within its reserved L0A half");
+    static_assert(16 * 512 * sizeof(ElementC) <= Base::L0C_PINGPONG_BUF_SIZE,
+                  "The complete PV output must fit within one L0C half");
 
     CATLASS_DEVICE
     void operator()(AscendC::GlobalTensor<ElementA> gA, AscendC::GlobalTensor<ElementC> gC, LayoutA layoutA,
@@ -215,9 +217,9 @@ class CachedQueryPV : public OnlineMmadTypes<Element>::PV {
         uint32_t L1BPingPongFlag = (pingpongIdx - 1) % 2;
         // QK retains its query in L0A[0] until the task drains.
         constexpr uint32_t L0APingPongFlag = 1;
+        const uint32_t L0CPingPongFlag = locPingPongIdx % 2;
 
         for (uint32_t embedSplitIdx = 0; embedSplitIdx < embedSplitLoopV; embedSplitIdx++) {
-            uint32_t L0CPingPongFlag = (locPingPongIdx) % 2;
             uint32_t L0BPingPongFlag = (embedSplitIdx + 1) % 2;
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(L0BPingPongFlag + 2);
             LayoutBInL1 layoutBInL1 = LayoutBInL1::template MakeLayout<ElementB>(vSeqTile, embed);
@@ -247,26 +249,26 @@ class CachedQueryPV : public OnlineMmadTypes<Element>::PV {
 
             AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(L0BPingPongFlag);
             AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(L0BPingPongFlag);
-            AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(L0CPingPongFlag);
+            if (embedSplitIdx == 0) {
+                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(L0CPingPongFlag);
+            }
             // mmad
-            tileMmad(l0CTensor[L0CPingPongFlag], l0ATensor[L0APingPongFlag], l0BTensor[L0BPingPongFlag], rowNumRound,
-                     embedSplitSize, vSeqTile);
+            // Adjacent column slices are adjacent in zN at this row stride.
+            // Keep all four independent MMAD results in one L0C slot so FIX
+            // can write the complete 512-column partial in a single copy.
+            tileMmad(l0CTensor[L0CPingPongFlag][embedSplitIdx * rowNumRound * embedSplitSizeRound],
+                     l0ATensor[L0APingPongFlag], l0BTensor[L0BPingPongFlag], rowNumRound, embedSplitSize, vSeqTile);
             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(L0BPingPongFlag + 2);
             if (embedSplitIdx == embedSplitLoopV - 1) {
                 AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(L0APingPongFlag);
             }
-            AscendC::SetFlag<AscendC::HardEvent::M_FIX>(L0CPingPongFlag);
-
-            AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(L0CPingPongFlag);
-            auto blockShape = Catlass::MakeCoord(rowNum, embedSplitSize);
-            auto layoutInL0C = LayoutCInL0::MakeLayoutInL0C(blockShape);
-            auto layoutCSplitK = layoutC.GetTileLayout(Catlass::MakeCoord(rowNumRound, embedSplitSizeRound));
-            // copy Otmp to gm
-            copyL0CToGm(gC[embedSplitIdx * embedSplitSizeRound], l0CTensor[L0CPingPongFlag], layoutCSplitK,
-                        layoutInL0C);
-            AscendC::SetFlag<AscendC::HardEvent::FIX_M>(L0CPingPongFlag);
-            locPingPongIdx++;
         }
+        AscendC::SetFlag<AscendC::HardEvent::M_FIX>(L0CPingPongFlag);
+        AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(L0CPingPongFlag);
+        auto layoutInL0C = LayoutCInL0::MakeLayoutInL0C(Catlass::MakeCoord(rowNum, embed));
+        copyL0CToGm(gC, l0CTensor[L0CPingPongFlag], layoutC, layoutInL0C);
+        AscendC::SetFlag<AscendC::HardEvent::FIX_M>(L0CPingPongFlag);
+        locPingPongIdx++;
     }
 };
 

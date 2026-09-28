@@ -101,6 +101,31 @@ def test_online_cached_query_components(dtype, length):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("length", [129, 383, 1024])
+def test_online_output_columns(dtype, length):
+    # Distinguish both sides of every output slice boundary while reusing each
+    # core for full and one-head tasks, with odd/even numbers of KV tiles.
+    case = Case("output-columns", "compressed", 2, 21, length, 17, 1, scale=0.23)
+    cpu = make_inputs(case, dtype, 20260928)
+    cpu["qv"].zero_()  # RoPE controls weights independently of output values.
+    columns = [0, 127, 128, 255, 256, 383, 384, 511]
+    for index, column in enumerate(columns):
+        values = (torch.arange(length) % (index + 2) - index / 2) * (-1 if index % 2 else 1)
+        cpu["v"][..., column] = values[None, :, None]
+    refs = mla_reference_pair(**cpu, softmax_scale=case.scale)
+    inputs = {name: tensor.npu() for name, tensor in cpu.items()}
+    results = [
+        api.flash_attn_func(**inputs, softmax_scale=case.scale, return_attn_probs=True)
+        for _ in range(2)
+    ]
+    for name, tensor, repeated, ref, pt in zip(("out", "lse"), *results, refs[:2], refs[2:]):
+        assert_fa_close(tensor.cpu(), ref, pt, name=name)
+        torch.testing.assert_close(tensor, repeated, rtol=0, atol=0)
+    for name, tensor in inputs.items():
+        torch.testing.assert_close(tensor.cpu(), cpu[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("length", [527, 528, 529, 575, 576, 577])
 def test_online_reduction_tail(length, dtype):
     # Exercise both the Cube's 16-column padding and the in-place reduction's
