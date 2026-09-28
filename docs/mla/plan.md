@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前具备 MLA 接口校验、独立 reference 和固定源码 CANN 基线。生产 MLA 前向与 MLA metadata 明确报未实现；普通 FA3 继续使用既有计算路径。M04a 源码映射和实现拆分已完成，唯一下一步为 M04b1。
+当前具备 MLA 接口校验、独立 reference、固定源码 CANN 基线和首步 dense 的独立调度模块。生产 MLA 前向与 MLA metadata 明确报未实现；普通 FA3 继续使用既有计算路径。M04b1 调度及 CPU 源码对照已完成，唯一下一步为 M04b2。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。
 
@@ -17,8 +17,8 @@
 | M02b2 | 已完成 | 固定源码 profiler 基线工具与代表用例 | kernel、转换和调用 E2E 分开记录，后续验收按同轮交替测量 |
 | M03 | 已完成 | MLA 入口识别、参数校验和未实现拦截 | 构建只含普通 FA3 kernel；MLA 真实/fake/C++/公开入口明确拒绝；契约、普通 FA3 精度/metadata/编译图及 CPU reference 回归通过 |
 | M04a | 已完成（纯文档） | CANN 源实现映射及 dense 实现拆分 | design 6.1..6.5 固定源函数、字段、数值顺序、资源/事件和组件复用条件；首步范围与验收子步骤明确，源码锚点及文档检查通过 |
-| M04b1 | 唯一下一步 | 首步 dense 的无 gert 调度模块及源输出对照 | 抽取 `CalcInnerSize/CalcMBaseSize/SplitCore` 等计算；CPU 对照固定源的基本块、分核端点、核数、无 FD 和 workspace；检查字段宽度、溢出、C1V1/C1V2 资源；尚不接生产前向或 metadata |
-| M04b2 | 待 M04b1 完成 | 首步范围的 FP16 CATLASS 前向与 FA3 接入 | 按 design 6 的源 Kernel/Block/Tile 完成可运行闭环；910B D01/D02、边界、O/LSE、重复执行、同轮 CANN 性能诊断及公共入口普通 FA3 回归通过；BF16 及范围外组合继续明确拒绝 |
+| M04b1 | 已完成 | 首步 dense 的无 gert 调度模块及源输出对照 | 85 项 CPU 检查通过，49,251 组输入与固定源的基本块、端点、核数、无 FD 和 workspace 完全一致；字段/资源/溢出检查及 sanitizer 通过；尚不接生产前向或 metadata |
+| M04b2 | 唯一下一步 | 首步范围的 FP16 CATLASS 前向与 FA3 接入 | 按 design 6 的源 Kernel/Block/Tile 完成可运行闭环；910B D01/D02、边界、O/LSE、重复执行、同轮 CANN 性能诊断及公共入口普通 FA3 回归通过；BF16 及范围外组合继续明确拒绝 |
 | M04b3 | 待 M04b2 完成 | 同范围 BF16 实例化及验收 | 保留源的 BF16 中间/输出舍入；BF16 精度与性能对照、FP16 针对性回归及公共入口普通 FA3 回归通过；两种 dtype 边界一致 |
 | M05 | 待开始 | 已验收 dense 范围的 MLA metadata | 将源调度计算接入 AICPU，保持调度结果；官方参数、运行时 scale、有/无 metadata、连续复用和普通 FA 兼容正确；metadata E2E 逐例不劣于同轮 CANN |
 | M04c1 | 待 M05 完成 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | KV 仍为 1..512；按源 M 切块/分核接通，覆盖 257/511/512/513 行及跨核尾块；两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过 |
