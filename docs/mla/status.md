@@ -2,59 +2,56 @@
 
 ## 当前能力与下一步
 
-- 分支：`feat/mla-cann-migration`。M03 接口边界的构建与回归验收已完成。
-- 生产入口识别 512+64 压缩 MLA 与 192/128 prefill，校验 rank、shape、dtype、device、头数和 stride；MLA 前向与 MLA metadata 明确报未实现。
-- Python 公开入口、自定义算子、fake 和 C++ 入口采用一致的拒绝契约。普通 FA3 使用既有计算与 metadata 路径。
-- 独立数学 reference、CANN 输入映射、固定源码基线包、分派溯源和 profiler 工具可用。
-- 实现原则：保持固定 CANN 的计算顺序、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码；必要 FA3 接口差异单独映射。
-- 唯一下一步：M04a，核对源文件/函数、调度字段、资源布局和事件依赖，确定首个 dense 有界实现范围及独立验收子步骤。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。本次提交成功后停止。
+- 分支：`feat/mla-cann-migration`；接手 HEAD 为 `677c14e`，工作区干净。M04a 源码映射和实现拆分已完成，本步仅修改三个 MLA 文档。
+- 生产 MLA 前向与 MLA metadata 仍明确报未实现；普通 FA3 保持既有计算与 metadata 路径。独立 reference、固定源码 CANN 基线、分派溯源和 profiler 工具可用。
+- [design 6.1..6.5](design.md#61-首个-dense-实现的源对应关系) 已固定调度、Kernel / Block / Tile 对应函数、数值路径、资源布局、事件依赖和组件复用条件。
+- 首个前向范围为连续 BSND、512+64 共享 KV、B>0、`1<=Sq*Hq<=256`、KV `1..512`、Hkv=1、无 mask、显式 `num_splits=1`；FP16/BF16 分步接通。此范围尚未实现；后续范围和验收顺序见 [plan](plan.md)。
+- 唯一下一步：M04b1，抽取首步范围的无 gert 调度模块，CPU 对照固定源的基本块、分核端点、核数、无 FD 和 workspace，并验证字段/资源边界。本步提交后停止。
 
 ## 本步验证
 
-证据目录：`build/mla-interface-guard-validation/`。
+证据目录：`build/mla-m04a-source-map/`。
 
 | 项目 | 结果 |
 | --- | --- |
-| 源码边界 | PASS：MLA 目录仅含校验 header；生成器输出 8 个普通 FA3 编译单元；reference 和 CANN 基线可用 |
-| 强制构建 | PASS：v3/910，9 个 C++ 编译单元和 1 个 AICPU 对象；实际加载扩展与链接产物哈希一致，普通 FA3 的 8 个 kernel 对象一致性检查通过 |
-| CPU reference / provenance / profile | PASS：88 项，无 skip |
-| MLA 拒绝契约 | PASS：233 项，无 skip；覆盖两种表示、dense/TND/PA、真实/fake/C++/公开入口、非法参数及未实现选项 |
-| 普通 FA3 | PASS：11 项，无 skip；精度、metadata、dense/varlen backward、kvcache/FlashDecode 及编译图回归 |
-| 设备记录 | 完整：物理 2 号共享 Warning 卡，21 个快照；前后告警为 81078603，ECC 八项计数均为 0 |
-| 文档及质量 | PASS：文档链接、当前状态、差异检查和 6 项适用质量检查；仅暂存本步 20 个文件 |
+| 接手及上步复核 | PASS：生产源码/构建来源哈希与上步一致；历史 XML 的 CPU 88、MLA 契约 233、普通 FA3 11 项全部通过且无 skip；复核原命令，未重跑测试 |
+| 固定来源 | PASS：53 个 CANN 文件由固定 commit 导出并与工作区逐字节核对；7 个 CATLASS 组件与固定子模块一致；来源仓库状态保持原样 |
+| 源码映射 | PASS：调度使用 `split_core.cpp`；核对 288+288 的 QK 排列、aMLA nUpdate、504 KiB L1、UB/GM 分区、五项跨核依赖及 C1V1/C1V2 分支 |
+| 实现拆分 | PASS：M04b1 调度 → M04b2 FP16 → M04b3 BF16 → M05 metadata；更大 S1G、多块/长 KV、空容量在 M04c 子步骤独立验收 |
+| 文档及质量 | PASS：98 个源码锚点、17 个本地链接/文档锚点、唯一下一步和 metadata E2E 口径一致；差异检查及 3 项适用质量检查通过；仅暂存三个 MLA 文档 |
+| 构建、CPU/NPU 回归及性能 | 未运行：本步仅文档，无生产源码或构建变化；没有新的精度或性能验收结论 |
 
-上述实机结果为功能回归；MLA 数值与 metadata E2E 在对应实现步骤验收。
+源码核对确定了组件复用条件，不表示移植后的设备等价性已验证。metadata 性能门槛仍为逐例 `FA3 metadata 路径 E2E / 原 CANN E2E <= 1.0`；M04b 的无 metadata 数据仅作诊断。
 
-## 环境与设备
+## 最近一次实机证据与环境差异
 
-| 项目 | 实际记录 |
+最近实机闭环为 M03，提交 `677c14e`，证据目录 `build/mla-interface-guard-validation/`。本轮只核对文件和既有证据，未导入 torch/扩展、未访问设备；下次开发或实机验证前须重新检查环境、实际加载扩展和可用芯片。
+
+| 项目 | M03 记录，非本轮重测 |
 | --- | --- |
 | Python / 包 | `/usr/local/python3.11.15/bin/python3` 3.11.15；torch `2.7.1+cpu`，torch_npu `2.7.1` |
-| CANN | `/usr/local/Ascend/cann-9.0.0-beta.2` |
-| 固定 FIA | `ca18aee610729ca5270a44e2d84c751bc687fbf0`；基线包 `build/mla-m02b-validation/opp-dense/` |
-| CATLASS | `769cd40a8716b28650b6bebb08db4834eea4462f`，子模块干净 |
-| 实际加载扩展 | 本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so` |
-| 扩展 SHA256 | `955ecbe4c2b199b2e1131d9c86c38ce23b15ed8704c55cf2e35de37986b84877` |
-| 芯片 | Ascend910B3，物理 2 号，进程内 npu:0 |
+| CANN / 芯片 | `/usr/local/Ascend/cann-9.0.0-beta.2`；Ascend910B3 |
+| 固定 FIA / 基线包 | `ca18aee610729ca5270a44e2d84c751bc687fbf0`；`build/mla-m02b-validation/opp-dense/` |
+| CATLASS | `769cd40a8716b28650b6bebb08db4834eea4462f`；本轮核实子模块干净 |
+| 加载扩展 | 本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so` |
+| 扩展 SHA256 | `955ecbe4c2b199b2e1131d9c86c38ce23b15ed8704c55cf2e35de37986b84877`；本轮仅确认磁盘文件哈希相同 |
+| 设备条件 | 物理 2 号共享 Warning 卡，告警 `81078603`，前后 ECC 八项计数均为 0；21 个监控快照 |
 
-设备为共享 Warning 条件，告警表示端口链路状态变化。开始时 AICore 0%，后台 PID 3724055 占 140 MB；监控文件保存测试期间的实际占用。该记录仅说明本轮功能验证条件，不作为健康、独占设备或性能验收结论。
-
-CANN 源仓只读，已有工作区改动保留；来源核对使用固定 commit。CANN 基线精度与 profiler 数据分别见 `build/mla-m02b-validation/` 和 `build/mla-m02b2-validation/`。
+上述设备记录只说明 M03 的功能验证条件，不作为本轮设备可用或性能验收结论。CANN 源仓只读，其已有删除和未跟踪文件均保留；本次引用固定 Git blob。CANN 精度及 profiler 基线分别见 `build/mla-m02b-validation/`、`build/mla-m02b2-validation/`。
 
 ## 证据与复现
 
-- `build-command.json`、`build.log`、`build-provenance.json`：编译参数、10 个链接对象、源码哈希及实际加载扩展。
-- `cpu-command.json`、`cpu.xml`、`npu-command.json`、`npu.xml`：88 项 CPU、233 项契约和 11 项普通 FA3 的精确参数与结果。
-- `device-readiness.json`、`npu-device-monitor.json`：设备健康、告警、ECC 和共享占用。
-- `acceptance-integrity.json`、`source-repositories.json`、`document-check.json`、`quality-final.log`、`checksums.sha256`：来源、结果及提交完整性。
+- 本步 `source-manifest.json`、`catlass-manifest.json`、`source-repositories.json`：固定源哈希、只读快照和来源工作区状态。
+- 本步 `source-symbols.json`、`previous-step-review.json`、`docs-check.json`、`quality-final.log`、`checksums.sha256`：函数/关键语句定位、上步命令与历史 XML 复核、文档及提交质量。
+- M03 的 `build-command.json`、`build-provenance.json`、`cpu-command.json`、`npu-command.json`、`cpu.xml`、`npu.xml` 保存强制构建、88 项 CPU、233 项契约及 11 项普通 FA3 的精确命令与结果；`npu-device-monitor.json` 保存设备条件。M03 的 `verify_acceptance.py --staged` 依赖当时暂存区，不直接用作本步检查。
 
-最小命令如下；实机运行前重新检查设备和扩展，保持 CANN PYTHONPATH，使用新日志标签与 JUnit 路径保存本轮结果：
+本步文档闭环命令（提交前暂存状态）：
 
 ```bash
-FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910 FLASH_ATTN_SKIP_SUBMODULE_INIT=1 FLASH_ATTN_FORCE_REBUILD=TRUE python3 setup.py build_ext --inplace
-TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_reference.py tests/test_flash_attn_npu_v3_mla_profile.py tests/test_flash_attn_npu_v3_mla_provenance.py
-ASCEND_RT_VISIBLE_DEVICES=2 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_contract.py
+python3 build/mla-m04a-source-map/check_docs.py --staged
+git diff --check
+git diff --cached --check
 PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache bash ci/code_quality.sh --staged
 ```
 
-普通 FA3 的精确节点保存在 `npu-command.json`。提交前完整性检查使用 `python3 build/mla-interface-guard-validation/verify_acceptance.py --staged`，该命令对应本步暂存状态。
+当前文档闭环提交用 `git log -1 -- docs/mla/status.md` 定位。进入 M04b1 后，先按开发约定复核环境与上步证据，再实现调度，不同时开始 kernel 或 metadata 接入。

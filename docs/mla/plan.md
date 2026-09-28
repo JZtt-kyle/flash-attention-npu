@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前具备 MLA 接口校验、独立 reference 和固定源码 CANN 基线。生产 MLA 前向与 MLA metadata 明确报未实现；普通 FA3 继续使用既有计算路径。M03 接口边界的构建与回归验收已完成，唯一下一步为 M04a。
+当前具备 MLA 接口校验、独立 reference 和固定源码 CANN 基线。生产 MLA 前向与 MLA metadata 明确报未实现；普通 FA3 继续使用既有计算路径。M04a 源码映射和实现拆分已完成，唯一下一步为 M04b1。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。
 
@@ -16,10 +16,15 @@
 | M02b1 | 已完成 | 固定 CANN 源码隔离构建与分派溯源 | vendor、host tiling、device binary 与固定源码对应，运行分派可核实 |
 | M02b2 | 已完成 | 固定源码 profiler 基线工具与代表用例 | kernel、转换和调用 E2E 分开记录，后续验收按同轮交替测量 |
 | M03 | 已完成 | MLA 入口识别、参数校验和未实现拦截 | 构建只含普通 FA3 kernel；MLA 真实/fake/C++/公开入口明确拒绝；契约、普通 FA3 精度/metadata/编译图及 CPU reference 回归通过 |
-| M04a | 唯一下一步 | CANN 源实现映射及 dense 实现拆分 | 固定源文件/函数对应 Kernel / Block / Tile；列明调度字段、资源布局、同步关系和必要 FA3 差异；确定首个有界范围及独立验收子步骤 |
-| M04b | 待开始 | 512+64、连续 BSND、无 mask、显式 num_splits=1 的前向 | 按源执行流程实现已核实的有界范围；FP16/BF16 O/LSE、尾块、单/多 query、重复执行及相关 910B 性能对照通过 |
+| M04a | 已完成（纯文档） | CANN 源实现映射及 dense 实现拆分 | design 6.1..6.5 固定源函数、字段、数值顺序、资源/事件和组件复用条件；首步范围与验收子步骤明确，源码锚点及文档检查通过 |
+| M04b1 | 唯一下一步 | 首步 dense 的无 gert 调度模块及源输出对照 | 抽取 `CalcInnerSize/CalcMBaseSize/SplitCore` 等计算；CPU 对照固定源的基本块、分核端点、核数、无 FD 和 workspace；检查字段宽度、溢出、C1V1/C1V2 资源；尚不接生产前向或 metadata |
+| M04b2 | 待 M04b1 完成 | 首步范围的 FP16 CATLASS 前向与 FA3 接入 | 按 design 6 的源 Kernel/Block/Tile 完成可运行闭环；910B D01/D02、边界、O/LSE、重复执行、同轮 CANN 性能诊断及公共入口普通 FA3 回归通过；BF16 及范围外组合继续明确拒绝 |
+| M04b3 | 待 M04b2 完成 | 同范围 BF16 实例化及验收 | 保留源的 BF16 中间/输出舍入；BF16 精度与性能对照、FP16 针对性回归及公共入口普通 FA3 回归通过；两种 dtype 边界一致 |
 | M05 | 待开始 | 已验收 dense 范围的 MLA metadata | 将源调度计算接入 AICPU，保持调度结果；官方参数、运行时 scale、有/无 metadata、连续复用和普通 FA 兼容正确；metadata E2E 逐例不劣于同轮 CANN |
-| M04c | 待 M05 完成 | dense 长 KV，含 8193 | 按源流程接通；FP16/BF16 O/LSE、单/多 query、重复执行及 metadata E2E 通过；显式 num_splits=1 |
+| M04c1 | 待 M05 完成 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | KV 仍为 1..512；按源 M 切块/分核接通，覆盖 257/511/512/513 行及跨核尾块；两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过 |
+| M04c2 | 待 M04c1 完成 | dense 的 KV 513..1024、显式 num_splits=1 | 保留源 aMLA nUpdate、PV 原子加和事件依赖；单列禁止 FD 的必要调度映射；跨块最大值变化、O/LSE、重复执行、metadata、普通 FA3 回归和 E2E 通过 |
+| M04c3 | 待 M04c2 完成 | dense 长 KV，含 8193 | 按源流程扩大范围，不改变切块/数值路径；单/多 query、多块尾部、两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过；显式 num_splits=1 |
+| M04c4 | 待 M04c3 完成 | dense 全局空 Q/K/V 容量边界 | `Sq=0`、`Sk=0`、二者均零及空 batch 的 shape、O 和 FA3 的 LSE 符号正确；有/无 metadata、fake、真实及普通 FA3 回归通过；样本内零长度在 M06 验收 |
 | M06 | 待开始 | 512+64 非分页 TND、实际长度和外层 stride | 不均匀 Q/KV、seqused、前缀和、零长度、尾块与 poison padding 通过；steady-state 无长度 D2H；相关 E2E 通过 |
 | M07 | 待开始 | 512+64 的 ND paged cache | BSND/TND query、乱序页表、尾页、源有效页大小、K/V 独立首维 stride；精度及 PA E2E 通过 |
 | M08 | 待开始 | 512+64 的右下 causal | Sq<Sk、Sq>Sk、多 query、空行、PA/TND 与 metadata 一致；精度及 E2E 通过 |
@@ -33,7 +38,9 @@
 | M16 | 待开始 | 图执行与 metadata 生命周期 | eager/图执行一致，图内长度更新后 metadata 正确；跨层复用、多 stream、fake 与真实输出一致 |
 | M17 | 待开始 | 全范围验收和用户示例 | 必迁能力均有用例，精度、逐例 metadata E2E 及普通 FA3 回归通过；README 给出调用方式和支持边界 |
 
-M04a 的源码映射写入 design 对应架构部分，实现拆分写入本表，当前结果和证据写入 status。每个实现步骤保持源设备行为，组件替换按运算、数据布局、精度和资源/同步契约核对等价性。
+M04b 的临时范围与验收切面见 [design 6.2](design.md#62-调度字段和首步边界) 和 [6.5](design.md#65-必要的-fa3-差异与验收切面)：连续 BSND、B>0、`1<=Sq*Hq<=256`、`1<=Sk<=512`、Hkv=1、无 mask、显式 `num_splits=1`；先接 `flash_attn_func`。FP16/BF16 分两次接通，各自验收前保持明确拒绝。M04c 的范围扩展不改变最终需求；TND、PA、mask、split 等仍按后续行推进。
+
+M04b1 是有独立验收的调度实现，不创建未实现 kernel 或返回占位 metadata。源对照从固定 commit 读取原算法，覆盖 design 6.5 的边界；新模块尚未被生产构建引用时不要求重跑 NPU。接入生产的 M04b2 必须强制核查构建依赖、实际加载扩展和源组件对应关系。每个实现步骤保持源设备行为，组件替换按运算、数据布局、精度和资源/同步契约核对等价性。
 
 E2E 优化集中于接口、调度计算位置、metadata 复用、重复准备与发射成本。设备计算耗时用于检查源行为一致性。新增能力及时验收相应精度和 E2E，普通 FA3 回归覆盖公共入口及 metadata 变化。
 

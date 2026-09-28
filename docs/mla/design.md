@@ -209,6 +209,95 @@ CATLASS Tile copy、Mmad、布局与硬件资源
 - metadata 的新 AICPU 源如独立成文件，必须同时修改 `setup.py`：当前构建只寻找固定的 `fa_metadata.aicpu`。header 改动的增量依赖也必须核查，防止链接旧对象。
 - 测试使用独立数学 reference 和 CANN 基线适配器。生产入口不能直接调用 `torch_npu.npu_fused_infer_attention_score*` 充当移植实现。
 
+### 6.1 首个 dense 实现的源对应关系
+
+以下映射固定到第 1 节 CANN commit；路径仍相对于 FIA 根目录，`../common/` 指 `attention/common/`。目标路径相对于本仓 `csrc/ascend910/flash_attn_npu_3/mla/`，是后续实现位置，不表示文件已存在。
+
+| 固定源文件 / 函数 | CATLASS 层次与迁移位置 | 必须保留的行为 |
+| --- | --- | --- |
+| `op_host/arch22/fia_tiling_nonquant_mla.cpp`：`CalcInnerSize`、`CalcMBaseSize`、`Split`、`CalcMmResSize`、`CalcNormalWorkspaceSize` | `mla_schedule.h/.cpp`，host/AICPU 共用的无 gert 调度计算 | 切块、分核输入、workspace 尺寸及核数；不另写一套形状启发式 |
+| `../common/op_host/split_core.cpp`：`SplitCore`、`CalcSplitInfo`、`CalcCostInfo`、`CalcSplitPlan`、`AssignByBatch/Row/Block`、`ForceAssign` | 同一调度模块的源算法实现 | 枚举核数、cost、容差、遍历次序和相同 cost 时保留已有方案的规则；专用 MLA 使用此文件，不是 `split_core_v2.cpp` |
+| `op_host/fused_infer_attention_score_tiling.h`；`op_kernel/arch22/fia_public_define.h`：`ConstInfo`、`RunInfo` | 调度字段与 Kernel 运行时参数 | 明确字段宽度、单位、端点语义和运行时状态，见 6.2 |
+| `op_kernel/arch22/fused_infer_attention_score_v3.cpp`：`INVOKE_FIA_OP_GENERAL_IMPL` 的 `BSH_KVBSH_MLA_TILING` 分支 | 独立实例化单元、launcher 和生成器 | FP16/BF16、无 PA、无 FD、BSND 输入输出、C1V1/C1V2；不带入 FIA 注册与大签名 |
+| `op_kernel/arch22/fia_kernel_nonquant_mla.h`：`Init`、`InitCalcParamsEach`、`CalcParams`、`FlashAttention`、`ExecuteTask` | `kernel/mla_dense.hpp` | 核区间解析、三项任务环、两级延迟流水、初始化及排空 |
+| `op_kernel/arch22/fia_block_cube_nonquant_mla.h`：`ComputeMm1/2`、`ProcessMm1/2` | `block/mla_cube.hpp` | QK 内容/RoPE 排列、L1/L0 切分、FP32 累加、Fixpipe 写回和原子加 |
+| `op_kernel/arch22/fia_block_vec_nonquant_mla.h`：`SoftmaxFlashV2Compute`、`AmlaVecCompute`、`ProcessAmlaNupdate`、`ProcessVec1L/2L`、`DealBmm2ResBaseBlock` | `block/mla_vector.hpp` | 源 softmax 与 aMLA 更新、舍入、尾列、行分工、O/LSE 写回；不是普通 online softmax 的替代实现 |
+| `../common/op_kernel/matmul.h`：`MatmulKPP`、`LoadDataToL0A/B`；`buffers_policy.h` | `tile/` 与 Cube Block 的局部资源管理 | L0 双缓冲、加载布局、首 K 清零、unitFlag 和小矩阵 PIPE_M barrier |
+| `../common/op_kernel/memcopy/attn_copy_gm_to_l1.h`：`CopyQueryGmToL1`、`CopyKvGmToL1`；`op_kernel/arch22/memory_copy.h`：`DataCopySoftmaxLseBSND` | `tile/mla_copy.hpp` | BSND 的 S1G 展平次序、ND→NZ、跨 query/head 的复制分段和 LSE 的 `[B,Hq,Sq]` 寻址 |
+
+首步对应 C1V2 dense 非 FD key 为 FP16 `105000000010000001`、BF16 `105000000010022221`；C1V1 分别为 `105000000110000001`、`105000000110022221`。key 只用于核对来源，FA3 不暴露 CANN key。源 `FiaKernelNonQuantMla::FlashDecode` 与 `fia_block_vec_flashdecode_arch22.h` 的合并保留到 M10；192/128 的通用 `fia_kernel_nonquant.h` 保留到 M11，均不混入首步分派。
+
+### 6.2 调度字段和首步边界
+
+首个前向范围为 **512+64 共享 KV，FP16/BF16，连续 BSND，B>0，`1 <= Sq*Hq <= 256`，`1 <= Sk <= 512`，Hkv=1，无 mask，显式 `num_splits=1`**。输入允许连续视图的非零 storage offset；接通时检查尺寸乘积、地址及 workspace 溢出。先开放 `flash_attn_func`，varlen/kvcache 接入随对应步骤验收。首步暂不接受 metadata、实际长度、非连续外层 stride、softcap、非默认调度选项或梯度请求；真实、fake、自定义算子和 C++ 的边界一致。
+
+这是实现里程碑的临时边界，不是缩小第 4 节的最终契约。`Sq*Hq>256`、多块/长 KV、零容量分别在 M04c 子步骤接通；TND/stride、PA、mask、split 和调度选项沿用 M06..M16。
+
+源 `mBaseSize` 初值为 256。`CalcMBaseSize` 仅在等长、`(B*Hkv)%aicNum != 0` 时，以两者最小公倍数计算可均分的 S1G 块；候选须整除 `Sq*Hq` 且在 128..256，否则保持 256。不能改成按头数选择 8/16 行。`DoOpTiling` 的正常分支只调用一次 `Split`；首轮 `splitKVFlag_` 为 false，非 PA 的 `s2BaseSize=min(Sk,512)`，不在分核后擅自重跑 `CalcInnerSize`。首步每个 S1G 块只有一个 S2 基本块，源分核不拆开基本块，因而无需 FD；调度验收仍逐例检查 `numOfFdHead==0`。
+
+| 源字段 / 计算 | 本仓归属与单位 | 首步处理及后续约束 |
+| --- | --- | --- |
+| `baseParams.bSize/n2Size/gSize/s1Size/s2Size/headDim/headDimRope` | `MlaSchedule` 的静态几何；元素/头/序列计数 | 分别映射 B、1、Hq、Sq、Sk、512、64；整型窄化前检查范围 |
+| `innerSplitParams.mBaseSize/s2BaseSize` | 可复用调度，元素数 | 保留上述源计算；`gS1` 对 BSND 是 `s1*Hq+head`，不是 head-major |
+| `outerSplitParams.bN2End/gS1End/s2End`、`usedCoreNum` | 每核任务区间的排他结束三元组；gS1/S2 为块索引 | 第 0 核从 `(0,0,0)` 起，其余从前核结束点起；`CalcParams` 才乘基本块变成元素索引 |
+| 平台 `aicNum/aivNum/cvRatio`、`CalcNumBlocks`、`CalcScheduleMode` | 资源信息、启动维度、BATCH_MODE | 平台核数、实际使用核数与启动 blockDim 分开；保留 `CalcTschBlockDim` 对应关系及 C1V1/C1V2。源端点数组容量是 26，移植时显式校验容量，不把它写成芯片核数 |
+| `workspaceParams.mm1ResSize/mm2ResSize` | 每核每槽的元素数，字节计算用宽整数 | `M=align16(min(Sq*Hq,mBaseSize))`，`N=align32(s2BaseSize)`，`R1=M*N`、`R2=M*512`；这里 N 按 32 个元素对齐，不是 32 字节 |
+| `fdParams` 的任务、split、归约端点及 `fdAccumOutSize/fdLogSumExpSize` | split 调度与额外 workspace | 首步确认没有 FD 后使用非 FD 实例；保留调度计算结果供来源对照，不能把非零 FD 字段强行清零后宣称等价 |
+| `scaleValue`、输入输出地址、实际 stride、workspace 地址 | `MlaLaunchParams`，每次前向传入 | scale 从源 tiling 中移出，仍在 QK 完成后的同一 FP32 Muls 位置使用；缺省 `1/sqrt(576)`，不写入可复用 metadata |
+| `softmaxLseFlag/outputLayout/batchContinuous/needInit`、长度、PA、mask 标志 | 可复用的布局/功能条件；地址另传 | 首步固定连续 BSND、非空无 mask、无长度数组；按源保留 LSE 初始化及同步。其余字段在对应功能接通时映射，不当作未定义 padding |
+| `RunInfo.loop/bn2IdxInCurCore/isFirstSInnerLoop/isLastS2Loop/isValid` | 每次 launch、每核私有的运行状态 | 不放进跨调用复用的 metadata；任务环、缓冲轮换和状态初始化属于 Kernel |
+
+M04b 先使用无设备长度读取的静态调度模块；M05 将同一计算接入 AICPU 和版本化 int32 metadata，不维护第二套公式。普通 FA byte metadata 继续使用原协议。
+
+### 6.3 数值路径与资源布局
+
+QK 的 L1 循环顺序为 N→K→M，M/N 子块均为 128。576 维并非先算完整内容再算完整 RoPE：两组 288 依次为 `[content 0:256, rope 0:32]`、`[rope 32:64, content 256:512]`，每组按 K=96 的 L0 片累加到 FP32 L0C。Q 的 64 维 RoPE 一次复制跨越相邻 Q/P 槽，尾 M 用 padding 偏移保持相邻关系；复制前必须同时取得两个槽的释放事件。最终 QK 以 FP32 ND 写入 GM，再乘 scale。
+
+Vector 保留 `SoftmaxFlashV2<float,...WITHOUT_BRC>` 和其动态 tiling；随后执行 `AmlaVecCompute`：计算 `round(-max/ln2)`、指数缩放因子、FP16/BF16 因子往返转换及 `cof/eps` 修正。P 在缩放后以 `CAST_ROUND` 转成输入 dtype。跨 S2 块的 `nUpdate` 含 `-30` 截断、`1.5` 修正、`1e-6` 和 `2^23`，以 int32 原子加更新 FP32 PV 缓冲的位表示；不能替换为常规 `O *= exp(old_max-new_max)`。
+
+PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128。首 S2 块覆盖写 FP32 GM，后续块在 nUpdate 完成后以 FP32 原子加写回。V2 每块消费完成事件，仅在最后 S2 块写输出：保留源对 `abs(PV)>1e10` 的清零、除以 `aMlaSum`、FP16 `CAST_ROUND` / BF16 `CAST_RINT`；LSE 则从原 softmax 的 max/sum 计算自然对数。单块范围也经过 aMLA 因子转换，不能省略这段数值路径。
+
+| 资源 | 固定源布局与生命周期 |
+| --- | --- |
+| L1 | 每槽 `128*288*2=72 KiB`，Q/P 四槽与 K/V 三槽共 504 KiB；QK 与 PV 共用，迭代器跨任务延续。Q/P 在各自首个 N 子块加载，后续 N 复用，最后 N 才释放 |
+| L0A / L0B / L0C | 分别为 `2*32 / 2*32 / 2*64 KiB`；A/B 共同跟随 K 片，C 轮换与 M/N 循环绑定；首 K 清零，最终 K/写回以 unitFlag=3 配对，其余累加用 2 |
+| Vector UB | input1 `2*32 KiB`、input2 `2*8 KiB`、output1 `32 KiB`、output2 C1V2/C1V1 为 `4/8 KiB`、tmp1 `32 KiB`、mask tmp `8 KiB`；n/cof/aMlaSum/max/exp/sum 各 `2*1 KiB`，默认 max/sum 各 `1 KiB`，合计 `170/174 KiB`。即使无 mask 也保留源分区复用 |
+| GM workspace | Kernel 顺序为双槽 QK FP32、P 输入 dtype、PV FP32、vec2 FP32。QK/P 用 `loop%2`，PV 用 `bn2IdxInCurCore%2`（每个新 S1G 任务递增），不是统一使用 tile 序号；调用间不得共用可变 scratch |
+| workspace 预算 | 源 host 普通部分为 `2*aicNum*(6*R1+8*R2+8*mBaseSize)` 字节，包含 nUpdate/sum 的额外预留；设备按 `GetBlockNum()` 排四个段，nUpdate 实际在 UB 生成并操作 PV 的 int32 别名。首步保留预算与段界，不把预留当成新的 GM 数据流；框架 `libapiSize` 与用户 workspace 单列 |
+| 任务 / 行分工 | 三项 `RunInfo` 环、两槽 GM；外层 M 基块最多 256。C1V2 将 M 按 16 行边界分给两条 Vector，M<=16 时第二条零行仍参与事件；C1V1 全部行由一条 Vector 处理，V1 内层每次至多 128 行 |
+
+### 6.4 同步依赖与组件复用结论
+
+`ExecuteTask(t)` 在 Cube 上依次发出 `QK(t)`、`PV(t-1)`；Vector 上依次执行 `V1(t-1)`、`V2(t-2)`。创建结束后仍须排空任务环。下表均为源 mode 2 跨 Cube/Vector 事件，编号不与本地 HardEvent 混为一个命名空间。
+
+| 源事件 | 生产 → 消费 | 保护的数据 / 时机 |
+| --- | --- | --- |
+| `syncC1V1=7` | Cube `PIPE_FIX` → V1 wait | QK 的 FP32 GM 写回完成 |
+| `syncV1C2=8` | V1 `PIPE_MTE3` → Cube wait | P 写回完成，PV 可以加载 |
+| `syncC2V1=4` | Cube `PIPE_FIX` → 下一次 V1 nUpdate wait | 前次 PV 完成后才能修改其位表示；Cube 初始化先发一个 token，Vector 结束回收最后一个 |
+| `syncV1NupdateC2=5` | V1 `PIPE_MTE3` → PV 首次 Fixpipe 前 wait | nUpdate 原子加完成；首块跳过 nUpdate 计算也必须发/收事件 |
+| `syncC2V2=9` | Cube `PIPE_FIX` → V2 wait | PV 写回完成；V2 在非末块也消费事件 |
+
+`syncV0C1=6` 在源常量中存在，但此非量化 dense 路径不使用。L1 Q/P 的本地事件为 2/3/4/5，K/V 为 6/7/1，保留 `MTE1_MTE2` 释放和 `MTE2_MTE1` 就绪配对；L0 的 `M_MTE1` / `MTE1_M` 与 unitFlag 共同约束覆盖写。Vector 保留 input 的 `V_MTE2` / `MTE2_V` 和 output 的 `MTE3_V` / `V_MTE3`；`AllocEventID/FreeEventID` 和零行同步不能被提前返回绕过。启用 LSE 时，源 `InitOutputSingleCore` 的初始化与 `SyncAll` 也在首步执行链内。
+
+固定 CATLASS 的复用结论如下；源码核对仅确定可用条件，设备等价性仍须在实现步验证。
+
+| 组件 | 核对结论 |
+| --- | --- |
+| `gemm/tile/tile_mmad.hpp::TileMmad` | 优先复用。FP16/BF16、M/N 已向 16 对齐时，可透传源的 K、initC、unitFlag，且包含同样的 `(M/16)*(N/16)<10` PIPE_M barrier；源 `MatmulKPP` 的 K 循环和加载/释放时机仍由本仓 Block 保留 |
+| `gemm/tile/atlasa2/copy_l0c_to_gm.hpp::CopyL0CToGm` | FP32、RowMajor、无量化/无 ReLU 的特化可映射源 Fixpipe 的 M/N、src/dst stride 和 unitFlag；原子模式由源 Block 在同一位置开关，不能交给默认 epilogue |
+| GM→L1、L1→L0 Tile | 在本仓封装源分段复制与加载，逐项匹配 NZ/ZN、转置、尾块和 stride 后再复用。`CopyGmToL1DynamicOptimized` 对小 M 改走 DataCopy，不能直接代替源 ND→NZ；Q 的跨槽 RoPE 复制也需专门保留 |
+| `epilogue/block/block_epilogue_amla_tp1_softmax.hpp` / `block_epilogue_amla_tp1_rescale_o.hpp` | 同有 aMLA 思路，但使用自有归约、UB/事件和部分不同 Cast 模式；不能整体替换源 Vector。首步在本仓按源封装 `SoftmaxFlashV2Compute/AmlaVecCompute` 等函数 |
+| `arch/resource.hpp`、`arch/cross_core_sync.hpp` | 可复用资源/简单 flag 表达；Resource 构造会 `pipe.Destroy()`，必须统一资源所有权，不能与另一套 TPipe 分配混用。带 reverse-depth 的同步封装会增加等待，首步保留源事件协议 |
+
+### 6.5 必要的 FA3 差异与验收切面
+
+首步只调整第 3 节的 q/qv/K/V 指针映射、公开返回结构、scale 默认值与参数存放位置，以及去除 gert/算子注册依赖；保持 O 的 BSND 写回和 LSE 的 `[B,Hq,Sq]` 寻址。`num_splits=1` 在此单 S2 块范围与源非 FD 结果一致；以后长 KV 可能被 CANN 自动分核到 FD，必须单列 FA3 禁止 split 的调度约束，不能将源 FD 结果直接套入非 FD kernel。mask/空行符号和设备长度解析在对应步骤按第 3 节适配。
+
+调度的独立验收比较源 `SplitCore` 输出的基本块、端点数组、使用核数、FD 标志和 workspace，oracle 从固定 commit 读取，不能调用待测调度实现。覆盖单/多 batch、平台核数及其两侧、M 的 16/128/256 边界、KV 的 16/32/128/256/512 边界和两种 CV 比例。无实际长度数组的步骤无需读取 NPU tensor；后续 AICPU 必须复用同一计算。
+
+首个 kernel 的精度用 D01/D02 加上述边界、内容两半与 RoPE 两半的独立扰动、非零 storage offset、默认/零/负/显式 scale、交错形状重复入队核对 O/LSE。性能代表固定为 D01（默认及 0.23）、D02、`(B,Sq,Hq,Sk)=(1,1,128,512)` 与 `(2,2,128,511)`，两种 dtype 按接通进度验收，保存同轮 CANN 分派、kernel 与公开调用 E2E。M04b 无 metadata 的数据仅作诊断；M05 在同组代表用例验收第 7 节的 metadata E2E 门槛。
+
 ## 7. 验收口径
 
 **源实现对照：** 每个迁移模块须能追溯到固定 CANN 的文件/函数，注明结构重构和必要接口适配的对应关系。风格重构须经过构建、精度、边界、重复执行和相关性能检查；迁移结果以本仓实际构建和测试为依据。保留源级执行行为不承诺编译后二进制或耗时完全相同。
