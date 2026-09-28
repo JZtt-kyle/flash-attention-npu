@@ -2,78 +2,69 @@
 
 ## 状态与唯一下一步
 
-- 当前步骤：M04b2b2b2b2b1 **已完成并闭环**，连续 BSND、512+64、FP16/BF16 MLA 支持范围扩至 KV `1..1280`，保持显式 `num_splits=1`。本次闭环提交由 `git log -1 -- docs/mla/status.md` 定位。
-- 当前分支：`feat/mla-cann-migration`。本步沿用 `1378760` 的 128 列在线 softmax 和三槽 KV 预取，仅放宽 Python/fake/C++ 上限并补齐边界测试；kernel 实现、workspace、metadata、CATLASS 和 CANN 源仓未修改。
-- 尚未支持的组合继续明确拒绝，包括 `1281`、`8193` 等 `KV >1280`；本步不代表整个 FIA/FA3 已迁移。
-- 唯一下一步：M04b2b2b2b2b2，优化并验收 `KV >1280` 的长 KV 调度，包含 8193 的单/多 query、FP16/BF16 O/LSE 与同轮 CANN 性能；保持显式 `num_splits=1`。本次提交后停止，下一步尚未开始。
+- 当前步骤：M04b2b2b2b2b2a **已完成探测与回归验收，未合入 kernel 优化**。最终产物是 36 项跨 64 列半区的极值回归及两种 softmax 候选的实测结论；本次闭环提交可由 `git log -1 -- docs/mla/status.md` 定位。
+- 当前分支：`feat/mla-cann-migration`。生产代码与 `23d7304` 一致，支持连续 BSND、512+64、FP16/BF16、KV `1..1280`、显式 `num_splits=1`。`1281`、`8193` 等更长 KV 继续明确拒绝。
+- 完整 tile 的整段 softmax 特化，以及仅直接合并两半最大值的两个候选均未证实收益，已撤回。不能把本步记为优化上线或长 KV 已支持。
+- 唯一下一步：M04b2b2b2b2b2b，优先定位 Cube 与长 KV 流水，再优化并验收 `KV >1280`，含 8193 的单/多 query、FP16/BF16 O/LSE、重复执行及同轮 CANN 性能；保持显式 `num_splits=1`。本次提交后停止。
 
-## 最近闭环证据
+## 最终合入内容的闭环证据
 
 | 检查 | 结果 |
 | --- | --- |
-| 接手与构建一致性 | PASS：本次复核此前 340 项证据 checksum、34 项源码/构建/测试哈希及两个源仓状态；实际加载扩展与功能验证相同。最终构建中 13 个 kernel/AICPU 对象与 `1378760` 逐字节一致，仅 `flash_api.o` 因上限变更而变化 |
-| MLA 精度与契约 | PASS：700 个不同节点，online 326 + short 141 + contract 233，无 skip；原双 reference 阈值未改 |
-| 固定源码 CANN 精度/分派 | PASS：150 组新实现/CANN 的 O/LSE 双 reference 检查，150 次 FIA launch 匹配固定源码配套二进制 |
-| 普通 FA3 | PASS：11 项精度、metadata 和编译图回归，无 skip；pytest 31.01 秒 |
-| 同轮性能 | PASS：56 例 kernel 和普通调用逐例不劣于 CANN，逐例配对 bootstrap 95% 区间上界均小于 1；本轮同时重查 56 例 O/LSE |
-| 性能输入的分派来源 | PASS：另用同一 56 个输入记录 56 次 FIA launch，全部为固定源码的 MLA template 5；包及候选扩展与计时运行一致 |
-| 设备记录 | PASS：用户授权的 2 号共享 Warning 卡；性能运行 52 个快照，其中覆盖计时窗口及边界的 8 个快照未出现额外进程；前后 ECC 八项计数全为 0 |
-| 提交质量 | PASS：`git diff --check` 与 `ci/code_quality.sh --staged`；只暂存本步 8 个文件，保留仓库提交钩子 |
+| 接手 | PASS：最初工作区干净，复核上一步 457 项证据 checksum、34 项源码/构建/测试哈希及两个源仓状态 |
+| 基线恢复 | PASS：生产源码恢复；重新构建的全部 14 个对象与 `23d7304` 逐字节一致，未保留候选 kernel。扩展重新链接，对象顺序与此前不同，实际 SHA 记录如下 |
+| 新增回归 | PASS：恢复基线上 36 项，覆盖两个 64 列半区首尾极值、正负 query、跨 tile/batch 最大值变化、1153/1279/1280、1/3/8/16/17/33 头及三次重复执行；原双 reference 阈值未改 |
+| 普通 FA3 | PASS：同一恢复扩展的 11 项精度、metadata、编译图回归；普通回归来自恢复后的 `baseline-regression.xml`；极值构造加强后只重跑受影响的 36 项，最终合计 47 个不同节点，无 skip |
+| 构建及测试完整性 | PASS：实际加载扩展与恢复构建哈希匹配，旧测试 AST 未改；CATLASS 与 CANN 源仓状态保持接手时原样 |
+| 最终设备记录 | PASS：本轮授权的物理 2 号共享 Warning 卡；两次最终基线运行分别保存 57 / 49 个快照，前后告警均为 81078603、ECC 八项计数均为 0。不得视为健康或独占设备 |
+| 提交质量 | PASS：`git diff --check` 与 `ci/code_quality.sh --staged` 的 5 项适用检查；仅暂存本步四个测试/文档文件，保留仓库提交钩子 |
 
-700 节点通过来自两轮：首轮 `641 passed, 1 failed` 后停止，其中 online/short 的 467 项全部通过。失败原因是公共入口拒绝测试仍使用旧超界长度 `17 × 61 = 1037`，该长度已在新范围内；将它改为 `17 × 76 = 1292` 后重跑全部 233 项契约通过。失败 XML、修改前测试和去重覆盖证明均保留，不记为单轮全过。本次性能运行前后产品源码、扩展及测试哈希均未再改变；未重复执行未受影响的 700/150/11 项检查。
+当前提交只改变测试和文档。候选运行的更大测试集记录在下一节，不能混作恢复后又重跑了全量 MLA 或上线了新的性能优化。
 
-以下均为 `新实现 / CANN` 的耗时中位数比值：
+## 两种已撤回候选的结论
 
-| 范围 | 用例数 | kernel 比值 | 普通调用比值 |
-| --- | --- | --- | --- |
-| KV 1..1024 代表用例 | 32 | `0.537..0.814` | `0.833..0.891` |
-| KV 1025..1280 代表用例 | 24 | `0.710..0.949` | `0.795..0.935` |
-| 全部 | 56 | `0.537..0.949` | `0.795..0.935` |
+| 候选 | 数值和性能证据 | 结论 |
+| --- | --- | --- |
+| A：完整 128 列 tile 的整段 softmax 特化，直接合并两半最大值 | 736 个不同 MLA 节点、186 组固定 CANN O/LSE 与分派、11 项普通 FA3 通过；100 组旧新 O/LSE 逐位一致；56 例同轮 CANN 比较逐例中位数与 95% 区间上界小于 1，56 次分派均为固定源码 MLA template 5 | 有效的 64 例旧新 kernel 比较为 0 改善、2 微退化、62 区间跨 1。`rows1-float16` 和 `rows7-float16` 比值分别为 1.01423、1.00840；不采用 |
+| B：仅在完整 tile 直接合并两半最大值，保留通用 softmax 主体 | 12 组 O/LSE 逐位一致；重点覆盖前述退化项、D01、1280 单/多 query，两种 dtype。每例每实现 150 个 kernel 样本，12 例 95% 区间均包含 1 | 未证实收益，不继续扩大验收，已撤回 |
 
-最接近门槛的 kernel 用例为 `kv1279-q1-bfloat16`：20.800 / 21.910 us，比值 0.94934。全部 kernel / 调用的 95% 区间上界最大值分别为 0.95930 / 0.95710，均可分辨不劣化，无需补测。每实现预热 10 次，调用计时 7 轮 × 50 对，profiler 3 轮 × 10 对，共 3360 个 kernel；同一输入交替 AB/BA，每次调用后同步。MLA 不使用 metadata，CANN 保持原生自动 split；没有调整精度或性能阈值。
+A 的首轮 100 例旧新采集在计时窗口出现四个外部进程，性能无效，数值证据仍有效；上述 64 例为另行有效重测。A 的 56 例 CANN 比较及 B 的 12 例探测均通过各自设备窗口检查。没有放宽精度或性能阈值，也没有将区间跨 1 记为提速。
 
-此前 1025..8193 探测精度通过，但 1536 单 query 与 8193 存在性能退化，故本步收敛于 1280。曾尝试的完整 L0B 候选已撤回，其计时因新增后台进程无效；这些旧探测不能视为更长 KV 已支持。
+最初一次针对性精度启动被旧占用检查拦截，没有执行 pytest；重新记录本轮实际共享占用后完成测试。上述中断、无效采集和未采用候选均保留原始记录。
 
 ## 运行环境与设备授权
 
-用户先要求选卡测试，随后明确要求“就用当前的卡测一下性能，验收一下”。本步按 design 第 7 节记录的单步例外，在物理 2 号（进程内 `npu:0`）完成性能验收：健康状态仍为 **Warning**，错误码 **81078603**，内容为端口链路 `up to down`；此结果不表示设备已经恢复健康。
+用户本轮明确授权“允许本轮使用 2 号卡，记录告警和占用”，例外见 design 第 7 节。使用物理 2 号、进程内 `npu:0`；设备仍为 Warning，错误码 `81078603`，内容为端口链路 `up to down`，没有恢复健康的结论。
 
-性能计时窗口为 `2026-09-28 08:03:49.446467..08:04:01.303141 UTC`。开始时 AICore 0%，已有后台 PID `3724055` 占 140 MB，本轮 driver PID 为 `1561693`；窗口及相邻边界快照仅见这两个进程。监控另保留计时前准备和计时后导出的快照，前后告警一致且 ECC 为 0。
-
-先前功能运行曾在 `07:34:17` 观察到额外 PID `1149729`（169 MB），已记录于功能证据；该进程未出现在本次性能窗口。当前授权限定于本步，后续步骤仍按默认健康、空闲设备口径及新的明确授权执行。
+最终基线测试开始时 AICore 0%，已有后台 PID `3724055` 占 140 MB；所有快照、运行 PID 及前后健康/ECC 输出保存在 monitor 文件。早期功能与无效性能运行中的额外占用另有完整记录。本轮授权不扩展至下一步。
 
 | 项目 | 实际核实 |
 | --- | --- |
 | Python / 包 | `/usr/local/python3.11.15/bin/python` 3.11.15；torch `2.7.1+cpu`，torch_npu `2.7.1` |
 | 芯片 / CANN | Ascend910B3；`/usr/local/Ascend/cann-9.0.0-beta.2` |
-| 固定 FIA 源 | `ca18aee610729ca5270a44e2d84c751bc687fbf0`，已有源仓状态保留 |
-| CATLASS | `769cd40a8716b28650b6bebb08db4834eea4462f`，干净且未修改 |
-| 实际扩展路径 | 本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so` |
-| 扩展 SHA256 | `81f61d518d8e2ced93d6f4a22ee31a5f3166598e7b24b3b4e0b7e3c61c6b94b4` |
+| 固定 FIA / CATLASS | FIA `ca18aee610729ca5270a44e2d84c751bc687fbf0`；CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`，子模块干净 |
+| 实际加载扩展 | 本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so` |
+| 最终恢复扩展 SHA256 | `e267a7fb331430dd1e1aeca5becd6ee3c6b5cd07f7c4c0756d76c4579306006b` |
+| 原扩展备份 SHA256 | `81f61d518d8e2ced93d6f4a22ee31a5f3166598e7b24b3b4e0b7e3c61c6b94b4`；两个扩展的 14 个构建对象相同，重链顺序证据已保存 |
 
 ## 持久证据与复现
 
-证据根目录：`/home/zhangqijia/repo/flash-attention-npu/build/mla-m04b2b2b5-validation/`。
+证据根目录：`/home/zhangqijia/repo/flash-attention-npu/build/mla-m04b2b2b6-validation/`。
 
-- `card2-warning-perf-20260928T080123Z/` 为最新性能与闭环证据：`takeover-audit.json`、`environment-current.*`、`compare-card2-a.json` / `.log` / `-command.json` / `-exit.json`、`profile-card2-a/`、设备 monitor/proof、`performance-acceptance-a.json`、`dispatch-performance.*`、`dispatch-proof.json`、`acceptance-integrity.json`、质量日志及 `checksums.sha256`。
-- `card2-warning-test-20260928T072906Z/` 为功能证据：`mla-final.xml`（首轮失败）、`contract-before-fix.py`、`mla-contract-fixed.xml`、`mla-coverage.json`、`cann-accuracy.json`、`dispatch-proof.json`、`regression-final.xml`、各阶段命令/退出码/设备记录和修正后的 `test-source-hashes.json`。其 handoff 文件保留当时“功能通过、性能待验收”的历史状态。
-- 父目录的 `build-final-*`、`build-provenance-final.json` 保存当前构建和对象哈希；`long-probe*`、`wide-probe*` 保留范围收敛的原始探测。父目录及功能子目录旧 checksum 均保留，本次未覆盖。
-- 固定源码包为 `build/mla-m02b-validation/opp-dense/`；原版 620 项接手复核及 `1378760` 的此前闭环证据仍在原位置。本步未改 CPU reference/profile/provenance 单测实现，未将未重跑的旧 CPU 检查计作本轮通过。
+- **最终合入验收**：`restored-baseline/` 的 `build-restored-*`、`build-provenance-restored.json`、`link-order-proof.json`、`environment-restored.json`、`baseline-regression*`（含 11 项普通 FA3）、`baseline-maxima-final*`（最终 36 项）、`test-source-initial.json` / `test-source-final.json`、`acceptance-integrity.json`、质量日志。
+- **候选 A（未采用）**：根目录的 `mla-coverage.json`、`cann-accuracy.json`、`dispatch-accuracy-proof.json`、`compare-versions-final*`（首轮性能无效）、`compare-versions-retry*`、`versions-summary.json`、`compare-cann-final*`、`performance-acceptance.json`、`dispatch-performance-proof.json`、`acceptance-integrity.json`（仅 A 的验证）；`full-tile-candidate/` 保留源码、patch、扩展与撤回决定。
+- **候选 B（未采用）**：`direct-max/` 的源码、patch、扩展、构建溯源、`compare-probe*`、`versions-summary.json` 和撤回决定；没有记作完成全量候选验收。
+- `takeover-audit.json`、`test-source-hashes.json`、`probe-test-source.py`（候选与首轮基线使用的原始极值构造）、`functional-device-summary.json` 及最终 `checksums.sha256` 保存来源和完整性。固定源码 CANN 包仍为 `build/mla-m02b-validation/opp-dense/`；此前已闭环的 700 项及 56 例性能证据见 `23d7304` 的 status。
 
-本轮实际性能命令如下；复跑使用新标签/目录，重新核对设备、后台占用、环境及扩展哈希，按实际条件调整运行器和报告字段。实机使用 `login=false`、沙箱外，并保留 CANN PYTHONPATH。
+最终最小实机命令如下；普通 FA3 的九个节点展开为 11 项，精确节点保存在 `run_baseline_regression.py`。复跑使用新标签和输出目录，不覆盖原证据；重新检查设备、后台占用及扩展哈希，使用 `login=false`、沙箱外并保留 CANN PYTHONPATH。
 
 ```bash
-python build/mla-m04b2b2b5-validation/card2-warning-perf-20260928T080123Z/monitored_run.py compare-card2-a \
-  timeout -k 15 600 python build/mla-m04b2b2b5-validation/card2-warning-perf-20260928T080123Z/compare.py \
-  --output build/mla-m04b2b2b5-validation/card2-warning-perf-20260928T080123Z/compare-card2-a.json \
-  --profile-dir build/mla-m04b2b2b5-validation/card2-warning-perf-20260928T080123Z/profile-card2-a \
-  --iterations 50 --rounds 7
+python build/mla-m04b2b2b6-validation/restored-baseline/monitored_run.py baseline-maxima-final \
+  timeout -k 15 600 python -m pytest -q -x \
+  tests/test_flash_attn_npu_v3_mla_online.py::test_online_maximum_across_halves \
+  --junitxml=build/mla-m04b2b2b6-validation/restored-baseline/baseline-maxima-final.xml
 
-python build/mla-m04b2b2b5-validation/card2-warning-perf-20260928T080123Z/verify_monitor.py compare-card2-a
-
-python build/mla-m04b2b2b5-validation/card2-warning-perf-20260928T080123Z/accept-performance.py \
-  --input build/mla-m04b2b2b5-validation/card2-warning-perf-20260928T080123Z/compare-card2-a.json \
-  --output build/mla-m04b2b2b5-validation/card2-warning-perf-20260928T080123Z/performance-acceptance-a.json
+python build/mla-m04b2b2b6-validation/restored-baseline/verify_restored.py --staged
 ```
 
-分派核对的完整命令见 `dispatch-performance-command.json`，最终综合检查为 `acceptance_integrity.py`。质量工具使用 `/tmp/mla-m01-precommit`（PYTHONPATH）和 `/tmp/mla-m01-precommit-cache`（PRE_COMMIT_HOME）。
+候选的实际构建、精度及性能参数均保存在对应 `*-command.json`，不作为新功能接通命令。质量工具仍使用 `/tmp/mla-m01-precommit`（PYTHONPATH）和 `/tmp/mla-m01-precommit-cache`（PRE_COMMIT_HOME）。

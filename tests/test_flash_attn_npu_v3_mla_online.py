@@ -189,6 +189,42 @@ def test_online_changing_maximum(dtype, biases):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("heads", [1, 3, 8, 16, 17, 33])
+@pytest.mark.parametrize("length", [1153, 1279, 1280])
+def test_online_maximum_across_halves(dtype, heads, length):
+    # Put competing extrema at both ends of each 64-column half. Opposite
+    # query signs select different halves; tile and batch changes force the
+    # running maximum to move while cores cycle through different row counts.
+    case = Case("maximum-halves", "compressed", 2, 11, length, heads, 1, scale=1.0)
+    cpu = make_inputs(case, dtype, length + heads)
+    cpu["q"].zero_()
+    cpu["qv"].zero_()
+    signs = (torch.arange(case.batch * case.seqlen_q * heads) % 2) * 2 - 1
+    cpu["qv"][..., 0] = signs.reshape(case.batch, case.seqlen_q, heads)
+    cpu["v"][..., 0] = 0
+    for batch in range(case.batch):
+        for tile, start in enumerate(range(0, length, 128)):
+            values = (12 + tile * 4, -13 - tile * 4, 10 + tile * 4, -15 - tile * 4)
+            if tile % 2:
+                values = values[1], values[0], values[3], values[2]
+            for column, value in zip((0, 63, 64, 127), values):
+                if start + column < length:
+                    cpu["v"][batch, start + column, 0, 0] = value * (-1) ** (batch + tile)
+    full_tiles = cpu["v"][:, : length // 128 * 128, 0, 0].reshape(case.batch, -1, 128)
+    extrema = torch.cat((full_tiles.argmax(-1).flatten(), full_tiles.argmin(-1).flatten()))
+    assert set(extrema.tolist()) == {0, 63, 64, 127}
+    refs = mla_reference_pair(**cpu, softmax_scale=case.scale)
+    inputs = {name: tensor.npu() for name, tensor in cpu.items()}
+    for _ in range(3):
+        actual = api.flash_attn_func(
+            **inputs, softmax_scale=case.scale, return_attn_probs=True, num_splits=1
+        )
+        for name, tensor, ref, pt in zip(("out", "lse"), actual, refs[:2], refs[2:]):
+            assert torch.isfinite(tensor).all()
+            assert_fa_close(tensor.cpu(), ref, pt, name=name)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("length", [511, 1023, 1279])
 def test_online_contiguous_storage_offset(dtype, length):
     cpu = make_inputs(Case("offset", "compressed", 2, 3, length, 17, 1), dtype, 20260924)
