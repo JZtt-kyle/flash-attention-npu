@@ -202,6 +202,41 @@ def test_online_queued_calls(dtype):
             assert_fa_close(tensor.cpu(), ref, pt, name=name)
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("heads", [1, 17, 32, 33])
+def test_online_vector_buffer_reuse(dtype, heads):
+    # More query tasks than cores force score/partial reuse across tasks.
+    # One-head tasks leave a vector lane empty; 33 heads rotate three head
+    # tiles across 910B3's 20 cores, alternating full and one-head tasks on each
+    # core. Changing maxima makes premature buffer reuse observable.
+    inputs, expected, originals = [], [], []
+    for length in (129, 257, 1024):
+        case = Case("vector-buffer-reuse", "compressed", 2, 19, length, heads, 1, scale=1.0)
+        cpu = make_inputs(case, dtype, length + heads)
+        cpu["q"].zero_()
+        cpu["qv"].zero_()
+        signs = (torch.arange(case.batch * case.seqlen_q * heads) % 2) * 2 - 1
+        cpu["qv"][..., 0] = signs.reshape(case.batch, case.seqlen_q, heads)
+        for tile, bias in enumerate((-70, 30, -25, 45, 10, -90, 60, -10)):
+            cpu["v"][:, tile * 128 : (tile + 1) * 128, :, 0] = bias
+        originals.append(cpu)
+        expected.append(mla_reference_pair(**cpu, softmax_scale=case.scale))
+        inputs.append({name: tensor.npu() for name, tensor in cpu.items()})
+    results = [
+        [api.flash_attn_func(**args, softmax_scale=1.0, return_attn_probs=True) for args in inputs]
+        for _ in range(2)
+    ]
+    for first, repeated, refs in zip(*results, expected):
+        for name, tensor, again, ref, pt in zip(
+            ("out", "lse"), first, repeated, refs[:2], refs[2:]
+        ):
+            assert_fa_close(tensor.cpu(), ref, pt, name=name)
+            torch.testing.assert_close(tensor, again, rtol=0, atol=0)
+    for args, cpu in zip(inputs, originals):
+        for name, tensor in args.items():
+            torch.testing.assert_close(tensor.cpu(), cpu[name], rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("entry", ["eager", "fake", "cpp"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("length", [512, 513, 1024])

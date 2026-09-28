@@ -40,6 +40,16 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
         alpha[0] = resource.ubBuf.template GetBufferByByte<float>(13568);
         alpha[1] = resource.ubBuf.template GetBufferByByte<float>(13824);
         numerator = resource.ubBuf.template GetBufferByByte<float>(81920);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
+    }
+
+    CATLASS_DEVICE
+    ~OnlineEpilogue()
+    {
+        // Each buffer keeps one release token, including lanes with no rows.
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
     }
 
     CATLASS_DEVICE
@@ -52,9 +62,8 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
         const uint32_t stride = ::RoundUp<16>(columns);
         const uint32_t count = rows * stride;
         auto rescale = alpha[tile % 2];
-        // Scalar issue order does not order MTE2 against the previous tile's
-        // vector work. Wait before reusing its score buffer.
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        // Only the previous softmax reads this buffer. Its release permits
+        // MTE2 to load scores while Vector accumulates an independent partial.
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
         AscendC::DataCopy(scores, source, count);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
@@ -82,6 +91,7 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
         AscendC::PipeBarrier<PIPE_V>();
         reduction.ReduceSumRepeatM(sum, scores, rows, columns, stride);
         AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
         if (tile == 0) {
             AscendC::DataCopy(runningSum, sum, ::RoundUp<8>(rows));
         } else {
@@ -114,8 +124,9 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
         if (rows == 0) {
             return;
         }
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        // The partial buffer has a separate lifetime from scores, so its next
+        // load need not wait for the intervening softmax's vector instructions.
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
         AscendC::DataCopy(output, source, rows * 512);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
@@ -127,6 +138,7 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
             AscendC::Add(numerator, numerator, output, rows * 512);
         }
         AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
         if (!last) {
             return;
         }
