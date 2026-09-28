@@ -164,6 +164,7 @@ class DenseKernel {
                         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(softmaxReady);
                     }
                     if (step > 0) {
+                        epilogue.RescaleNumerator(laneRows, step - 1);
                         Catlass::Arch::CrossCoreWaitFlag(pvReady);
                         epilogue.Accumulate(partial[(((step - 1) % 2) * kHeadsPerTile + firstRow) * 512],
                                             out[(queryRow + firstRow) * 512], lse[lseOffset], laneRows, p.queryLength,

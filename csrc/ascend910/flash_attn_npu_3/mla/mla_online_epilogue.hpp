@@ -118,6 +118,18 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
     }
 
     CATLASS_DEVICE
+    void RescaleNumerator(uint32_t rows, uint32_t tile)
+    {
+        if (rows != 0 && tile != 0) {
+            // This only reads the previous numerator and its alpha slot.
+            // Issue it before the scalar wait for PV, so Vector can execute
+            // while Cube finishes that partial or MTE2 transfers it to UB.
+            ScaleNumerator<false>(alpha[tile % 2], rows);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+    }
+
+    CATLASS_DEVICE
     void Accumulate(AscendC::GlobalTensor<float> source, AscendC::GlobalTensor<Element> dest,
                     AscendC::GlobalTensor<float> lse, uint32_t rows, uint32_t lseStride, uint32_t tile, bool last)
     {
@@ -133,8 +145,6 @@ class OnlineEpilogue : public ShortEpilogue<Element> {
         if (tile == 0) {
             AscendC::DataCopy(numerator, output, rows * 512);
         } else {
-            ScaleNumerator<false>(alpha[tile % 2], rows);
-            AscendC::PipeBarrier<PIPE_V>();
             AscendC::Add(numerator, numerator, output, rows * 512);
         }
         AscendC::PipeBarrier<PIPE_V>();

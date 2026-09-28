@@ -208,9 +208,11 @@ def test_online_vector_buffer_reuse(dtype, heads):
     # More query tasks than cores force score/partial reuse across tasks.
     # One-head tasks leave a vector lane empty; 33 heads rotate three head
     # tiles across 910B3's 20 cores, alternating full and one-head tasks on each
-    # core. Changing maxima makes premature buffer reuse observable.
+    # core. Changing maxima makes premature buffer reuse observable. Full and
+    # partial final tiles exercise scaling before the PV wait/load;
+    # three and five tiles exercise both alpha slots before the final drain.
     inputs, expected, originals = [], [], []
-    for length in (129, 257, 1024):
+    for length in (129, 255, 257, 384, 513, 1024):
         case = Case("vector-buffer-reuse", "compressed", 2, 19, length, heads, 1, scale=1.0)
         cpu = make_inputs(case, dtype, length + heads)
         cpu["q"].zero_()
