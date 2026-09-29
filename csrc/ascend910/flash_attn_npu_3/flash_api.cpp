@@ -707,21 +707,32 @@ std::vector<at::Tensor> mha_fwd(
 
 at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k, int64_t num_heads_q,
                                   int64_t num_heads_kv, int64_t headdim, int64_t headdim_v, pybind11::object qkv_dtype,
-                                  at::Tensor cache_seqlens, std::optional<at::Tensor> seqlens_q,
+                                  at::Tensor cache_seqlens, std::optional<at::Tensor> cu_seqlens_q,
                                   std::optional<at::Tensor> cu_seqlens_k, std::optional<at::Tensor> cu_seqlens_k_new,
-                                  std::optional<at::Tensor> cache_leftpad, std::optional<int64_t> page_size,
-                                  int64_t max_seqlen_k_new, bool causal, int64_t window_size_left,
-                                  int64_t window_size_right, int64_t attention_chunk, bool has_softcap,
-                                  int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin)
+                                  std::optional<at::Tensor> seqused_q, std::optional<at::Tensor> cache_leftpad,
+                                  std::optional<int64_t> page_size, int64_t max_seqlen_k_new, bool causal,
+                                  int64_t window_size_left, int64_t window_size_right, int64_t attention_chunk,
+                                  bool has_softcap, int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin,
+                                  std::optional<double> softcap_, std::optional<double> softmax_scale)
 {
     flash_attn::mla::CheckMetadataBoundary(headdim, headdim_v);
+    // The official prefix carries only the scheduling feature. The legacy
+    // byte protocol additionally needs a numerical value, supplied by the
+    // Python keyword compatibility layer (also checked by its fake entry).
+    TORCH_CHECK(softcap_.has_value() || !has_softcap,
+                "NPU FlashAttention byte metadata with has_softcap=True is not implemented "
+                "yet without the legacy softcap keyword");
+    const double softcap = softcap_.value_or(0.0);
+    TORCH_CHECK(std::isfinite(softcap) && softcap >= 0.0,
+                "softcap must be finite and non-negative (0.0 disables softcap)");
+    TORCH_CHECK(!has_softcap || softcap > 0.0, "has_softcap=True conflicts with legacy softcap=0.0");
     const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
-    const bool is_varlen_q = seqlens_q.has_value();
-    void* seqlensQDev = nullptr;
+    const bool is_varlen_q = cu_seqlens_q.has_value();
+    void* cuSeqlensQDev = nullptr;
     if (is_varlen_q) {
-        auto seqlens_q_t = seqlens_q.value();
-        TORCH_CHECK(seqlens_q_t.dtype() == torch::kInt32, "seqlens_q must have dtype int32");
-        seqlensQDev = seqlens_q_t.data_ptr();
+        auto cu_q = cu_seqlens_q.value();
+        TORCH_CHECK(cu_q.dtype() == torch::kInt32, "cu_seqlens_q must have dtype int32");
+        cuSeqlensQDev = cu_q.data_ptr();
     }
     TORCH_CHECK(cache_seqlens.dtype() == torch::kInt32, "cache_seqlens must have dtype int32");
     const bool is_varlen_kv = cu_seqlens_k.has_value();
@@ -736,9 +747,14 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
     // the declared seqlen bounds / cache capacity (no D2H). AICPU re-derives
     // tiling maskType / windows against the actual max KV length.
     FwdMaskDerivation maskDer = DeriveFwdMask(causal, window_size_left, window_size_right, max_seqlen_q, max_seqlen_k);
+    float scaleValue = softmax_scale.has_value() ? static_cast<float>(softmax_scale.value())
+                                                 : 1.0f / std::sqrt(static_cast<float>(headdim));
+    if (softcap > 0.0) {
+        scaleValue /= static_cast<float>(softcap);
+    }
     FAMetadataArgs args{};
-    args.seqlensQAddr = is_varlen_q ? reinterpret_cast<uint64_t>(seqlensQDev) : 0ULL;
-    args.cacheSeqlensAddr = reinterpret_cast<uint64_t>(cache_seqlens.data_ptr());
+    args.cuSeqlensQAddr = is_varlen_q ? reinterpret_cast<uint64_t>(cuSeqlensQDev) : 0ULL;
+    args.seqlensKAddr = reinterpret_cast<uint64_t>(cache_seqlens.data_ptr());
     args.metaOutAddr = 0; // set by GetSchedulerMetadataImpl
     args.batch = static_cast<uint32_t>(batch_size);
     args.numHeads = static_cast<uint32_t>(num_heads_q);
@@ -757,11 +773,12 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
     args.isVarlenKv = is_varlen_kv ? 1U : 0U;
     args.pagedKV = page_size.has_value() ? 1U : 0U;
     args.numSplits = static_cast<uint32_t>(num_splits);
-    // The 910 schedule is independent of has_softcap; the forward selects its kernel specialization.
+    args.scaleValue = scaleValue;
+    args.softcapValue = static_cast<float>(softcap);
     // Append-KV tiling fields: kvNewSeqlen = new length (uniform), kvCacheSeqlen = cache capacity.
     args.kvNewSeqlen = (max_seqlen_k_new > 0) ? static_cast<uint32_t>(max_seqlen_k_new) : 0U;
     args.kvCacheSeqlen = static_cast<uint32_t>(max_seqlen_k);
-    return GetSchedulerMetadataImpl(args, cache_seqlens, seqlens_q);
+    return GetSchedulerMetadataImpl(args, cache_seqlens, cu_seqlens_q);
 }
 
 std::vector<at::Tensor> mha_bwd(

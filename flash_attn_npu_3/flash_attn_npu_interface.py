@@ -1633,9 +1633,9 @@ def _validate_scheduler_metadata(
         )
 
 
-# Real metadata contract (sizeof(FAInferTilingData)):
+# Real metadata contract:
 #   all mask types:
-#       shape = (2376,)
+#       shape = (2384,)
 #   dtype  = torch.uint8
 #   device = NPU
 #   stride = (1,)
@@ -1643,6 +1643,24 @@ def _validate_scheduler_metadata(
 # get_scheduler_metadata() implementation. Schema matches the V3 910
 # pybind signature in flash_api.cpp (not the V4 parameter list).
 _SCHEDULER_METADATA_TILING_BYTES = 2376
+
+
+def _resolve_legacy_metadata_softcap(has_softcap, softcap):
+    # Ordinary FA3 byte metadata still stores the numerical softcap and scale.
+    # A feature flag cannot supply that value. Preserve old keyword calls, but
+    # reject the flag-only form until this protocol can consume runtime values.
+    if softcap is None:
+        if has_softcap:
+            raise RuntimeError(
+                "NPU FlashAttention byte metadata with has_softcap=True is not implemented "
+                "yet without the legacy softcap keyword"
+            )
+        return 0.0
+    if not math.isfinite(softcap) or softcap < 0.0:
+        raise RuntimeError("softcap must be finite and non-negative (0.0 disables softcap)")
+    if has_softcap and softcap == 0.0:
+        raise RuntimeError("has_softcap=True conflicts with legacy softcap=0.0")
+    return softcap
 
 
 @torch.library.custom_op(
@@ -1659,9 +1677,10 @@ def _get_scheduler_metadata_op(
     headdim_v: int,
     qkv_dtype: torch.dtype,
     cache_seqlens: torch.Tensor,
-    seqlens_q: Optional[torch.Tensor],
+    cu_seqlens_q: Optional[torch.Tensor],
     cu_seqlens_k: Optional[torch.Tensor],
     cu_seqlens_k_new: Optional[torch.Tensor],
+    seqused_q: Optional[torch.Tensor],
     cache_leftpad: Optional[torch.Tensor],
     page_size: Optional[int],
     max_seqlen_k_new: int,
@@ -1673,8 +1692,11 @@ def _get_scheduler_metadata_op(
     num_splits: int,
     pack_gqa: Optional[bool],
     sm_margin: int,
+    softcap: Optional[float],
+    softmax_scale: Optional[float],
 ) -> torch.Tensor:
     _check_mla_metadata(headdim, headdim_v)
+    resolved_softcap = _resolve_legacy_metadata_softcap(has_softcap, softcap)
     scheduler_metadata = flash_attn_npu_3.get_scheduler_metadata(
         batch_size,
         max_seqlen_q,
@@ -1685,9 +1707,10 @@ def _get_scheduler_metadata_op(
         headdim_v,
         qkv_dtype,
         cache_seqlens,
-        seqlens_q,
+        cu_seqlens_q,
         cu_seqlens_k,
         cu_seqlens_k_new,
+        seqused_q,
         cache_leftpad,
         page_size,
         max_seqlen_k_new,
@@ -1699,17 +1722,22 @@ def _get_scheduler_metadata_op(
         num_splits,
         pack_gqa,
         sm_margin,
+        softcap,
+        softmax_scale,
     )
     # Keep this side effect inside the opaque custom op so Dynamo does not
     # trace the setattr while still attaching the runtime fingerprint.
+    if softmax_scale is None:
+        softmax_scale = headdim ** (-0.5)
     scheduler_metadata._fa_scheduler_params = {
         "causal": bool(causal),
         "window_size": (int(window_size_left), int(window_size_right)),
-        "has_softcap": bool(has_softcap),
+        "softcap": float(resolved_softcap),
+        "softmax_scale": float(softmax_scale),
         "page_size": None if page_size is None else int(page_size),
         "max_seqlen_q": int(max_seqlen_q),
         "max_seqlen_k": int(max_seqlen_k),
-        "varlen_q": seqlens_q is not None,
+        "varlen_q": cu_seqlens_q is not None,
         "num_splits": int(num_splits),
     }
     return scheduler_metadata
@@ -1726,9 +1754,10 @@ def _get_scheduler_metadata_fake(
     headdim_v: int,
     qkv_dtype: torch.dtype,
     cache_seqlens: torch.Tensor,
-    seqlens_q: Optional[torch.Tensor],
+    cu_seqlens_q: Optional[torch.Tensor],
     cu_seqlens_k: Optional[torch.Tensor],
     cu_seqlens_k_new: Optional[torch.Tensor],
+    seqused_q: Optional[torch.Tensor],
     cache_leftpad: Optional[torch.Tensor],
     page_size: Optional[int],
     max_seqlen_k_new: int,
@@ -1740,8 +1769,11 @@ def _get_scheduler_metadata_fake(
     num_splits: int,
     pack_gqa: Optional[bool],
     sm_margin: int,
+    softcap: Optional[float],
+    softmax_scale: Optional[float],
 ) -> torch.Tensor:
     _check_mla_metadata(headdim, headdim_v)
+    _resolve_legacy_metadata_softcap(has_softcap, softcap)
     return torch.empty(
         (_SCHEDULER_METADATA_TILING_BYTES,),
         dtype=torch.uint8,
@@ -1771,14 +1803,25 @@ def get_scheduler_metadata(
     num_splits=0,  # Can be tuned for speed
     pack_gqa=None,  # Can be tuned for speed
     sm_margin=0,  # Can be tuned if some SMs are used for communication
+    *,
+    softcap=None,  # legacy ordinary-FA byte metadata only; 0.0 means deactivated
+    softmax_scale=None,  # defaults to 1 / sqrt(headdim); must match the fwd call
 ):
-    cache_seqlens = maybe_contiguous(cache_seqlens)
-    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1] if cu_seqlens_q is not None else None
+    """Precompute NPU scheduling metadata with the official FA3 argument order.
+
+    Ordinary FA3 returns byte metadata and still embeds numerical softcap/scale.
+    Its legacy ``softcap`` and ``softmax_scale`` arguments are keyword-only; a
+    positive legacy softcap enables softcapping even when has_softcap is omitted.
+    ``has_softcap=True`` requires a positive legacy softcap for this protocol.
+    MLA int32 metadata is not connected to this public entry yet.
+    """
     if headdim_v is None:
         headdim_v = headdim
     _check_mla_metadata(headdim, headdim_v)
+    cache_seqlens = maybe_contiguous(cache_seqlens)
     # Route through the custom op so torch.compile / FakeTensor can use the
     # registered fake instead of tracing into the raw pybind extension.
+    # Public API still hard-codes cu_seqlens_k / seqused_q as None (unchanged).
     scheduler_metadata = _get_scheduler_metadata_op(
         batch_size,
         max_seqlen_q,
@@ -1789,9 +1832,10 @@ def get_scheduler_metadata(
         headdim_v,
         qkv_dtype,
         cache_seqlens,
-        seqlens_q,
+        cu_seqlens_q,
         None,  # cu_seqlens_k
         cu_seqlens_k_new,
+        None,  # seqused_q
         cache_leftpad,
         page_size,
         max_seqlen_k_new,
@@ -1803,5 +1847,7 @@ def get_scheduler_metadata(
         num_splits,
         pack_gqa,
         sm_margin,
+        softcap,
+        softmax_scale,
     )
     return scheduler_metadata

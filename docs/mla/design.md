@@ -182,6 +182,8 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 6. **生命周期明确。** 同设备、同调度参数与长度下可跨层复用；实际长度改变要重新计算。图内捕获 metadata 计算时，每次 replay 重新读取设备长度；图外生成的旧快照不会自动跟随长度张量变化。读写 workspace、计数器和 stream 的所有权要明确，禁止共享可变 scratch 造成并发污染。
 7. **校验与图模式一致。** 校验尺寸、dtype、设备和可获得的静态参数；必要的内容检查留在设备侧。Python tensor 私有属性不能成为唯一正确性依据；不能为了校验在 graph 中读取设备标量。真实输出与 fake 的 metadata 大小、O/LSE/accumulator shape 必须一致。
 
+M05b2a 对齐公开 `get_scheduler_metadata` 的官方位置参数及默认值，内部 custom op、fake 和 C++ 使用相同的 `has_softcap` 位置。`softcap` / `softmax_scale` 只作为公开关键字兼容项；普通 FA3 仍返回原 `uint8` 协议，其中保存数值，因此单独 `has_softcap=True` 暂时明确拒绝，须通过旧关键字提供正 `softcap`。旧调用省略 `has_softcap` 时仍以数值 `softcap` 启用该功能；显式 True 与零值冲突、负值或非有限值均拒绝。MLA metadata 生成及消费在 M05b2b 接通前继续明确拒绝，不能把本步签名对齐视为该调用链完成。
+
 ## 6. 代码结构
 
 实现接入点保持 [flash_api.cpp](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp) 和现有 Python 包。新增代码拟放在 `csrc/ascend910/flash_attn_npu_3/mla/`：
@@ -253,9 +255,9 @@ M04b 先使用无设备长度读取的静态调度模块；M05 将同一计算�
 
 MLA 的内部 dense metadata 由 [`mla_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h) 定义：版本 1 为 401 个 int32 字，前 8 字保存 magic、版本、类型、总字数、dtype、生成状态、源调度状态和保留位，其后完整保存 `MlaSchedule` 的几何、分核端点、FD 字段、workspace 和资源需求。64 位字段按低/高 32 位保存，允许连续 tensor 的奇数 storage offset，不能窄化 workspace 大小。调度失败或 dtype 未支持时，记录非成功状态并清零整个调度载荷；消费者必须先检查头部再读取调度。scale、输入输出地址和可变 scratch 不进入可复用记录。
 
-[`mla_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.aicpu) 直接编译相同的调度、分核和序列化源码，输出后执行设备写屏障。AICPU 发射参数只携带本步静态形状、平台资源和输出缓冲信息。M05a 的独立驱动按既有事件协议在当前 stream 与 AICPU stream 之间同步；M05b1 增加独立设备消费链路，公开 MLA metadata 在 M05b2 接通前继续明确拒绝。生产构建单独链接该 AICPU 对象，并跟踪包含的头文件、`.cpp` 及编译选项以判断是否需要重编译。
+[`mla_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.aicpu) 直接编译相同的调度、分核和序列化源码，输出后执行设备写屏障。AICPU 发射参数只携带本步静态形状、平台资源和输出缓冲信息。M05a 的独立驱动按既有事件协议在当前 stream 与 AICPU stream 之间同步；M05b1 增加独立设备消费链路，公开 MLA metadata 在 M05b2b 接通前继续明确拒绝。生产构建单独链接该 AICPU 对象，并跟踪包含的头文件、`.cpp` 及编译选项以判断是否需要重编译。
 
-M05b1 的 [`mla_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata_consumer.h) 共用 CPU/设备解码与校验，[`kernel/mla_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_metadata.hpp) 负责设备读取。先验证大小、头部、生成状态和 dtype，再检查调用方独立提供的形状、平台、实际 launch blockDim、workspace 容量和本地内存条件；分核端点须单调且完整覆盖任务。64 位 workspace 字段不窄化；通过后才构造 Kernel 调度并进入原计算与同步。校验失败不改写调度输出，不进入 attention Kernel。此检查保证兼容性和地址边界，不验证记录来源真实性；`maxCost`、未启用的 FD 记账和未使用核的端点不驱动计算。记录须在生产/消费 stream 依赖完成后保持只读，跨调用 scratch 独立。独立验收驱动仍在 host 准备启动维度和分配预算，各核以独占缓存行报告校验状态；它不是公开 API 的错误上报或 metadata E2E。生产入口、生命周期及错误传播在 M05b2 验收。
+M05b1 的 [`mla_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata_consumer.h) 共用 CPU/设备解码与校验，[`kernel/mla_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_metadata.hpp) 负责设备读取。先验证大小、头部、生成状态和 dtype，再检查调用方独立提供的形状、平台、实际 launch blockDim、workspace 容量和本地内存条件；分核端点须单调且完整覆盖任务。64 位 workspace 字段不窄化；通过后才构造 Kernel 调度并进入原计算与同步。校验失败不改写调度输出，不进入 attention Kernel。此检查保证兼容性和地址边界，不验证记录来源真实性；`maxCost`、未启用的 FD 记账和未使用核的端点不驱动计算。记录须在生产/消费 stream 依赖完成后保持只读，跨调用 scratch 独立。独立验收驱动仍在 host 准备启动维度和分配预算，各核以独占缓存行报告校验状态；它不是公开 API 的错误上报或 metadata E2E。生产入口、生命周期及错误传播在 M05b2b 验收。
 
 M04b2c 的生产适配由 `mla_forward.cpp` 读取实际平台资源、调用同一 `BuildDenseSchedule`、分配 O/LSE 和每次调用独立的 workspace，并传递本次 scale 与地址。`mla_launch_impl.hpp` 通过生成器分别提供 FP16/BF16 C1V2 编译单元，按输入 dtype 分派。M04b3 将同一 Kernel / Block / Tile 按输入类型实例化，保持 M04b2b 的计算、资源和同步次序；aMLA 因子、P 和 O 使用各自输入 dtype，保留第 6.3 节的舍入规则。两种 dtype 均为 2 字节，共用同一调度和 workspace 布局。当前只开放 910B C1V2，其他设备及比例在相应实例验收前明确拒绝。首步公开入口为不带预分配输出的 `flash_attn_func`；内部 `out_` 也明确拒绝，避免绕过现有 functional custom op 的 alias 契约。
 

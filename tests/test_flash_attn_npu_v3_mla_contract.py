@@ -231,7 +231,8 @@ def test_mla_options_cannot_fall_through(entry, representation, option, dtype):
 
 
 @pytest.mark.parametrize("dims", [(64, 512), (192, 128), (64, 128)])
-def test_mla_metadata_rejected(entry, dims, dtype):
+@pytest.mark.parametrize("has_softcap", [False, True])
+def test_mla_metadata_rejected(entry, dims, dtype, has_softcap):
     args = dict(
         batch_size=2,
         max_seqlen_q=3,
@@ -242,6 +243,7 @@ def test_mla_metadata_rejected(entry, dims, dtype):
         headdim_v=dims[1],
         qkv_dtype=dtype,
         cache_seqlens=torch.full((2,), 17, dtype=torch.int32, device="npu"),
+        has_softcap=has_softcap,
     )
     with pytest.raises(RuntimeError, match="MLA scheduler metadata is not implemented yet"):
         api.get_scheduler_metadata(**args)
