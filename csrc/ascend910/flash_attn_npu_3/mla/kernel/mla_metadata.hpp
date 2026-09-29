@@ -13,6 +13,25 @@ struct MetadataReader {
     }
 };
 
+// Reused metadata is a snapshot, not proof that the current lengths still
+// match. Every Cube/Vector checks all B lengths before any attention barrier
+// or write. The host has validated the optional tensor's size/device/stride.
+__aicore__ inline bool CheckDenseCacheLengths(GM_ADDR address, uint32_t batch, uint32_t capacity)
+{
+    if (address == nullptr) {
+        return true;
+    }
+    AscendC::GlobalTensor<int32_t> lengths;
+    lengths.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(address));
+    for (uint32_t b = 0; b < batch; ++b) {
+        if (lengths.GetValue(b) != static_cast<int32_t>(capacity)) {
+            AscendC::Trap();
+            return false;
+        }
+    }
+    return true;
+}
+
 template <typename InputT>
 __aicore__ inline MlaMetadataReadStatus ReadDenseMetadata(GM_ADDR address, uint32_t words,
                                                           const MlaDenseMetadataContext& context,

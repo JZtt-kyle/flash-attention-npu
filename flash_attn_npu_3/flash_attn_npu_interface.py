@@ -216,10 +216,39 @@ def _check_mla_dense_options(
 
 
 def _check_mla_metadata(headdim, headdim_v):
-    # Dimensions alone do not imply qv. Both unequal-dimension paths need the
-    # future MLA scheduler and must not receive ordinary byte metadata.
-    if headdim != headdim_v:
-        raise RuntimeError("NPU FlashAttention MLA scheduler metadata is not implemented yet")
+    if headdim == headdim_v:
+        return False
+    # Select only the schedule family. Forward still requires a real qv.
+    if (headdim, headdim_v) != (64, 512):
+        raise RuntimeError(
+            "NPU FlashAttention MLA scheduler metadata is not implemented yet for these head dimensions"
+        )
+    return True
+
+
+def _check_mla_cache_lengths(lengths, batch, device):
+    if lengths.dtype != torch.int32:
+        raise RuntimeError("MLA: cache_seqlens must have dtype int32")
+    if lengths.device.type != "npu" or lengths.device != device:
+        raise RuntimeError("MLA: cache_seqlens must be on the same NPU device")
+    if lengths.ndim != 1 or lengths.shape[0] != batch:
+        raise RuntimeError("MLA: cache_seqlens must have shape [batch_size]")
+    if not lengths.is_contiguous():
+        raise RuntimeError("MLA: cache_seqlens must be contiguous")
+
+
+def _check_mla_forward_metadata(q, cache_seqlens, metadata):
+    if cache_seqlens is not None:
+        _check_mla_cache_lengths(cache_seqlens, q.shape[0], q.device)
+    if metadata is not None:
+        if metadata.dtype != torch.int32:
+            raise RuntimeError("MLA: scheduler_metadata must have dtype int32")
+        if metadata.device != q.device:
+            raise RuntimeError("MLA: scheduler_metadata must be on the same NPU device")
+        if metadata.ndim != 1 or metadata.shape[0] != 401:
+            raise RuntimeError("MLA: scheduler_metadata must have shape [401]")
+        if not metadata.is_contiguous():
+            raise RuntimeError("MLA: scheduler_metadata must be contiguous")
 
 
 @_torch_custom_op_wrapper(
@@ -286,7 +315,6 @@ def _flash_attn_forward(
                 out_,
                 cu_seqlens_k_new,
                 seqused_q,
-                seqused_k,
                 max_seqlen_q,
                 max_seqlen_k,
                 kv_batch_idx,
@@ -297,9 +325,9 @@ def _flash_attn_forward(
                 q_descale,
                 k_descale,
                 v_descale,
-                scheduler_metadata,
             ),
         )
+        _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
     q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
     v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
     cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new = [
@@ -423,7 +451,6 @@ def _flash_attn_forward_fake(
                 out_,
                 cu_seqlens_k_new,
                 seqused_q,
-                seqused_k,
                 max_seqlen_q,
                 max_seqlen_k,
                 kv_batch_idx,
@@ -434,9 +461,9 @@ def _flash_attn_forward_fake(
                 q_descale,
                 k_descale,
                 v_descale,
-                scheduler_metadata,
             ),
         )
+        _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
 
     # Determine if we're in varlen mode
     is_varlen_q = cu_seqlens_q is not None
@@ -864,7 +891,7 @@ class FlashAttnFunc(torch.autograd.Function):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
         # MLA generates and consumes its private AICPU record inside DenseForward.
-        # Explicit public MLA metadata reuse is not connected yet.
+        # Explicit reuse is available through the read-only kvcache entry.
         scheduler_metadata = None
         if not is_mla:
             # Training interfaces do not expose scheduler_metadata (aligned with
@@ -1508,25 +1535,28 @@ def flash_attn_with_kvcache(
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
     """
-    if _check_mla_inputs(
+    is_mla = _check_mla_inputs(
         q,
         k_cache,
         v_cache,
         qv,
         varlen_q=cu_seqlens_q is not None,
         paged_kv=page_table is not None,
-    ):
-        raise RuntimeError("MLA compressed forward is not implemented yet for the kvcache entry")
+    )
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
     if softmax_scale is None:
         softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
     if cache_seqlens is not None and isinstance(cache_seqlens, int):
+        if is_mla and cache_seqlens != k_cache.shape[1]:
+            raise RuntimeError(
+                "MLA compressed forward is not implemented yet unless cache_seqlens equals KV capacity"
+            )
         cache_seqlens = torch.full(
             (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
         )
         cache_seqlens = maybe_contiguous(cache_seqlens)
-    if scheduler_metadata is not None:
+    if scheduler_metadata is not None and not is_mla:
         _validate_scheduler_metadata(
             scheduler_metadata,
             causal=causal,
@@ -1696,8 +1726,8 @@ def _get_scheduler_metadata_op(
     softcap: Optional[float],
     softmax_scale: Optional[float],
 ) -> torch.Tensor:
-    _check_mla_metadata(headdim, headdim_v)
-    resolved_softcap = _resolve_legacy_metadata_softcap(has_softcap, softcap)
+    is_mla = _check_mla_metadata(headdim, headdim_v)
+    resolved_softcap = None if is_mla else _resolve_legacy_metadata_softcap(has_softcap, softcap)
     scheduler_metadata = flash_attn_npu_3.get_scheduler_metadata(
         batch_size,
         max_seqlen_q,
@@ -1726,6 +1756,10 @@ def _get_scheduler_metadata_op(
         softcap,
         softmax_scale,
     )
+    if is_mla:
+        # All compatibility checks are in the device record and the current
+        # call; no Python attribute is needed to clone or reuse MLA metadata.
+        return scheduler_metadata
     # Keep this side effect inside the opaque custom op so Dynamo does not
     # trace the setattr while still attaching the runtime fingerprint.
     if softmax_scale is None:
@@ -1773,7 +1807,49 @@ def _get_scheduler_metadata_fake(
     softcap: Optional[float],
     softmax_scale: Optional[float],
 ) -> torch.Tensor:
-    _check_mla_metadata(headdim, headdim_v)
+    if _check_mla_metadata(headdim, headdim_v):
+        if not (
+            0 < batch_size <= 0xFFFFFFFF
+            and 0 < max_seqlen_q <= 256
+            and 0 < num_heads_q <= 256
+            and max_seqlen_q * num_heads_q <= 256
+            and 0 < max_seqlen_k <= 512
+            and num_heads_kv == 1
+        ):
+            raise RuntimeError(
+                "MLA scheduler metadata is not implemented yet outside the dense shape bounds"
+            )
+        if (
+            any(
+                t is not None
+                for t in (
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    cu_seqlens_k_new,
+                    seqused_q,
+                    cache_leftpad,
+                    page_size,
+                    pack_gqa,
+                    softcap,
+                    softmax_scale,
+                )
+            )
+            or max_seqlen_k_new != 0
+            or causal
+            or (window_size_left, window_size_right) != (-1, -1)
+            or attention_chunk != 0
+            or has_softcap
+            or num_splits != 1
+            or sm_margin != 0
+        ):
+            raise RuntimeError(
+                "MLA scheduler metadata is not implemented yet for these length, mask, split, "
+                "scheduling or legacy numerical options"
+            )
+        if qkv_dtype not in (torch.float16, torch.bfloat16):
+            raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
+        _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
+        return torch.empty((401,), dtype=torch.int32, device=cache_seqlens.device)
     _resolve_legacy_metadata_softcap(has_softcap, softcap)
     return torch.empty(
         (_SCHEDULER_METADATA_TILING_BYTES,),
@@ -1814,12 +1890,14 @@ def get_scheduler_metadata(
     Its legacy ``softcap`` and ``softmax_scale`` arguments are keyword-only; a
     positive legacy softcap enables softcapping even when has_softcap is omitted.
     ``has_softcap=True`` requires a positive legacy softcap for this protocol.
-    MLA int32 metadata is not connected to this public entry yet.
+    MLA returns int32 metadata for the validated full-length dense subset with
+    num_splits=1. Its scale is supplied only to forward; legacy numerical
+    keywords are not supported. Length values are checked on device.
     """
     if headdim_v is None:
         headdim_v = headdim
-    _check_mla_metadata(headdim, headdim_v)
-    cache_seqlens = maybe_contiguous(cache_seqlens)
+    if not _check_mla_metadata(headdim, headdim_v):
+        cache_seqlens = maybe_contiguous(cache_seqlens)
     # Route through the custom op so torch.compile / FakeTensor can use the
     # registered fake instead of tracing into the raw pybind extension.
     # Public API still hard-codes cu_seqlens_k / seqused_q as None (unchanged).

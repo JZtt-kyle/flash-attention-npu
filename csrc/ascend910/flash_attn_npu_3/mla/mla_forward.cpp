@@ -14,8 +14,8 @@
 extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
 
 namespace flash_attn::mla {
-std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
-                                     const at::Tensor& qv, float scale)
+namespace {
+MlaPlatformInfo DensePlatform()
 {
     const char* soc = aclrtGetSocName();
     TORCH_CHECK(soc && std::strncmp(soc, "Ascend910B", 10) == 0,
@@ -37,6 +37,79 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     for (uint32_t c = 1; c <= p.aicNum; ++c) {
         p.blockDims[c - 1] = platform->CalcTschBlockDim(c * 2, c, c * 2);
     }
+    return p;
+}
+
+struct MetadataSubmission {
+    at::Tensor metadata;
+    std::optional<at::Tensor> lengths;
+    MlaMetadataArgs args;
+    aclrtStream current, worker;
+    aclrtEvent inputReady, metadataDone;
+
+    void Enqueue()
+    {
+        TORCH_CHECK(aclrtRecordEvent(inputReady, current) == ACL_SUCCESS, "MLA: input event recording failed");
+        TORCH_CHECK(aclrtStreamWaitEvent(worker, inputReady) == ACL_SUCCESS, "MLA: input event wait failed");
+        ComputeMlaDenseMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
+        TORCH_CHECK(aclrtRecordEvent(metadataDone, worker) == ACL_SUCCESS, "MLA: metadata event recording failed");
+        TORCH_CHECK(aclrtStreamWaitEvent(current, metadataDone) == ACL_SUCCESS, "MLA: metadata event wait failed");
+    }
+};
+
+MetadataSubmission PrepareMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platform, at::ScalarType dtype,
+                                   const at::TensorOptions& options, const std::optional<at::Tensor>& lengths)
+{
+    auto metadata = at::empty({kMlaDenseMetadataWords}, options.dtype(at::kInt));
+    auto stream = c10_npu::getCurrentNPUStream();
+    auto worker = c10_npu::getNPUStreamFromPool();
+    // The two record/wait pairs are submitted together before these per-host-
+    // thread/device handles can be reused. No steady-state host wait is needed.
+    struct MetadataEvents {
+        aclrtEvent inputReady = nullptr;
+        aclrtEvent metadataDone = nullptr;
+    };
+    static thread_local std::unordered_map<c10::DeviceIndex, MetadataEvents> eventsByDevice;
+    auto& events = eventsByDevice[stream.device_index()];
+    if (events.inputReady == nullptr) {
+        TORCH_CHECK(aclrtCreateEvent(&events.inputReady) == ACL_SUCCESS, "MLA: input event creation failed");
+    }
+    if (events.metadataDone == nullptr) {
+        TORCH_CHECK(aclrtCreateEvent(&events.metadataDone) == ACL_SUCCESS, "MLA: metadata event creation failed");
+    }
+    c10_npu::NPUCachingAllocator::recordStream(metadata.storage().data_ptr(), worker);
+    if (lengths) {
+        c10_npu::NPUCachingAllocator::recordStream(lengths->storage().data_ptr(), worker);
+    }
+    MlaMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
+                         kMlaDenseMetadataWords,
+                         uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),
+                         shape,
+                         platform,
+                         lengths ? reinterpret_cast<uint64_t>(lengths->data_ptr()) : 0,
+                         lengths ? uint64_t(lengths->numel()) : 0};
+    return {metadata,           lengths, args, stream.stream(false), worker.stream(false), events.inputReady,
+            events.metadataDone};
+}
+} // namespace
+
+at::Tensor DenseMetadata(int64_t batch, int64_t sq, int64_t heads, int64_t sk, at::ScalarType dtype,
+                         const at::Tensor& cacheSeqlens)
+{
+    auto submission =
+        PrepareMetadata({batch, sq, heads, sk}, DensePlatform(), dtype, cacheSeqlens.options(), cacheSeqlens);
+    at_npu::native::OpCommand::RunOpApiV2("ascendc_mla_metadata", [submission]() mutable -> int {
+        submission.Enqueue();
+        return 0;
+    });
+    return submission.metadata;
+}
+
+std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                     const at::Tensor& qv, float scale, const std::optional<at::Tensor>& cacheSeqlens,
+                                     const std::optional<at::Tensor>& schedulerMetadata)
+{
+    auto p = DensePlatform();
     MlaSchedule s{};
     auto status = BuildDenseSchedule({q.size(0), q.size(1), q.size(2), k.size(1)}, p, s);
     TORCH_CHECK(status == MlaScheduleStatus::Success, "MLA: dense scheduling failed (status ", int(status), ")");
@@ -48,7 +121,12 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     auto out = at::empty({q.size(0), q.size(1), q.size(2), v.size(3)}, q.options());
     auto lse = at::empty({q.size(0), q.size(2), q.size(1)}, q.options().dtype(at::kFloat));
     auto workspace = at::empty({static_cast<int64_t>(s.workspace.totalBytes)}, q.options().dtype(at::kByte));
-    auto metadata = at::empty({kMlaDenseMetadataWords}, q.options().dtype(at::kInt));
+    std::optional<MetadataSubmission> producer;
+    if (!schedulerMetadata) {
+        producer = PrepareMetadata({q.size(0), q.size(1), q.size(2), k.size(1)}, p, q.scalar_type(), q.options(),
+                                   cacheSeqlens);
+    }
+    auto metadata = schedulerMetadata ? *schedulerMetadata : producer->metadata;
     for (const auto& t : {q, k, v, qv, out, lse, workspace, metadata}) {
         auto address = reinterpret_cast<uintptr_t>(t.data_ptr());
         TORCH_CHECK(address != 0 && uint64_t(t.nbytes()) <= std::numeric_limits<uintptr_t>::max() - address,
@@ -60,8 +138,12 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
                 "MLA: failed to obtain cross-core synchronization address");
     auto stream = c10_npu::getCurrentNPUStream();
     a.stream = stream.stream(false);
-    for (const auto& t : {q, k, v, qv}) {
+    for (const auto& t : {q, k, v, qv, metadata}) {
         c10_npu::NPUCachingAllocator::recordStream(t.storage().data_ptr(), stream);
+    }
+    if (cacheSeqlens) {
+        c10_npu::NPUCachingAllocator::recordStream(cacheSeqlens->storage().data_ptr(), stream);
+        a.cacheSeqlens = static_cast<uint8_t*>(cacheSeqlens->data_ptr());
     }
     a.qc = static_cast<uint8_t*>(qv.data_ptr());
     a.qr = static_cast<uint8_t*>(q.data_ptr());
@@ -89,39 +171,10 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
                  s.workspace.userBytes,
                  s.workspace.libApiBytes,
                  p.localMemory};
-    MlaMetadataArgs metaArgs{reinterpret_cast<uint64_t>(metadata.data_ptr()),
-                             kMlaDenseMetadataWords,
-                             dtype,
-                             {q.size(0), q.size(1), q.size(2), k.size(1)},
-                             p,
-                             0,
-                             0};
-    auto aicpuStream = c10_npu::getNPUStreamFromPool();
-    auto aicpuHandle = aicpuStream.stream(false);
-    // Match the existing FA3 metadata event handshake. Each host submission
-    // enqueues both record/wait pairs before a later call can reuse the events.
-    // Keep the handles for the thread/device lifetime; no host synchronization
-    // or destruction of a still-pending event is needed in the steady state.
-    struct MetadataEvents {
-        aclrtEvent inputReady = nullptr;
-        aclrtEvent metadataDone = nullptr;
-    };
-    static thread_local std::unordered_map<c10::DeviceIndex, MetadataEvents> eventsByDevice;
-    auto& events = eventsByDevice[stream.device_index()];
-    if (events.inputReady == nullptr) {
-        TORCH_CHECK(aclrtCreateEvent(&events.inputReady) == ACL_SUCCESS, "MLA: input event creation failed");
-    }
-    if (events.metadataDone == nullptr) {
-        TORCH_CHECK(aclrtCreateEvent(&events.metadataDone) == ACL_SUCCESS, "MLA: metadata event creation failed");
-    }
-    c10_npu::NPUCachingAllocator::recordStream(metadata.storage().data_ptr(), aicpuStream);
-    auto launch = [a, aicpuHandle, inputReady = events.inputReady, metadataDone = events.metadataDone, metaArgs, q, k,
-                   v, qv, out, lse, workspace, metadata]() mutable -> int {
-        TORCH_CHECK(aclrtRecordEvent(inputReady, a.stream) == ACL_SUCCESS, "MLA: input event recording failed");
-        TORCH_CHECK(aclrtStreamWaitEvent(aicpuHandle, inputReady) == ACL_SUCCESS, "MLA: input event wait failed");
-        ComputeMlaDenseMetadata<<<1, nullptr, aicpuHandle>>>(&metaArgs, sizeof(metaArgs));
-        TORCH_CHECK(aclrtRecordEvent(metadataDone, aicpuHandle) == ACL_SUCCESS, "MLA: metadata event recording failed");
-        TORCH_CHECK(aclrtStreamWaitEvent(a.stream, metadataDone) == ACL_SUCCESS, "MLA: metadata event wait failed");
+    auto launch = [a, producer, q, k, v, qv, out, lse, workspace, metadata, cacheSeqlens]() mutable -> int {
+        if (producer) {
+            producer->Enqueue();
+        }
         auto error = q.scalar_type() == at::kBFloat16 ? LaunchDenseBf16(a) : LaunchDenseFp16(a);
         TORCH_CHECK(error == ACL_SUCCESS, "MLA: BATCH_MODE kernel launch failed (", error, ")");
         return 0;

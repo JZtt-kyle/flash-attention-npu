@@ -26,14 +26,44 @@ from tests.mla_cann_baseline import (
 from tests.mla_dense_profile import CASES
 
 
-def profile(directory, vendor, dtype_name="fp16"):
+def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False):
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     vendor = check_vendor_configuration(vendor)
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     torch.npu.set_device(0)
     assert torch.npu.device_count() == 1 and "910B" in torch.npu.get_device_name(0)
-    inputs, native = [], []
+    inputs, native, lengths, metadata = [], [], [], []
+
+    def generate(index):
+        q, k = inputs[index]["q"], inputs[index]["k"]
+        return api.get_scheduler_metadata(
+            q.shape[0],
+            q.shape[1],
+            k.shape[1],
+            q.shape[2],
+            1,
+            64,
+            lengths[index],
+            qkv_dtype=dtype,
+            headdim_v=512,
+            num_splits=1,
+        )
+
+    def cached(index, record):
+        tensors = inputs[index]
+        return api.flash_attn_with_kvcache(
+            tensors["q"],
+            tensors["k"],
+            tensors["v"],
+            qv=tensors["qv"],
+            cache_seqlens=lengths[index],
+            scheduler_metadata=record,
+            softmax_scale=CASES[index][1],
+            num_splits=1,
+            return_softmax_lse=True,
+        )
+
     for shape, scale in CASES:
         batch, sq, heads, sk = shape
         cpu = make_inputs(
@@ -42,9 +72,14 @@ def profile(directory, vendor, dtype_name="fp16"):
         device = {name: tensor.npu() for name, tensor in cpu.items()}
         inputs.append(device)
         native.append(CannCall(device, scale=scale))
-        actual = api.flash_attn_func(
-            **device, softmax_scale=scale, num_splits=1, return_attn_probs=True
-        )
+        if metadata_reuse:
+            lengths.append(torch.full((batch,), sk, dtype=torch.int32, device=device["q"].device))
+            metadata.append(generate(len(inputs) - 1))
+            actual = cached(len(inputs) - 1, metadata[-1])
+        else:
+            actual = api.flash_attn_func(
+                **device, softmax_scale=scale, num_splits=1, return_attn_probs=True
+            )
         source = native[-1]()
         refs = mla_reference_pair(**cpu, softmax_scale=scale)
         for i, name in enumerate(("out", "lse")):
@@ -68,22 +103,38 @@ def profile(directory, vendor, dtype_name="fp16"):
     def call(index, name):
         if name == "native_cann":
             return native[index]()
+        if metadata_reuse:
+            if name == "generate":
+                return generate(index)
+            if name == "native_cann_4":
+                return [native[index]() for _ in range(4)]
+            if name == "implicit":
+                return cached(index, None)
+            if name in ("generate_1", "generate_4"):
+                record = generate(index)
+                return [cached(index, record) for _ in range(1 if name == "generate_1" else 4)]
+            return cached(index, metadata[index])
         return api.flash_attn_func(
             **inputs[index], softmax_scale=CASES[index][1], num_splits=1, return_attn_probs=True
         )
 
     names = ("fa3", "native_cann")
+    wall_names = (
+        names + ("generate", "implicit", "generate_1", "generate_4", "native_cann_4")
+        if metadata_reuse
+        else names
+    )
     snapshot("npu-before.log")
     for index in range(len(CASES)):
         for _ in range(5):
-            for name in names:
+            for name in wall_names:
                 result = call(index, name)
                 torch.npu.synchronize()
     wall = []
     for index in range(len(CASES)):
         for r in range(5):
             for i in range(20):
-                for name in names if r % 2 == 0 else names[::-1]:
+                for name in wall_names if r % 2 == 0 else wall_names[::-1]:
                     start = time.perf_counter_ns()
                     result = call(index, name)
                     torch.npu.synchronize()
@@ -141,6 +192,8 @@ def profile(directory, vendor, dtype_name="fp16"):
     # attention kernels. Never fold producer duration into the attention
     # comparison, and explicitly report whether it was captured.
     metadata_rows = [row for row in rows if "ComputeMlaDenseMetadata" in row["Name"]]
+    if metadata_reuse:
+        assert not metadata_rows, "explicit reuse unexpectedly regenerated metadata"
     rows = [row for row in rows if "ComputeMlaDenseMetadata" not in row["Name"]]
     assert len(rows) == len(labels), (len(rows), len(labels))
     fa3_count = sum(label["name"] == "fa3" for label in labels)
@@ -163,26 +216,49 @@ def profile(directory, vendor, dtype_name="fp16"):
     results = []
     for index, (shape, scale) in enumerate(CASES):
         item = dict(shape=shape, scale=scale, native_call=native[index].description())
-        for name in names:
+        for name in wall_names:
             kernels = [x for x in labels if x["case"] == index and x["name"] == name]
             walls = [x for x in wall if x["case"] == index and x["name"] == name]
             item[name] = dict(
-                median_kernel_us=statistics.median(x["kernel_us"] for x in kernels),
                 median_e2e_us=statistics.median(x["e2e_us"] for x in walls),
-                round_mean_kernel_us=[
-                    statistics.mean(x["kernel_us"] for x in kernels if x["round"] == r)
-                    for r in range(5)
-                ],
                 round_mean_e2e_us=[
                     statistics.mean(x["e2e_us"] for x in walls if x["round"] == r) for r in range(5)
                 ],
             )
+            if kernels:
+                item[name].update(
+                    median_kernel_us=statistics.median(x["kernel_us"] for x in kernels),
+                    round_mean_kernel_us=[
+                        statistics.mean(x["kernel_us"] for x in kernels if x["round"] == r)
+                        for r in range(5)
+                    ],
+                )
         item["e2e_ratio"] = item["fa3"]["median_e2e_us"] / item["native_cann"]["median_e2e_us"]
+        if metadata_reuse:
+            item["generate_1_ratio"] = (
+                item["generate_1"]["median_e2e_us"] / item["native_cann"]["median_e2e_us"]
+            )
+            item["generate_4_ratio"] = (
+                item["generate_4"]["median_e2e_us"] / item["native_cann_4"]["median_e2e_us"]
+            )
         results.append(item)
     snapshot("npu-after.log")
     report = dict(
         dtype=dtype_name,
-        scope="Public flash_attn_func with implicit AICPU metadata generation vs fixed native CANN; diagnostics, not explicit metadata reuse acceptance",
+        scope=(
+            "Public read-only dense kvcache metadata reuse vs fixed native CANN; M05b2b3b diagnostics"
+            if metadata_reuse
+            else "Public flash_attn_func with implicit AICPU metadata generation vs fixed native CANN; diagnostics, not explicit metadata reuse acceptance"
+        ),
+        metadata_lifecycle=(
+            dict(
+                reuse_forward="precomputed once before measurement",
+                complete_segments=[1, 4],
+                complete_segment="one public metadata generation plus R forwards; CANN performs the same R forwards; R fixed before collection",
+            )
+            if metadata_reuse
+            else "implicit generation for each forward"
+        ),
         pid=os.getpid(),
         visible_devices=os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
         seed=20260929,
@@ -206,4 +282,5 @@ if __name__ == "__main__":
         os.environ["MLA_FORWARD_ARTIFACT_DIR"],
         os.environ["MLA_CANN_VENDOR"],
         os.environ.get("MLA_FORWARD_DTYPE", "fp16"),
+        os.environ.get("MLA_FORWARD_METADATA_REUSE") == "1",
     )

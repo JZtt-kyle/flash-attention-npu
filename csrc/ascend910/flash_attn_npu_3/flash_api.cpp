@@ -180,17 +180,22 @@ std::vector<at::Tensor> mha_fwd(
                                                              cu_seqlens_k_.has_value(), page_table_.has_value());
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     if (isMla) {
-        TORCH_CHECK(!k_new_ && !v_new_ && !out_ && !cu_seqlens_k_new_ && !seqused_q_ && !seqused_k_ && !max_seqlen_q_ &&
+        TORCH_CHECK(!k_new_ && !v_new_ && !out_ && !cu_seqlens_k_new_ && !seqused_q_ && !max_seqlen_q_ &&
                         !max_seqlen_k_ && !kv_batch_idx_ && !leftpad_k_ && !rotary_cos_ && !rotary_sin_ &&
-                        !seqlens_rotary_ && !q_descale_ && !k_descale_ && !v_descale_ && !scheduler_metadata_ &&
-                        is_rotary_interleaved,
+                        !seqlens_rotary_ && !q_descale_ && !k_descale_ && !v_descale_ && is_rotary_interleaved,
                     "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
         TORCH_CHECK(!is_causal && window_size_left == -1 && window_size_right == -1 && attention_chunk == 0 &&
                         softcap == 0.0f && num_splits == 1 && !pack_gqa_.has_value() && sm_margin == 0,
                     "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
-        return flash_attn::mla::DenseForward(q, k, v, *q_v_, scale);
+        if (seqused_k_) {
+            flash_attn::mla::CheckCacheLengths(*seqused_k_, q.size(0), q.device());
+        }
+        if (scheduler_metadata_) {
+            flash_attn::mla::CheckDenseMetadataTensor(*scheduler_metadata_, q.device());
+        }
+        return flash_attn::mla::DenseForward(q, k, v, *q_v_, scale, seqused_k_, scheduler_metadata_);
     }
     auto hostStart = std::chrono::steady_clock::now();
 
@@ -715,7 +720,24 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   bool has_softcap, int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin,
                                   std::optional<double> softcap_, std::optional<double> softmax_scale)
 {
-    flash_attn::mla::CheckMetadataBoundary(headdim, headdim_v);
+    if (flash_attn::mla::CheckMetadataBoundary(headdim, headdim_v)) {
+        TORCH_CHECK(batch_size > 0 && batch_size <= UINT32_MAX && max_seqlen_q > 0 && max_seqlen_q <= 256 &&
+                        num_heads_q > 0 && num_heads_q <= 256 && max_seqlen_q * num_heads_q <= 256 &&
+                        max_seqlen_k > 0 && max_seqlen_k <= 512 && num_heads_kv == 1,
+                    "MLA scheduler metadata is not implemented yet outside the dense shape bounds");
+        TORCH_CHECK(!cu_seqlens_q && !cu_seqlens_k && !cu_seqlens_k_new && !seqused_q && !cache_leftpad && !page_size &&
+                        max_seqlen_k_new == 0 && !causal && window_size_left == -1 && window_size_right == -1 &&
+                        attention_chunk == 0 && !has_softcap && num_splits == 1 && !pack_gqa.has_value() &&
+                        sm_margin == 0 && !softcap_ && !softmax_scale,
+                    "MLA scheduler metadata is not implemented yet for these length, mask, split, scheduling or "
+                    "legacy numerical options");
+        const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
+        TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
+        flash_attn::mla::CheckCacheLengths(cache_seqlens, batch_size, cache_seqlens.device());
+        const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
+        return flash_attn::mla::DenseMetadata(batch_size, max_seqlen_q, num_heads_q, max_seqlen_k, dtype,
+                                              cache_seqlens);
+    }
     // The official prefix carries only the scheduling feature. The legacy
     // byte protocol additionally needs a numerical value, supplied by the
     // Python keyword compatibility layer (also checked by its fake entry).

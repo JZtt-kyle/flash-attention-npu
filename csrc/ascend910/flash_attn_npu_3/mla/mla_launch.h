@@ -8,7 +8,7 @@ namespace flash_attn::mla {
 struct MlaLaunchArgs {
     aclrtStream stream;
     uint64_t ffts;
-    uint8_t *qc, *qr, *kv, *kr, *output, *lse, *workspace, *metadata;
+    uint8_t *qc, *qr, *kv, *kr, *output, *lse, *workspace, *metadata, *cacheSeqlens;
     MlaDenseMetadataContext context;
     float scale;
 };

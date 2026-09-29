@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/extension.h>
+#include "mla_metadata.h"
 
 // Host-only boundary for the two representations in docs/mla/design.md.
 // Contract: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
@@ -65,10 +66,34 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
     TORCH_CHECK(false, "NPU FlashAttention MLA prefill forward is not implemented yet");
 }
 
-inline void CheckMetadataBoundary(int64_t headDim, int64_t headDimV)
+inline bool CheckMetadataBoundary(int64_t headDim, int64_t headDimV)
 {
-    // Metadata has no qv argument: do not infer that qv is present from dimensions.
-    TORCH_CHECK(headDim == headDimV, "NPU FlashAttention MLA scheduler metadata is not implemented yet");
+    if (headDim == headDimV) {
+        return false;
+    }
+    // This selects only the schedule family. Forward still requires qv and
+    // independently checks the actual tensors and the record's geometry.
+    TORCH_CHECK(headDim == 64 && headDimV == 512,
+                "NPU FlashAttention MLA scheduler metadata is not implemented yet for these head dimensions");
+    return true;
+}
+
+inline void CheckCacheLengths(const at::Tensor& lengths, int64_t batch, const at::Device& device)
+{
+    TORCH_CHECK(lengths.scalar_type() == at::kInt, "MLA: cache_seqlens must have dtype int32");
+    TORCH_CHECK(lengths.device().type() == at::kPrivateUse1 && lengths.device() == device,
+                "MLA: cache_seqlens must be on the same NPU device");
+    TORCH_CHECK(lengths.dim() == 1 && lengths.size(0) == batch, "MLA: cache_seqlens must have shape [batch_size]");
+    TORCH_CHECK(lengths.is_contiguous(), "MLA: cache_seqlens must be contiguous");
+}
+
+inline void CheckDenseMetadataTensor(const at::Tensor& metadata, const at::Device& device)
+{
+    TORCH_CHECK(metadata.scalar_type() == at::kInt, "MLA: scheduler_metadata must have dtype int32");
+    TORCH_CHECK(metadata.device() == device, "MLA: scheduler_metadata must be on the same NPU device");
+    TORCH_CHECK(metadata.dim() == 1 && metadata.size(0) == kMlaDenseMetadataWords,
+                "MLA: scheduler_metadata must have shape [401]");
+    TORCH_CHECK(metadata.is_contiguous(), "MLA: scheduler_metadata must be contiguous");
 }
 
 } // namespace flash_attn::mla

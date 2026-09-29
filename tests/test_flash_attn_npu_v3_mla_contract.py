@@ -181,13 +181,19 @@ def test_public_rejects_before_metadata_or_dispatch(
         pytest.fail("MLA reached ordinary metadata/kernel dispatch")
 
     monkeypatch.setattr(api, "get_scheduler_metadata", unexpected)
-    supported = representation == "compressed" and public_entry == "dense"
+    supported = representation == "compressed" and public_entry in ("dense", "kvcache")
     if not supported:
         monkeypatch.setattr(api, "_flash_attn_forward", unexpected)
     with FakeTensorMode() if fake else nullcontext():
         args = _inputs(representation, "tnd" if public_entry == "varlen" else "dense", dtype=dtype)
         if supported:
-            out, lse = api.flash_attn_func(**args, return_attn_probs=True)
+            if public_entry == "dense":
+                out, lse = api.flash_attn_func(**args, return_attn_probs=True)
+            else:
+                args["k_cache"], args["v_cache"] = args.pop("k"), args.pop("v")
+                out, lse, *_ = api.flash_attn_with_kvcache(
+                    **args, num_splits=1, return_softmax_lse=True
+                )
             assert out.shape == (2, 3, 4, 512) and lse.shape == (2, 4, 3)
             return
         with pytest.raises(RuntimeError, match="forward is not implemented yet"):
@@ -281,7 +287,6 @@ def test_mla_metadata_rejected(entry, dims, dtype, has_softcap):
         "out_",
         "cu_seqlens_k_new",
         "seqused_q",
-        "seqused_k",
         "max_seqlen_q",
         "max_seqlen_k",
         "kv_batch_idx",
@@ -292,7 +297,6 @@ def test_mla_metadata_rejected(entry, dims, dtype, has_softcap):
         "q_descale",
         "k_descale",
         "v_descale",
-        "scheduler_metadata",
         "rotary_interleaved",
         "causal",
         "window_size_left",

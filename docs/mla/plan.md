@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前已将首步 FP16/BF16 dense MLA 的调度和 Kernel 接入 910B FA3 `flash_attn_func`，具备独立 reference 和固定源码 CANN 对照。M05a 已完成 AICPU 调度生成；M05b1 已完成版本化 metadata 的设备读取、校验和独立 dense 消费链路；M05b2a 已对齐官方 metadata 签名及普通 FA3 关键字兼容层。公开 MLA metadata 和范围外组合仍明确报未实现；无 metadata 的公开 E2E 尚未达到性能门槛。M05b2b1 已完成 AICPU 设备长度读取和范围拒绝。M05b2b2 已完成内部设备校验错误上报。M05b2b3a 已完成生产内部 AICPU 生成及校验消费；唯一下一步为 M05b2b3b，接通公开生成与只读 dense kvcache 复用。最终 metadata E2E 门槛在 M05c 验收。
+当前已将 FP16/BF16 dense MLA 的源调度和 Kernel 接入 910B FA3。M05a/M05b1 完成 AICPU 生成、版本化 metadata 的设备读取与校验；M05b2a 对齐官方签名并保留普通 FA3 关键字兼容。M05b2b1/b2 完成设备长度读取和错误上报，b3a 完成生产内部生成/消费，b3b 已接通公开 `get_scheduler_metadata` 及只读 dense `flash_attn_with_kvcache` 复用。范围外组合仍明确拒绝；显式复用的 E2E 尚未达到性能门槛。唯一下一步为 M05c，优化重复准备/发射成本并完成最终 metadata E2E 验收；整个 M05 完成前不开始 M04c1。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。
 
@@ -28,8 +28,8 @@
 | M05b2b1 | 已完成 | AICPU 读取 dense cache_seqlens 并拒绝未支持长度 | 175 项 CPU、52 项 AICPU、60 项双 dtype 消费精度/拒绝、129 项签名、622 项 MLA 与 20 项普通 FA3 回归通过；仅接受每个长度等于 KV 容量，失败记录清零 payload；生产 AICPU 重建和生成/复用性能诊断完成；公开入口仍拒绝 |
 | M05b2b2 | 已完成 | 公开接入所需的设备校验错误上报 | 98 项双 dtype 设备检查通过，含 36 个独立进程的真实异常、device/stream/event 同步和成功精度；`-DNDEBUG` 仍触发 Trap，无长度 D2H 或 steady-state 主机同步；90 项 CPU、普通 FA3 回归、公开拒绝契约及同轮 CANN 性能诊断完成 |
 | M05b2b3a | 已完成 | 现有 dense 前向的生产 AICPU 生成与校验消费链路 | `flash_attn_func` 内部生成 metadata 并由生产 launcher 调用 `LoadDenseMetadata`；两种 dtype 源对照精度、运行时 scale、连续调用与 allocator/stream 生命周期、生产构建、普通 FA3 回归及同轮性能诊断通过；显式 metadata 入口继续拒绝 |
-| M05b2b3b | 唯一下一步 | 已验收 dense 范围的公开 MLA metadata 生成与复用 | 开放官方 `get_scheduler_metadata` 和 `flash_attn_with_kvcache` 的只读连续 BSND 子集；真实/fake/C++ 边界、完整 dense 长度校验、运行时 scale、有/无 metadata、连续复用及 allocator/stream 生命周期正确；两种 dtype 精度、普通 FA3 回归及同轮性能诊断通过 |
-| M05c | 待 M05b2b 完成 | metadata 复用路径 E2E 验收 | 优化重复准备与发射成本；逐例 `FA3 metadata E2E / 同轮 CANN E2E <= 1.0`，分别记录 metadata 生成、复用和完整调用段；两种 dtype 精度及普通 FA3 回归通过 |
+| M05b2b3b | 已完成 | 已验收 dense 范围的公开 MLA metadata 生成与复用 | 开放官方 `get_scheduler_metadata` 和 `flash_attn_with_kvcache` 的只读连续 BSND 子集；真实/fake/C++ 边界、完整 dense 长度校验、运行时 scale、有/无 metadata、连续复用及 allocator/stream 生命周期正确；两种 dtype 精度、普通 FA3 回归及同轮性能诊断通过 |
+| M05c | 唯一下一步 | metadata 复用路径 E2E 验收 | 优化重复准备与发射成本；逐例 `FA3 metadata E2E / 同轮 CANN E2E <= 1.0`，分别记录 metadata 生成、复用和完整调用段；两种 dtype 精度及普通 FA3 回归通过 |
 | M04c1 | 待 M05 完成 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | KV 仍为 1..512；按源 M 切块/分核接通，覆盖 257/511/512/513 行及跨核尾块；两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过 |
 | M04c2 | 待 M04c1 完成 | dense 的 KV 513..1024、显式 num_splits=1 | 保留源 aMLA nUpdate、PV 原子加和事件依赖；单列禁止 FD 的必要调度映射；跨块最大值变化、O/LSE、重复执行、metadata、普通 FA3 回归和 E2E 通过 |
 | M04c3 | 待 M04c2 完成 | dense 长 KV，含 8193 | 按源流程扩大范围，不改变切块/数值路径；单/多 query、多块尾部、两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过；显式 num_splits=1 |
@@ -51,7 +51,7 @@ M04b 的临时范围与验收切面见 [design 6.2](design.md#62-调度字段和
 
 M04b1 是有独立验收的调度实现，不创建未实现 kernel 或返回占位 metadata。源对照从固定 commit 读取原算法，覆盖 design 6.5 的边界；该调度尚未被生产构建引用时不要求重跑 NPU。M04b2a/b 的测试驱动只用于设备组件验收，不提供 MLA 前向接口；两步均须完成相关 910B 精度和性能诊断。M04b2c 接入生产时必须强制核查构建依赖、实际加载扩展和源组件对应关系。每个实现步骤保持源设备行为，组件替换按运算、数据布局、精度和资源/同步契约核对等价性。
 
-M05a 只提供内部 AICPU 生成组件和测试驱动，输出实际调度字段而非占位数据，不另造公开协议。调度和分核算法与 host 共用源码；不包含 scale、张量地址或跨调用可变 scratch。M05b 按设备消费（M05b1）、官方签名与旧调用兼容（M05b2a）、公开生成及消费（M05b2b）拆开验收。M05b2b 再分为设备长度读取（b1）、设备错误上报（b2）及公开接入（b3）；b3 进一步按生产内部链路（b3a）与公开生成/复用（b3b）拆分。官方 `flash_attn_func` 没有显式 metadata 参数，公开复用需要接通 `flash_attn_with_kvcache` 的只读 dense 子集及完整长度校验；在 b3b 验收前，公开生成与复用入口保持明确拒绝。普通 FA 的 byte 协议仍保存 softcap 数值，单独 has_softcap=True 明确拒绝；具体兼容规则见 design 第 5 节。M05b2b 接通后仍以 M05c 完成作为整个 M05 的完成条件；M04c1 在此之前不开始。
+M05a 只提供内部 AICPU 生成组件和测试驱动，输出实际调度字段而非占位数据，不另造公开协议。调度和分核算法与 host 共用源码；不包含 scale、张量地址或跨调用可变 scratch。M05b 按设备消费（M05b1）、官方签名与旧调用兼容（M05b2a）、公开生成及消费（M05b2b）拆开验收。M05b2b 再分为设备长度读取（b1）、设备错误上报（b2）及公开接入（b3）；b3 进一步按生产内部链路（b3a）与公开生成/复用（b3b）拆分。官方 `flash_attn_func` 没有显式 metadata 参数，公开复用需要接通 `flash_attn_with_kvcache` 的只读 dense 子集及完整长度校验；b3b 已完成上述 dense 子集的公开生成与复用；生成和消费均校验全部 dense 长度，显式复用不再生成记录，其余组合仍明确拒绝。普通 FA 的 byte 协议仍保存 softcap 数值，单独 has_softcap=True 明确拒绝；具体兼容规则见 design 第 5 节。M05b2b 接通后仍以 M05c 完成作为整个 M05 的完成条件；M04c1 在此之前不开始。
 
 E2E 优化集中于接口、调度计算位置、metadata 复用、重复准备与发射成本。设备计算耗时用于检查源行为一致性。新增能力及时验收相应精度和 E2E，普通 FA3 回归覆盖公共入口及 metadata 变化。
 
