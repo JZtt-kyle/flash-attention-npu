@@ -1,0 +1,225 @@
+/**
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
+
+// Upstream license: ../LICENSE.cann.
+// Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0,
+// attention/fused_infer_attention_score/op_kernel/arch22/fia_kernel_nonquant_mla.h:
+// Init, InitOutputSingleCore, InitCalcParamsEach, CalcParams, UpdateAxisInfo,
+// FlashAttention, CreateTask, ShouldExecuteTask and ExecuteTask.
+// Specialization: nonempty contiguous BSND, Hkv=1, no mask/FD/length arrays,
+// 1<=Sq*Hq<=256, 1<=Sk<=512. The caller supplies a validated M04b1 schedule.
+#pragma once
+#include "../mla_dense_params.h"
+#include "../block/mla_vector.hpp"
+
+namespace flash_attn::mla::Kernel {
+using namespace AscendC;
+
+class MlaDense {
+  public:
+    __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
+                                      GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
+                                      TPipe* pipe)
+    {
+        params = schedule;
+        uint32_t index = GetBlockIdx();
+        uint32_t ratio = 1;
+        if ASCEND_IS_AIV {
+            ratio = GetSubBlockNum();
+            index /= ratio;
+        }
+        if (index >= params.usedCoreNum) {
+            if ASCEND_IS_AIV {
+                SyncAll();
+            }
+            return;
+        }
+        core = index;
+        bStart = core == 0 ? 0 : params.bN2End[core - 1];
+        mStart = core == 0 ? 0 : params.gS1End[core - 1];
+        sStart = core == 0 ? 0 : params.s2End[core - 1];
+        bEnd = params.bN2End[core];
+        mEnd = params.gS1End[core];
+        sEnd = params.s2End[core];
+
+        if ASCEND_IS_AIV {
+            // The source does not initialize O for dense nonempty unmasked Q.
+            // LSE initialization and the all-Vector barrier are still required.
+            InitOutputSingleCore(lse, ratio);
+        }
+        const uint64_t r1 = params.mm1ResSize, r2 = params.mm2ResSize;
+        uint64_t offset = 0;
+        GlobalTensor<float> qk, pv, vec2;
+        GlobalTensor<half> p;
+        GlobalTensor<int32_t> pvInt;
+        qk.SetGlobalBuffer((__gm__ float*)(workspace + core * 2 * r1 * sizeof(float)));
+        offset += GetBlockNum() * 2 * r1 * sizeof(float);
+        p.SetGlobalBuffer((__gm__ half*)(workspace + offset + core * 2 * r1 * sizeof(half)));
+        offset += GetBlockNum() * 2 * r1 * sizeof(half);
+        pv.SetGlobalBuffer((__gm__ float*)(workspace + offset + core * 2 * r2 * sizeof(float)));
+        pvInt.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(pv.GetPhyAddr(0)));
+        offset += GetBlockNum() * 2 * r2 * sizeof(float);
+        vec2.SetGlobalBuffer((__gm__ float*)(workspace + offset + core * 2 * r2 * sizeof(float)));
+
+        Block::CubeParams cubeParams{params.sq, params.heads, params.sk, params.mm1ResSize, params.mm2ResSize};
+        if ASCEND_IS_AIC {
+            cube.Init(pipe, cubeParams, qc, qr, kv, kr);
+            cube.InitMm1GlobalTensor(qk);
+            cube.InitMm2GlobalTensor(p, pv);
+            cube.AllocEventID();
+        }
+        if ASCEND_IS_AIV {
+            Block::VectorParams vectorParams{cubeParams, ratio, scale};
+            vector.Init(vectorParams, output, lse);
+            vector.InitVec1GlobalTensor(qk, p, pvInt);
+            vector.InitVec2GlobalTensor(vec2, pv);
+            vector.InitBuffers(pipe);
+            vector.AllocEventID();
+        }
+        FlashAttention();
+        if ASCEND_IS_AIC {
+            cube.FreeEventID();
+        }
+        if ASCEND_IS_AIV {
+            vector.FreeEventID();
+        }
+    }
+
+  private:
+    using RunInfo = Block::RunInfo;
+    static constexpr uint32_t kTaskCount = 3;
+    Block::MlaCube cube;
+    Block::MlaVector vector;
+    MlaDenseKernelSchedule params;
+    uint32_t core, bStart, mStart, sStart, bEnd, mEnd, sEnd;
+    uint32_t bn2IdxInCurCore = 0;
+
+    __aicore__ inline void InitOutputSingleCore(GM_ADDR lse, uint32_t ratio)
+    {
+        GlobalTensor<float> lseGm;
+        lseGm.SetGlobalBuffer((__gm__ float*)lse);
+        uint32_t event = 0;
+        SetFlag<HardEvent::MTE3_V>(event);
+        uint64_t total = uint64_t(params.batch) * params.sq * params.heads;
+        uint64_t single = (total + params.usedCoreNum * ratio - 1) / (params.usedCoreNum * ratio);
+        uint64_t start = GetBlockIdx() * single;
+        uint64_t tail = total - start;
+        uint64_t count = tail < single ? tail : single;
+        WaitFlag<HardEvent::MTE3_V>(event);
+        if (start < total && count > 0) {
+            matmul::InitOutput<float>(lseGm[start], count, float(1.0 / 0.0));
+        }
+        SetFlag<HardEvent::MTE3_V>(event);
+        WaitFlag<HardEvent::MTE3_V>(event);
+        SyncAll();
+    }
+
+    __aicore__ inline void CalcParams(uint64_t loop, uint32_t b, uint32_t m, uint32_t s, RunInfo& info)
+    {
+        info.loop = loop;
+        info.isValid = true;
+        info.bIdx = b;
+        info.n2Idx = 0;
+        info.gS1Idx = m * params.mBaseSize;
+        uint32_t rows = params.sq * params.heads;
+        info.actMBaseSize = params.mBaseSize;
+        if ((m + 1) * params.mBaseSize > rows) {
+            info.actMBaseSize = rows - m * params.mBaseSize;
+        }
+        info.actualSingleProcessSInnerSize = params.s2BaseSize;
+        if ((s + 1) * params.s2BaseSize > params.sk) {
+            info.actualSingleProcessSInnerSize = params.sk - s * params.s2BaseSize;
+        }
+        info.actualSingleProcessSInnerSizeAlign = Tile::Align(info.actualSingleProcessSInnerSize, 32U);
+        // In this validated non-FD single-S2 range curS2Start=0, curS2End=1.
+        info.isFirstSInnerLoop = (loop == 0 || s == 0);
+        if (info.isFirstSInnerLoop) {
+            ++bn2IdxInCurCore;
+        }
+        info.bn2IdxInCurCore = bn2IdxInCurCore - 1;
+        info.isLastS2Loop = (s + 1 == (params.sk + params.s2BaseSize - 1) / params.s2BaseSize);
+        info.s2BatchOffset = s * params.s2BaseSize;
+    }
+
+    __aicore__ inline void UpdateAxisInfo(uint32_t& b, uint32_t& m, uint32_t& s)
+    {
+        uint32_t mLoops = (params.sq * params.heads + params.mBaseSize - 1) / params.mBaseSize;
+        uint32_t sLoops = (params.sk + params.s2BaseSize - 1) / params.s2BaseSize;
+        if (s + 1 < sLoops) {
+            ++s;
+            return;
+        }
+        s = 0;
+        if (m + 1 < mLoops) {
+            ++m;
+            return;
+        }
+        m = 0;
+        ++b;
+    }
+
+    __aicore__ inline bool ShouldExecuteTask(RunInfo tasks[kTaskCount])
+    {
+        for (uint32_t i = 0; i < kTaskCount; ++i) {
+            if (tasks[i].isValid) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    __aicore__ inline void ExecuteTask(uint64_t loop, RunInfo tasks[kTaskCount])
+    {
+        RunInfo& current = tasks[loop % kTaskCount];
+        RunInfo& previous = tasks[(loop + 2) % kTaskCount];
+        RunInfo& oldest = tasks[(loop + 1) % kTaskCount];
+        if (current.isValid) {
+            if ASCEND_IS_AIC {
+                cube.ComputeMm1(current);
+            }
+        }
+        if (previous.isValid) {
+            if ASCEND_IS_AIV {
+                vector.ProcessVec1L(previous);
+            }
+            if ASCEND_IS_AIC {
+                cube.ComputeMm2(previous);
+            }
+        }
+        if (oldest.isValid) {
+            if ASCEND_IS_AIV {
+                vector.ProcessVec2L(oldest);
+            }
+            oldest.isValid = false;
+        }
+    }
+
+    __aicore__ inline void FlashAttention()
+    {
+        RunInfo tasks[kTaskCount];
+        uint32_t b = bStart, m = mStart, s = sStart;
+        uint64_t created = 0, executed = 0;
+        bool dispatch = true, execute = false;
+        while (dispatch || execute) {
+            dispatch = (b != bEnd || m != mEnd || s != sEnd);
+            if (dispatch) {
+                // GetTaskDealMode always creates in the nonempty unmasked range.
+                CalcParams(created, b, m, s, tasks[created % kTaskCount]);
+                ++created;
+                UpdateAxisInfo(b, m, s);
+            }
+            execute = ShouldExecuteTask(tasks);
+            if (execute) {
+                ExecuteTask(executed++, tasks);
+            }
+        }
+    }
+};
+} // namespace flash_attn::mla::Kernel

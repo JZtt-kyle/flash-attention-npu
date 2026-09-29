@@ -33,16 +33,18 @@ struct CubeParams {
     uint32_t mmResUbSize, bmm2ResUbSize; // Elements per core per GM slot.
 };
 
-// Subset of fia_public_define.h::RunInfo consumed by the Cube, same units.
+// Subset of fia_public_define.h::RunInfo shared by Cube/Vector, same units.
 struct RunInfo {
     uint32_t loop = 0, bIdx = 0, n2Idx = 0, gS1Idx = 0;
     uint32_t actMBaseSize = 0, actualSingleProcessSInnerSize = 0;
     uint32_t actualSingleProcessSInnerSizeAlign = 0;
     uint32_t bn2IdxInCurCore = 0, s2BatchOffset = 0;
     bool isFirstSInnerLoop = true;
+    bool isLastS2Loop = true, isValid = false;
 };
 struct MSplitInfo {
     uint32_t nBufferStartM, nBufferDealM;
+    uint32_t nBufferIdx, vecStartM, vecDealM;
 };
 
 class MlaCube {

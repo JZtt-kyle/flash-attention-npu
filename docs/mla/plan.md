@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前具备 MLA 接口校验、独立 reference、固定源码 CANN 基线、首步 dense 的独立调度及 FP16 Cube 组件。生产 MLA 前向与 MLA metadata 明确报未实现；普通 FA3 继续使用既有计算路径。M04b2 按设备组件和入口接入拆为三步；M04b2a 的 910B 组件验收已完成，唯一下一步为 M04b2b。
+当前具备 MLA 接口校验、独立 reference、固定源码 CANN 基线，以及首步 dense 的独立调度和 FP16 Kernel（Cube、Vector、O/LSE）。生产 MLA 前向与 MLA metadata 明确报未实现；普通 FA3 继续使用既有计算路径。M04b2b 的独立 910B 验收已完成，唯一下一步为 M04b2c 的 FA3 接入与构建。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。
 
@@ -19,8 +19,8 @@
 | M04a | 已完成（纯文档） | CANN 源实现映射及 dense 实现拆分 | design 6.1..6.5 固定源函数、字段、数值顺序、资源/事件和组件复用条件；首步范围与验收子步骤明确，源码锚点及文档检查通过 |
 | M04b1 | 已完成 | 首步 dense 的无 gert 调度模块及源输出对照 | 85 项 CPU 检查通过，49,251 组输入与固定源的基本块、端点、核数、无 FD 和 workspace 完全一致；字段/资源/溢出检查及 sanitizer 通过；尚不接生产前向或 metadata |
 | M04b2a | 已完成 | FP16 QK/PV 的 Cube Block 与 Tile | 155 项 910B 检查通过，FP32 QK/PV 与固定源逐元素一致并满足独立 FP64 误差界；覆盖内容/RoPE 两半、M/N/K 尾块、多 query、非零 offset、缓冲复用；四组组件性能诊断完成；不接生产前向 |
-| M04b2b | 唯一下一步 | FP16 Vector Block 与 dense Kernel | 复用已验收 Cube，按源接通 softmax/aMLA、三项任务环、排空和 O/LSE；独立设备驱动完成 D01/D02、边界、scale、重复执行及同轮 CANN 性能诊断；不接公共入口 |
-| M04b2c | 待 M04b2b 完成 | 首步 FP16 的 FA3 接入与构建 | 接通已验收 Kernel、静态调度和生产构建，核查编译依赖及加载产物；真实/fake/C++ 边界、910B 精度、公开调用 E2E 诊断及普通 FA3 回归通过；BF16 及范围外组合明确拒绝 |
+| M04b2b | 已完成 | FP16 Vector Block 与 dense Kernel | 175 项独立 910B 检查通过，O/LSE 与固定源逐元素一致并通过独立数学对照；覆盖 D01/D02、尾块、多 batch、scale、任务环及复用；155 项 Cube 回归通过，五组同轮固定 CANN 性能诊断完成；不接公共入口 |
+| M04b2c | 唯一下一步 | 首步 FP16 的 FA3 接入与构建 | 接通已验收 Kernel、静态调度和生产构建，核查编译依赖及加载产物；真实/fake/C++ 边界、910B 精度、公开调用 E2E 诊断及普通 FA3 回归通过；BF16 及范围外组合明确拒绝 |
 | M04b3 | 待 M04b2c 完成 | 同范围 BF16 实例化及验收 | 保留源的 BF16 中间/输出舍入；BF16 精度与性能对照、FP16 针对性回归及公共入口普通 FA3 回归通过；两种 dtype 边界一致 |
 | M05 | 待开始 | 已验收 dense 范围的 MLA metadata | 将源调度计算接入 AICPU，保持调度结果；官方参数、运行时 scale、有/无 metadata、连续复用和普通 FA 兼容正确；metadata E2E 逐例不劣于同轮 CANN |
 | M04c1 | 待 M05 完成 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | KV 仍为 1..512；按源 M 切块/分核接通，覆盖 257/511/512/513 行及跨核尾块；两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过 |
