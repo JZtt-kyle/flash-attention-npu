@@ -251,6 +251,10 @@ CATLASS Tile copy、Mmad、布局与硬件资源
 
 M04b 先使用无设备长度读取的静态调度模块；M05 将同一计算接入 AICPU 和版本化 int32 metadata，不维护第二套公式。普通 FA byte metadata 继续使用原协议。
 
+M04b2c 的生产适配由 `mla_forward.cpp` 读取实际平台资源、调用同一 `BuildDenseSchedule`、分配 O/LSE 和每次调用独立的 workspace，并传递本次 scale 与地址。`mla_launch_impl.hpp` 通过生成器提供 FP16 C1V2 编译单元；Kernel / Block / Tile 计算保持 M04b2b 版本。当前只开放 910B，其他设备及 BF16 在相应实例验收前明确拒绝。首步公开入口为不带预分配输出的 `flash_attn_func`；内部 `out_` 也明确拒绝，避免绕过现有 functional custom op 的 alias 契约。
+
+CANN 9.0 的 Bisheng ASC launcher 未提供调度模式参数；生产扩展用仅在 MLA 发射期间生效的线程局部作用域，为实际 ACL launch 设置源 `BATCH_MODE`。封装保留其他 launch 属性和错误码，未进入该作用域的普通 FA3 发射原样透传；编译器绕过已验收 ACL 路径或单次作用域出现非一次发射时明确失败。构建为 MLA 编译单元额外生成设备预处理依赖，避免最终 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头文件。
+
 `BuildDenseSchedule` 的平台输入携带核数、实际可用 L1/UB/L0 容量、libapi 预留和平台 `CalcTschBlockDim(c*cvRatio,c,c*cvRatio)` 的结果表；调度通过实际使用核数索引该表，避免在无 gert 模块中猜测芯片启动维度。输出采用固定容量数组，workspace 字段保留元素与字节单位；几何、源 uint32 最小公倍数/块数、资源和 uint64 workspace 加法检查失败时不改写调用方的原调度。
 
 源 `SetSplitOutput` 固定读取 `usedCoreNum*2` 项 FD Vector 端点，而 C1V1 的源 vector 只有 `aicNum*cvRatio` 项。本仓按 vector 实际长度复制到 52 项容量数组，未用项初始化为零；CPU oracle 比较原 `SplitCore` 的完整输出 vector，不执行该可能越界的序列化循环。此调整不改变分核算法、FD 判定或设备计算。

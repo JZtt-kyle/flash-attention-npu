@@ -320,6 +320,9 @@ class BishengBuildExt(build_ext):
             "-ltiling_api",
             "-lplatform",
         ]
+        if ext_name == "flash_attn_npu_3.flash_attn_npu_3":
+            # Scope is thread-local and active only around MLA's ASC launch.
+            link_flags.append("-Wl,--wrap=aclrtLaunchKernelWithHostArgs")
 
         # NOTE: ccache is intentionally NOT supported. bisheng requires `-x asc`
         # to enter ASC/device-compile mode (without it, kernel_operator.h and the
@@ -497,7 +500,19 @@ class BishengBuildExt(build_ext):
             _compiler, compile_common, _la, _lf = toolchains[ext_name]
             depfile = obj + ".d"
             cmdhash_file = obj + ".cmdhash"
-            if not force and _obj_is_fresh(obj, src, depfile, cmdhash_file, compile_common):
+            mla_device = ext_name == "flash_attn_npu_3.flash_attn_npu_3" and os.path.basename(
+                src
+            ).startswith("mla_dispatch_")
+            device_depfile = obj + ".device.d"
+            device_fresh = not mla_device or (
+                os.path.exists(device_depfile)
+                and _obj_is_fresh(obj, src, device_depfile, cmdhash_file, compile_common)
+            )
+            if (
+                not force
+                and device_fresh
+                and _obj_is_fresh(obj, src, depfile, cmdhash_file, compile_common)
+            ):
                 print("[compile-skip]", ext_name, os.path.basename(src), "(obj up-to-date)")
                 return (ext_name, obj)
             cmd = [*compile_common, "-c", src, "-o", obj, "-MMD", "-MF", depfile]
@@ -507,6 +522,19 @@ class BishengBuildExt(build_ext):
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 if result.stdout:
                     print(result.stdout)
+                if mla_device:
+                    # Bisheng's final host pass overwrites -MMD and omits headers
+                    # under __NPU_ARCH__. Track the actual device include graph.
+                    deps_cmd = [
+                        *compile_common,
+                        "--offload-device-only",
+                        "-M",
+                        src,
+                        "-MF",
+                        device_depfile,
+                    ]
+                    print("[device-deps-cmd]", " ".join(deps_cmd))
+                    subprocess.run(deps_cmd, capture_output=True, text=True, check=True)
                 with open(cmdhash_file, "w") as f:
                     f.write(_cmdhash(compile_common))
                 return (ext_name, obj)
@@ -640,6 +668,15 @@ src_ascend910_v3 = glob.glob(
 src_ascend910_v3 += glob.glob(
     os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3", "autogen", "*.cpp"), recursive=True
 )
+src_ascend910_v3 += [
+    os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3/mla", name)
+    for name in (
+        "mla_forward.cpp",
+        "mla_launch.cpp",
+        "mla_schedule.cpp",
+        "detail/cann_split_core.cpp",
+    )
+]
 src_ascend950_v3 = glob.glob(
     os.path.join(this_dir, "csrc/ascend950/flash_attn_npu_3", "flash_api.cpp"), recursive=True
 )

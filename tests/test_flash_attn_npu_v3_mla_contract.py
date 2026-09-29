@@ -1,8 +1,4 @@
-"""MLA rejection contract on 910B, including registered fake and raw C++ entries.
-
-These checks do not claim MLA numerical support. All MLA calls must fail before
-ordinary metadata/kernel dispatch until the corresponding migration step lands.
-"""
+"""MLA supported subset and rejections through eager, fake and raw C++ entries."""
 
 from contextlib import nullcontext
 import inspect
@@ -73,15 +69,30 @@ def _forward(entry, args):
 @pytest.mark.parametrize("layout", ["dense", "tnd", "paged", "paged_tnd"])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("strided", [False, True])
-def test_mla_unimplemented(entry, representation, layout, dtype, strided):
+def test_mla_supported_subset_and_rejections(entry, representation, layout, dtype, strided):
     args = _inputs(representation, layout, dtype, strided)
     if strided:
         for name in ("q", "k", "v"):
             assert args[name].stride(-1) == 1
             assert not args[name].is_contiguous()
             assert args[name].storage_offset() > 0
-    with pytest.raises(RuntimeError, match=f"MLA {representation} forward is not implemented yet"):
-        _forward(entry, args)
+    if (
+        representation == "compressed"
+        and layout == "dense"
+        and dtype == torch.float16
+        and not strided
+    ):
+        out, lse, *_ = _forward(entry, args)
+        assert out.shape == (2, 3, 4, 512) and out.dtype == torch.float16
+        assert lse.shape == (2, 4, 3) and lse.dtype == torch.float32
+        if entry != "fake":
+            torch.testing.assert_close(out.cpu(), torch.zeros(out.shape, dtype=out.dtype))
+            torch.testing.assert_close(lse.cpu(), torch.full(lse.shape, 17.0).log())
+    else:
+        with pytest.raises(
+            RuntimeError, match=f"MLA {representation} forward is not implemented yet"
+        ):
+            _forward(entry, args)
 
 
 INVALID = [
@@ -171,9 +182,15 @@ def test_public_rejects_before_metadata_or_dispatch(
         pytest.fail("MLA reached ordinary metadata/kernel dispatch")
 
     monkeypatch.setattr(api, "get_scheduler_metadata", unexpected)
-    monkeypatch.setattr(api, "_flash_attn_forward", unexpected)
+    supported = representation == "compressed" and public_entry == "dense"
+    if not supported:
+        monkeypatch.setattr(api, "_flash_attn_forward", unexpected)
     with FakeTensorMode() if fake else nullcontext():
         args = _inputs(representation, "tnd" if public_entry == "varlen" else "dense")
+        if supported:
+            out, lse = api.flash_attn_func(**args, return_attn_probs=True)
+            assert out.shape == (2, 3, 4, 512) and lse.shape == (2, 4, 3)
+            return
         with pytest.raises(RuntimeError, match="forward is not implemented yet"):
             if public_entry == "dense":
                 api.flash_attn_func(**args)
@@ -253,6 +270,99 @@ def test_mla_metadata_rejected(entry, dims):
             api.flash_attn_npu_3.get_scheduler_metadata(*bound.arguments.values())
         else:
             api._get_scheduler_metadata_op(**args)
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "k_new",
+        "v_new",
+        "out_",
+        "cu_seqlens_k_new",
+        "seqused_q",
+        "seqused_k",
+        "max_seqlen_q",
+        "max_seqlen_k",
+        "kv_batch_idx",
+        "leftpad_k",
+        "rotary_cos",
+        "rotary_sin",
+        "seqlens_rotary",
+        "q_descale",
+        "k_descale",
+        "v_descale",
+        "scheduler_metadata",
+        "rotary_interleaved",
+        "causal",
+        "window_size_left",
+        "window_size_right",
+        "attention_chunk",
+        "softcap",
+        "num_splits",
+        "pack_gqa",
+        "sm_margin",
+    ],
+)
+def test_each_unsupported_dense_option(entry, option):
+    args = _inputs()
+    if option in ("max_seqlen_q", "max_seqlen_k"):
+        args[option] = 17
+    elif option in ("rotary_interleaved", "pack_gqa"):
+        args[option] = False
+    elif option == "causal":
+        args[option] = True
+    elif option in ("window_size_left", "window_size_right", "num_splits"):
+        args[option] = 0
+    elif option in ("attention_chunk", "softcap", "sm_margin"):
+        args[option] = 1
+    else:
+        args[option] = torch.empty(1, device="npu")
+    with pytest.raises(RuntimeError, match="MLA compressed forward is not implemented yet"):
+        _forward(entry, args)
+
+
+@pytest.mark.parametrize("shape", [(0, 1, 1), (1, 257, 1), (1, 2, 129)])
+def test_dense_query_limits(entry, shape):
+    args = _inputs()
+    args["q"] = torch.empty((*shape, 64), dtype=torch.float16, device="npu")
+    args["qv"] = torch.empty((*shape, 512), dtype=torch.float16, device="npu")
+    args["k"] = args["k"][: shape[0]]
+    args["v"] = args["v"][: shape[0]]
+    with pytest.raises(RuntimeError, match="outside B>0"):
+        _forward(entry, args)
+
+
+def test_dense_kv_limit(entry):
+    args = _inputs()
+    args["k"] = torch.empty((2, 513, 1, 64), dtype=torch.float16, device="npu")
+    args["v"] = torch.empty((2, 513, 1, 512), dtype=torch.float16, device="npu")
+    with pytest.raises(RuntimeError, match="outside B>0"):
+        _forward(entry, args)
+
+
+def test_dense_batch_mismatch(entry):
+    args = _inputs()
+    args["k"], args["v"] = args["k"][:1], args["v"][:1]
+    with pytest.raises(RuntimeError, match="dense batch sizes must match"):
+        _forward(entry, args)
+
+
+@pytest.mark.parametrize("scale", [float("inf"), -float("inf"), float("nan"), 1e39])
+def test_dense_nonfinite_scale(entry, scale):
+    args = _inputs()
+    args["softmax_scale"] = scale
+    with pytest.raises(RuntimeError, match="softmax_scale must be finite"):
+        _forward(entry, args)
+
+
+def test_fake_batch_field_overflow():
+    with FakeTensorMode():
+        args = {
+            name: torch.empty((2**32, 1, 1, dim), dtype=torch.float16, device="npu")
+            for name, dim in (("q", 64), ("k", 64), ("v", 512), ("qv", 512))
+        }
+        with pytest.raises(RuntimeError, match="outside B>0"):
+            api._flash_attn_forward(**args)
 
 
 @pytest.mark.parametrize("layout", ["dense", "tnd"])

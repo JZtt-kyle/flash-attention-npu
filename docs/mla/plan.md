@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前具备 MLA 接口校验、独立 reference、固定源码 CANN 基线，以及首步 dense 的独立调度和 FP16 Kernel（Cube、Vector、O/LSE）。生产 MLA 前向与 MLA metadata 明确报未实现；普通 FA3 继续使用既有计算路径。M04b2b 的独立 910B 验收已完成，唯一下一步为 M04b2c 的 FA3 接入与构建。
+当前已将首步 FP16 dense MLA 的调度和 Kernel 接入 910B FA3 `flash_attn_func`，具备独立 reference 和固定源码 CANN 对照。BF16、MLA metadata 及范围外组合仍明确报未实现；普通 FA3 继续使用既有计算路径。M04b2c 的生产构建、精度、入口边界和普通 FA3 回归已完成；无 metadata 的公开调用 E2E 仍慢于 CANN，数据仅作诊断。唯一下一步为 M04b3 的同范围 BF16 实例化与验收。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。
 
@@ -20,8 +20,8 @@
 | M04b1 | 已完成 | 首步 dense 的无 gert 调度模块及源输出对照 | 85 项 CPU 检查通过，49,251 组输入与固定源的基本块、端点、核数、无 FD 和 workspace 完全一致；字段/资源/溢出检查及 sanitizer 通过；尚不接生产前向或 metadata |
 | M04b2a | 已完成 | FP16 QK/PV 的 Cube Block 与 Tile | 155 项 910B 检查通过，FP32 QK/PV 与固定源逐元素一致并满足独立 FP64 误差界；覆盖内容/RoPE 两半、M/N/K 尾块、多 query、非零 offset、缓冲复用；四组组件性能诊断完成；不接生产前向 |
 | M04b2b | 已完成 | FP16 Vector Block 与 dense Kernel | 175 项独立 910B 检查通过，O/LSE 与固定源逐元素一致并通过独立数学对照；覆盖 D01/D02、尾块、多 batch、scale、任务环及复用；155 项 Cube 回归通过，五组同轮固定 CANN 性能诊断完成；不接公共入口 |
-| M04b2c | 唯一下一步 | 首步 FP16 的 FA3 接入与构建 | 接通已验收 Kernel、静态调度和生产构建，核查编译依赖及加载产物；真实/fake/C++ 边界、910B 精度、公开调用 E2E 诊断及普通 FA3 回归通过；BF16 及范围外组合明确拒绝 |
-| M04b3 | 待 M04b2c 完成 | 同范围 BF16 实例化及验收 | 保留源的 BF16 中间/输出舍入；BF16 精度与性能对照、FP16 针对性回归及公共入口普通 FA3 回归通过；两种 dtype 边界一致 |
+| M04b2c | 已完成 | 首步 FP16 的 FA3 接入与构建 | 强制构建、设备头增量依赖及加载产物已核查；339 项真实/fake/C++ 契约、101 项公开/内部入口精度与生命周期、176 项 CPU 和 11 项普通 FA3 回归通过；五组同轮 CANN 公开调用诊断完成，E2E 比值约 1.61–1.63，未达最终性能门槛；BF16 及范围外组合明确拒绝 |
+| M04b3 | 唯一下一步 | 同范围 BF16 实例化及验收 | 保留源的 BF16 中间/输出舍入；BF16 精度与性能对照、FP16 针对性回归及公共入口普通 FA3 回归通过；两种 dtype 边界一致 |
 | M05 | 待开始 | 已验收 dense 范围的 MLA metadata | 将源调度计算接入 AICPU，保持调度结果；官方参数、运行时 scale、有/无 metadata、连续复用和普通 FA 兼容正确；metadata E2E 逐例不劣于同轮 CANN |
 | M04c1 | 待 M05 完成 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | KV 仍为 1..512；按源 M 切块/分核接通，覆盖 257/511/512/513 行及跨核尾块；两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过 |
 | M04c2 | 待 M04c1 完成 | dense 的 KV 513..1024、显式 num_splits=1 | 保留源 aMLA nUpdate、PV 原子加和事件依赖；单列禁止 FD 的必要调度映射；跨块最大值变化、O/LSE、重复执行、metadata、普通 FA3 回归和 E2E 通过 |

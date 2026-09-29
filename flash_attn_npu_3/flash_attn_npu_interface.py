@@ -107,11 +107,11 @@ def round_up_headdim(head_size: int) -> int:
 
 
 def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged_kv=False):
-    """Reject MLA before copies, metadata generation or ordinary FA dispatch.
+    """Recognize validated dense MLA before copies or ordinary FA dispatch.
 
     Uses only tensor metadata, including for fake tensors. Keep in sync with
     ascend910/flash_attn_npu_3/mla/mla_validation.h. Outer strides and storage
-    offsets are legal; no view is materialized by this boundary.
+    offsets are legal for contiguous views; no view is materialized here.
     """
 
     def check(condition, message):
@@ -125,7 +125,7 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
     )
     check(q.shape[-1] == k.shape[-1], "FlashAttention: q and k head dimensions must match")
     if qv is None and q.shape[-1] == v.shape[-1]:
-        return
+        return False
     check(not paged_kv or not varlen_k, "MLA: page_table and cu_seqlens_k cannot be combined")
     check(q.dtype in (torch.float16, torch.bfloat16), "MLA: inputs must have FP16 or BF16 dtype")
     check(q.device.type == "npu", "MLA: inputs must be NPU tensors")
@@ -152,12 +152,68 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
             "MLA: supported qv representation requires Dq=64 and Dv=512",
         )
         check(heads_kv == 1, "MLA: compressed representation requires one KV head")
-        raise RuntimeError("NPU FlashAttention MLA compressed forward is not implemented yet")
+        check(
+            not varlen_q and not varlen_k and not paged_kv,
+            "MLA compressed forward is not implemented yet for TND or paged KV",
+        )
+        check(q.dtype == torch.float16, "MLA compressed forward is not implemented yet for BF16")
+        check(q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
+        check(
+            0 < q.shape[0] <= 2**32 - 1
+            and 1 <= q.shape[1] * heads_q <= 256
+            and 1 <= k.shape[1] <= 512,
+            "MLA compressed forward is not implemented yet outside B>0, 1<=Sq*Hq<=256, 1<=Sk<=512",
+        )
+        for tensor in (q, k, v, qv):
+            check(
+                tensor.is_contiguous(),
+                "MLA compressed forward is not implemented yet for noncontiguous BSND",
+            )
+            check(
+                not tensor.requires_grad,
+                "MLA compressed forward is not implemented yet for gradients",
+            )
+        return True
     check(
         q.shape[-1] == 192 and v.shape[-1] == 128,
         "MLA: supported representation without qv requires Dq=192 and Dv=128",
     )
     raise RuntimeError("NPU FlashAttention MLA prefill forward is not implemented yet")
+
+
+def _check_mla_dense_options(
+    *,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    attention_chunk=0,
+    softcap=0.0,
+    num_splits=1,
+    pack_gqa=None,
+    sm_margin=0,
+    rotary_interleaved=True,
+    optional_tensors=(),
+):
+    if any(t is not None for t in optional_tensors) or not rotary_interleaved:
+        raise RuntimeError(
+            "MLA compressed forward is not implemented yet for optional tensors or length/rotary options"
+        )
+    if (
+        causal
+        or window_size != (-1, -1)
+        or attention_chunk != 0
+        or softcap != 0.0
+        or num_splits != 1
+        or pack_gqa is not None
+        or sm_margin != 0
+    ):
+        raise RuntimeError(
+            "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options"
+        )
+    if softmax_scale is not None and (
+        not math.isfinite(softmax_scale) or abs(softmax_scale) > 3.4028234663852886e38
+    ):
+        raise RuntimeError("MLA: softmax_scale must be finite in FP32")
 
 
 def _check_mla_metadata(headdim, headdim_v):
@@ -206,7 +262,7 @@ def _flash_attn_forward(
     pack_gqa: Optional[bool] = None,
     sm_margin: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    _check_mla_inputs(
+    if _check_mla_inputs(
         q,
         k,
         v,
@@ -214,7 +270,37 @@ def _flash_attn_forward(
         varlen_q=cu_seqlens_q is not None,
         varlen_k=cu_seqlens_k is not None,
         paged_kv=page_table is not None,
-    )
+    ):
+        _check_mla_dense_options(
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=(window_size_left, window_size_right),
+            attention_chunk=attention_chunk,
+            softcap=softcap,
+            num_splits=num_splits,
+            pack_gqa=pack_gqa,
+            sm_margin=sm_margin,
+            rotary_interleaved=rotary_interleaved,
+            optional_tensors=(
+                k_new,
+                v_new,
+                out_,
+                cu_seqlens_k_new,
+                seqused_q,
+                seqused_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                kv_batch_idx,
+                leftpad_k,
+                rotary_cos,
+                rotary_sin,
+                seqlens_rotary,
+                q_descale,
+                k_descale,
+                v_descale,
+                scheduler_metadata,
+            ),
+        )
     q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
     v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
     cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new = [
@@ -313,7 +399,7 @@ def _flash_attn_forward_fake(
     Symbolic fake implementation of flash attention forward.
     Returns tensors with the correct shapes and dtypes without actual computation.
     """
-    _check_mla_inputs(
+    if _check_mla_inputs(
         q,
         k,
         v,
@@ -321,7 +407,37 @@ def _flash_attn_forward_fake(
         varlen_q=cu_seqlens_q is not None,
         varlen_k=cu_seqlens_k is not None,
         paged_kv=page_table is not None,
-    )
+    ):
+        _check_mla_dense_options(
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=(window_size_left, window_size_right),
+            attention_chunk=attention_chunk,
+            softcap=softcap,
+            num_splits=num_splits,
+            pack_gqa=pack_gqa,
+            sm_margin=sm_margin,
+            rotary_interleaved=rotary_interleaved,
+            optional_tensors=(
+                k_new,
+                v_new,
+                out_,
+                cu_seqlens_k_new,
+                seqused_q,
+                seqused_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                kv_batch_idx,
+                leftpad_k,
+                rotary_cos,
+                rotary_sin,
+                seqlens_rotary,
+                q_descale,
+                k_descale,
+                v_descale,
+                scheduler_metadata,
+            ),
+        )
 
     # Determine if we're in varlen mode
     is_varlen_q = cu_seqlens_q is not None
@@ -733,31 +849,46 @@ class FlashAttnFunc(torch.autograd.Function):
         sm_margin=0,
         return_softmax=False,
     ):
-        _check_mla_inputs(q, k, v, qv)
+        is_mla = _check_mla_inputs(q, k, v, qv)
+        if is_mla:
+            _check_mla_dense_options(
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                attention_chunk=attention_chunk,
+                softcap=softcap,
+                num_splits=num_splits,
+                pack_gqa=pack_gqa,
+                sm_margin=sm_margin,
+                optional_tensors=(q_descale, k_descale, v_descale),
+            )
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
-        # Training interfaces do not expose scheduler_metadata (aligned with
-        # official flash-attn); the scheduler metadata is computed internally on
-        # the AICPU so no D2H/H2D sync breaks the pipeline.
-        batch_size, seqlen_q, num_heads, head_size = q.shape
-        seqlen_k, num_heads_k = k.shape[1], k.shape[2]
-        cache_seqlens = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
-        scheduler_metadata = get_scheduler_metadata(
-            batch_size,
-            seqlen_q,
-            seqlen_k,
-            num_heads,
-            num_heads_k,
-            head_size,
-            cache_seqlens,
-            qkv_dtype=q.dtype,
-            headdim_v=v.shape[-1],
-            causal=causal,
-            window_size=window_size,
-            has_softcap=softcap > 0.0,
-            num_splits=num_splits,
-            sm_margin=sm_margin,
-        )
+        # MLA uses the validated static scheduler until its AICPU metadata lands.
+        scheduler_metadata = None
+        if not is_mla:
+            # Training interfaces do not expose scheduler_metadata (aligned with
+            # official flash-attn); the scheduler metadata is computed internally on
+            # the AICPU so no D2H/H2D sync breaks the pipeline.
+            batch_size, seqlen_q, num_heads, head_size = q.shape
+            seqlen_k, num_heads_k = k.shape[1], k.shape[2]
+            cache_seqlens = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
+            scheduler_metadata = get_scheduler_metadata(
+                batch_size,
+                seqlen_q,
+                seqlen_k,
+                num_heads,
+                num_heads_k,
+                head_size,
+                cache_seqlens,
+                qkv_dtype=q.dtype,
+                headdim_v=v.shape[-1],
+                causal=causal,
+                window_size=window_size,
+                has_softcap=softcap > 0.0,
+                num_splits=num_splits,
+                sm_margin=sm_margin,
+            )
         # out, q, k, v, out_padded, softmax_lse = _flash_attn_forward(
         out, softmax_lse, *rest = _flash_attn_forward(
             q,
@@ -1377,14 +1508,15 @@ def flash_attn_with_kvcache(
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
     """
-    _check_mla_inputs(
+    if _check_mla_inputs(
         q,
         k_cache,
         v_cache,
         qv,
         varlen_q=cu_seqlens_q is not None,
         paged_kv=page_table is not None,
-    )
+    ):
+        raise RuntimeError("MLA compressed forward is not implemented yet for the kvcache entry")
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
     if softmax_scale is None:

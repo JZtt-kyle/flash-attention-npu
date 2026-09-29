@@ -1,0 +1,181 @@
+"""Public FA3 dense E2E diagnostics against fixed native CANN; no MLA metadata yet."""
+
+import csv
+from decimal import Decimal
+import hashlib
+import json
+import os
+from pathlib import Path
+import statistics
+import subprocess
+import time
+
+import torch
+import torch_npu
+
+from flash_attn_npu_3 import flash_attn_npu_interface as api
+from tests.common.compare import assert_fa_close
+from tests.common.mla_ref import mla_reference_pair
+from tests.mla_cann_baseline import (
+    CannCall,
+    Case,
+    check_vendor_configuration,
+    environment,
+    make_inputs,
+)
+from tests.mla_dense_profile import CASES
+
+
+def profile(directory, vendor):
+    vendor = check_vendor_configuration(vendor)
+    directory = Path(directory).resolve()
+    directory.mkdir(parents=True, exist_ok=False)
+    torch.npu.set_device(0)
+    assert torch.npu.device_count() == 1 and "910B" in torch.npu.get_device_name(0)
+    inputs, native = [], []
+    for shape, scale in CASES:
+        batch, sq, heads, sk = shape
+        cpu = make_inputs(
+            Case("public", "compressed", batch, sq, sk, heads, 1), torch.float16, seed=20260929
+        )
+        device = {name: tensor.npu() for name, tensor in cpu.items()}
+        inputs.append(device)
+        native.append(CannCall(device, scale=scale))
+        actual = api.flash_attn_func(
+            **device, softmax_scale=scale, num_splits=1, return_attn_probs=True
+        )
+        source = native[-1]()
+        refs = mla_reference_pair(**cpu, softmax_scale=scale)
+        for i, name in enumerate(("out", "lse")):
+            torch.testing.assert_close(actual[i].cpu(), source[i].cpu(), rtol=0, atol=0)
+            assert_fa_close(actual[i].cpu(), refs[i], refs[i + 2], name=name)
+    source_root = Path(
+        os.environ.get(
+            "MLA_CANN_SOURCE_ROOT", Path(__file__).resolve().parents[2] / "ops-transformer"
+        )
+    )
+    env = environment(source_root, vendor)
+    extension = Path(api.flash_attn_npu_3.__file__).resolve()
+    env["fa3_extension"] = dict(
+        path=str(extension), sha256=hashlib.sha256(extension.read_bytes()).hexdigest()
+    )
+    (directory / "environment.json").write_text(json.dumps(env, indent=2) + "\n")
+
+    def snapshot(label):
+        (directory / label).write_text(subprocess.check_output(["npu-smi", "info"], text=True))
+
+    def call(index, name):
+        if name == "native_cann":
+            return native[index]()
+        return api.flash_attn_func(
+            **inputs[index], softmax_scale=CASES[index][1], num_splits=1, return_attn_probs=True
+        )
+
+    names = ("fa3", "native_cann")
+    snapshot("npu-before.log")
+    for index in range(len(CASES)):
+        for _ in range(5):
+            for name in names:
+                result = call(index, name)
+                torch.npu.synchronize()
+    wall = []
+    for index in range(len(CASES)):
+        for r in range(5):
+            for i in range(20):
+                for name in names if r % 2 == 0 else names[::-1]:
+                    start = time.perf_counter_ns()
+                    result = call(index, name)
+                    torch.npu.synchronize()
+                    wall.append(
+                        dict(
+                            case=index,
+                            name=name,
+                            round=r,
+                            iteration=i,
+                            e2e_us=(time.perf_counter_ns() - start) / 1000,
+                        )
+                    )
+    (directory / "wall-samples.json").write_text(json.dumps(wall, indent=2) + "\n")
+
+    labels = []
+    profiler = torch_npu.profiler
+    trace = directory / "profiler"
+    with profiler.profile(
+        activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU],
+        schedule=profiler.schedule(wait=0, warmup=1, active=len(CASES) * 5 * 10 * 2, repeat=1),
+        on_trace_ready=profiler.tensorboard_trace_handler(str(trace)),
+        experimental_config=profiler._ExperimentalConfig(
+            profiler_level=profiler.ProfilerLevel.Level0,
+            export_type=profiler.ExportType.Text,
+            data_simplification=False,
+        ),
+    ) as prof:
+        result = call(0, "fa3")
+        torch.npu.synchronize()
+        prof.step()
+        for index in range(len(CASES)):
+            for r in range(5):
+                for i in range(10):
+                    for name in names if r % 2 == 0 else names[::-1]:
+                        result = call(index, name)
+                        torch.npu.synchronize()
+                        labels.append(dict(case=index, name=name, round=r, iteration=i))
+                        prof.step()
+    del result
+    (directory / "profile-labels.json").write_text(json.dumps(labels, indent=2) + "\n")
+    csvs, raw_csvs = list(trace.rglob("kernel_details.csv")), list(trace.rglob("op_summary_*.csv"))
+    assert len(csvs) == len(raw_csvs) == 1
+    with csvs[0].open() as f:
+        rows = sorted(csv.DictReader(f), key=lambda row: Decimal(row["Start Time(us)"].strip()))
+    with raw_csvs[0].open() as f:
+        raw = sorted(csv.DictReader(f), key=lambda row: Decimal(row["Task Start Time(us)"].strip()))
+    assert len(rows) == len(raw) == len(labels), (len(rows), len(raw), len(labels))
+    for row, source, label in zip(rows, raw, labels):
+        assert row["Name"] == source["Op Name"] and row["Device_id"] == source["Device_id"]
+        assert Decimal(row["Start Time(us)"].strip()) == Decimal(
+            source["Task Start Time(us)"].strip()
+        )
+        assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
+        assert ("mla_dense_fp16" if label["name"] == "fa3" else "FusedInferAttentionScore") in row[
+            "Name"
+        ]
+        label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
+    results = []
+    for index, (shape, scale) in enumerate(CASES):
+        item = dict(shape=shape, scale=scale, native_call=native[index].description())
+        for name in names:
+            kernels = [x for x in labels if x["case"] == index and x["name"] == name]
+            walls = [x for x in wall if x["case"] == index and x["name"] == name]
+            item[name] = dict(
+                median_kernel_us=statistics.median(x["kernel_us"] for x in kernels),
+                median_e2e_us=statistics.median(x["e2e_us"] for x in walls),
+                round_mean_kernel_us=[
+                    statistics.mean(x["kernel_us"] for x in kernels if x["round"] == r)
+                    for r in range(5)
+                ],
+                round_mean_e2e_us=[
+                    statistics.mean(x["e2e_us"] for x in walls if x["round"] == r) for r in range(5)
+                ],
+            )
+        item["e2e_ratio"] = item["fa3"]["median_e2e_us"] / item["native_cann"]["median_e2e_us"]
+        results.append(item)
+    snapshot("npu-after.log")
+    report = dict(
+        scope="Public flash_attn_func without metadata vs fixed native CANN; diagnostics, not metadata acceptance",
+        seed=20260929,
+        warmup=5,
+        rounds=5,
+        wall_iterations=20,
+        profiler_iterations=10,
+        timing="public call through device completion, including validation, scheduling, output/workspace allocation and launch; input H2D excluded on both paths",
+        kernel_csv=str(csvs[0]),
+        raw_kernel_csv=str(raw_csvs[0]),
+        results=results,
+        kernel_samples=labels,
+    )
+    (directory / "profile.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(results, indent=2))
+
+
+if __name__ == "__main__":
+    profile(os.environ["MLA_FORWARD_ARTIFACT_DIR"], os.environ["MLA_CANN_VENDOR"])
