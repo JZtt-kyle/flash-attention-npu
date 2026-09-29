@@ -2,11 +2,15 @@
 #include "mla_launch.h"
 #include "mla_schedule.h"
 #include "mla_metadata_args.h"
+#include "mla_validation.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 #include "torch_npu/csrc/framework/OpCommand.h"
 #include "runtime/rt_ffts.h"
+#include <c10/core/DeviceGuard.h>
+#include <torch/library.h>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -182,4 +186,45 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     at_npu::native::OpCommand::RunOpApiV2("ascendc_mla_dense", launch);
     return {out, lse, at::Tensor(), at::Tensor()};
 }
+
+// The public read-only cache path has already rejected unsupported options.
+// Keep tensor/scale checks here as well: the dispatcher is independently callable.
+std::tuple<at::Tensor, at::Tensor> DenseForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                                  const at::Tensor& qv, std::optional<double> softmaxScale,
+                                                  const std::optional<at::Tensor>& cacheSeqlens,
+                                                  const std::optional<at::Tensor>& schedulerMetadata)
+{
+    CheckForwardBoundary(q, k, v, qv, false, false, false);
+    TORCH_CHECK(!softmaxScale ||
+                    (std::isfinite(*softmaxScale) && std::abs(*softmaxScale) <= std::numeric_limits<float>::max()),
+                "MLA: softmax_scale must be finite in FP32");
+    float scale = softmaxScale ? static_cast<float>(*softmaxScale) : 1.0f / std::sqrt(576.0f);
+    if (cacheSeqlens) {
+        CheckCacheLengths(*cacheSeqlens, q.size(0), q.device());
+    }
+    if (schedulerMetadata) {
+        CheckDenseMetadataTensor(*schedulerMetadata, q.device());
+    }
+    const c10::OptionalDeviceGuard deviceGuard(device_of(q));
+    auto result = DenseForward(q, k, v, qv, scale, cacheSeqlens, schedulerMetadata);
+    return {result[0], result[1]};
+}
 } // namespace flash_attn::mla
+
+TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
+{
+    m.def("_mla_dense_forward(Tensor q, Tensor k, Tensor v, Tensor qv, float? softmax_scale=None, "
+          "Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
+}
+
+TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
+{
+    m.impl("_mla_dense_forward", &flash_attn::mla::DenseForwardOp);
+}
+
+TORCH_LIBRARY_IMPL(flash_attn_npu_3, AutogradPrivateUse1, m)
+{
+    // Preserve FakeTensor dispatch below Autograd. The real/fake kernels both
+    // reject requires_grad before allocating or submitting forward-only MLA.
+    m.impl("_mla_dense_forward", torch::CppFunction::makeFallthrough());
+}

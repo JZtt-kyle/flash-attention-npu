@@ -269,6 +269,8 @@ M05b2b3b 开放官方 `get_scheduler_metadata` 的 64/512 dense 调度，以及 
 
 公开 metadata 仍为 v1 的 401 字 int32 tensor，可克隆或用连续偏移视图跨层复用，不依赖 Python 私有属性；消费前检查其类型、形状和设备，内容由现有消费者校验。显式复用不再发射 AICPU 生成；无 metadata 的 kvcache 和 `flash_attn_func` 继续内部生成。生成/消费各自登记 allocator stream，提交闭包保留输入、长度和记录；生成完成后由当前 stream 等待 AICPU，跨 stream 使用时调用方建立正常 stream/event 依赖。记录在消费期间保持只读，各前向独立分配 O/LSE/workspace；scale 按当次调用生效。公开 kvcache 的 LSE 返回值为四项，未分割时两个 accumulator 是与官方包装一致的空 tensor（默认 FP32），真实/fake 一致。重复 host 调度和调用成本留给 M05c；图捕获生命周期留给 M16。
 
+M05c1 为上述只读 dense kvcache 增加内部 C++ dispatcher `_mla_dense_forward`，只接收 q/k/v/qv、当次 scale、长度和 metadata，返回 O/LSE。公共入口先识别 MLA 并拒绝未支持选项；真实 C++ 和 fake 实现分别执行张量、scale、长度及记录外形校验。Autograd 层透传到真实/fake 分派，两者都明确拒绝 requires_grad；不提供反向。请求 LSE 时公共包装再创建两个遵循 PyTorch 默认浮点 dtype 的空 accumulator。此入口复用原 `DenseForward` 的调度、分配、stream 和设备校验，不改变公开签名、metadata 协议或 Kernel；通用前向及普通 FA3 保持原分派。
+
 CANN 9.0 的 Bisheng ASC launcher 未提供调度模式参数；生产扩展用仅在 MLA 发射期间生效的线程局部作用域，为实际 ACL launch 设置源 `BATCH_MODE`。封装保留其他 launch 属性和错误码，未进入该作用域的普通 FA3 发射原样透传；编译器绕过已验收 ACL 路径或单次作用域出现非一次发射时明确失败。构建为 MLA 编译单元额外生成设备预处理依赖，避免最终 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头文件。
 
 `BuildDenseSchedule` 的平台输入携带核数、实际可用 L1/UB/L0 容量、libapi 预留和平台 `CalcTschBlockDim(c*cvRatio,c,c*cvRatio)` 的结果表；调度通过实际使用核数索引该表，避免在无 gert 模块中猜测芯片启动维度。输出采用固定容量数组，workspace 字段保留元素与字节单位；几何、源 uint32 最小公倍数/块数、资源和 uint64 workspace 加法检查失败时不改写调用方的原调度。

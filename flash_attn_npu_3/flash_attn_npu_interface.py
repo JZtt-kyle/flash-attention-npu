@@ -251,6 +251,19 @@ def _check_mla_forward_metadata(q, cache_seqlens, metadata):
             raise RuntimeError("MLA: scheduler_metadata must be contiguous")
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_dense_forward")
+def _mla_dense_forward_fake(
+    q, k, v, qv, softmax_scale=None, cache_seqlens=None, scheduler_metadata=None
+):
+    _check_mla_inputs(q, k, v, qv)
+    _check_mla_dense_options(softmax_scale=softmax_scale)
+    _check_mla_forward_metadata(q, cache_seqlens, scheduler_metadata)
+    return (
+        q.new_empty((*q.shape[:-1], v.shape[-1])),
+        q.new_empty((q.shape[0], q.shape[2], q.shape[1]), dtype=torch.float32),
+    )
+
+
 @_torch_custom_op_wrapper(
     "flash_attn_npu_3::_flash_attn_forward", mutates_args=(), device_types="npu"
 )
@@ -1556,6 +1569,44 @@ def flash_attn_with_kvcache(
             (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
         )
         cache_seqlens = maybe_contiguous(cache_seqlens)
+    if is_mla:
+        # The real/fake dispatcher checks scale. Keep its scalar validation
+        # inside the op so torch.compile can capture this public wrapper.
+        _check_mla_dense_options(
+            causal=causal,
+            window_size=window_size,
+            attention_chunk=attention_chunk,
+            softcap=softcap,
+            num_splits=num_splits,
+            pack_gqa=pack_gqa,
+            sm_margin=sm_margin,
+            rotary_interleaved=rotary_interleaved,
+            optional_tensors=(
+                k,
+                v,
+                cu_seqlens_k_new,
+                max_seqlen_q,
+                cache_batch_idx,
+                cache_leftpad,
+                rotary_cos,
+                rotary_sin,
+                rotary_seqlens,
+                q_descale,
+                k_descale,
+                v_descale,
+            ),
+        )
+        out, softmax_lse = torch.ops.flash_attn_npu_3._mla_dense_forward(
+            q, k_cache, v_cache, qv, softmax_scale, cache_seqlens, scheduler_metadata
+        )
+        if return_softmax_lse:
+            return (
+                out,
+                softmax_lse,
+                torch.empty(0, device=out.device),
+                torch.empty(0, device=out.device),
+            )
+        return out
     if scheduler_metadata is not None and not is_mla:
         _validate_scheduler_metadata(
             scheduler_metadata,

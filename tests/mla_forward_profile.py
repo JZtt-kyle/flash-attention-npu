@@ -246,7 +246,7 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False):
     report = dict(
         dtype=dtype_name,
         scope=(
-            "Public read-only dense kvcache metadata reuse vs fixed native CANN; M05b2b3b diagnostics"
+            "Public read-only dense kvcache metadata reuse vs fixed native CANN"
             if metadata_reuse
             else "Public flash_attn_func with implicit AICPU metadata generation vs fixed native CANN; diagnostics, not explicit metadata reuse acceptance"
         ),
