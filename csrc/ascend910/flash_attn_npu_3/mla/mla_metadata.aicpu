@@ -1,0 +1,28 @@
+// Compile the SAME scheduler for AICPU; do not duplicate its formulas or depend
+// on an installed CANN operator. Source attribution is retained in these files.
+#include "aicpu_api.h"
+#include "mla_metadata_args.h"
+#include "mla_metadata.cpp"
+#include "mla_schedule.cpp"
+#include "detail/cann_split_core.cpp"
+#include <cstring>
+
+__global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaMetadataArgs*>(args);
+    if (input.outputAddr == 0 || input.outputAddr % alignof(int32_t) != 0 ||
+        input.outputWords != kMlaDenseMetadataWords) {
+        return 1;
+    }
+    MlaDenseMetadata metadata;
+    BuildDenseMetadata(input.shape, input.platform, input.dtype, metadata);
+    std::memcpy(reinterpret_cast<void*>(input.outputAddr), &metadata, sizeof(metadata));
+    AscendC::DataStoreBarrier();
+    // Invalid schedule inputs are represented by the header, never by a stale
+    // usable schedule. A consumer must check status before reading the payload.
+    return 0;
+}

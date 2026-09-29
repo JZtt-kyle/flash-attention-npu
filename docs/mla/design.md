@@ -251,6 +251,10 @@ CATLASS Tile copy、Mmad、布局与硬件资源
 
 M04b 先使用无设备长度读取的静态调度模块；M05 将同一计算接入 AICPU 和版本化 int32 metadata，不维护第二套公式。普通 FA byte metadata 继续使用原协议。
 
+MLA 的内部 dense metadata 由 [`mla_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h) 定义：版本 1 为 401 个 int32 字，前 8 字保存 magic、版本、类型、总字数、dtype、生成状态、源调度状态和保留位，其后完整保存 `MlaSchedule` 的几何、分核端点、FD 字段、workspace 和资源需求。64 位字段按低/高 32 位保存，允许连续 tensor 的奇数 storage offset，不能窄化 workspace 大小。调度失败或 dtype 未支持时，记录非成功状态并清零整个调度载荷；消费者必须先检查头部再读取调度。scale、输入输出地址和可变 scratch 不进入可复用记录。
+
+[`mla_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.aicpu) 直接编译相同的调度、分核和序列化源码，输出后执行设备写屏障。AICPU 发射参数只携带本步静态形状、平台资源和输出缓冲信息。M05a 的独立驱动按既有事件协议在当前 stream 与 AICPU stream 之间同步；公开调用链和设备消费者在 M05b 接通前继续明确拒绝 MLA metadata。生产构建单独链接该 AICPU 对象，并跟踪包含的头文件、`.cpp` 及编译选项以判断是否需要重编译。
+
 M04b2c 的生产适配由 `mla_forward.cpp` 读取实际平台资源、调用同一 `BuildDenseSchedule`、分配 O/LSE 和每次调用独立的 workspace，并传递本次 scale 与地址。`mla_launch_impl.hpp` 通过生成器分别提供 FP16/BF16 C1V2 编译单元，按输入 dtype 分派。M04b3 将同一 Kernel / Block / Tile 按输入类型实例化，保持 M04b2b 的计算、资源和同步次序；aMLA 因子、P 和 O 使用各自输入 dtype，保留第 6.3 节的舍入规则。两种 dtype 均为 2 字节，共用同一调度和 workspace 布局。当前只开放 910B C1V2，其他设备及比例在相应实例验收前明确拒绝。首步公开入口为不带预分配输出的 `flash_attn_func`；内部 `out_` 也明确拒绝，避免绕过现有 functional custom op 的 alias 契约。
 
 CANN 9.0 的 Bisheng ASC launcher 未提供调度模式参数；生产扩展用仅在 MLA 发射期间生效的线程局部作用域，为实际 ACL launch 设置源 `BATCH_MODE`。封装保留其他 launch 属性和错误码，未进入该作用域的普通 FA3 发射原样透传；编译器绕过已验收 ACL 路径或单次作用域出现非一次发射时明确失败。构建为 MLA 编译单元额外生成设备预处理依赖，避免最终 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头文件。
