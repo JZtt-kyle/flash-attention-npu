@@ -19,7 +19,8 @@ __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args)
         return 1;
     }
     MlaDenseMetadata metadata;
-    BuildDenseMetadata(input.shape, input.platform, input.dtype, metadata);
+    BuildDenseMetadata(input.shape, input.platform, input.dtype, metadata,
+                       reinterpret_cast<const int32_t*>(input.cacheSeqlensAddr), input.cacheSeqlensCount);
     std::memcpy(reinterpret_cast<void*>(input.outputAddr), &metadata, sizeof(metadata));
     AscendC::DataStoreBarrier();
     // Invalid schedule inputs are represented by the header, never by a stale

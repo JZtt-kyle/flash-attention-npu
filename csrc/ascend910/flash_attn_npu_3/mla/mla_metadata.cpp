@@ -2,9 +2,28 @@
 // remain in mla_schedule.cpp and detail/cann_split_core.cpp (LICENSE.cann).
 #include "mla_metadata.h"
 #include <algorithm>
+#include <limits>
 
 namespace flash_attn::mla {
 namespace {
+MlaMetadataStatus CheckCacheLengths(const MlaDenseShape& shape, const int32_t* lengths, uint64_t count)
+{
+    if (lengths == nullptr && count == 0) {
+        return MlaMetadataStatus::Success;
+    }
+    const auto address = reinterpret_cast<uintptr_t>(lengths);
+    if (lengths == nullptr || address % alignof(int32_t) != 0 || count != uint64_t(shape.batch) ||
+        count > (std::numeric_limits<uintptr_t>::max() - address) / sizeof(int32_t)) {
+        return MlaMetadataStatus::InvalidCacheLengths;
+    }
+    for (uint64_t b = 0; b < count; ++b) {
+        if (lengths[b] != shape.kvLength) {
+            return MlaMetadataStatus::UnsupportedCacheLength;
+        }
+    }
+    return MlaMetadataStatus::Success;
+}
+
 MlaMetadataWide Wide(uint64_t value)
 {
     return {static_cast<uint32_t>(value), static_cast<uint32_t>(value >> 32)};
@@ -55,7 +74,7 @@ MlaMetadataSchedule Serialize(const MlaSchedule& s)
 } // namespace
 
 void BuildDenseMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
-                        MlaDenseMetadata& output)
+                        MlaDenseMetadata& output, const int32_t* cacheSeqlens, uint64_t cacheSeqlensCount)
 {
     MlaDenseMetadata metadata{};
     metadata.magic = kMlaMetadataMagic;
@@ -71,7 +90,12 @@ void BuildDenseMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platf
         auto status = BuildDenseSchedule(shape, platform, schedule);
         metadata.scheduleStatus = static_cast<uint32_t>(status);
         if (status == MlaScheduleStatus::Success) {
-            metadata.schedule = Serialize(schedule);
+            // Validate static scheduling bounds before dereferencing lengths.
+            // Failure leaves the entire payload zero, including after reuse.
+            metadata.status = static_cast<uint32_t>(CheckCacheLengths(shape, cacheSeqlens, cacheSeqlensCount));
+            if (metadata.status == static_cast<uint32_t>(MlaMetadataStatus::Success)) {
+                metadata.schedule = Serialize(schedule);
+            }
         } else {
             metadata.status = static_cast<uint32_t>(MlaMetadataStatus::ScheduleFailure);
         }

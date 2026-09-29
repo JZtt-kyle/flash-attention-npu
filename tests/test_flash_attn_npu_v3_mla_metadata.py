@@ -52,6 +52,8 @@ class Args(ct.Structure):
         ("dtype", ct.c_uint32),
         ("shape", Shape),
         ("platform", Platform),
+        ("cache_seqlens", ct.c_uint64),
+        ("cache_seqlens_count", ct.c_uint64),
     ]
 
 
@@ -134,10 +136,15 @@ def load_probe(library, directory):
             assert acl.aclrtDestroyEvent(event) == 0
 
 
-def enqueue(probe, args, storage, worker=0):
+def enqueue(probe, args, storage, worker=0, cache_seqlens=None):
     output = storage[1:-1]
     assert output.is_contiguous() and output.numel() == WORDS
     args.output = output.data_ptr()
+    if cache_seqlens is not None:
+        assert cache_seqlens.dtype == torch.int32 and cache_seqlens.is_contiguous()
+        assert cache_seqlens.device == output.device and cache_seqlens.ndim == 1
+        args.cache_seqlens = cache_seqlens.data_ptr()
+        args.cache_seqlens_count = cache_seqlens.numel()
     producer = torch.npu.current_stream()
     worker_stream = probe["workers"][worker]
     ready, done = probe["events"][2 * worker : 2 * worker + 2]
@@ -150,6 +157,10 @@ def enqueue(probe, args, storage, worker=0):
     # The fixture also retains storage until synchronization; explicitly record
     # the auxiliary stream, as the production allocator integration will do.
     output.record_stream(worker_stream)
+    if cache_seqlens is not None:
+        cache_seqlens.record_stream(worker_stream)
+    # Independent host schedule for full capacity only; never read device
+    # lengths here. Rejection tests separately assert their expected header.
     host = (ct.c_uint32 * WORDS)()
     probe["lib"].metadata_host(ct.byref(args), host)
     return list(host)
@@ -306,3 +317,94 @@ def test_repeated_overwrite_and_streams(probe):
         words = output.cpu().tolist()
         assert words[0] == words[-1] == SENTINEL
         assert [w & 0xFFFFFFFF for w in words[1:-1]] == host
+
+
+@pytest.mark.parametrize("dtype", (1, 2))
+@pytest.mark.parametrize("sk", (1, 17, 65, 257, 512))
+def test_device_cache_lengths(probe, dtype, sk):
+    # Nonzero, only 4-byte-aligned offset, with a batch spanning multiple cores.
+    batch = 2 * probe["platform"].aic + 1
+    lengths_storage = torch.full((batch + 2,), SENTINEL, dtype=torch.int32, device="npu")
+    lengths = lengths_storage[1:-1]
+    lengths.fill_(sk)
+    storage = torch.full((WORDS + 2,), SENTINEL, dtype=torch.int32, device="npu")
+    args = Args(0, WORDS, dtype, Shape(batch, 1, 8, sk), probe["platform"])
+    expected = enqueue(probe, args, storage, cache_seqlens=lengths)
+    assert [v & 0xFFFFFFFF for v in storage[1:-1].cpu().tolist()] == expected
+    # Every position must be inspected, including the final sample. The
+    # mismatching value is updated on device before the AICPU stream handshake.
+    for index in range(batch):
+        lengths.fill_(sk)
+        lengths[index] = sk - 1
+        enqueue(probe, args, storage, cache_seqlens=lengths)
+        words = storage.cpu().tolist()
+        assert words[0] == words[-1] == SENTINEL
+        assert words[1:9] == [MAGIC, 1, 1, WORDS, dtype, 4, 0, 0]
+        assert not any(words[9:-1])
+    lengths.fill_(sk)
+    enqueue(probe, args, storage, cache_seqlens=lengths)
+    assert [v & 0xFFFFFFFF for v in storage[1:-1].cpu().tolist()] == expected
+    assert lengths_storage.cpu().tolist() == [SENTINEL, *([sk] * batch), SENTINEL]
+
+
+@pytest.mark.parametrize("dtype", (1, 2))
+@pytest.mark.parametrize("value", (-(2**31), -1, 0, 1, 256, 258, 512, 513, 2**31 - 1))
+def test_unsupported_cache_length(probe, dtype, value):
+    args = Args(0, WORDS, dtype, Shape(2, 1, 8, 257), probe["platform"])
+    storage = torch.full((WORDS + 2,), SENTINEL, dtype=torch.int32, device="npu")
+    for values in ([value, value], [257, value], [value, 257]):
+        lengths = torch.tensor(values, dtype=torch.int32, device="npu")
+        enqueue(probe, args, storage, cache_seqlens=lengths)
+        words = storage.cpu().tolist()
+        assert words[0] == words[-1] == SENTINEL
+        assert words[1:9] == [MAGIC, 1, 1, WORDS, dtype, 4, 0, 0]
+        assert not any(words[9:-1])
+        assert lengths.cpu().tolist() == values
+
+
+def test_device_cache_length_buffer_bounds(probe):
+    args = Args(0, WORDS, 1, Shape(2, 1, 8, 257), probe["platform"])
+    storage = torch.full((WORDS + 2,), SENTINEL, dtype=torch.int32, device="npu")
+    lengths = torch.full((2,), 257, dtype=torch.int32, device="npu")
+    expected = enqueue(probe, args, storage, cache_seqlens=lengths)
+    for address, count in (
+        (0, 2),
+        (lengths.data_ptr(), 0),
+        (lengths.data_ptr(), 1),
+        (lengths.data_ptr(), 3),
+        (lengths.data_ptr(), 2**64 - 1),
+        (lengths.data_ptr() + 1, 2),
+        (lengths.data_ptr() + 2, 2),
+        (2**64 - 4, 2),
+    ):
+        args.cache_seqlens, args.cache_seqlens_count = address, count
+        enqueue(probe, args, storage)
+        words = storage.cpu().tolist()
+        assert words[0] == words[-1] == SENTINEL
+        assert words[1:9] == [MAGIC, 1, 1, WORDS, 1, 3, 0, 0]
+        assert not any(words[9:-1])
+    enqueue(probe, args, storage, cache_seqlens=lengths)
+    assert [v & 0xFFFFFFFF for v in storage[1:-1].cpu().tolist()] == expected
+
+
+def test_cache_length_updates_and_streams(probe):
+    streams = [torch.npu.Stream(), torch.npu.Stream()]
+    pending = []
+    for i, stream in enumerate(streams):
+        with torch.npu.stream(stream):
+            lengths = torch.empty((2,), dtype=torch.int32, device="npu")
+            storage = torch.full((WORDS + 2,), SENTINEL, dtype=torch.int32, device="npu")
+            args = Args(0, WORDS, 1 + i, Shape(2, 1, 8, 257), probe["platform"])
+            for value in (257, 0, 256, 258, 257, -1, 257):
+                lengths.fill_(value)
+                expected = enqueue(probe, args, storage, worker=i, cache_seqlens=lengths)
+                if value != 257:
+                    expected = [MAGIC, 1, 1, WORDS, 1 + i, 4, 0, 0] + [0] * (WORDS - 8)
+                pending.append((storage.clone(), expected))
+            # The producer records the worker stream before these local
+            # references are dropped; the ordered caller stream owns updates.
+            del args, lengths, storage
+    for storage, expected in pending:
+        words = storage.cpu().tolist()
+        assert words[0] == words[-1] == SENTINEL
+        assert [v & 0xFFFFFFFF for v in words[1:-1]] == expected

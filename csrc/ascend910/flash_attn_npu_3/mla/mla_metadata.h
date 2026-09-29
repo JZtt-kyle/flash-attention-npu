@@ -19,7 +19,9 @@ enum class MlaMetadataDtype : uint32_t {
 enum class MlaMetadataStatus : uint32_t {
     Success = 0,
     UnsupportedDtype = 1,
-    ScheduleFailure = 2
+    ScheduleFailure = 2,
+    InvalidCacheLengths = 3,
+    UnsupportedCacheLength = 4
 };
 
 // Every wire field has int32-tensor alignment, including 64-bit quantities.
@@ -67,7 +69,12 @@ static_assert(std::is_standard_layout_v<MlaDenseMetadata> && std::is_trivially_c
 
 // Deterministic full record, also on failure: a non-success header and zero
 // payload replace any previous schedule. No scale, addresses or mutable scratch.
+// Optional lengths must all equal shape.kvLength: shorter, empty, nonuniform or
+// over-capacity sequences are not implemented by the current dense Kernel.
+// (nullptr, 0) uses full capacity. A non-null buffer must have B aligned int32
+// entries, readable on the executing processor (host tests or AICPU).
 void BuildDenseMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
-                        MlaDenseMetadata& output);
+                        MlaDenseMetadata& output, const int32_t* cacheSeqlens = nullptr,
+                        uint64_t cacheSeqlensCount = 0);
 
 } // namespace flash_attn::mla

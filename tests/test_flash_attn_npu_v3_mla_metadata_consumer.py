@@ -47,6 +47,8 @@ class Args(ct.Structure):
         ("dtype", ct.c_uint32),
         ("shape", Shape),
         ("platform", Platform),
+        ("cache_seqlens", ct.c_uint64),
+        ("cache_seqlens_count", ct.c_uint64),
     ]
 
 

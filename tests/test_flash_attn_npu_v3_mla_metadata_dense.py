@@ -61,9 +61,12 @@ def make_metadata_case(probes, probe, shape, *, scale=None, worker=0):
         ((3 * case["context"].block_dim + 2) * 16,), SENTINEL, dtype=torch.int32, device="npu"
     )
     case["status"] = case["status_storage"][16:-16]
+    case["cache_seqlens"] = torch.full((shape[0],), shape[3], dtype=torch.int32, device="npu")
     args = Args(0, WORDS, dtype, Shape(*shape), probe["platform"])
     # No D2H or synchronization between the AICPU producer and the consumer.
-    case["metadata_expected"] = enqueue(probe, args, storage, worker)
+    case["metadata_expected"] = enqueue(
+        probe, args, storage, worker, cache_seqlens=case["cache_seqlens"]
+    )
     return case
 
 
@@ -243,4 +246,30 @@ def test_aicpu_failure_and_overwrite(consumers, probe):
             assert_status(case, expected)
             for actual, before in zip(outputs, original):
                 assert torch.equal(actual.cpu(), before)
+    check_metadata_case(consumers, case)
+
+
+def test_cache_lengths_failure_and_recovery(consumers, probe):
+    case = make_metadata_case(consumers, probe, (2, 1, 8, 257))
+    check_metadata_case(consumers, case)
+    outputs = [*case["outputs"]["migrated"], case["workspace"]["migrated"]]
+    original = [t.cpu() for t in outputs]
+    args = Args(0, WORDS, case["context"].dtype, Shape(*case["shape"]), probe["platform"])
+    for value in (-1, 0, 1, 256, 258, 512, 513, 2**31 - 1):
+        case["cache_seqlens"][1] = value
+        enqueue(probe, args, case["metadata_storage"], cache_seqlens=case["cache_seqlens"])
+        # A failed producer record is passed straight to the real device
+        # consumer; no status copy or synchronization intervenes.
+        launch_consumer(consumers, case)
+        assert_status(case, 3)  # GenerationFailed on every Cube/Vector core.
+        words = case["metadata_storage"].cpu().tolist()
+        assert words[0] == words[-1] == SENTINEL
+        assert words[6:9] == [4, 0, 0]
+        assert not any(words[9:-1])
+        for actual, before in zip(outputs, original):
+            assert torch.equal(actual.cpu(), before)
+    case["cache_seqlens"].fill_(257)
+    case["metadata_expected"] = enqueue(
+        probe, args, case["metadata_storage"], cache_seqlens=case["cache_seqlens"]
+    )
     check_metadata_case(consumers, case)

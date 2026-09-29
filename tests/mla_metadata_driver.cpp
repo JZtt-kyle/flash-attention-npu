@@ -63,6 +63,41 @@ int main()
     bad = args;
     bad.platform.libApiWorkspaceBytes = std::numeric_limits<uint64_t>::max();
     checkFailure(bad, 2, 5);
+    // Exact B entries at a 4-byte offset: sanitizers detect any overread.
+    alignas(8) int32_t lengths[3] = {int32_t(guard), 257, 257};
+    auto withLengths = args;
+    withLengths.cacheSeqlensAddr = reinterpret_cast<uint64_t>(lengths + 1);
+    withLengths.cacheSeqlensCount = 2;
+    assert(ComputeMlaDenseMetadata(&withLengths) == 0 && storage == before);
+    for (uint32_t i = 1; i <= 2; ++i) {
+        for (int32_t value : {INT32_MIN, -1, 0, 1, 256, 258, 512, 513, INT32_MAX}) {
+            lengths[i] = value;
+            checkFailure(withLengths, 4, 0);
+        }
+        lengths[i] = 257;
+    }
+    assert(lengths[0] == int32_t(guard));
+    for (uint64_t count : {uint64_t(0), uint64_t(1), uint64_t(3), UINT64_MAX}) {
+        bad = withLengths;
+        bad.cacheSeqlensCount = count;
+        checkFailure(bad, 3, 0);
+    }
+    for (uint64_t address :
+         {uint64_t(0), withLengths.cacheSeqlensAddr + 1, withLengths.cacheSeqlensAddr + 2, UINT64_MAX - 3}) {
+        bad = withLengths;
+        bad.cacheSeqlensAddr = address;
+        checkFailure(bad, 3, 0);
+    }
+    // This pointer is aligned but unreadable. Static failures must precede
+    // length access, even if the declared count matches the invalid batch.
+    bad = withLengths;
+    bad.cacheSeqlensAddr = 4;
+    bad.shape.kvLength = 513;
+    checkFailure(bad, 2, 1);
+    bad.shape = withLengths.shape;
+    bad.dtype = 0;
+    checkFailure(bad, 1, 0);
+    assert(ComputeMlaDenseMetadata(&withLengths) == 0 && storage == before);
     uint64_t budget = good.schedule.workspace.userBytes.low | (uint64_t(good.schedule.workspace.userBytes.high) << 32);
     args.platform.libApiWorkspaceBytes = std::numeric_limits<uint64_t>::max() - budget;
     assert(ComputeMlaDenseMetadata(&args) == 0);
