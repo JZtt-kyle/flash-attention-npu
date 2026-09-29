@@ -1548,27 +1548,21 @@ def flash_attn_with_kvcache(
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
     """
-    is_mla = _check_mla_inputs(
-        q,
-        k_cache,
-        v_cache,
-        qv,
-        varlen_q=cu_seqlens_q is not None,
-        paged_kv=page_table is not None,
+    # The dense qv dispatcher validates tensors independently in real/fake
+    # execution. Route before repeating those checks in Python; other forms
+    # retain the common recognition/rejection path.
+    is_mla = (
+        qv is not None and cu_seqlens_q is None and page_table is None and q.device.type == "npu"
     )
-    assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
-    assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
-    if softmax_scale is None:
-        softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
-    if cache_seqlens is not None and isinstance(cache_seqlens, int):
-        if is_mla and cache_seqlens != k_cache.shape[1]:
-            raise RuntimeError(
-                "MLA compressed forward is not implemented yet unless cache_seqlens equals KV capacity"
-            )
-        cache_seqlens = torch.full(
-            (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
+    if not is_mla:
+        is_mla = _check_mla_inputs(
+            q,
+            k_cache,
+            v_cache,
+            qv,
+            varlen_q=cu_seqlens_q is not None,
+            paged_kv=page_table is not None,
         )
-        cache_seqlens = maybe_contiguous(cache_seqlens)
     if is_mla:
         # The real/fake dispatcher checks scale. Keep its scalar validation
         # inside the op so torch.compile can capture this public wrapper.
@@ -1596,6 +1590,17 @@ def flash_attn_with_kvcache(
                 v_descale,
             ),
         )
+        if isinstance(cache_seqlens, int):
+            # Integer convenience input needs valid geometry before creating
+            # its device tensor. Tensor/None lengths go straight to the op.
+            _check_mla_inputs(q, k_cache, v_cache, qv)
+            if cache_seqlens != k_cache.shape[1]:
+                raise RuntimeError(
+                    "MLA compressed forward is not implemented yet unless cache_seqlens equals KV capacity"
+                )
+            cache_seqlens = torch.full(
+                (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
+            )
         out, softmax_lse = torch.ops.flash_attn_npu_3._mla_dense_forward(
             q, k_cache, v_cache, qv, softmax_scale, cache_seqlens, scheduler_metadata
         )
@@ -1607,6 +1612,15 @@ def flash_attn_with_kvcache(
                 torch.empty(0, device=out.device),
             )
         return out
+    assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
+    assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
+    if softmax_scale is None:
+        softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
+    if cache_seqlens is not None and isinstance(cache_seqlens, int):
+        cache_seqlens = torch.full(
+            (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
+        )
+        cache_seqlens = maybe_contiguous(cache_seqlens)
     if scheduler_metadata is not None and not is_mla:
         _validate_scheduler_metadata(
             scheduler_metadata,
@@ -1745,6 +1759,57 @@ def _resolve_legacy_metadata_softcap(has_softcap, softcap):
     return softcap
 
 
+def _check_mla_metadata_options(
+    num_heads_kv,
+    max_seqlen_k_new,
+    causal,
+    window_size,
+    attention_chunk,
+    has_softcap,
+    num_splits,
+    sm_margin,
+    optional_args,
+):
+    if num_heads_kv != 1:
+        raise RuntimeError(
+            "MLA scheduler metadata is not implemented yet outside the dense shape bounds"
+        )
+    if (
+        any(arg is not None for arg in optional_args)
+        or max_seqlen_k_new != 0
+        or causal
+        or window_size != (-1, -1)
+        or attention_chunk != 0
+        or has_softcap
+        or num_splits != 1
+        or sm_margin != 0
+    ):
+        raise RuntimeError(
+            "MLA scheduler metadata is not implemented yet for these length, mask, split, "
+            "scheduling or legacy numerical options"
+        )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_dense_metadata")
+def _mla_dense_metadata_fake(
+    batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
+):
+    if not (
+        0 < batch_size <= 0xFFFFFFFF
+        and 0 < max_seqlen_q <= 256
+        and 0 < num_heads_q <= 256
+        and max_seqlen_q * num_heads_q <= 256
+        and 0 < max_seqlen_k <= 512
+    ):
+        raise RuntimeError(
+            "MLA scheduler metadata is not implemented yet outside the dense shape bounds"
+        )
+    if qkv_dtype not in (torch.float16, torch.bfloat16):
+        raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
+    _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
+    return torch.empty((401,), dtype=torch.int32, device=cache_seqlens.device)
+
+
 @torch.library.custom_op(
     "flash_attn_npu_3::_get_scheduler_metadata",
     mutates_args=(),
@@ -1859,48 +1924,30 @@ def _get_scheduler_metadata_fake(
     softmax_scale: Optional[float],
 ) -> torch.Tensor:
     if _check_mla_metadata(headdim, headdim_v):
-        if not (
-            0 < batch_size <= 0xFFFFFFFF
-            and 0 < max_seqlen_q <= 256
-            and 0 < num_heads_q <= 256
-            and max_seqlen_q * num_heads_q <= 256
-            and 0 < max_seqlen_k <= 512
-            and num_heads_kv == 1
-        ):
-            raise RuntimeError(
-                "MLA scheduler metadata is not implemented yet outside the dense shape bounds"
-            )
-        if (
-            any(
-                t is not None
-                for t in (
-                    cu_seqlens_q,
-                    cu_seqlens_k,
-                    cu_seqlens_k_new,
-                    seqused_q,
-                    cache_leftpad,
-                    page_size,
-                    pack_gqa,
-                    softcap,
-                    softmax_scale,
-                )
-            )
-            or max_seqlen_k_new != 0
-            or causal
-            or (window_size_left, window_size_right) != (-1, -1)
-            or attention_chunk != 0
-            or has_softcap
-            or num_splits != 1
-            or sm_margin != 0
-        ):
-            raise RuntimeError(
-                "MLA scheduler metadata is not implemented yet for these length, mask, split, "
-                "scheduling or legacy numerical options"
-            )
-        if qkv_dtype not in (torch.float16, torch.bfloat16):
-            raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
-        _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
-        return torch.empty((401,), dtype=torch.int32, device=cache_seqlens.device)
+        _check_mla_metadata_options(
+            num_heads_kv,
+            max_seqlen_k_new,
+            causal,
+            (window_size_left, window_size_right),
+            attention_chunk,
+            has_softcap,
+            num_splits,
+            sm_margin,
+            (
+                cu_seqlens_q,
+                cu_seqlens_k,
+                cu_seqlens_k_new,
+                seqused_q,
+                cache_leftpad,
+                page_size,
+                pack_gqa,
+                softcap,
+                softmax_scale,
+            ),
+        )
+        return _mla_dense_metadata_fake(
+            batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
+        )
     _resolve_legacy_metadata_softcap(has_softcap, softcap)
     return torch.empty(
         (_SCHEDULER_METADATA_TILING_BYTES,),
@@ -1947,8 +1994,30 @@ def get_scheduler_metadata(
     """
     if headdim_v is None:
         headdim_v = headdim
-    if not _check_mla_metadata(headdim, headdim_v):
-        cache_seqlens = maybe_contiguous(cache_seqlens)
+    if _check_mla_metadata(headdim, headdim_v):
+        _check_mla_metadata_options(
+            num_heads_kv,
+            max_seqlen_k_new,
+            causal,
+            (window_size[0], window_size[1]),
+            attention_chunk,
+            has_softcap,
+            num_splits,
+            sm_margin,
+            (
+                cu_seqlens_q,
+                cu_seqlens_k_new,
+                cache_leftpad,
+                page_size,
+                pack_gqa,
+                softcap,
+                softmax_scale,
+            ),
+        )
+        return torch.ops.flash_attn_npu_3._mla_dense_metadata(
+            batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
+        )
+    cache_seqlens = maybe_contiguous(cache_seqlens)
     # Route through the custom op so torch.compile / FakeTensor can use the
     # registered fake instead of tracing into the raw pybind extension.
     # Public API still hard-codes cu_seqlens_k / seqused_q as None (unchanged).

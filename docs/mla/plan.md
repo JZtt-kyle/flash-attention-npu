@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前已将 FP16/BF16 dense MLA 的源调度和 Kernel 接入 910B FA3。M05a/M05b1 完成 AICPU 生成、版本化 metadata 的设备读取与校验；M05b2a 对齐官方签名并保留普通 FA3 关键字兼容。M05b2b1/b2 完成设备长度读取和错误上报，b3a 完成生产内部生成/消费，b3b 已接通公开 `get_scheduler_metadata` 及只读 dense `flash_attn_with_kvcache` 复用。范围外组合仍明确拒绝。M05c1 已接通精简 C++ dispatcher，两种 dtype 各五组的复用前向及一次生成加四次前向均达到同轮 CANN E2E 门槛；一次生成加一次前向仍未达标。唯一下一步为 M05c2，优化 metadata 生成及剩余 host 准备并完成最终 E2E 验收；整个 M05 完成前不开始 M04c1。
+当前已将 FP16/BF16 dense MLA 的源调度和 Kernel 接入 910B FA3。M05a/M05b1 完成 AICPU 生成、版本化 metadata 的设备读取与校验；M05b2a 对齐官方签名并保留普通 FA3 关键字兼容。M05b2b1/b2 完成设备长度读取和错误上报，b3a 完成生产内部生成/消费，b3b 已接通公开 `get_scheduler_metadata` 及只读 dense `flash_attn_with_kvcache` 复用。范围外组合仍明确拒绝。M05c1/M05c2 已完成精简 C++ 前向与 metadata dispatcher，并消除公开 dense qv 路径的重复张量检查；两种 dtype 各五组在相同固定 CPU 亲和性下的复用前向、一次生成加一次/四次前向均达到同轮 CANN E2E 中位数门槛，M05 已闭环。唯一下一步为 M04c1，接通 dense 的 S1G 多块；KV 容量仍限于 1..512。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。
 
@@ -29,9 +29,9 @@
 | M05b2b2 | 已完成 | 公开接入所需的设备校验错误上报 | 98 项双 dtype 设备检查通过，含 36 个独立进程的真实异常、device/stream/event 同步和成功精度；`-DNDEBUG` 仍触发 Trap，无长度 D2H 或 steady-state 主机同步；90 项 CPU、普通 FA3 回归、公开拒绝契约及同轮 CANN 性能诊断完成 |
 | M05b2b3a | 已完成 | 现有 dense 前向的生产 AICPU 生成与校验消费链路 | `flash_attn_func` 内部生成 metadata 并由生产 launcher 调用 `LoadDenseMetadata`；两种 dtype 源对照精度、运行时 scale、连续调用与 allocator/stream 生命周期、生产构建、普通 FA3 回归及同轮性能诊断通过；显式 metadata 入口继续拒绝 |
 | M05b2b3b | 已完成 | 已验收 dense 范围的公开 MLA metadata 生成与复用 | 开放官方 `get_scheduler_metadata` 和 `flash_attn_with_kvcache` 的只读连续 BSND 子集；真实/fake/C++ 边界、完整 dense 长度校验、运行时 scale、有/无 metadata、连续复用及 allocator/stream 生命周期正确；两种 dtype 精度、普通 FA3 回归及同轮性能诊断通过 |
-| M05c1 | 已完成 | dense MLA kvcache 的精简 C++ dispatcher | 真实/fake/compile、参数拒绝、双 dtype 源对照精度、生命周期和普通 FA3 回归通过；1,595 个去重测试通过；十个代表用例的复用 E2E 比值为 0.746–0.775，生成加一次前向仍为 1.525–1.608，整个 M05 未完成 |
-| M05c2 | 唯一下一步 | metadata 生成及剩余 host 准备优化、最终 E2E 验收 | 优先处理公开 metadata 生成开销，再按测量处理重复准备/调度；逐例 `FA3 metadata E2E / 同轮 CANN E2E <= 1.0`，分别记录 metadata 生成、复用和预设完整调用段；两种 dtype 精度及普通 FA3 回归通过 |
-| M04c1 | 待 M05 完成 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | KV 仍为 1..512；按源 M 切块/分核接通，覆盖 257/511/512/513 行及跨核尾块；两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过 |
+| M05c1 | 已完成 | dense MLA kvcache 的精简 C++ dispatcher | 真实/fake/compile、参数拒绝、双 dtype 源对照精度、生命周期和普通 FA3 回归通过；1,595 个去重测试通过；十个代表用例的复用 E2E 比值为 0.746–0.775，生成加一次前向仍为 1.525–1.608，后续由 M05c2 完成完整调用段验收 |
+| M05c2 | 已完成 | 精简 metadata dispatcher 与公开 dense qv 准备优化、完整 E2E 验收 | 1,789 项最终检查通过；相同固定 CPU 亲和性下，两种 dtype 各五组的复用前向、生成加一次/四次前向逐例均满足同轮 CANN E2E 比值 <= 1.0，metadata 生成和 Kernel 时间分别记录 |
+| M04c1 | 唯一下一步 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | KV 仍为 1..512；按源 M 切块/分核接通，覆盖 257/511/512/513 行及跨核尾块；两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过 |
 | M04c2 | 待 M04c1 完成 | dense 的 KV 513..1024、显式 num_splits=1 | 保留源 aMLA nUpdate、PV 原子加和事件依赖；单列禁止 FD 的必要调度映射；跨块最大值变化、O/LSE、重复执行、metadata、普通 FA3 回归和 E2E 通过 |
 | M04c3 | 待 M04c2 完成 | dense 长 KV，含 8193 | 按源流程扩大范围，不改变切块/数值路径；单/多 query、多块尾部、两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过；显式 num_splits=1 |
 | M04c4 | 待 M04c3 完成 | dense 全局空 Q/K/V 容量边界 | `Sq=0`、`Sk=0`、二者均零及空 batch 的 shape、O 和 FA3 的 LSE 符号正确；有/无 metadata、fake、真实及普通 FA3 回归通过；样本内零长度在 M06 验收 |
@@ -56,7 +56,7 @@ M05a 只提供内部 AICPU 生成组件和测试驱动，输出实际调度字�
 
 E2E 优化集中于接口、调度计算位置、metadata 复用、重复准备与发射成本。设备计算耗时用于检查源行为一致性。新增能力及时验收相应精度和 E2E，普通 FA3 回归覆盖公共入口及 metadata 变化。
 
-M05c1 依据公开入口/C++ 调用及 Python profile 定位通用 custom-op 的参数遍历、重复检查和返回准备开销；只为已支持的只读 dense kvcache 注册精简 C++ op，真实/fake 各自保留张量校验，公共入口仍拒绝全部未支持选项。它不改变调度、metadata 协议或设备 Kernel；验收包括独立入口边界、schema/fake、compile、双 dtype 精度/生命周期、普通 FA3 和固定五组的同轮性能。M05c2 依据本步数据处理剩余开销；不能把单独复用前向达标视为生成加前向完整调用段已达标。
+M05c1 依据公开入口/C++ 调用及 Python profile 定位通用 custom-op 的参数遍历、重复检查和返回准备开销；只为已支持的只读 dense kvcache 注册精简 C++ op，真实/fake 各自保留张量校验，公共入口仍拒绝全部未支持选项。它不改变调度、metadata 协议或设备 Kernel；验收包括独立入口边界、schema/fake、compile、双 dtype 精度/生命周期、普通 FA3 和固定五组的同轮性能。M05c2 通过精简 metadata C++ dispatcher 和公开 dense qv 路径的单次张量校验完成剩余 host 优化；真实/fake 各自保留全部边界，整数长度转换前仍检查几何。调度和设备计算保持原路径，十个代表用例的 R=1/4 完整调用段及复用 E2E 均已验收。
 
 ## 每步最小闭环
 

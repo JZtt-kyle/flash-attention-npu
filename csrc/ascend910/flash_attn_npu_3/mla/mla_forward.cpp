@@ -109,6 +109,18 @@ at::Tensor DenseMetadata(int64_t batch, int64_t sq, int64_t heads, int64_t sk, a
     return submission.metadata;
 }
 
+at::Tensor DenseMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, at::ScalarType dtype,
+                           const at::Tensor& cacheSeqlens)
+{
+    TORCH_CHECK(batch > 0 && batch <= UINT32_MAX && sq > 0 && sq <= 256 && heads > 0 && heads <= 256 &&
+                    sq * heads <= 256 && sk > 0 && sk <= 512,
+                "MLA scheduler metadata is not implemented yet outside the dense shape bounds");
+    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
+    CheckCacheLengths(cacheSeqlens, batch, cacheSeqlens.device());
+    const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
+    return DenseMetadata(batch, sq, heads, sk, dtype, cacheSeqlens);
+}
+
 std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                      const at::Tensor& qv, float scale, const std::optional<at::Tensor>& cacheSeqlens,
                                      const std::optional<at::Tensor>& schedulerMetadata)
@@ -213,8 +225,24 @@ std::tuple<at::Tensor, at::Tensor> DenseForwardOp(const at::Tensor& q, const at:
 
 TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 {
+    m.def("_mla_dense_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
+          "ScalarType qkv_dtype, Tensor cache_seqlens) -> Tensor");
     m.def("_mla_dense_forward(Tensor q, Tensor k, Tensor v, Tensor qv, float? softmax_scale=None, "
           "Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
+}
+
+TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
+{
+    // Validate the sole tensor's device before selecting the NPU generator,
+    // including when a direct caller supplies CPU lengths.
+    m.impl("_mla_dense_metadata", &flash_attn::mla::DenseMetadataOp);
+}
+
+TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
+{
+    // Lengths and metadata are int32. Let real/fake kernels validate their
+    // dtype, including malformed floating tensors that require gradients.
+    m.impl("_mla_dense_metadata", torch::CppFunction::makeFallthrough());
 }
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)

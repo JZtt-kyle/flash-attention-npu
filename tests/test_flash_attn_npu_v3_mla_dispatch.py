@@ -41,6 +41,7 @@ def test_dispatcher_schema_and_outputs(dtype, reuse):
 
 
 @pytest.mark.parametrize("fake", [False, True])
+@pytest.mark.parametrize("public", [False, True])
 @pytest.mark.parametrize(
     "fault,message",
     [
@@ -54,9 +55,14 @@ def test_dispatcher_schema_and_outputs(dtype, reuse):
         ("length_dtype", "cache_seqlens must have dtype"),
         ("metadata_device", "scheduler_metadata must be on the same"),
         ("metadata_shape", "scheduler_metadata must have shape"),
+        ("q_rank", "q rank"),
+        ("k_rank", "k/v rank"),
+        ("qk_dim", "q and k head dimensions"),
+        ("kv_shape", "k/v shapes"),
+        ("last_stride", "contiguous last dimension"),
     ],
 )
-def test_dispatcher_rejects_invalid_inputs(dtype, fake, fault, message):
+def test_dispatcher_rejects_invalid_inputs(dtype, fake, public, fault, message):
     with FakeTensorMode() if fake else nullcontext():
         args = _inputs(dtype=dtype)
         args.pop("softmax_scale")
@@ -81,8 +87,33 @@ def test_dispatcher_rejects_invalid_inputs(dtype, fake, fault, message):
             args["scheduler_metadata"] = torch.empty(401, dtype=torch.int32, device="cpu")
         elif fault == "metadata_shape":
             args["scheduler_metadata"] = torch.empty(400, dtype=torch.int32, device="npu")
+        elif fault in ("q_rank", "k_rank"):
+            name = fault.removesuffix("_rank")
+            args[name] = args[name][0]
+        elif fault == "qk_dim":
+            args["k"] = args["k"][..., :32].contiguous()
+        elif fault == "kv_shape":
+            args["v"] = args["v"][:, :-1]
+        elif fault == "last_stride":
+            args["qv"] = torch.empty((2, 3, 4, 1024), dtype=dtype, device="npu")[..., ::2]
         with pytest.raises(RuntimeError, match=message):
-            torch.ops.flash_attn_npu_3._mla_dense_forward(**args)
+            if public:
+                api.flash_attn_with_kvcache(
+                    args.pop("q"), args.pop("k"), args.pop("v"), **args, num_splits=1
+                )
+            else:
+                torch.ops.flash_attn_npu_3._mla_dense_forward(**args)
+
+
+@pytest.mark.parametrize("fake", [False, True])
+def test_public_dense_cache_rejects_cpu_tensors(dtype, fake):
+    with FakeTensorMode() if fake else nullcontext():
+        args = _inputs(dtype=dtype)
+        tensors = {name: args[name].cpu() for name in ("q", "k", "v", "qv")}
+        with pytest.raises(RuntimeError, match="MLA: inputs must be NPU tensors"):
+            api.flash_attn_with_kvcache(
+                tensors["q"], tensors["k"], tensors["v"], qv=tensors["qv"], num_splits=1
+            )
 
 
 @pytest.mark.parametrize("fake", [False, True])
