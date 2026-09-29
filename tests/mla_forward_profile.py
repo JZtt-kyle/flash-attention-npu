@@ -1,4 +1,4 @@
-"""Public FA3 dense E2E diagnostics against fixed native CANN; no MLA metadata yet."""
+"""Public FA3 dense E2E diagnostics, including implicit MLA metadata generation."""
 
 import csv
 from decimal import Decimal
@@ -130,18 +130,36 @@ def profile(directory, vendor, dtype_name="fp16"):
         rows = sorted(csv.DictReader(f), key=lambda row: Decimal(row["Start Time(us)"].strip()))
     with raw_csvs[0].open() as f:
         raw = sorted(csv.DictReader(f), key=lambda row: Decimal(row["Task Start Time(us)"].strip()))
-    assert len(rows) == len(raw) == len(labels), (len(rows), len(raw), len(labels))
-    for row, source, label in zip(rows, raw, labels):
+    assert len(rows) == len(raw), (len(rows), len(raw))
+    for row, source in zip(rows, raw):
         assert row["Name"] == source["Op Name"] and row["Device_id"] == source["Device_id"]
         assert Decimal(row["Start Time(us)"].strip()) == Decimal(
             source["Task Start Time(us)"].strip()
         )
         assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
+    # Some profiler versions include AICPU tasks here, others export only
+    # attention kernels. Never fold producer duration into the attention
+    # comparison, and explicitly report whether it was captured.
+    metadata_rows = [row for row in rows if "ComputeMlaDenseMetadata" in row["Name"]]
+    rows = [row for row in rows if "ComputeMlaDenseMetadata" not in row["Name"]]
+    assert len(rows) == len(labels), (len(rows), len(labels))
+    fa3_count = sum(label["name"] == "fa3" for label in labels)
+    assert len(metadata_rows) in (0, fa3_count), (len(metadata_rows), fa3_count)
+    producers = iter(metadata_rows)
+    previous_end = Decimal(0)
+    for row, label in zip(rows, labels):
         expected_name = (
             f"mla_dense_{dtype_name}" if label["name"] == "fa3" else "FusedInferAttentionScore"
         )
         assert expected_name in row["Name"]
         label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
+        if metadata_rows and label["name"] == "fa3":
+            producer = next(producers)
+            begin = Decimal(producer["Start Time(us)"].strip())
+            end = begin + Decimal(producer["Duration(us)"].strip())
+            assert previous_end <= begin < end <= Decimal(row["Start Time(us)"].strip())
+            label["metadata_kernel_us"] = float(producer["Duration(us)"])
+        previous_end = Decimal(row["Start Time(us)"].strip()) + Decimal(row["Duration(us)"].strip())
     results = []
     for index, (shape, scale) in enumerate(CASES):
         item = dict(shape=shape, scale=scale, native_call=native[index].description())
@@ -164,7 +182,9 @@ def profile(directory, vendor, dtype_name="fp16"):
     snapshot("npu-after.log")
     report = dict(
         dtype=dtype_name,
-        scope="Public flash_attn_func without metadata vs fixed native CANN; diagnostics, not metadata acceptance",
+        scope="Public flash_attn_func with implicit AICPU metadata generation vs fixed native CANN; diagnostics, not explicit metadata reuse acceptance",
+        pid=os.getpid(),
+        visible_devices=os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
         seed=20260929,
         warmup=5,
         rounds=5,
@@ -173,6 +193,7 @@ def profile(directory, vendor, dtype_name="fp16"):
         timing="public call through device completion, including validation, scheduling, output/workspace allocation and launch; input H2D excluded on both paths",
         kernel_csv=str(csvs[0]),
         raw_kernel_csv=str(raw_csvs[0]),
+        metadata_kernel_rows=len(metadata_rows),
         results=results,
         kernel_samples=labels,
     )

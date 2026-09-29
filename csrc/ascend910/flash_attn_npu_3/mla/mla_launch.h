@@ -2,13 +2,14 @@
 #pragma once
 #include "acl/acl.h"
 #include "mla_dense_params.h"
+#include "mla_metadata.h"
 
 namespace flash_attn::mla {
 struct MlaLaunchArgs {
     aclrtStream stream;
     uint64_t ffts;
-    uint8_t *qc, *qr, *kv, *kr, *output, *lse, *workspace;
-    MlaDenseKernelSchedule schedule;
+    uint8_t *qc, *qr, *kv, *kr, *output, *lse, *workspace, *metadata;
+    MlaDenseMetadataContext context;
     float scale;
 };
 

@@ -863,7 +863,8 @@ class FlashAttnFunc(torch.autograd.Function):
             )
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
-        # MLA uses the validated static scheduler until its AICPU metadata lands.
+        # MLA generates and consumes its private AICPU record inside DenseForward.
+        # Explicit public MLA metadata reuse is not connected yet.
         scheduler_metadata = None
         if not is_mla:
             # Training interfaces do not expose scheduler_metadata (aligned with

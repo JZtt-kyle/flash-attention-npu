@@ -9,6 +9,18 @@
 
 namespace flash_attn::mla {
 
+// Supplied by the caller, never taken from the record being validated. The
+// workspace pointer passed to MlaDense starts AFTER the libapi reservation.
+// No output pointer, scale or mutable per-call state belongs in metadata.
+struct MlaDenseMetadataContext {
+    uint32_t dtype, batch, sq, heads, sk;
+    uint32_t aicNum, aivNum, blockDim;
+    uint64_t workspaceBytes, libApiBytes;
+    MlaLocalMemory localMemory;
+};
+static_assert(std::is_standard_layout_v<MlaDenseMetadataContext> &&
+              std::is_trivially_copyable_v<MlaDenseMetadataContext>);
+
 constexpr uint32_t kMlaMetadataMagic = 0x4d4c4131; // MLA1
 constexpr uint32_t kMlaMetadataVersion = 1;
 constexpr uint32_t kMlaMetadataDenseSharedKV = 1; // BSND, 512+64, Hkv=1, no mask/split.

@@ -1,14 +1,17 @@
 #include "mla_forward.h"
 #include "mla_launch.h"
 #include "mla_schedule.h"
+#include "mla_metadata_args.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
 #include "torch_npu/csrc/framework/OpCommand.h"
 #include "runtime/rt_ffts.h"
-#include <algorithm>
 #include <cstring>
 #include <limits>
+#include <unordered_map>
+
+extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
 
 namespace flash_attn::mla {
 std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -45,7 +48,8 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     auto out = at::empty({q.size(0), q.size(1), q.size(2), v.size(3)}, q.options());
     auto lse = at::empty({q.size(0), q.size(2), q.size(1)}, q.options().dtype(at::kFloat));
     auto workspace = at::empty({static_cast<int64_t>(s.workspace.totalBytes)}, q.options().dtype(at::kByte));
-    for (const auto& t : {q, k, v, qv, out, lse, workspace}) {
+    auto metadata = at::empty({kMlaDenseMetadataWords}, q.options().dtype(at::kInt));
+    for (const auto& t : {q, k, v, qv, out, lse, workspace, metadata}) {
         auto address = reinterpret_cast<uintptr_t>(t.data_ptr());
         TORCH_CHECK(address != 0 && uint64_t(t.nbytes()) <= std::numeric_limits<uintptr_t>::max() - address,
                     "MLA: tensor address overflow");
@@ -69,22 +73,55 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     // dense specialization only consumes user workspace.
     a.workspace = static_cast<uint8_t*>(workspace.data_ptr()) + s.workspace.libApiBytes;
     a.scale = scale;
-    a.schedule = {s.bSize,
-                  s.s1Size,
-                  s.gSize,
-                  s.s2Size,
-                  s.mBaseSize,
-                  s.s2BaseSize,
-                  s.usedCoreNum,
-                  s.blockDim,
-                  s.cvRatio,
-                  uint32_t(s.workspace.mm1ResSize),
-                  uint32_t(s.workspace.mm2ResSize)};
-    static_assert(MlaDenseKernelSchedule::kEndpointCapacity == kMlaMaxAic);
-    std::copy(s.bN2End.begin(), s.bN2End.end(), a.schedule.bN2End);
-    std::copy(s.gS1End.begin(), s.gS1End.end(), a.schedule.gS1End);
-    std::copy(s.s2End.begin(), s.s2End.end(), a.schedule.s2End);
-    auto launch = [a, q, k, v, qv, out, lse, workspace]() -> int {
+    const uint32_t dtype = uint32_t(q.scalar_type() == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16);
+    // The host schedule currently supplies only launch/allocation bounds. The
+    // Kernel receives all tiling and endpoints from the AICPU record, checked
+    // against this independently supplied context before any output write.
+    a.metadata = static_cast<uint8_t*>(metadata.data_ptr());
+    a.context = {dtype,
+                 s.bSize,
+                 s.s1Size,
+                 s.gSize,
+                 s.s2Size,
+                 p.aicNum,
+                 p.aivNum,
+                 s.blockDim,
+                 s.workspace.userBytes,
+                 s.workspace.libApiBytes,
+                 p.localMemory};
+    MlaMetadataArgs metaArgs{reinterpret_cast<uint64_t>(metadata.data_ptr()),
+                             kMlaDenseMetadataWords,
+                             dtype,
+                             {q.size(0), q.size(1), q.size(2), k.size(1)},
+                             p,
+                             0,
+                             0};
+    auto aicpuStream = c10_npu::getNPUStreamFromPool();
+    auto aicpuHandle = aicpuStream.stream(false);
+    // Match the existing FA3 metadata event handshake. Each host submission
+    // enqueues both record/wait pairs before a later call can reuse the events.
+    // Keep the handles for the thread/device lifetime; no host synchronization
+    // or destruction of a still-pending event is needed in the steady state.
+    struct MetadataEvents {
+        aclrtEvent inputReady = nullptr;
+        aclrtEvent metadataDone = nullptr;
+    };
+    static thread_local std::unordered_map<c10::DeviceIndex, MetadataEvents> eventsByDevice;
+    auto& events = eventsByDevice[stream.device_index()];
+    if (events.inputReady == nullptr) {
+        TORCH_CHECK(aclrtCreateEvent(&events.inputReady) == ACL_SUCCESS, "MLA: input event creation failed");
+    }
+    if (events.metadataDone == nullptr) {
+        TORCH_CHECK(aclrtCreateEvent(&events.metadataDone) == ACL_SUCCESS, "MLA: metadata event creation failed");
+    }
+    c10_npu::NPUCachingAllocator::recordStream(metadata.storage().data_ptr(), aicpuStream);
+    auto launch = [a, aicpuHandle, inputReady = events.inputReady, metadataDone = events.metadataDone, metaArgs, q, k,
+                   v, qv, out, lse, workspace, metadata]() mutable -> int {
+        TORCH_CHECK(aclrtRecordEvent(inputReady, a.stream) == ACL_SUCCESS, "MLA: input event recording failed");
+        TORCH_CHECK(aclrtStreamWaitEvent(aicpuHandle, inputReady) == ACL_SUCCESS, "MLA: input event wait failed");
+        ComputeMlaDenseMetadata<<<1, nullptr, aicpuHandle>>>(&metaArgs, sizeof(metaArgs));
+        TORCH_CHECK(aclrtRecordEvent(metadataDone, aicpuHandle) == ACL_SUCCESS, "MLA: metadata event recording failed");
+        TORCH_CHECK(aclrtStreamWaitEvent(a.stream, metadataDone) == ACL_SUCCESS, "MLA: metadata event wait failed");
         auto error = q.scalar_type() == at::kBFloat16 ? LaunchDenseBf16(a) : LaunchDenseFp16(a);
         TORCH_CHECK(error == ACL_SUCCESS, "MLA: BATCH_MODE kernel launch failed (", error, ")");
         return 0;

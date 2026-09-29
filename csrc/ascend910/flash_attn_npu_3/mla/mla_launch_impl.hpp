@@ -6,14 +6,19 @@
 #include "kernel_operator.h"
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #include "kernel/mla_dense.hpp"
+#include "kernel/mla_metadata.hpp"
 #endif
 
 namespace flash_attn::mla {
 __global__ __aicore__ __mix__(1, 2) void MLA_DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
                                                          GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
-                                                         MlaDenseKernelSchedule schedule, float scale)
+                                                         GM_ADDR metadata, MlaDenseMetadataContext context, float scale)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
+    MlaDenseKernelSchedule schedule{};
+    if (!Kernel::LoadDenseMetadata<MLA_DENSE_TYPE>(metadata, kMlaDenseMetadataWords, context, schedule)) {
+        return;
+    }
     AscendC::SetSyncBaseAddr(ffts);
     AscendC::TPipe pipe;
     Kernel::MlaDense<MLA_DENSE_TYPE> op;
@@ -24,8 +29,8 @@ __global__ __aicore__ __mix__(1, 2) void MLA_DENSE_ENTRY(uint64_t ffts, GM_ADDR 
 aclError MLA_DENSE_LAUNCH(const MlaLaunchArgs& a)
 {
     MlaBatchLaunchScope launch;
-    MLA_DENSE_ENTRY<<<a.schedule.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
-                                                                a.workspace, a.schedule, a.scale);
+    MLA_DENSE_ENTRY<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
+                                                               a.workspace, a.metadata, a.context, a.scale);
     return launch.Result();
 }
 } // namespace flash_attn::mla

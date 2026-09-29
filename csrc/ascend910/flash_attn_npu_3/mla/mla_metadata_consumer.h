@@ -41,18 +41,6 @@ enum class MlaMetadataReadStatus : uint32_t {
     InsufficientLocalMemory,
 };
 
-// Supplied by the caller, never taken from the record being validated. The
-// workspace pointer passed to MlaDense starts AFTER the libapi reservation.
-// No output pointer, scale or mutable per-call state belongs in metadata.
-struct MlaDenseMetadataContext {
-    uint32_t dtype, batch, sq, heads, sk;
-    uint32_t aicNum, aivNum, blockDim;
-    uint64_t workspaceBytes, libApiBytes;
-    MlaLocalMemory localMemory;
-};
-static_assert(std::is_standard_layout_v<MlaDenseMetadataContext> &&
-              std::is_trivially_copyable_v<MlaDenseMetadataContext>);
-
 template <typename Reader>
 MLA_METADATA_INLINE uint64_t ReadMetadataWide(const Reader& read, uint32_t word)
 {

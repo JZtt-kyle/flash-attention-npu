@@ -1,6 +1,7 @@
 """Production FP16/BF16 MLA entry: source equality, math and launch lifetime."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -148,3 +149,53 @@ def test_input_lifetime_on_consuming_stream(probes):
     for out, lse in outputs:
         assert_fa_close(out.cpu(), refs[0], refs[2], name="out")
         assert_fa_close(lse.cpu(), refs[1], refs[3], name="lse")
+
+
+def test_queued_metadata_and_scratch_lifetime(probes):
+    from tests.mla_metadata_error_probe import forbid_host_readback
+
+    cases = [make_case(probes, *shape) for shape in ((2, 1, 8, 257), (21, 2, 128, 65))]
+    # Initialize the runtime before asserting that repeated submissions do not
+    # wait for metadata or read a device scalar back to Python.
+    for case in cases:
+        public(case)
+    torch.npu.synchronize()
+    streams = [torch.npu.Stream(), torch.npu.Stream()]
+    results = []
+    with forbid_host_readback():
+        for iteration in range(32):
+            case = cases[iteration % 2]
+            scale = (0.0, -0.23, 0.23, None)[iteration % 4]
+            with torch.npu.stream(streams[iteration % 2]):
+                results.append((case, scale, public(case, scale=scale)))
+                # Pressure both private allocations while the AICPU stream
+                # and attention consumer may still reference earlier calls.
+                poison = [torch.full((401,), -1, dtype=torch.int32, device="npu") for _ in range(8)]
+                scratch = torch.full_like(case["workspace"]["migrated"], 205)
+                del poison, scratch
+    torch.npu.synchronize()
+    for case, scale, result in results:
+        refs = mla_reference_pair(**case["inputs"], softmax_scale=scale)
+        for i, name in enumerate(("out", "lse")):
+            assert_fa_close(result[i].cpu(), refs[i], refs[i + 2], name=name)
+
+
+def test_metadata_events_across_host_threads(probes):
+    cases = [make_case(probes, *shape) for shape in ((1, 7, 16, 65), (21, 2, 128, 511))]
+    torch.npu.synchronize()
+
+    def run(index):
+        torch.npu.set_device(0)
+        stream = torch.npu.Stream()
+        with torch.npu.stream(stream):
+            results = [public(cases[index], scale=-0.23) for _ in range(16)]
+        stream.synchronize()
+        return results
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(run, range(2)))
+    for case, outputs in zip(cases, results):
+        refs = mla_reference_pair(**case["inputs"], softmax_scale=-0.23)
+        for result in outputs:
+            for i, name in enumerate(("out", "lse")):
+                assert_fa_close(result[i].cpu(), refs[i], refs[i + 2], name=name)

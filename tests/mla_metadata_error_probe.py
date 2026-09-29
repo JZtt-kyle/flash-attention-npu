@@ -108,6 +108,11 @@ def run(manifest_path, producer_path, fault, sync, directory):
             assert sha256(ROOT / path) == digest, path
     for row in manifest["libraries"].values():
         assert sha256(Path(row["path"])) == row["sha256"]
+    if "production_extension" in manifest:
+        # The C bridge links the real extension, so an old/rebuilt extension
+        # invalidates this run even if the bridge itself has not changed.
+        row = manifest["production_extension"]
+        assert sha256(Path(row["path"])) == row["sha256"]
     assert sha256(Path(producer_manifest["library"])) == producer_manifest["library_sha256"]
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[manifest["dtype"]]
     probes = configure(
@@ -151,6 +156,7 @@ def run(manifest_path, producer_path, fault, sync, directory):
                     elapsed_seconds=time.monotonic() - start,
                     error=str(error),
                     library=manifest["libraries"]["metadata_checked"],
+                    production_extension=manifest.get("production_extension"),
                 )
                 (directory / "runtime-error.json").write_text(json.dumps(report, indent=2) + "\n")
                 # Keep all tensors/streams alive until process exit. Their
