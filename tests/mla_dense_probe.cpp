@@ -7,6 +7,11 @@
 #include "mla/mla_dense_params.h"
 using namespace AscendC;
 using flash_attn::mla::MlaDenseKernelSchedule;
+#ifdef MLA_DENSE_BF16
+using InputT = bfloat16_t;
+#else
+using InputT = half;
+#endif
 
 #if !defined(__NPU_ARCH__)
 // Bisheng's standalone <<<>>> launcher defaults to NORMAL_MODE. Only this
@@ -44,7 +49,11 @@ extern "C" aclError __wrap_aclrtLaunchKernelWithHostArgs(aclrtFuncHandle functio
 #endif
 
 #ifdef MLA_DENSE_ORACLE
+#ifdef MLA_DENSE_BF16
+#define DENSE_ENTRY cann_dense_bf16_probe
+#else
 #define DENSE_ENTRY cann_dense_probe
+#endif
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #include "oracle_tiling.h"
 #include "fia_public_define.h"
@@ -53,7 +62,7 @@ using fa_base_vector::FLOAT_ZERO;
 constexpr float FLOAT_INF = AttentionCommon::ConstInfo::FLOAT_INF;
 constexpr uint32_t BUFFER_SIZE_BYTE_1K = AttentionCommon::ConstInfo::BUFFER_SIZE_BYTE_1K;
 #include "fia_kernel_nonquant_mla.h"
-using Types = AttentionCommon::FIAType<half, half, half, half>;
+using Types = AttentionCommon::FIAType<InputT, InputT, InputT, InputT>;
 using OracleCube = typename std::conditional<g_coreType == AscendC::AIC, FiaBlockCubeNonQuantMla<Types>,
                                              FiaBlockCubeNonQuantMlaDummy<Types>>::type;
 using OracleVector = typename std::conditional<g_coreType == AscendC::AIC, FiaBlockVecNonQuantMlaDummy<Types>,
@@ -62,7 +71,11 @@ using OracleFd = typename std::conditional<g_coreType == AscendC::AIC, FiaBlockV
                                            FiaBlockVecFlashDecode<Types>>::type;
 #endif
 #else
+#ifdef MLA_DENSE_BF16
+#define DENSE_ENTRY mla_dense_bf16_probe
+#else
 #define DENSE_ENTRY mla_dense_probe
+#endif
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #include "mla/kernel/mla_dense.hpp"
 #endif
@@ -103,7 +116,7 @@ __global__ __aicore__ __mix__(1, 2) void DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, 
             qr, kr, nullptr, nullptr, output, lse, workspace, &tiling, nullptr, &pipe);
     op.Process();
 #else
-    flash_attn::mla::Kernel::MlaDense op;
+    flash_attn::mla::Kernel::MlaDense<InputT> op;
     op(params, scale, qc, qr, kv, kr, output, lse, workspace, &pipe);
 #endif
 #endif
@@ -118,7 +131,7 @@ extern "C" int launch_dense(void* stream, void* qc, void* qr, void* kv, void* kr
         params->usedCoreNum > 26 || params->blockDim < params->usedCoreNum) {
         return -1;
     }
-    // The production launcher/910C instantiation is M04b2c; this probe is C1V2.
+    // This standalone probe, like the validated production range, is C1V2 only.
     uint64_t ffts = 0;
     uint32_t len = 0;
     auto error = rtGetC2cCtrlAddr(&ffts, &len);

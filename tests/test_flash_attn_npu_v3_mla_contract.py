@@ -21,6 +21,11 @@ def entry(request):
         yield request.param
 
 
+@pytest.fixture(params=[torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def dtype(request):
+    return request.param
+
+
 def _tensor(shape, dtype, strided=False):
     if not strided:
         return torch.zeros(shape, dtype=dtype, device="npu")
@@ -67,7 +72,6 @@ def _forward(entry, args):
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
 @pytest.mark.parametrize("layout", ["dense", "tnd", "paged", "paged_tnd"])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("strided", [False, True])
 def test_mla_supported_subset_and_rejections(entry, representation, layout, dtype, strided):
     args = _inputs(representation, layout, dtype, strided)
@@ -76,14 +80,9 @@ def test_mla_supported_subset_and_rejections(entry, representation, layout, dtyp
             assert args[name].stride(-1) == 1
             assert not args[name].is_contiguous()
             assert args[name].storage_offset() > 0
-    if (
-        representation == "compressed"
-        and layout == "dense"
-        and dtype == torch.float16
-        and not strided
-    ):
+    if representation == "compressed" and layout == "dense" and not strided:
         out, lse, *_ = _forward(entry, args)
-        assert out.shape == (2, 3, 4, 512) and out.dtype == torch.float16
+        assert out.shape == (2, 3, 4, 512) and out.dtype == dtype
         assert lse.shape == (2, 4, 3) and lse.dtype == torch.float32
         if entry != "fake":
             torch.testing.assert_close(out.cpu(), torch.zeros(out.shape, dtype=out.dtype))
@@ -120,8 +119,8 @@ INVALID = [
 
 
 @pytest.mark.parametrize("case,message", INVALID, ids=[row[0] for row in INVALID])
-def test_mla_invalid_inputs(entry, case, message):
-    args = _inputs(layout="tnd" if case == "page_and_cu_k" else "dense")
+def test_mla_invalid_inputs(entry, case, message, dtype):
+    args = _inputs(layout="tnd" if case == "page_and_cu_k" else "dense", dtype=dtype)
     if case in ("q_rank", "k_rank", "qv_rank"):
         name = case.removesuffix("_rank")
         args[name] = args[name][0]
@@ -136,7 +135,7 @@ def test_mla_invalid_inputs(entry, case, message):
             args[name] = args[name].float()
     elif case.endswith("_dtype"):
         name = case.removesuffix("_dtype")
-        args[name] = args[name].bfloat16()
+        args[name] = args[name].to(torch.bfloat16 if dtype == torch.float16 else torch.float16)
     elif case.endswith("_device"):
         name = case.removesuffix("_device")
         args[name] = args[name].cpu()
@@ -162,8 +161,8 @@ def test_mla_invalid_inputs(entry, case, message):
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
 @pytest.mark.parametrize("sq,sk", [(0, 3), (3, 0), (0, 0)])
-def test_mla_empty_is_still_unimplemented(entry, representation, sq, sk):
-    args = _inputs(representation)
+def test_mla_empty_is_still_unimplemented(entry, representation, sq, sk, dtype):
+    args = _inputs(representation, dtype=dtype)
     args["q"] = args["q"][:, :sq]
     args["k"], args["v"] = args["k"][:, :sk], args["v"][:, :sk]
     if args["qv"] is not None:
@@ -176,7 +175,7 @@ def test_mla_empty_is_still_unimplemented(entry, representation, sq, sk):
 @pytest.mark.parametrize("public_entry", ["dense", "varlen", "kvcache"])
 @pytest.mark.parametrize("fake", [False, True])
 def test_public_rejects_before_metadata_or_dispatch(
-    monkeypatch, representation, public_entry, fake
+    monkeypatch, representation, public_entry, fake, dtype
 ):
     def unexpected(*args, **kwargs):
         pytest.fail("MLA reached ordinary metadata/kernel dispatch")
@@ -186,7 +185,7 @@ def test_public_rejects_before_metadata_or_dispatch(
     if not supported:
         monkeypatch.setattr(api, "_flash_attn_forward", unexpected)
     with FakeTensorMode() if fake else nullcontext():
-        args = _inputs(representation, "tnd" if public_entry == "varlen" else "dense")
+        args = _inputs(representation, "tnd" if public_entry == "varlen" else "dense", dtype=dtype)
         if supported:
             out, lse = api.flash_attn_func(**args, return_attn_probs=True)
             assert out.shape == (2, 3, 4, 512) and lse.shape == (2, 4, 3)
@@ -203,8 +202,8 @@ def test_public_rejects_before_metadata_or_dispatch(
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
 @pytest.mark.parametrize("option", ["split", "mask", "softcap", "schedule", "append", "grad"])
-def test_mla_options_cannot_fall_through(entry, representation, option):
-    args = _inputs(representation)
+def test_mla_options_cannot_fall_through(entry, representation, option, dtype):
+    args = _inputs(representation, dtype=dtype)
     if option == "split":
         args["num_splits"] = 256
     elif option == "mask":
@@ -232,7 +231,7 @@ def test_mla_options_cannot_fall_through(entry, representation, option):
 
 
 @pytest.mark.parametrize("dims", [(64, 512), (192, 128), (64, 128)])
-def test_mla_metadata_rejected(entry, dims):
+def test_mla_metadata_rejected(entry, dims, dtype):
     args = dict(
         batch_size=2,
         max_seqlen_q=3,
@@ -241,7 +240,7 @@ def test_mla_metadata_rejected(entry, dims):
         num_heads_kv=1,
         headdim=dims[0],
         headdim_v=dims[1],
-        qkv_dtype=torch.float16,
+        qkv_dtype=dtype,
         cache_seqlens=torch.full((2,), 17, dtype=torch.int32, device="npu"),
     )
     with pytest.raises(RuntimeError, match="MLA scheduler metadata is not implemented yet"):
@@ -303,8 +302,8 @@ def test_mla_metadata_rejected(entry, dims):
         "sm_margin",
     ],
 )
-def test_each_unsupported_dense_option(entry, option):
-    args = _inputs()
+def test_each_unsupported_dense_option(entry, option, dtype):
+    args = _inputs(dtype=dtype)
     if option in ("max_seqlen_q", "max_seqlen_k"):
         args[option] = 17
     elif option in ("rotary_interleaved", "pack_gqa"):
@@ -322,43 +321,43 @@ def test_each_unsupported_dense_option(entry, option):
 
 
 @pytest.mark.parametrize("shape", [(0, 1, 1), (1, 257, 1), (1, 2, 129)])
-def test_dense_query_limits(entry, shape):
-    args = _inputs()
-    args["q"] = torch.empty((*shape, 64), dtype=torch.float16, device="npu")
-    args["qv"] = torch.empty((*shape, 512), dtype=torch.float16, device="npu")
+def test_dense_query_limits(entry, shape, dtype):
+    args = _inputs(dtype=dtype)
+    args["q"] = torch.empty((*shape, 64), dtype=dtype, device="npu")
+    args["qv"] = torch.empty((*shape, 512), dtype=dtype, device="npu")
     args["k"] = args["k"][: shape[0]]
     args["v"] = args["v"][: shape[0]]
     with pytest.raises(RuntimeError, match="outside B>0"):
         _forward(entry, args)
 
 
-def test_dense_kv_limit(entry):
-    args = _inputs()
-    args["k"] = torch.empty((2, 513, 1, 64), dtype=torch.float16, device="npu")
-    args["v"] = torch.empty((2, 513, 1, 512), dtype=torch.float16, device="npu")
+def test_dense_kv_limit(entry, dtype):
+    args = _inputs(dtype=dtype)
+    args["k"] = torch.empty((2, 513, 1, 64), dtype=dtype, device="npu")
+    args["v"] = torch.empty((2, 513, 1, 512), dtype=dtype, device="npu")
     with pytest.raises(RuntimeError, match="outside B>0"):
         _forward(entry, args)
 
 
-def test_dense_batch_mismatch(entry):
-    args = _inputs()
+def test_dense_batch_mismatch(entry, dtype):
+    args = _inputs(dtype=dtype)
     args["k"], args["v"] = args["k"][:1], args["v"][:1]
     with pytest.raises(RuntimeError, match="dense batch sizes must match"):
         _forward(entry, args)
 
 
 @pytest.mark.parametrize("scale", [float("inf"), -float("inf"), float("nan"), 1e39])
-def test_dense_nonfinite_scale(entry, scale):
-    args = _inputs()
+def test_dense_nonfinite_scale(entry, scale, dtype):
+    args = _inputs(dtype=dtype)
     args["softmax_scale"] = scale
     with pytest.raises(RuntimeError, match="softmax_scale must be finite"):
         _forward(entry, args)
 
 
-def test_fake_batch_field_overflow():
+def test_fake_batch_field_overflow(dtype):
     with FakeTensorMode():
         args = {
-            name: torch.empty((2**32, 1, 1, dim), dtype=torch.float16, device="npu")
+            name: torch.empty((2**32, 1, 1, dim), dtype=dtype, device="npu")
             for name, dim in (("q", 64), ("k", 64), ("v", 512), ("qv", 512))
         }
         with pytest.raises(RuntimeError, match="outside B>0"):
@@ -366,13 +365,13 @@ def test_fake_batch_field_overflow():
 
 
 @pytest.mark.parametrize("layout", ["dense", "tnd"])
-def test_ordinary_fake_output_and_metadata_shapes(layout):
+def test_ordinary_fake_output_and_metadata_shapes(layout, dtype):
     with FakeTensorMode():
-        args = _inputs(layout=layout)
+        args = _inputs(layout=layout, dtype=dtype)
         args["v"] = args["k"]
         args["qv"] = None
         out, lse, out_accum, lse_accum = api._flash_attn_forward(**args)
-        assert out.shape == args["q"].shape and out.dtype == torch.float16
+        assert out.shape == args["q"].shape and out.dtype == dtype
         expected_lse = (4, 4) if layout == "tnd" else (2, 4, 3)
         assert lse.shape == expected_lse and lse.dtype == torch.float32
         assert out_accum.numel() == lse_accum.numel() == 0

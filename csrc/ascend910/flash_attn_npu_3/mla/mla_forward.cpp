@@ -23,7 +23,7 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     p.aicNum = platform->GetCoreNumAic();
     p.aivNum = platform->GetCoreNumAiv();
     TORCH_CHECK(p.aicNum > 0 && p.aicNum <= kMlaMaxAic && p.aivNum == 2 * p.aicNum,
-                "MLA: this FP16 launch requires validated C1V2 resources");
+                "MLA: this dense launch requires validated C1V2 resources");
     using Mem = platform_ascendc::CoreMemType;
     platform->GetCoreMemSize(Mem::L1, p.localMemory.l1Bytes);
     platform->GetCoreMemSize(Mem::UB, p.localMemory.ubBytes);
@@ -85,7 +85,7 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     std::copy(s.gS1End.begin(), s.gS1End.end(), a.schedule.gS1End);
     std::copy(s.s2End.begin(), s.s2End.end(), a.schedule.s2End);
     auto launch = [a, q, k, v, qv, out, lse, workspace]() -> int {
-        auto error = LaunchDenseFp16(a);
+        auto error = q.scalar_type() == at::kBFloat16 ? LaunchDenseBf16(a) : LaunchDenseFp16(a);
         TORCH_CHECK(error == ACL_SUCCESS, "MLA: BATCH_MODE kernel launch failed (", error, ")");
         return 0;
     };

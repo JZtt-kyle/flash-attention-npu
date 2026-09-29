@@ -26,7 +26,8 @@ from tests.mla_cann_baseline import (
 from tests.mla_dense_profile import CASES
 
 
-def profile(directory, vendor):
+def profile(directory, vendor, dtype_name="fp16"):
+    dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     vendor = check_vendor_configuration(vendor)
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
@@ -36,7 +37,7 @@ def profile(directory, vendor):
     for shape, scale in CASES:
         batch, sq, heads, sk = shape
         cpu = make_inputs(
-            Case("public", "compressed", batch, sq, sk, heads, 1), torch.float16, seed=20260929
+            Case("public", "compressed", batch, sq, sk, heads, 1), dtype, seed=20260929
         )
         device = {name: tensor.npu() for name, tensor in cpu.items()}
         inputs.append(device)
@@ -136,9 +137,10 @@ def profile(directory, vendor):
             source["Task Start Time(us)"].strip()
         )
         assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
-        assert ("mla_dense_fp16" if label["name"] == "fa3" else "FusedInferAttentionScore") in row[
-            "Name"
-        ]
+        expected_name = (
+            f"mla_dense_{dtype_name}" if label["name"] == "fa3" else "FusedInferAttentionScore"
+        )
+        assert expected_name in row["Name"]
         label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
     results = []
     for index, (shape, scale) in enumerate(CASES):
@@ -161,6 +163,7 @@ def profile(directory, vendor):
         results.append(item)
     snapshot("npu-after.log")
     report = dict(
+        dtype=dtype_name,
         scope="Public flash_attn_func without metadata vs fixed native CANN; diagnostics, not metadata acceptance",
         seed=20260929,
         warmup=5,
@@ -178,4 +181,8 @@ def profile(directory, vendor):
 
 
 if __name__ == "__main__":
-    profile(os.environ["MLA_FORWARD_ARTIFACT_DIR"], os.environ["MLA_CANN_VENDOR"])
+    profile(
+        os.environ["MLA_FORWARD_ARTIFACT_DIR"],
+        os.environ["MLA_CANN_VENDOR"],
+        os.environ.get("MLA_FORWARD_DTYPE", "fp16"),
+    )

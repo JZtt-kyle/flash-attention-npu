@@ -156,7 +156,6 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
             not varlen_q and not varlen_k and not paged_kv,
             "MLA compressed forward is not implemented yet for TND or paged KV",
         )
-        check(q.dtype == torch.float16, "MLA compressed forward is not implemented yet for BF16")
         check(q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
         check(
             0 < q.shape[0] <= 2**32 - 1

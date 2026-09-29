@@ -24,7 +24,7 @@ using Run = AttentionCommon::RunInfo;
 #define CUBE_PROBE_ENTRY mla_cube_probe
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #include "mla/block/mla_cube.hpp"
-using Cube = flash_attn::mla::Block::MlaCube;
+using Cube = flash_attn::mla::Block::MlaCube<half>;
 using Run = flash_attn::mla::Block::RunInfo;
 #endif
 #endif

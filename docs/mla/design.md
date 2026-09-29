@@ -251,7 +251,7 @@ CATLASS Tile copy、Mmad、布局与硬件资源
 
 M04b 先使用无设备长度读取的静态调度模块；M05 将同一计算接入 AICPU 和版本化 int32 metadata，不维护第二套公式。普通 FA byte metadata 继续使用原协议。
 
-M04b2c 的生产适配由 `mla_forward.cpp` 读取实际平台资源、调用同一 `BuildDenseSchedule`、分配 O/LSE 和每次调用独立的 workspace，并传递本次 scale 与地址。`mla_launch_impl.hpp` 通过生成器提供 FP16 C1V2 编译单元；Kernel / Block / Tile 计算保持 M04b2b 版本。当前只开放 910B，其他设备及 BF16 在相应实例验收前明确拒绝。首步公开入口为不带预分配输出的 `flash_attn_func`；内部 `out_` 也明确拒绝，避免绕过现有 functional custom op 的 alias 契约。
+M04b2c 的生产适配由 `mla_forward.cpp` 读取实际平台资源、调用同一 `BuildDenseSchedule`、分配 O/LSE 和每次调用独立的 workspace，并传递本次 scale 与地址。`mla_launch_impl.hpp` 通过生成器分别提供 FP16/BF16 C1V2 编译单元，按输入 dtype 分派。M04b3 将同一 Kernel / Block / Tile 按输入类型实例化，保持 M04b2b 的计算、资源和同步次序；aMLA 因子、P 和 O 使用各自输入 dtype，保留第 6.3 节的舍入规则。两种 dtype 均为 2 字节，共用同一调度和 workspace 布局。当前只开放 910B C1V2，其他设备及比例在相应实例验收前明确拒绝。首步公开入口为不带预分配输出的 `flash_attn_func`；内部 `out_` 也明确拒绝，避免绕过现有 functional custom op 的 alias 契约。
 
 CANN 9.0 的 Bisheng ASC launcher 未提供调度模式参数；生产扩展用仅在 MLA 发射期间生效的线程局部作用域，为实际 ACL launch 设置源 `BATCH_MODE`。封装保留其他 launch 属性和错误码，未进入该作用域的普通 FA3 发射原样透传；编译器绕过已验收 ACL 路径或单次作用域出现非一次发射时明确失败。构建为 MLA 编译单元额外生成设备预处理依赖，避免最终 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头文件。
 

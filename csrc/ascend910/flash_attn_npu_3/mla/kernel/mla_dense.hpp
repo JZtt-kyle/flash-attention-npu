@@ -22,7 +22,11 @@
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
+template <typename InputT>
 class MlaDense {
+    static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
+                  "MLA dense only supports FP16 and BF16");
+
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
                                       GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
@@ -57,12 +61,12 @@ class MlaDense {
         const uint64_t r1 = params.mm1ResSize, r2 = params.mm2ResSize;
         uint64_t offset = 0;
         GlobalTensor<float> qk, pv, vec2;
-        GlobalTensor<half> p;
+        GlobalTensor<InputT> p;
         GlobalTensor<int32_t> pvInt;
         qk.SetGlobalBuffer((__gm__ float*)(workspace + core * 2 * r1 * sizeof(float)));
         offset += GetBlockNum() * 2 * r1 * sizeof(float);
-        p.SetGlobalBuffer((__gm__ half*)(workspace + offset + core * 2 * r1 * sizeof(half)));
-        offset += GetBlockNum() * 2 * r1 * sizeof(half);
+        p.SetGlobalBuffer((__gm__ InputT*)(workspace + offset + core * 2 * r1 * sizeof(InputT)));
+        offset += GetBlockNum() * 2 * r1 * sizeof(InputT);
         pv.SetGlobalBuffer((__gm__ float*)(workspace + offset + core * 2 * r2 * sizeof(float)));
         pvInt.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(pv.GetPhyAddr(0)));
         offset += GetBlockNum() * 2 * r2 * sizeof(float);
@@ -95,8 +99,8 @@ class MlaDense {
   private:
     using RunInfo = Block::RunInfo;
     static constexpr uint32_t kTaskCount = 3;
-    Block::MlaCube cube;
-    Block::MlaVector vector;
+    Block::MlaCube<InputT> cube;
+    Block::MlaVector<InputT> vector;
     MlaDenseKernelSchedule params;
     uint32_t core, bStart, mStart, sStart, bEnd, mEnd, sEnd;
     uint32_t bn2IdxInCurCore = 0;

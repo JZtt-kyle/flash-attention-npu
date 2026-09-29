@@ -1,4 +1,4 @@
-"""Production FP16 MLA entry: pinned source equality, math and launch lifetime."""
+"""Production FP16/BF16 MLA entry: source equality, math and launch lifetime."""
 
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.common.compare import assert_fa_close
 from tests.common.mla_ref import mla_reference_pair
 from tests.test_flash_attn_npu_v3_mla_contract import _forward
-from tests.test_flash_attn_npu_v3_mla_dense import launch, make_case
+from tests.test_flash_attn_npu_v3_mla_dense import launch, make_case, make_rounding_case
 from tests.test_flash_attn_npu_v3_mla_dense import probes as probes
 
 
@@ -40,6 +40,7 @@ def check_forward(probes, shape, *, scale=None, perturb=None, offset=1, amplitud
     for before, device, _ in case["storage"][:4]:
         torch.testing.assert_close(device.cpu(), before, rtol=0, atol=0)
     record = dict(
+        dtype=case["dtype"],
         shape=shape,
         scale=scale,
         offset=offset,
@@ -82,6 +83,15 @@ def test_public_content_rope(probes, perturb):
 @pytest.mark.parametrize("amplitude", [0.125, 4.0, 8.0])
 def test_public_amla(probes, amplitude):
     check_forward(probes, (1, 1, 128, 512), amplitude=amplitude)
+
+
+def test_public_output_rounding(probes):
+    case, expected = make_rounding_case(probes)
+    launch(probes[0]["oracle"], case, "oracle")
+    actual = public(case)
+    for i in range(2):
+        torch.testing.assert_close(actual[i], case["outputs"]["oracle"][i], rtol=0, atol=0)
+    torch.testing.assert_close(actual[0].cpu(), expected, rtol=0, atol=0)
 
 
 def test_interleaved_scales_and_streams(probes):

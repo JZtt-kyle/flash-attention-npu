@@ -11,7 +11,7 @@
 // Upstream license: ../LICENSE.cann (block/ and tile/).
 // Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0.
 // attention/common/op_kernel/matmul.h::LoadDataToL0A/B, MatmulKPP.
-// Dense FP16 specialization; retain the source L0 loop and paired A/B lifetime.
+// Dense FP16/BF16 specialization; retain the source L0 loop and paired A/B lifetime.
 #pragma once
 
 #include "catlass/arch/arch.hpp"

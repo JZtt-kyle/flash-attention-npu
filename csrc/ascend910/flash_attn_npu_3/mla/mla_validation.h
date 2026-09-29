@@ -50,7 +50,6 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
         TORCH_CHECK(headsKV == 1, "MLA: compressed representation requires one KV head");
         TORCH_CHECK(!varlenQ && !varlenK && !pagedKV,
                     "MLA compressed forward is not implemented yet for TND or paged KV");
-        TORCH_CHECK(q.scalar_type() == at::kHalf, "MLA compressed forward is not implemented yet for BF16");
         TORCH_CHECK(q.size(0) == k.size(0), "MLA: dense batch sizes must match");
         TORCH_CHECK(q.size(0) > 0 && q.size(0) <= UINT32_MAX && q.size(1) > 0 && q.size(1) <= 256 && headsQ <= 256 &&
                         uint64_t(q.size(1)) * uint64_t(headsQ) <= 256 && k.size(1) > 0 && k.size(1) <= 512,

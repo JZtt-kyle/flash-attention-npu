@@ -1,5 +1,5 @@
 // Source launch: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0,
-// fused_infer_attention_score_v3.cpp BSH_KVBSH_MLA_TILING (FP16, C1V2).
+// fused_infer_attention_score_v3.cpp BSH_KVBSH_MLA_TILING (FP16/BF16, C1V2).
 // The migrated algorithm and its copyright/license live under kernel/block/tile.
 #pragma once
 #include "mla_launch.h"
@@ -9,23 +9,23 @@
 #endif
 
 namespace flash_attn::mla {
-__global__ __aicore__ __mix__(1, 2) void mla_dense_fp16(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
-                                                        GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
-                                                        MlaDenseKernelSchedule schedule, float scale)
+__global__ __aicore__ __mix__(1, 2) void MLA_DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
+                                                         GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
+                                                         MlaDenseKernelSchedule schedule, float scale)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     AscendC::SetSyncBaseAddr(ffts);
     AscendC::TPipe pipe;
-    Kernel::MlaDense op;
+    Kernel::MlaDense<MLA_DENSE_TYPE> op;
     op(schedule, scale, qc, qr, kv, kr, output, lse, workspace, &pipe);
 #endif
 }
 
-aclError LaunchDenseFp16(const MlaLaunchArgs& a)
+aclError MLA_DENSE_LAUNCH(const MlaLaunchArgs& a)
 {
     MlaBatchLaunchScope launch;
-    mla_dense_fp16<<<a.schedule.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
-                                                               a.workspace, a.schedule, a.scale);
+    MLA_DENSE_ENTRY<<<a.schedule.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
+                                                                a.workspace, a.schedule, a.scale);
     return launch.Result();
 }
 } // namespace flash_attn::mla

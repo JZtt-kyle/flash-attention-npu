@@ -1,4 +1,4 @@
-"""Build isolated FP16 dense probes from current headers and pinned CANN blobs."""
+"""Build isolated dense probes from current headers and pinned CANN blobs."""
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -19,7 +19,8 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build_probes(artifacts):
+def build_probes(artifacts, dtype="fp16"):
+    assert dtype in ("fp16", "bf16")
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
@@ -52,11 +53,11 @@ def build_probes(artifacts):
         for macro, args in re.findall(r"(TILING_DATA_FIELD_DEF(?:_ARR|_STRUCT)?)\(([^)]*)\)", body):
             args = [x.strip() for x in args.split(",")]
             if macro.endswith("_ARR"):
-                dtype, count, field = args
-                fields.append(f"    {dtype} {field}[{count}];")
+                field_dtype, count, field = args
+                fields.append(f"    {field_dtype} {field}[{count}];")
             else:
-                dtype, field = args
-                fields.append(f"    {dtype} {field};")
+                field_dtype, field = args
+                fields.append(f"    {field_dtype} {field};")
         # Generated CANN tiling substructures have 8-byte alignment. The source
         # copy_data_align64 endpoint loads require this, including after bools.
         structs.append(f"struct alignas(8) {name} {{\n" + "\n".join(fields) + "\n};")
@@ -96,6 +97,8 @@ def build_probes(artifacts):
         "-lruntime",
         "-Wl,--wrap=aclrtLaunchKernelWithHostArgs",
     ]
+    if dtype == "bf16":
+        common.append("-DMLA_DENSE_BF16")
 
     def compile_probe(name):
         output = artifacts / f"{name}.so"
@@ -189,6 +192,7 @@ def build_probes(artifacts):
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("*/*.hpp")),
     ]
     manifest = {
+        "dtype": dtype,
         "oracle_tiling_sha256": sha256(artifacts / "oracle_tiling.h"),
         "libraries": {
             name: {"path": path, "sha256": sha256(Path(path))} for name, path in libraries.items()

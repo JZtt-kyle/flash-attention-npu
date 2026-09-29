@@ -12,7 +12,7 @@
 // Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0.
 // attention/common/op_kernel/memcopy/attn_copy_gm_to_l1.h:
 // CopySingle/MultiMatrixNDToNZ, CopyQueryGmToL1::ProcessS1G,
-// CopyKvGmToL1::ProcessContinuousOrTensorlist, specialized to dense FP16 BSND.
+// CopyKvGmToL1::ProcessContinuousOrTensorlist, specialized to dense FP16/BF16 BSND.
 #pragma once
 #include "catlass/gemm/tile/atlasa2/copy_l0c_to_gm.hpp"
 
@@ -22,8 +22,9 @@ __aicore__ inline uint32_t Align(uint32_t n, uint32_t a)
 {
     return (n + a - 1) / a * a;
 }
+template <typename InputT>
 struct L1Tensor {
-    LocalTensor<half> tensor;
+    LocalTensor<InputT> tensor;
     uint32_t rowCount;
 };
 struct QueryCoord {
@@ -32,19 +33,21 @@ struct QueryCoord {
 struct KvCoord {
     uint32_t bIdx, n2Idx, s2Idx, dIdx, s2DealSize, dDealSize;
 };
+template <typename InputT>
 struct DenseTensor {
-    GlobalTensor<half> gmTensor;
+    GlobalTensor<InputT> gmTensor;
     uint32_t sequence, heads, dim;
     __aicore__ inline void Init(GM_ADDR ptr, uint32_t s, uint32_t h, uint32_t d)
     {
-        gmTensor.SetGlobalBuffer((__gm__ half*)ptr);
+        gmTensor.SetGlobalBuffer((__gm__ InputT*)ptr);
         sequence = s;
         heads = h;
         dim = d;
     }
 };
 
-__aicore__ inline void CopySingleMatrixNDToNZ(LocalTensor<half> dst, GlobalTensor<half> src, uint32_t rows,
+template <typename InputT>
+__aicore__ inline void CopySingleMatrixNDToNZ(LocalTensor<InputT> dst, GlobalTensor<InputT> src, uint32_t rows,
                                               uint32_t cols, uint32_t stride, uint32_t dstRows)
 {
     // Source's large-stride fallback is unreachable: dense strides are 64/512.
@@ -60,7 +63,8 @@ __aicore__ inline void CopySingleMatrixNDToNZ(LocalTensor<half> dst, GlobalTenso
     DataCopy(dst, src, p);
 }
 
-__aicore__ inline void CopyMultiMatrixNDToNZ(LocalTensor<half> dst, GlobalTensor<half> src, uint32_t count,
+template <typename InputT>
+__aicore__ inline void CopyMultiMatrixNDToNZ(LocalTensor<InputT> dst, GlobalTensor<InputT> src, uint32_t count,
                                              uint32_t srcMatrixStride, uint32_t dstMatrixStride, uint32_t rows,
                                              uint32_t cols, uint32_t stride, uint32_t dstRows)
 {
@@ -86,9 +90,10 @@ __aicore__ inline void CopyMultiMatrixNDToNZ(LocalTensor<half> dst, GlobalTensor
     }
 }
 
+template <typename InputT>
 class CopyQueryGmToL1 {
   public:
-    __aicore__ inline void operator()(L1Tensor& dst, DenseTensor& src, QueryCoord& c)
+    __aicore__ inline void operator()(L1Tensor<InputT>& dst, DenseTensor<InputT>& src, QueryCoord& c)
     {
         uint32_t sStart = c.gS1Idx / src.heads, gStart = c.gS1Idx % src.heads;
         uint32_t sEnd = (c.gS1Idx + c.gS1DealSize) / src.heads;
@@ -118,9 +123,10 @@ class CopyQueryGmToL1 {
         }
     }
 };
+template <typename InputT>
 class CopyKvGmToL1 {
   public:
-    __aicore__ inline void operator()(L1Tensor& dst, DenseTensor& src, KvCoord& c)
+    __aicore__ inline void operator()(L1Tensor<InputT>& dst, DenseTensor<InputT>& src, KvCoord& c)
     {
         uint64_t offset = (uint64_t(c.bIdx) * src.sequence + c.s2Idx) * src.dim + c.dIdx;
         CopySingleMatrixNDToNZ(dst.tensor, src.gmTensor[offset], c.s2DealSize, c.dDealSize, src.dim, dst.rowCount);

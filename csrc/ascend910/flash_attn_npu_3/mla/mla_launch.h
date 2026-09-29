@@ -13,6 +13,7 @@ struct MlaLaunchArgs {
 };
 
 aclError LaunchDenseFp16(const MlaLaunchArgs& args);
+aclError LaunchDenseBf16(const MlaLaunchArgs& args);
 
 // Bisheng 9.0's ASC launcher does not expose a scheduling-mode argument.
 // The link wrapper changes only the launch inside this thread-local scope.
