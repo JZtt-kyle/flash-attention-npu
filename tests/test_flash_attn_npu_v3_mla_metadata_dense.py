@@ -4,6 +4,9 @@ import ctypes as ct
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -36,14 +39,15 @@ def consumers(tmp_path_factory, request):
 
 def configure(libraries, directory, dtype):
     probes = load_probes(libraries, directory, dtype)
-    lib = probes[0]["metadata"]
-    lib.launch_dense_metadata.argtypes = [ct.c_void_p] * 10 + [
-        ct.c_uint32,
-        ct.c_void_p,
-        ct.POINTER(Context),
-        ct.c_float,
-    ]
-    lib.launch_dense_metadata.restype = ct.c_int
+    for name in ("metadata", "metadata_checked"):
+        lib = probes[0][name]
+        lib.launch_dense_metadata.argtypes = [ct.c_void_p] * 10 + [
+            ct.c_uint32,
+            ct.c_void_p,
+            ct.POINTER(Context),
+            ct.c_float,
+        ]
+        lib.launch_dense_metadata.restype = ct.c_int
     return probes
 
 
@@ -70,15 +74,15 @@ def make_metadata_case(probes, probe, shape, *, scale=None, worker=0):
     return case
 
 
-def launch_consumer(probes, case, *, words=WORDS, address=None, context=None):
+def launch_consumer(probes, case, *, words=WORDS, address=None, context=None, checked=True):
     tensors = [case["device"][n] for n in ("qv", "q", "v", "k")]
     tensors += [case["desc"], *case["outputs"]["migrated"], case["workspace"]["migrated"]]
-    result = probes[0]["metadata"].launch_dense_metadata(
+    result = probes[0]["metadata_checked" if checked else "metadata"].launch_dense_metadata(
         torch.npu.current_stream().npu_stream,
         *(t.data_ptr() for t in tensors),
         case["metadata"].data_ptr() if address is None else address,
         words,
-        case["status"].data_ptr(),
+        None if checked else case["status"].data_ptr(),
         ct.byref(case["context"] if context is None else context),
         case["scale"],
     )
@@ -100,7 +104,6 @@ def check_metadata_case(probes, case, repeats=3):
             launch(lib, current, name)
 
     record = check_case(probes, case, repeats=repeats, launch_fn=dispatch)
-    assert_status(case, 0)
     actual = case["metadata_storage"].cpu().tolist()
     assert actual[0] == actual[-1] == SENTINEL
     assert [x & 0xFFFFFFFF for x in actual[1:-1]] == case["metadata_expected"]
@@ -150,7 +153,7 @@ def test_reject_corrupt_records(consumers, probe):
     for word, value, expected in CORRUPTIONS:
         case["metadata"].copy_(good)
         case["metadata"][word] = value if value < 2**31 else value - 2**32
-        launch_consumer(consumers, case)
+        launch_consumer(consumers, case, checked=False)
         assert_status(case, expected)
         for actual, before in zip(outputs, original):
             assert torch.equal(actual.cpu(), before), (word, value)
@@ -161,7 +164,7 @@ def test_reject_corrupt_records(consumers, probe):
         (WORDS, 0),
         (WORDS, case["metadata"].data_ptr() + 2),
     ]:
-        launch_consumer(consumers, case, words=words, address=address)
+        launch_consumer(consumers, case, words=words, address=address, checked=False)
         assert_status(case, 1)
         for actual, before in zip(outputs, original):
             assert torch.equal(actual.cpu(), before)
@@ -179,12 +182,12 @@ def test_reject_corrupt_records(consumers, probe):
     ]:
         context = Context.from_buffer_copy(case["context"])
         setattr(context, name, value)
-        launch_consumer(consumers, case, context=context)
+        launch_consumer(consumers, case, context=context, checked=False)
         assert_status(case, expected)
         for actual, before in zip(outputs, original):
             assert torch.equal(actual.cpu(), before)
     case["metadata"].copy_(good)
-    check_metadata_case(consumers, case)  # Failure does not poison subsequent launches.
+    check_metadata_case(consumers, case)  # Diagnostic rejection preserves the stream.
     (consumers[1] / "rejections.json").write_text(
         json.dumps(
             dict(
@@ -220,7 +223,6 @@ def test_reuse_scales_streams_and_inputs(consumers, probe):
             launch_consumer(consumers, current)
             pending.append(current)
     for current in pending:
-        assert current["status"][::16].cpu().tolist() == [0] * (case["status"].numel() // 16)
         refs = mla_reference_pair(**current["inputs"], softmax_scale=current["scale"])
         for i, out in enumerate(current["outputs"]["migrated"]):
             assert_fa_close(out.cpu(), refs[i], refs[i + 2], name=("out", "lse")[i])
@@ -242,7 +244,7 @@ def test_aicpu_failure_and_overwrite(consumers, probe):
             case["metadata_expected"] = enqueue(
                 probe, args, case["metadata_storage"], iteration % 2
             )
-            launch_consumer(consumers, case)
+            launch_consumer(consumers, case, checked=False)
             assert_status(case, expected)
             for actual, before in zip(outputs, original):
                 assert torch.equal(actual.cpu(), before)
@@ -252,6 +254,7 @@ def test_aicpu_failure_and_overwrite(consumers, probe):
 def test_cache_lengths_failure_and_recovery(consumers, probe):
     case = make_metadata_case(consumers, probe, (2, 1, 8, 257))
     check_metadata_case(consumers, case)
+
     outputs = [*case["outputs"]["migrated"], case["workspace"]["migrated"]]
     original = [t.cpu() for t in outputs]
     args = Args(0, WORDS, case["context"].dtype, Shape(*case["shape"]), probe["platform"])
@@ -260,7 +263,7 @@ def test_cache_lengths_failure_and_recovery(consumers, probe):
         enqueue(probe, args, case["metadata_storage"], cache_seqlens=case["cache_seqlens"])
         # A failed producer record is passed straight to the real device
         # consumer; no status copy or synchronization intervenes.
-        launch_consumer(consumers, case)
+        launch_consumer(consumers, case, checked=False)
         assert_status(case, 3)  # GenerationFailed on every Cube/Vector core.
         words = case["metadata_storage"].cpu().tolist()
         assert words[0] == words[-1] == SENTINEL
@@ -273,3 +276,86 @@ def test_cache_lengths_failure_and_recovery(consumers, probe):
         probe, args, case["metadata_storage"], cache_seqlens=case["cache_seqlens"]
     )
     check_metadata_case(consumers, case)
+
+
+def test_checked_enqueue_without_host_readback(consumers, probe):
+    from tests.mla_metadata_error_probe import forbid_host_readback
+
+    case = make_metadata_case(consumers, probe, (2, 1, 8, 257))
+    args = Args(0, WORDS, case["context"].dtype, Shape(*case["shape"]), probe["platform"])
+    with forbid_host_readback():
+        for _ in range(8):
+            enqueue(probe, args, case["metadata_storage"], cache_seqlens=case["cache_seqlens"])
+            launch_consumer(consumers, case)
+    check_metadata_case(consumers, case)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "null",
+        "unaligned",
+        "truncated",
+        "magic",
+        "version",
+        "schedule_failure",
+        "length_count",
+        "length_negative",
+        "length_zero",
+        "length_short",
+        "length_over_capacity",
+        "dtype",
+        "shape",
+        "platform",
+        "tiling",
+        "endpoints",
+        "workspace_high_word",
+        "local_memory",
+    ],
+)
+def test_checked_runtime_error(consumers, probe, fault):
+    # Build once in the parent, then load the exact same hashed libraries into
+    # fresh interpreters. An expected runtime failure must not poison pytest.
+    directory = consumers[1] / ("error-" + fault)
+    directory.mkdir()
+    torch.npu.synchronize()
+    sync = {"magic": "event", "length_short": "stream"}.get(fault, "device")
+    command = [
+        sys.executable,
+        "-m",
+        "tests.mla_metadata_error_probe",
+        str(consumers[1] / "build-manifest.json"),
+        str(probe["directory"] / "build-manifest.json"),
+        fault,
+        sync,
+        str(directory),
+    ]
+    (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n")
+    with (directory / "process.log").open("w") as log:
+        with subprocess.Popen(
+            command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+        ) as child:
+            try:
+                returncode = child.wait(timeout=90)
+            finally:
+                # The child deliberately bypasses NPU tensor destruction after
+                # Trap. Clean its CANN compiler workers too, using only this
+                # test's private process group (never the parent's group).
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+    assert returncode == 0, (directory / "process.log").read_text()
+    report = json.loads((directory / "runtime-error.json").read_text())
+    assert report["stage"] in ("launch", sync)
+    # C1V2 may report the Cube or Vector exception first. Pin the documented
+    # exception codes, require the trap diagnostic and exclude task timeouts.
+    assert any(code in report["error"] for code in ("507015", "507016", "507035", "507036")), report
+    assert "trap error" in report["error"], report
+    assert report["elapsed_seconds"] < 15, report  # A real exception, not the op timeout.
+    assert "910B" in report["device"]

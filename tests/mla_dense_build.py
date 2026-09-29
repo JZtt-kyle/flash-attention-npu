@@ -114,8 +114,10 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False):
             ]
         else:
             cmd += [f"-I{ROOT}/csrc/catlass/include", f"-I{ROOT}/csrc/ascend910/flash_attn_npu_3"]
-            if name == "metadata":
+            if name in ("metadata", "metadata_checked"):
                 cmd.append("-DMLA_DENSE_METADATA")
+            if name == "metadata_checked":
+                cmd += ["-DMLA_DENSE_METADATA_CHECKED", "-DNDEBUG"]
         cmd += ["-MMD", "-MF", str(artifacts / f"{name}.d"), "-o", str(output)]
         (artifacts / f"{name}-command.json").write_text(json.dumps(cmd, indent=2) + "\n")
         with (artifacts / f"{name}-compile.log").open("w") as log:
@@ -153,12 +155,16 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False):
             ]
         )
         assert all(header in dependencies for header in expected)
-        if name == "metadata":
+        if name in ("metadata", "metadata_checked"):
             assert "mla_metadata_consumer.h" in dependencies and "mla_metadata.hpp" in dependencies
         assert ("oracle-source" in dependencies) == (name == "oracle")
         return str(output)
 
-    names = ("oracle", "migrated", "metadata") if metadata else ("oracle", "migrated")
+    names = (
+        ("oracle", "migrated", "metadata", "metadata_checked")
+        if metadata
+        else ("oracle", "migrated")
+    )
     with ThreadPoolExecutor(max_workers=2) as pool:
         libraries = dict(zip(names, pool.map(compile_probe, names)))
     host_output = artifacts / "schedule.so"

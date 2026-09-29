@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前已将首步 FP16/BF16 dense MLA 的调度和 Kernel 接入 910B FA3 `flash_attn_func`，具备独立 reference 和固定源码 CANN 对照。M05a 已完成 AICPU 调度生成；M05b1 已完成版本化 metadata 的设备读取、校验和独立 dense 消费链路；M05b2a 已对齐官方 metadata 签名及普通 FA3 关键字兼容层。公开 MLA metadata 和范围外组合仍明确报未实现；无 metadata 的公开 E2E 尚未达到性能门槛。M05b2b1 已完成 AICPU 设备长度读取和范围拒绝。唯一下一步为 M05b2b2，完成设备校验错误上报，再由 M05b2b3 接通公开生成与消费；最终 metadata E2E 门槛在 M05c 验收。
+当前已将首步 FP16/BF16 dense MLA 的调度和 Kernel 接入 910B FA3 `flash_attn_func`，具备独立 reference 和固定源码 CANN 对照。M05a 已完成 AICPU 调度生成；M05b1 已完成版本化 metadata 的设备读取、校验和独立 dense 消费链路；M05b2a 已对齐官方 metadata 签名及普通 FA3 关键字兼容层。公开 MLA metadata 和范围外组合仍明确报未实现；无 metadata 的公开 E2E 尚未达到性能门槛。M05b2b1 已完成 AICPU 设备长度读取和范围拒绝。M05b2b2 已完成内部设备校验错误上报。唯一下一步为 M05b2b3，接通公开生成与消费；最终 metadata E2E 门槛在 M05c 验收。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能验收使用 metadata 路径 E2E 与同轮 CANN E2E 的逐例比较。
 
@@ -26,8 +26,8 @@
 | M05b1 | 已完成 | 版本化 metadata 的设备消费者及独立 dense 链路 | AICPU 记录经版本、类型、形状、平台、端点和 workspace 校验后驱动现有 Kernel；拒绝记录不触碰 O/LSE/workspace；两种 dtype 精度、复用、同轮性能诊断及普通 FA3 回归通过；公开入口继续拒绝 |
 | M05b2a | 已完成 | 官方 metadata 签名与普通 FA3 兼容层 | 129 项签名/兼容/精度/编译图、622 项 MLA 与 20 项普通 FA3 回归通过；80 组旧协议逐字节一致；生产入口重建及 16 个未变对象哈希已核查；公开 MLA metadata 仍拒绝 |
 | M05b2b1 | 已完成 | AICPU 读取 dense cache_seqlens 并拒绝未支持长度 | 175 项 CPU、52 项 AICPU、60 项双 dtype 消费精度/拒绝、129 项签名、622 项 MLA 与 20 项普通 FA3 回归通过；仅接受每个长度等于 KV 容量，失败记录清零 payload；生产 AICPU 重建和生成/复用性能诊断完成；公开入口仍拒绝 |
-| M05b2b2 | 唯一下一步 | 公开接入所需的设备校验错误上报 | 失败记录或损坏 metadata 在正常调用/同步点报错，不能静默返回未初始化 O/LSE；不引入长度 D2H 或 steady-state 主机同步；隔离进程的真实错误和成功路径验收通过 |
-| M05b2b3 | 待 M05b2b2 完成 | 已验收 dense 范围的公开 MLA metadata 生成与消费 | 官方签名、真实/fake/C++ 边界、运行时 scale、有/无 metadata、连续复用及 allocator/stream 生命周期正确；生产构建、两种 dtype 精度、普通 FA3 回归及同轮性能诊断通过 |
+| M05b2b2 | 已完成 | 公开接入所需的设备校验错误上报 | 98 项双 dtype 设备检查通过，含 36 个独立进程的真实异常、device/stream/event 同步和成功精度；`-DNDEBUG` 仍触发 Trap，无长度 D2H 或 steady-state 主机同步；90 项 CPU、普通 FA3 回归、公开拒绝契约及同轮 CANN 性能诊断完成 |
+| M05b2b3 | 唯一下一步 | 已验收 dense 范围的公开 MLA metadata 生成与消费 | 官方签名、真实/fake/C++ 边界、运行时 scale、有/无 metadata、连续复用及 allocator/stream 生命周期正确；生产构建、两种 dtype 精度、普通 FA3 回归及同轮性能诊断通过 |
 | M05c | 待 M05b2b 完成 | metadata 复用路径 E2E 验收 | 优化重复准备与发射成本；逐例 `FA3 metadata E2E / 同轮 CANN E2E <= 1.0`，分别记录 metadata 生成、复用和完整调用段；两种 dtype 精度及普通 FA3 回归通过 |
 | M04c1 | 待 M05 完成 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | KV 仍为 1..512；按源 M 切块/分核接通，覆盖 257/511/512/513 行及跨核尾块；两种 dtype、metadata、重复执行、普通 FA3 回归和 E2E 通过 |
 | M04c2 | 待 M04c1 完成 | dense 的 KV 513..1024、显式 num_splits=1 | 保留源 aMLA nUpdate、PV 原子加和事件依赖；单列禁止 FD 的必要调度映射；跨块最大值变化、O/LSE、重复执行、metadata、普通 FA3 回归和 E2E 通过 |

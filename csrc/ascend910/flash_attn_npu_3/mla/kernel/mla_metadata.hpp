@@ -34,4 +34,20 @@ __aicore__ inline MlaMetadataReadStatus ReadDenseMetadata(GM_ADDR address, uint3
     read.data.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(address));
     return flash_attn::mla::ReadDenseMetadata(read, words, context, output);
 }
+
+// Runtime-facing adapter: an invalid record must fail the stream, not leave
+// apparently successful, uninitialized O/LSE. Trap is unconditional on build
+// flags (unlike debug assertions) and needs no status buffer or host readback.
+// All Cube/Vector cores validate the same immutable record before the caller
+// constructs TPipe, allocates events or enters any attention barrier.
+template <typename InputT>
+__aicore__ inline bool LoadDenseMetadata(GM_ADDR address, uint32_t words, const MlaDenseMetadataContext& context,
+                                         MlaDenseKernelSchedule& output)
+{
+    if (ReadDenseMetadata<InputT>(address, words, context, output) != MlaMetadataReadStatus::Success) {
+        AscendC::Trap();
+        return false;
+    }
+    return true;
+}
 } // namespace flash_attn::mla::Kernel

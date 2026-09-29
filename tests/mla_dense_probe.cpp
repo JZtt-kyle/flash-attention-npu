@@ -75,10 +75,18 @@ using OracleFd = typename std::conditional<g_coreType == AscendC::AIC, FiaBlockV
 #endif
 #else
 #ifdef MLA_DENSE_METADATA
+#ifdef MLA_DENSE_METADATA_CHECKED
+#ifdef MLA_DENSE_BF16
+#define DENSE_ENTRY mla_metadata_checked_dense_bf16_probe
+#else
+#define DENSE_ENTRY mla_metadata_checked_dense_probe
+#endif
+#else
 #ifdef MLA_DENSE_BF16
 #define DENSE_ENTRY mla_metadata_dense_bf16_probe
 #else
 #define DENSE_ENTRY mla_metadata_dense_probe
+#endif
 #endif
 #else
 #ifdef MLA_DENSE_BF16
@@ -107,6 +115,11 @@ __global__ __aicore__ __mix__(1, 2) void DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, 
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #ifdef MLA_DENSE_METADATA
     MlaDenseKernelSchedule params{};
+#ifdef MLA_DENSE_METADATA_CHECKED
+    if (!flash_attn::mla::Kernel::LoadDenseMetadata<InputT>(metadata, words, context, params)) {
+        return;
+    }
+#else
     auto result = flash_attn::mla::Kernel::ReadDenseMetadata<InputT>(metadata, words, context, params);
     uint32_t index = GetBlockIdx();
     if ASCEND_IS_AIV {
@@ -123,6 +136,7 @@ __global__ __aicore__ __mix__(1, 2) void DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, 
     if (result != flash_attn::mla::MlaMetadataReadStatus::Success) {
         return;
     }
+#endif
 #endif
     SetSyncBaseAddr(ffts);
     TPipe pipe;
@@ -165,10 +179,15 @@ extern "C" int launch_dense_metadata(void* stream, void* qc, void* qr, void* kv,
                                      void* lse, void* workspace, void* metadata, uint32_t words, void* status,
                                      const flash_attn::mla::MlaDenseMetadataContext* context, float scale)
 {
-    if (!context || !qc || !qr || !kv || !kr || !output || !lse || !workspace || !status || !std::isfinite(scale) ||
+    if (!context || !qc || !qr || !kv || !kr || !output || !lse || !workspace || !std::isfinite(scale) ||
         context->blockDim == 0 || context->blockDim > 26) {
         return -1;
     }
+#ifndef MLA_DENSE_METADATA_CHECKED
+    if (!status) {
+        return -1;
+    }
+#endif
     uint64_t ffts = 0;
     uint32_t len = 0;
     auto error = rtGetC2cCtrlAddr(&ffts, &len);
