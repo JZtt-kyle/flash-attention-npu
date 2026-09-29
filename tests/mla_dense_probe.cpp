@@ -5,6 +5,9 @@
 #include "runtime/rt_ffts.h"
 #include "kernel_operator.h"
 #include "mla/mla_dense_params.h"
+#ifdef MLA_DENSE_METADATA
+#include "mla/mla_metadata_consumer.h"
+#endif
 using namespace AscendC;
 using flash_attn::mla::MlaDenseKernelSchedule;
 #ifdef MLA_DENSE_BF16
@@ -71,21 +74,56 @@ using OracleFd = typename std::conditional<g_coreType == AscendC::AIC, FiaBlockV
                                            FiaBlockVecFlashDecode<Types>>::type;
 #endif
 #else
+#ifdef MLA_DENSE_METADATA
+#ifdef MLA_DENSE_BF16
+#define DENSE_ENTRY mla_metadata_dense_bf16_probe
+#else
+#define DENSE_ENTRY mla_metadata_dense_probe
+#endif
+#else
 #ifdef MLA_DENSE_BF16
 #define DENSE_ENTRY mla_dense_bf16_probe
 #else
 #define DENSE_ENTRY mla_dense_probe
 #endif
+#endif
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #include "mla/kernel/mla_dense.hpp"
+#ifdef MLA_DENSE_METADATA
+#include "mla/kernel/mla_metadata.hpp"
+#endif
 #endif
 #endif
 
 __global__ __aicore__ __mix__(1, 2) void DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
                                                      GM_ADDR kvList, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
+#ifdef MLA_DENSE_METADATA
+                                                     GM_ADDR metadata, uint32_t words, GM_ADDR status,
+                                                     flash_attn::mla::MlaDenseMetadataContext context, float scale)
+#else
                                                      MlaDenseKernelSchedule params, float scale)
+#endif
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
+#ifdef MLA_DENSE_METADATA
+    MlaDenseKernelSchedule params{};
+    auto result = flash_attn::mla::Kernel::ReadDenseMetadata<InputT>(metadata, words, context, params);
+    uint32_t index = GetBlockIdx();
+    if ASCEND_IS_AIV {
+        index += GetBlockNum();
+    }
+    GlobalTensor<uint32_t> statusGm;
+    // Each scalar writer owns a whole cache line; adjacent words would lose
+    // other cores' results when their independent data caches write back.
+    statusGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(status) + index * 16);
+    statusGm.SetValue(0, uint32_t(result));
+    DataCacheCleanAndInvalid<uint32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(statusGm);
+    // Each Cube/Vector reports separately. The immutable record and context
+    // produce the same decision on all cores, before any attention barriers.
+    if (result != flash_attn::mla::MlaMetadataReadStatus::Success) {
+        return;
+    }
+#endif
     SetSyncBaseAddr(ffts);
     TPipe pipe;
 #ifdef MLA_DENSE_ORACLE
@@ -122,6 +160,38 @@ __global__ __aicore__ __mix__(1, 2) void DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, 
 #endif
 }
 
+#ifdef MLA_DENSE_METADATA
+extern "C" int launch_dense_metadata(void* stream, void* qc, void* qr, void* kv, void* kr, void* kvList, void* output,
+                                     void* lse, void* workspace, void* metadata, uint32_t words, void* status,
+                                     const flash_attn::mla::MlaDenseMetadataContext* context, float scale)
+{
+    if (!context || !qc || !qr || !kv || !kr || !output || !lse || !workspace || !status || !std::isfinite(scale) ||
+        context->blockDim == 0 || context->blockDim > 26) {
+        return -1;
+    }
+    uint64_t ffts = 0;
+    uint32_t len = 0;
+    auto error = rtGetC2cCtrlAddr(&ffts, &len);
+    if (error != RT_ERROR_NONE) {
+        return error;
+    }
+    error = aclrtSetOpExecuteTimeOut(15);
+    if (error != ACL_SUCCESS) {
+        return error;
+    }
+#if !defined(__NPU_ARCH__)
+    auto before = batchLaunchCount;
+#endif
+    DENSE_ENTRY<<<context->blockDim, nullptr, stream>>>(
+        ffts, (uint8_t*)qc, (uint8_t*)qr, (uint8_t*)kv, (uint8_t*)kr, (uint8_t*)kvList, (uint8_t*)output, (uint8_t*)lse,
+        (uint8_t*)workspace, (uint8_t*)metadata, words, (uint8_t*)status, *context, scale);
+#if !defined(__NPU_ARCH__)
+    return batchLaunchCount == before + 1 ? batchLaunchError : -2;
+#else
+    return 0;
+#endif
+}
+#else
 extern "C" int launch_dense(void* stream, void* qc, void* qr, void* kv, void* kr, void* kvList, void* output, void* lse,
                             void* workspace, const MlaDenseKernelSchedule* params, float scale)
 {
@@ -154,3 +224,4 @@ extern "C" int launch_dense(void* stream, void* qc, void* qr, void* kv, void* kr
     return 0;
 #endif
 }
+#endif

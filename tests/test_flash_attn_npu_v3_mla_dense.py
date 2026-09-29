@@ -145,12 +145,12 @@ def launch(lib, case, name, *, scale=None):
     assert result == 0, f"dense probe launch failed: {result}"
 
 
-def check_case(probes, case, *, repeats=3):
+def check_case(probes, case, *, repeats=3, launch_fn=launch):
     libs, artifacts = probes
     first = {}
     for repeat in range(repeats):
         for name in ("oracle", "migrated"):
-            launch(libs[name], case, name)
+            launch_fn(libs[name], case, name)
         torch.npu.synchronize()
         results = {
             name: [x.cpu() for x in case["outputs"][name]] for name in ("oracle", "migrated")

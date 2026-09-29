@@ -19,7 +19,7 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build_probes(artifacts, dtype="fp16"):
+def build_probes(artifacts, dtype="fp16", *, metadata=False):
     assert dtype in ("fp16", "bf16")
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -114,6 +114,8 @@ def build_probes(artifacts, dtype="fp16"):
             ]
         else:
             cmd += [f"-I{ROOT}/csrc/catlass/include", f"-I{ROOT}/csrc/ascend910/flash_attn_npu_3"]
+            if name == "metadata":
+                cmd.append("-DMLA_DENSE_METADATA")
         cmd += ["-MMD", "-MF", str(artifacts / f"{name}.d"), "-o", str(output)]
         (artifacts / f"{name}-command.json").write_text(json.dumps(cmd, indent=2) + "\n")
         with (artifacts / f"{name}-compile.log").open("w") as log:
@@ -151,13 +153,14 @@ def build_probes(artifacts, dtype="fp16"):
             ]
         )
         assert all(header in dependencies for header in expected)
+        if name == "metadata":
+            assert "mla_metadata_consumer.h" in dependencies and "mla_metadata.hpp" in dependencies
         assert ("oracle-source" in dependencies) == (name == "oracle")
         return str(output)
 
+    names = ("oracle", "migrated", "metadata") if metadata else ("oracle", "migrated")
     with ThreadPoolExecutor(max_workers=2) as pool:
-        libraries = dict(
-            zip(("oracle", "migrated"), pool.map(compile_probe, ("oracle", "migrated")))
-        )
+        libraries = dict(zip(names, pool.map(compile_probe, names)))
     host_output = artifacts / "schedule.so"
     host_cmd = [
         "g++",
@@ -189,6 +192,8 @@ def build_probes(artifacts, dtype="fp16"):
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/detail/cann_split_core.h",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/detail/cann_split_core.cpp",
         ROOT / "tests/mla_dense_probe.cpp",
+        ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h",
+        ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_metadata_consumer.h",
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("*/*.hpp")),
     ]
     manifest = {

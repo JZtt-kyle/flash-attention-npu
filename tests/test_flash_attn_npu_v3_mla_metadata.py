@@ -6,6 +6,7 @@ constitute attention-kernel acceptance on other chips or C1V1 hardware.
 """
 
 import ctypes as ct
+from contextlib import contextmanager
 import hashlib
 import itertools
 import json
@@ -75,7 +76,15 @@ def probe(tmp_path_factory):
     directory = Path(
         os.environ.get("MLA_METADATA_ARTIFACT_DIR", tmp_path_factory.mktemp("mla-metadata"))
     )
-    library = build_probe(directory)
+    with load_probe(build_probe(directory), directory) as result:
+        yield result
+
+
+@contextmanager
+def load_probe(library, directory):
+    """Own test-only AICPU streams/events, also for standalone diagnostics."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
     torch.npu.set_device(0)
     assert "910B" in torch.npu.get_device_name(0)
     lib = ct.CDLL(str(library))
@@ -117,10 +126,12 @@ def probe(tmp_path_factory):
         )
         + "\n"
     )
-    yield result
-    torch.npu.synchronize()
-    for event in events:
-        assert acl.aclrtDestroyEvent(event) == 0
+    try:
+        yield result
+    finally:
+        torch.npu.synchronize()
+        for event in events:
+            assert acl.aclrtDestroyEvent(event) == 0
 
 
 def enqueue(probe, args, storage, worker=0):
