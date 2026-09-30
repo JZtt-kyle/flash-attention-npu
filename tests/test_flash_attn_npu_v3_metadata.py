@@ -636,15 +636,23 @@ def test_flash_attn_kvcache_metadata_tnd(
 )
 @pytest.mark.skipif(not _is_ascend910(), reason="Ascend910 only")
 def test_flash_attn_kvcache_metadata_flash_decode(
-    data_type, q_seqlen, num_heads, head_size, num_splits,
-    is_causal, softcap, new_length,
+    data_type,
+    q_seqlen,
+    num_heads,
+    head_size,
+    num_splits,
+    is_causal,
+    softcap,
+    new_length,
 ):
     """Check both scheduling paths against golden, with identical fresh caches."""
     old_length, block_size = 1024, 128
     total_length = old_length + new_length
     capacity = ((total_length + block_size - 1) // block_size) * block_size
     query = _rand_npu((q_seqlen, num_heads, head_size), data_type, SMALL_RANGE)
-    key_cache = _rand_npu((capacity // block_size, block_size, 1, head_size), data_type, SMALL_RANGE)
+    key_cache = _rand_npu(
+        (capacity // block_size, block_size, 1, head_size), data_type, SMALL_RANGE
+    )
     value_cache = _rand_npu(key_cache.shape, data_type, WIDE_RANGE)
     page_table = _int32_npu(list(range(capacity // block_size))).reshape(1, -1)
     cu_seqlens_q = _int32_npu([0, q_seqlen])
@@ -656,24 +664,45 @@ def test_flash_attn_kvcache_metadata_flash_decode(
     if new_length:
         key_ref[:, old_length:total_length] = k_new.cpu()
         value_ref[:, old_length:total_length] = v_new.cpu()
-    scale = head_size ** -0.5
+    scale = head_size**-0.5
 
     for use_metadata in (False, True):
-        metadata = _metadata(
-            batch_size=1, q_seqlen=q_seqlen, kv_seqlen=capacity,
-            num_heads=num_heads, kv_heads=1, head_size=head_size,
-            cache_seqlens=cache_seqlens, data_type=data_type,
-            cu_seqlens_q=cu_seqlens_q, page_size=block_size,
-            is_causal=is_causal, softcap=softcap,
-            num_splits=num_splits, max_seqlen_k_new=new_length,
-        ) if use_metadata else None
+        metadata = (
+            _metadata(
+                batch_size=1,
+                q_seqlen=q_seqlen,
+                kv_seqlen=capacity,
+                num_heads=num_heads,
+                kv_heads=1,
+                head_size=head_size,
+                cache_seqlens=cache_seqlens,
+                data_type=data_type,
+                cu_seqlens_q=cu_seqlens_q,
+                page_size=block_size,
+                is_causal=is_causal,
+                softcap=softcap,
+                num_splits=num_splits,
+                max_seqlen_k_new=new_length,
+            )
+            if use_metadata
+            else None
+        )
         keys, values = key_cache.clone(), value_cache.clone()
         output, lse, *_ = flash_attn_with_kvcache(
-            query, keys, values, k=k_new, v=v_new,
-            cache_seqlens=cache_seqlens, page_table=page_table,
-            cu_seqlens_q=cu_seqlens_q, max_seqlen_q=q_seqlen,
-            softmax_scale=scale, causal=is_causal, softcap=softcap,
-            num_splits=num_splits, scheduler_metadata=metadata,
+            query,
+            keys,
+            values,
+            k=k_new,
+            v=v_new,
+            cache_seqlens=cache_seqlens,
+            page_table=page_table,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=q_seqlen,
+            softmax_scale=scale,
+            causal=is_causal,
+            softcap=softcap,
+            num_splits=num_splits,
+            scheduler_metadata=metadata,
             return_softmax_lse=True,
         )
         _assert_bsnd_matches_ref(
@@ -681,15 +710,22 @@ def test_flash_attn_kvcache_metadata_flash_decode(
             lse.reshape(1, num_heads, q_seqlen),
             query.reshape(1, q_seqlen, num_heads, head_size),
             (key_ref[:, :total_length], value_ref[:, :total_length]),
-            batch_size=1, q_seqlen=q_seqlen, num_heads=num_heads,
-            head_size=head_size, scale=scale, data_type=data_type,
-            is_causal=is_causal, softcap=softcap,
+            batch_size=1,
+            q_seqlen=q_seqlen,
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            data_type=data_type,
+            is_causal=is_causal,
+            softcap=softcap,
         )
         if new_length:
             # Appending must update the cache without changing its old prefix
             # or unused capacity. Each scheduling path starts with its own copy.
             torch.testing.assert_close(keys.cpu().reshape_as(key_ref), key_ref, rtol=0, atol=0)
-            torch.testing.assert_close(values.cpu().reshape_as(value_ref), value_ref, rtol=0, atol=0)
+            torch.testing.assert_close(
+                values.cpu().reshape_as(value_ref), value_ref, rtol=0, atol=0
+            )
 
 
 @pytest.mark.parametrize("data_type, num_splits", KV_CACHE_FD_CONSTANT_CASES)
@@ -704,19 +740,37 @@ def test_flash_attn_kvcache_metadata_fd_constant_value(data_type, num_splits):
     cu = _int32_npu([0, sq])
     table = _int32_npu(list(range(sk // page_size))).reshape(1, -1)
     metadata = _metadata(
-        batch_size=1, q_seqlen=sq, kv_seqlen=sk, num_heads=1, kv_heads=1,
-        head_size=dim, cache_seqlens=lengths, data_type=data_type,
-        cu_seqlens_q=cu, page_size=page_size, num_splits=num_splits,
+        batch_size=1,
+        q_seqlen=sq,
+        kv_seqlen=sk,
+        num_heads=1,
+        kv_heads=1,
+        head_size=dim,
+        cache_seqlens=lengths,
+        data_type=data_type,
+        cu_seqlens_q=cu,
+        page_size=page_size,
+        num_splits=num_splits,
     )
     output, lse, *_ = flash_attn_with_kvcache(
-        query, keys, values, cache_seqlens=lengths, page_table=table,
-        cu_seqlens_q=cu, max_seqlen_q=sq, num_splits=num_splits,
-        scheduler_metadata=metadata, return_softmax_lse=True,
+        query,
+        keys,
+        values,
+        cache_seqlens=lengths,
+        page_table=table,
+        cu_seqlens_q=cu,
+        max_seqlen_q=sq,
+        num_splits=num_splits,
+        scheduler_metadata=metadata,
+        return_softmax_lse=True,
     )
     # P=1/1024 and V=-80 are exactly representable in both low-precision types.
-    torch.testing.assert_close(output.cpu(), torch.full((sq, 1, dim), -80, dtype=data_type), rtol=0, atol=0)
+    torch.testing.assert_close(
+        output.cpu(), torch.full((sq, 1, dim), -80, dtype=data_type), rtol=0, atol=0
+    )
     expected_lse = torch.full((1, sq), torch.tensor(float(sk)).log().item())
     torch.testing.assert_close(lse.cpu(), expected_lse, rtol=0, atol=1e-6)
+
 
 FLASH_ATTN_FUNC_SWA_CASES = [
     # data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, is_causal, window_size
@@ -1057,8 +1111,17 @@ def test_flash_attn_kvcache_metadata_swa_softcap(
 )
 @pytest.mark.skipif(not _is_ascend910(), reason="Ascend910 only")
 def test_flash_attn_kvcache_metadata_paged_short_kv_window(
-    data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size,
-    block_size, is_causal, window_size, softcap,
+    data_type,
+    batch_size,
+    num_heads,
+    kv_heads,
+    q_seqlen,
+    kv_seqlen,
+    head_size,
+    block_size,
+    is_causal,
+    window_size,
+    softcap,
 ):
     """Metadata path must follow actual cache_seqlens, not page capacity."""
     query = make_random_tensor(
@@ -1068,7 +1131,7 @@ def test_flash_attn_kvcache_metadata_paged_short_kv_window(
         batch_size, kv_seqlen, kv_heads, head_size, block_size, data_type
     )
     cache_seqlens = _int32_npu([kv_seqlen] * batch_size)
-    scale = 1.0 / (head_size ** 0.5)
+    scale = 1.0 / (head_size**0.5)
     capacity = int(page_table.shape[1]) * block_size
     assert capacity > kv_seqlen
 
@@ -1124,16 +1187,27 @@ def test_flash_attn_kvcache_metadata_paged_short_kv_window(
     out_meta, lse_meta = _run(scheduler_metadata)
 
     key_batched, value_batched = gather_paged_kv_batch(
-        key_cache.detach().cpu(), value_cache.detach().cpu(), page_table.cpu(),
-        kv_seqlen, block_size,
+        key_cache.detach().cpu(),
+        value_cache.detach().cpu(),
+        page_table.cpu(),
+        kv_seqlen,
+        block_size,
     )
     mask, is_causal_g, is_local_g = make_golden_attention_mask(
-        q_seqlen, kv_seqlen, is_causal, window_size[0], window_size[1],
+        q_seqlen,
+        kv_seqlen,
+        is_causal,
+        window_size[0],
+        window_size[1],
     )
     golden_out_ref, golden_lse_ref, golden_out_pt, golden_lse_pt = ref_flash_attention_pair(
-        query.detach().cpu(), key_batched, value_batched, scale,
+        query.detach().cpu(),
+        key_batched,
+        value_batched,
+        scale,
         mask if (is_causal_g or is_local_g) else None,
-        data_type, softcap=softcap,
+        data_type,
+        softcap=softcap,
     )
     if mask is not None:
         fully_masked = mask.all(dim=-1)
@@ -1605,12 +1679,23 @@ def test_flash_attn_kvcache_metadata_950_short_kv_swa():
 
     # On 950, None auto-generates metadata using the actual KV length (2).
     out, lse, *_ = flash_attn_with_kvcache(
-        q, k, v, cache_seqlens=_int32_npu([2]), page_table=_int32_npu([[0]]),
-        max_seqlen_q=1, causal=False, window_size=(3, 2), num_splits=0,
-        scheduler_metadata=None, return_softmax_lse=True,
+        q,
+        k,
+        v,
+        cache_seqlens=_int32_npu([2]),
+        page_table=_int32_npu([[0]]),
+        max_seqlen_q=1,
+        causal=False,
+        window_size=(3, 2),
+        num_splits=0,
+        scheduler_metadata=None,
+        return_softmax_lse=True,
     )
     # Q=K=0 gives equal scores: O=(1+1)/2 and LSE=log(exp(0)+exp(0)).
     torch.testing.assert_close(out.cpu(), torch.ones_like(out.cpu()), rtol=0, atol=0)
     torch.testing.assert_close(
-        lse.cpu(), torch.full_like(lse.cpu(), math.log(2)), rtol=0, atol=1e-6,
+        lse.cpu(),
+        torch.full_like(lse.cpu(), math.log(2)),
+        rtol=0,
+        atol=1e-6,
     )
