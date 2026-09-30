@@ -339,8 +339,8 @@ def test_dense_query_limits(entry, shape, dtype):
 
 def test_dense_kv_limit(entry, dtype):
     args = _inputs(dtype=dtype)
-    args["k"] = torch.empty((2, 513, 1, 64), dtype=dtype, device="npu")
-    args["v"] = torch.empty((2, 513, 1, 512), dtype=dtype, device="npu")
+    args["k"] = torch.empty((2, 1025, 1, 64), dtype=dtype, device="npu")
+    args["v"] = torch.empty((2, 1025, 1, 512), dtype=dtype, device="npu")
     with pytest.raises(RuntimeError, match="outside B>0"):
         _forward(entry, args)
 

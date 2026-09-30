@@ -234,7 +234,7 @@ def test_aicpu_failure_and_overwrite(consumers, probe):
     for iteration in range(3):
         for shape, expected in [
             ((2, 1, 8, 257), 0),
-            ((2, 1, 8, 513), 3),
+            ((2, 1, 8, 1025), 3),
             ((1, 7, 16, 65), 5),
             ((2, 1, 8, 257), 0),
         ]:

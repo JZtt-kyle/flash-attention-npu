@@ -14,7 +14,7 @@
 // Init, InitOutputSingleCore, InitCalcParamsEach, CalcParams, UpdateAxisInfo,
 // FlashAttention, CreateTask, ShouldExecuteTask and ExecuteTask.
 // Specialization: nonempty contiguous BSND, Hkv=1, no mask/FD/length arrays,
-// Sq*Hq>0, 1<=Sk<=512. The caller validates source field/address bounds and
+// Sq*Hq>0, 1<=Sk<=1024. The caller validates source field/address bounds and
 // supplies the source M-block partition, including cross-core and tail blocks.
 #pragma once
 #include "../mla_dense_params.h"
@@ -143,7 +143,7 @@ class MlaDense {
             info.actualSingleProcessSInnerSize = params.sk - s * params.s2BaseSize;
         }
         info.actualSingleProcessSInnerSizeAlign = Tile::Align(info.actualSingleProcessSInnerSize, 32U);
-        // In this validated non-FD single-S2 range curS2Start=0, curS2End=1.
+        // Every non-FD M block starts at S2=0 and consumes all of its S2 blocks.
         info.isFirstSInnerLoop = (loop == 0 || s == 0);
         if (info.isFirstSInnerLoop) {
             ++bn2IdxInCurCore;

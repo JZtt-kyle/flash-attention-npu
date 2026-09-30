@@ -13,8 +13,9 @@
 // CalcInnerSize, CalcMBaseSize, CreateSplitInput, Split, CalcMmResSize,
 // FillTilingWorkspaceParams, CalcNormalWorkspaceSize, CalcNumBlocks, CalcScheduleMode.
 // The upstream license is reproduced in LICENSE.cann next to this file.
-// Changes: remove gert/registration, restrict inputs to dense single-S2-block MLA,
-// separate platform/launch data, check arithmetic/resources before source narrowing.
+// Changes: remove gert/registration, restrict inputs to dense MLA with Sk<=1024,
+// align source endpoints for FA3 num_splits=1, separate platform/launch
+// data, check arithmetic/resources before source narrowing.
 
 #include "mla_schedule.h"
 #include "detail/cann_split_core.h"
@@ -77,7 +78,7 @@ bool ValidSplit(const detail::SplitResult& split, uint32_t batch, uint32_t mBloc
     }
     uint64_t previous = 0;
     for (uint32_t i = 0; i < split.usedCoreNum; ++i) {
-        // Single S2 block: every boundary must be between complete M blocks.
+        // num_splits=1: every boundary must be between complete M blocks.
         if (split.bN2End[i] > batch || split.gS1End[i] >= mBlocks || split.s2End[i] != 0) {
             return false;
         }
@@ -88,6 +89,45 @@ bool ValidSplit(const detail::SplitResult& split, uint32_t batch, uint32_t mBloc
         previous = end;
     }
     return previous == uint64_t(batch) * mBlocks;
+}
+
+void SplitWithoutFlashDecode(uint32_t cores, const detail::BaseInfo& base, const detail::SplitParam& param,
+                             uint32_t mBlocks, detail::SplitResult& split)
+{
+    detail::SplitCore(cores, base, param, split);
+    if (split.numOfFdHead == 0) {
+        return;
+    }
+    // FA3 num_splits=1 requires complete M blocks on each core. Round each
+    // source endpoint up to the end of its M block and coalesce empty ranges.
+    // Rebuild the partition and its costs; never just clear an FD plan's flags.
+    // Filtering out all source FD candidates can otherwise discard balanced
+    // partitions even when there are enough M blocks to occupy every core.
+    detail::SplitContext context(base, param);
+    detail::CalcSplitInfo(context);
+    detail::BatchCache batch{};
+    detail::CalcBatchCache(0, context, batch);
+    detail::S1GCache first{}, last{};
+    detail::CalcS1GCache(0, context, batch, first);
+    detail::CalcS1GCache(mBlocks - 1, context, batch, last);
+    // Dense batches have identical full rows and one possible M tail.
+    const int64_t batchCost = int64_t(mBlocks - 1) * first.s1GCost + last.s1GCost;
+    const auto costBefore = [&](uint64_t end) {
+        return int64_t(end / mBlocks) * batchCost + int64_t(end % mBlocks) * first.s1GCost;
+    };
+    detail::SplitResult whole{cores, split.vecCubeRatio};
+    uint64_t previous = 0;
+    for (uint32_t i = 0; i < split.usedCoreNum; ++i) {
+        const uint64_t end = uint64_t(split.bN2End[i]) * mBlocks + split.gS1End[i] + (split.s2End[i] != 0);
+        if (end > previous) {
+            const uint32_t core = whole.usedCoreNum++;
+            whole.bN2End[core] = end / mBlocks;
+            whole.gS1End[core] = end % mBlocks;
+            whole.maxCost = std::max(whole.maxCost, costBefore(end) - costBefore(previous));
+            previous = end;
+        }
+    }
+    split = std::move(whole);
 }
 
 MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& platform, MlaSchedule& output)
@@ -103,7 +143,7 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
     }
     // Multiplication is wide even for rejected input; never overflow the caller's int64 shape.
     uint64_t rows = uint64_t(shape.queryLength) * uint64_t(shape.queryHeads);
-    if (shape.kvLength > 512) {
+    if (shape.kvLength > 1024) {
         return MlaScheduleStatus::UnsupportedShape;
     }
     if (rows > kMlaMaxDenseRows || shape.queryHeads > kMlaMaxQueryHeads || shape.queryLength > kMlaMaxQueryLength ||
@@ -149,7 +189,8 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
     schedule.scheduleMode = 1;
     schedule.requiredLocalMemory = requiredMemory;
     uint32_t mBlocks = (rows + schedule.mBaseSize - 1) / schedule.mBaseSize;
-    if (uint64_t(batch) * mBlocks > u32Max) {
+    uint32_t s2Blocks = (schedule.s2Size + schedule.s2BaseSize - 1) / schedule.s2BaseSize;
+    if (uint64_t(batch) * mBlocks * s2Blocks > u32Max) {
         return MlaScheduleStatus::FieldOverflow;
     }
 
@@ -178,7 +219,7 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
     param.mBaseSize = schedule.mBaseSize;
     param.s2BaseSize = schedule.s2BaseSize;
     detail::SplitResult split{platform.aicNum, ratio};
-    detail::SplitCore(platform.aicNum, base, param, split);
+    SplitWithoutFlashDecode(platform.aicNum, base, param, mBlocks, split);
     // Do not force FD fields to zero to make a non-FD launch appear valid.
     if (split.numOfFdHead != 0 || split.maxS2SplitNum != 0 || split.usedVecNumOfFd != 0) {
         return MlaScheduleStatus::UnexpectedFlashDecode;

@@ -146,9 +146,13 @@ def case(batch=1, sq=1, heads=128, sk=512, aic=20, ratio=2, **overrides):
     return list(values.values())
 
 
-def evaluate(binary, cases):
+def evaluate(binary, cases, *, automatic_fd=False):
     text = "".join(" ".join(map(str, item)) + "\n" for item in cases)
-    result = run([str(binary)], input=text)
+    env = os.environ.copy()
+    env.pop("MLA_ORACLE_AUTOMATIC_FD", None)
+    if automatic_fd:
+        env["MLA_ORACLE_AUTOMATIC_FD"] = "1"
+    result = run([str(binary)], input=text, env=env)
     assert not result.stderr, result.stderr
     outputs = [json.loads(line) for line in result.stdout.splitlines()]
     assert len(outputs) == len(cases)
@@ -235,6 +239,40 @@ def test_s1g_multiblock_source_partitions(scheduler, oracle, artifact_dir, ratio
 
 
 @pytest.mark.parametrize("ratio", (1, 2))
+def test_two_kv_blocks_without_flashdecode(scheduler, oracle, artifact_dir, ratio):
+    cases = [
+        case(b, sq, h, sk, aic, ratio)
+        for aic in range(1, 27)
+        for b in sorted({1, max(1, aic // 2), aic, aic + 1, 2 * aic + 1})
+        for sq, h in ((1, 1), (1, 17), (1, 128), (2, 128), (171, 3), (129, 128))
+        for sk in (513, 544, 769, 1023, 1024)
+    ]
+    results = compare(scheduler, oracle, cases, artifact_dir, f"two-kv-blocks-{ratio}")
+    automatic = evaluate(oracle, cases, automatic_fd=True)
+    counts = dict(unchanged=0, constrained=0)
+    for shape, got, auto in zip(cases, results, automatic):
+        assert got[2] == 512
+        assert all(end == 0 for end in got[70:96])
+        if auto[5] == 0:
+            assert got == auto
+            counts["unchanged"] += 1
+        else:
+            assert got[5:8] == [0, 0, 0]
+            m_blocks = (shape[1] * shape[2] + got[1] - 1) // got[1]
+            ends = sorted(
+                {
+                    auto[18 + i] * m_blocks + auto[44 + i] + bool(auto[70 + i])
+                    for i in range(auto[3])
+                }
+            )
+            assert got[3] == len(ends)
+            assert [got[18 + i] * m_blocks + got[44 + i] for i in range(got[3])] == ends
+            counts["constrained"] += 1
+    assert all(counts.values())
+    (artifact_dir / f"fd-constraint-{ratio}.json").write_text(json.dumps(counts) + "\n")
+
+
+@pytest.mark.parametrize("ratio", (1, 2))
 def test_local_memory_boundaries(scheduler, ratio):
     good = case(ratio=ratio)
     assert evaluate(scheduler, [good])[0][0] == 0
@@ -259,7 +297,7 @@ def test_local_memory_boundaries(scheduler, ratio):
         ({"sk": -1}, 1),
         ({"heads": 2**23}, 2),
         ({"sq": 2**30 + 1, "heads": 1}, 2),
-        ({"sk": 513}, 1),
+        ({"sk": 1025}, 1),
         ({"batch": 2**32}, 2),
         ({"sq": 2**63 - 1}, 2),
         ({"heads": 2**32}, 2),
@@ -268,6 +306,7 @@ def test_local_memory_boundaries(scheduler, ratio):
         ({"sq": 2**30 - 63, "heads": 4}, 2),
         ({"batch": 2**24, "sq": 2**30, "heads": 1}, 2),
         ({"batch": 2**31, "sq": 513, "heads": 1, "aic": 1}, 2),
+        ({"batch": 2**31, "sq": 1, "heads": 1, "sk": 513, "aic": 1}, 2),
         ({"batch": 2**32 - 1}, 2),  # Source uint32 lcm would overflow before allocating vectors.
         ({"batch": 2**31, "heads": 256, "aic": 3}, 2),
         ({"aic": 0, "aiv": 0}, 3),

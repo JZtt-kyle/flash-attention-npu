@@ -160,7 +160,7 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         check(
             _fits_mla_dense_shape(q.shape[0], q.shape[1], heads_q, k.shape[1]),
             "MLA compressed forward is not implemented yet outside B>0, positive S1G within "
-            "address/field bounds, 1<=Sk<=512",
+            "address/field bounds, 1<=Sk<=1024",
         )
         for tensor in (q, k, v, qv):
             check(
@@ -1797,7 +1797,7 @@ def _fits_mla_dense_shape(batch, sq, heads, sk):
         and 0 < heads <= (2**32 - 1) // 512
         and sq * heads <= 2**32 - 256
         and batch * sq * heads <= (2**63 - 1) // 1024
-        and 0 < sk <= 512
+        and 0 < sk <= 1024
     )
 
 

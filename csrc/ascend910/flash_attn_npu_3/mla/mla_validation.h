@@ -13,7 +13,7 @@ inline bool FitsDenseShape(int64_t batch, int64_t sq, int64_t heads, int64_t sk)
 {
     return batch > 0 && batch <= UINT32_MAX && sq > 0 && sq <= kMlaMaxQueryLength && heads > 0 &&
            heads <= kMlaMaxQueryHeads && uint64_t(sq) * heads <= kMlaMaxDenseRows &&
-           uint64_t(batch) * sq * heads <= kMlaMaxBatchRows && sk > 0 && sk <= 512;
+           uint64_t(batch) * sq * heads <= kMlaMaxBatchRows && sk > 0 && sk <= 1024;
 }
 
 inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -61,7 +61,7 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
         TORCH_CHECK(q.size(0) == k.size(0), "MLA: dense batch sizes must match");
         TORCH_CHECK(FitsDenseShape(q.size(0), q.size(1), headsQ, k.size(1)),
                     "MLA compressed forward is not implemented yet outside B>0, positive S1G within address/field "
-                    "bounds, 1<=Sk<=512");
+                    "bounds, 1<=Sk<=1024");
         for (const auto& t : {q, k, v, *qv}) {
             TORCH_CHECK(t.is_contiguous(), "MLA compressed forward is not implemented yet for noncontiguous BSND");
             TORCH_CHECK(!t.requires_grad(), "MLA compressed forward is not implemented yet for gradients");

@@ -76,7 +76,7 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
     }
     const uint64_t rows = uint64_t(c.sq) * c.heads;
     if (c.batch == 0 || rows == 0 || rows > kMlaMaxDenseRows || c.sq > kMlaMaxQueryLength ||
-        c.heads > kMlaMaxQueryHeads || uint64_t(c.batch) * rows > kMlaMaxBatchRows || c.sk == 0 || c.sk > 512 ||
+        c.heads > kMlaMaxQueryHeads || uint64_t(c.batch) * rows > kMlaMaxBatchRows || c.sk == 0 || c.sk > 1024 ||
         MLA_WORD(schedule.bSize) != c.batch || MLA_WORD(schedule.s1Size) != c.sq ||
         MLA_WORD(schedule.gSize) != c.heads || MLA_WORD(schedule.s2Size) != c.sk || MLA_WORD(schedule.n2Size) != 1 ||
         MLA_WORD(schedule.headDim) != 512 || MLA_WORD(schedule.headDimRope) != 64) {
@@ -98,16 +98,17 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
     }
     s.mBaseSize = MLA_WORD(schedule.mBaseSize);
     s.s2BaseSize = MLA_WORD(schedule.s2BaseSize);
+    const uint32_t s2Base = c.sk < 512 ? c.sk : 512;
     // CalcMBaseSize may choose any divisor in [128,256], including odd values.
     // A 256-row base also permits a final partial block.
     if (s.mBaseSize < 128 || s.mBaseSize > 256 || (s.mBaseSize != 256 && rows % s.mBaseSize != 0) ||
-        s.s2BaseSize != c.sk || MLA_WORD(schedule.numOfFdHead) != 0 || MLA_WORD(schedule.maxS2SplitNum) != 0 ||
+        s.s2BaseSize != s2Base || MLA_WORD(schedule.numOfFdHead) != 0 || MLA_WORD(schedule.maxS2SplitNum) != 0 ||
         MLA_WORD(schedule.usedVecNumOfFd) != 0) {
         return Status::InvalidTiling;
     }
     const uint32_t mBlocks = (rows + s.mBaseSize - 1) / s.mBaseSize;
     const uint64_t tasks = uint64_t(c.batch) * mBlocks;
-    if (tasks > UINT32_MAX) {
+    if (tasks * ((c.sk + s2Base - 1) / s2Base) > UINT32_MAX) {
         return Status::InvalidEndpoints;
     }
     uint64_t previous = 0;
@@ -125,7 +126,7 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
         return Status::InvalidEndpoints;
     }
     const uint64_t m = ((rows < s.mBaseSize ? rows : s.mBaseSize) + 15) / 16 * 16;
-    const uint64_t r1 = m * ((c.sk + 31) / 32 * 32), r2 = m * 512;
+    const uint64_t r1 = m * ((s2Base + 31) / 32 * 32), r2 = m * 512;
     const uint64_t p = 2 * s.blockDim * r1 * 4, pv = p + 2 * s.blockDim * r1 * 2;
     const uint64_t vec2 = pv + 2 * s.blockDim * r2 * 4, kernel = vec2 + 2 * s.blockDim * r2 * 4;
     const uint64_t reserve = uint64_t(2) * c.aicNum * (6 * r1 + 8 * r2 + 8 * s.mBaseSize);

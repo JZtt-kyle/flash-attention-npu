@@ -128,7 +128,7 @@ enum class MlaScheduleStatus {
 };
 
 // Pure CPU scheduling for contiguous BSND, shared 512+64 KV, Hkv=1,
-// Sq*Hq>0 within the address/field bounds above, 1<=Sk<=512, B>0,
+// Sq*Hq>0 within the address/field bounds above, 1<=Sk<=1024, B>0,
 // no mask/length arrays, num_splits=1.
 // FP16 and BF16 have identical scheduling. This is not a public forward or
 // metadata entry point; callers must separately validate tensor/layout/options.

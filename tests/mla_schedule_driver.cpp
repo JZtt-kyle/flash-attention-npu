@@ -150,6 +150,45 @@ void Run(const Input& in)
     param.s2BaseSize = host.sInnerSize_;
     SplitResult split(in.aic, host.cvRatio_);
     SplitCore(in.aic, base, param, split);
+    if (split.numOfFdHead && !std::getenv("MLA_ORACLE_AUTOMATIC_FD")) {
+        // Independently map the pinned source's selected partition to complete
+        // M blocks. Materialize source row costs instead of the production
+        // dense prefix formula, then sum the rows assigned to each core.
+        SplitContext context(base, param);
+        CalcSplitInfo(context);
+        const uint32_t rows = context.splitInfo.s1GBaseNum[0];
+        const uint32_t columns = context.splitInfo.s2BaseNum[0];
+        std::vector<int64_t> costs;
+        for (uint32_t b = 0; b < in.batch; ++b) {
+            BatchCache batch{};
+            CalcBatchCache(b, context, batch);
+            for (uint32_t m = 0; m < rows; ++m) {
+                S1GCache row{};
+                CalcS1GCache(m, context, batch, row);
+                costs.push_back(row.s1GCost);
+            }
+        }
+        std::vector<uint64_t> ends;
+        for (uint32_t i = 0; i < split.usedCoreNum; ++i) {
+            const uint64_t physical = (uint64_t(split.bN2End[i]) * rows + split.gS1End[i]) * columns + split.s2End[i];
+            ends.push_back((physical + columns - 1) / columns);
+        }
+        ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
+        SplitResult whole(in.aic, host.cvRatio_);
+        uint64_t start = 0;
+        for (auto end : ends) {
+            int64_t cost = 0;
+            for (auto m = start; m < end; ++m) {
+                cost += costs.at(m);
+            }
+            auto i = whole.usedCoreNum++;
+            whole.bN2End[i] = end / rows;
+            whole.gS1End[i] = end % rows;
+            whole.maxCost = std::max(whole.maxCost, cost);
+            start = end;
+        }
+        split = std::move(whole);
+    }
     host.splitKVFlag_ = split.numOfFdHead > 0;
     host.CalcMmResSize();
     host.FillTilingWorkspaceParams();

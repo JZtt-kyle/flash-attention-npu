@@ -69,7 +69,7 @@ def forbid_host_readback():
 def inject(producer, case, fault):
     args = Args(0, WORDS, case["context"].dtype, Shape(*case["shape"]), producer["platform"])
     if fault == "schedule_failure":
-        args.shape.sk = 513
+        args.shape.sk = 1025
     lengths = case["cache_seqlens"]
     if fault == "length_count":
         lengths = lengths[:1]

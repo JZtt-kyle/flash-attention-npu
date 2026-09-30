@@ -55,7 +55,7 @@ int main()
         assert(ComputeMlaDenseMetadata(&args) == 0 && storage == before);
     };
     auto bad = args;
-    bad.shape.kvLength = 513;
+    bad.shape.kvLength = 1025;
     checkFailure(bad, 2, 1);
     bad = args;
     bad.dtype = 0;
@@ -92,7 +92,7 @@ int main()
     // length access, even if the declared count matches the invalid batch.
     bad = withLengths;
     bad.cacheSeqlensAddr = 4;
-    bad.shape.kvLength = 513;
+    bad.shape.kvLength = 1025;
     checkFailure(bad, 2, 1);
     bad.shape = withLengths.shape;
     bad.dtype = 0;

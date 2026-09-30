@@ -13,7 +13,7 @@
 // attention/fused_infer_attention_score/op_kernel/arch22/fia_block_vec_nonquant_mla.h
 // Dense BSND FP16/BF16, Hkv=1, no mask/FD/length arrays. Scale is launch data.
 // SoftmaxFlashV2, aMLA, all UB partitions, casts and events follow the source.
-// Cross-S2 nUpdate is retained for provenance, but is not exposed by this milestone.
+// Cross-S2 nUpdate retains the source int32 atomic update of the FP32 PV bits.
 #pragma once
 #include "mla_cube.hpp"
 #include "../tile/mla_vector_ops.hpp"

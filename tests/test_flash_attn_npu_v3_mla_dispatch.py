@@ -77,8 +77,8 @@ def test_dispatcher_rejects_invalid_inputs(dtype, fake, public, fault, message):
         elif fault == "grad":
             args["q"].requires_grad_(True)
         elif fault == "shape":
-            args["k"] = torch.empty((2, 513, 1, 64), dtype=dtype, device="npu")
-            args["v"] = torch.empty((2, 513, 1, 512), dtype=dtype, device="npu")
+            args["k"] = torch.empty((2, 1025, 1, 64), dtype=dtype, device="npu")
+            args["v"] = torch.empty((2, 1025, 1, 512), dtype=dtype, device="npu")
         elif fault == "scale":
             args["softmax_scale"] = 1e100
         elif fault == "length_dtype":

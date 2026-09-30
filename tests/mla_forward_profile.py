@@ -36,6 +36,18 @@ S1G_CASES = [
     ((1, 129, 128, 33), None),
 ]
 
+# Fixed M04c2 additions, selected before sampling. CANN may automatically use
+# FD; FA3 num_splits=1 uses complete M blocks on each core at the same Sk.
+KV_CASES = [
+    ((2, 1, 8, 513), None),
+    ((2, 1, 8, 513), 0.23),
+    ((1, 7, 16, 769), None),
+    ((1, 1, 128, 1024), None),
+    ((2, 2, 128, 1023), None),
+    ((10, 3, 86, 769), None),
+    ((21, 171, 3, 1024), None),
+]
+
 
 def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CASES):
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
@@ -75,6 +87,7 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
             return_softmax_lse=True,
         )
 
+    accuracy = []
     for shape, scale in cases:
         batch, sq, heads, sk = shape
         cpu = make_inputs(
@@ -94,8 +107,20 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
         source = native[-1]()
         refs = mla_reference_pair(**cpu, softmax_scale=scale)
         for i, name in enumerate(("out", "lse")):
-            torch.testing.assert_close(actual[i].cpu(), source[i].cpu(), rtol=0, atol=0)
+            if sk <= 512:
+                torch.testing.assert_close(actual[i].cpu(), source[i].cpu(), rtol=0, atol=0)
             assert_fa_close(actual[i].cpu(), refs[i], refs[i + 2], name=name)
+            assert_fa_close(source[i].cpu(), refs[i], refs[i + 2], name=name)
+        accuracy.append(
+            dict(
+                shape=shape,
+                scale=scale,
+                source_equal=all(torch.equal(actual[i].cpu(), source[i].cpu()) for i in range(2)),
+                fa3_max_error=[float((actual[i].cpu() - refs[i]).abs().max()) for i in range(2)],
+                cann_max_error=[float((source[i].cpu() - refs[i]).abs().max()) for i in range(2)],
+            )
+        )
+    (directory / "accuracy.json").write_text(json.dumps(accuracy, indent=2) + "\n")
     source_root = Path(
         os.environ.get(
             "MLA_CANN_SOURCE_ROOT", Path(__file__).resolve().parents[2] / "ops-transformer"
@@ -294,5 +319,7 @@ if __name__ == "__main__":
         os.environ["MLA_CANN_VENDOR"],
         os.environ.get("MLA_FORWARD_DTYPE", "fp16"),
         os.environ.get("MLA_FORWARD_METADATA_REUSE") == "1",
-        CASES + S1G_CASES if os.environ.get("MLA_FORWARD_S1G_MULTIBLOCK") == "1" else CASES,
+        CASES
+        + (S1G_CASES if os.environ.get("MLA_FORWARD_S1G_MULTIBLOCK") == "1" else [])
+        + (KV_CASES if os.environ.get("MLA_FORWARD_KV_MULTIBLOCK") == "1" else []),
     )

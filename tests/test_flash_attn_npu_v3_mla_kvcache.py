@@ -145,7 +145,7 @@ def test_public_record_matches_host(probe, dtype, shape):
         ("max_seqlen_q", 2**30 + 1),
         ("max_seqlen_q", 2**30 - 63),
         ("max_seqlen_k", 0),
-        ("max_seqlen_k", 513),
+        ("max_seqlen_k", 1025),
         ("num_heads_q", 0),
         ("num_heads_q", 2**23),
         ("num_heads_kv", 2),
@@ -418,7 +418,17 @@ def test_compile_metadata_reuse(dtype):
         for mode in ("generated", "implicit", "reused")
         for value in ("negative", "zero", "short", "over")
     ]
-    + ["magic", "dtype", "shape", "workspace", "m_base", "m_end"],
+    + [
+        "magic",
+        "dtype",
+        "shape",
+        "workspace",
+        "m_base",
+        "m_end",
+        "kv_base",
+        "kv_end",
+        "kv_workspace",
+    ],
 )
 def test_public_runtime_error(dtype, fault, tmp_path):
     dtype_name = "fp16" if dtype == torch.float16 else "bf16"

@@ -24,22 +24,23 @@ def run(dtype_name, fault, directory):
     # The invalid final batch catches checks that accidentally inspect only
     # the first sample or only the first launch core's own work.
     heads = 171 if fault in ("m_base", "m_end") else 4
+    sk = 1024 if fault.startswith("kv_") else 17
     device = {
         n: torch.zeros(
-            (21, 3 if n in ("q", "qv") else 17, heads if n in ("q", "qv") else 1, d),
+            (21, 3 if n in ("q", "qv") else sk, heads if n in ("q", "qv") else 1, d),
             dtype=dtype,
             device="npu",
         )
         for n, d in (("q", 64), ("k", 64), ("v", 512), ("qv", 512))
     }
-    lengths = torch.full((21,), 17, dtype=torch.int32, device="npu")
+    lengths = torch.full((21,), sk, dtype=torch.int32, device="npu")
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
         record = generate(device, lengths)
         good = cached(device, record, lengths)
         torch.testing.assert_close(good[0].cpu(), torch.zeros(good[0].shape, dtype=dtype))
-        torch.testing.assert_close(good[1].cpu(), torch.full(good[1].shape, 17.0).log())
+        torch.testing.assert_close(good[1].cpu(), torch.full(good[1].shape, float(sk)).log())
         mode, _, detail = fault.partition("-")
         if mode in ("generated", "implicit", "reused"):
             value = dict(negative=-1, zero=0, short=16, over=18)[detail]
@@ -55,6 +56,9 @@ def run(dtype_name, fault, directory):
                 workspace=(368, -1),
                 m_base=(15, 129),
                 m_end=(49, 3),
+                kv_base=(16, 1024),
+                kv_end=(75, 1),
+                kv_workspace=(367, 16384),
             )
             word, value = mutations[fault]
             record[word] = value
@@ -75,6 +79,7 @@ def run(dtype_name, fault, directory):
                 fault=fault,
                 dtype=dtype_name,
                 shape=list(device["q"].shape),
+                sk=sk,
                 pid=os.getpid(),
                 device=device_name,
                 visible_devices=os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),

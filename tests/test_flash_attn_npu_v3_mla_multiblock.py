@@ -89,8 +89,8 @@ def test_multiblock_content_rope(probes, perturb):
     check_public(probes, (10, 2, 129, 33), perturb=perturb)
 
 
-def test_multiblock_stream_reuse(probes):
-    cases = [make_case(probes, *s) for s in ((10, 2, 129, 17), (21, 3, 171, 33))]
+def check_stream_reuse(probes, shapes):
+    cases = [make_case(probes, *s) for s in shapes]
     records = [generate(case["device"]) for case in cases]
     snapshots = [record.cpu().clone() for record in records]
     streams = [torch.npu.Stream(), torch.npu.Stream()]
@@ -116,6 +116,10 @@ def test_multiblock_stream_reuse(probes):
             assert_fa_close(result[i].cpu(), refs[index][i], refs[index][i + 2], name=name)
     for record, snapshot in zip(records, snapshots):
         torch.testing.assert_close(record.cpu(), snapshot, rtol=0, atol=0)
+
+
+def test_multiblock_stream_reuse(probes):
+    check_stream_reuse(probes, ((10, 2, 129, 17), (21, 3, 171, 33)))
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
