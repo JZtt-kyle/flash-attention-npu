@@ -218,6 +218,23 @@ def test_equal_cost_keeps_first_plan(scheduler, oracle, artifact_dir):
 
 
 @pytest.mark.parametrize("ratio", (1, 2))
+def test_s1g_multiblock_source_partitions(scheduler, oracle, artifact_dir, ratio):
+    cases = [
+        case(b, sq, h, sk, aic, ratio)
+        for aic in (1, 2, 3, 20, 24, 26)
+        for b in sorted({1, aic - 1 or 1, aic, aic + 1, 2 * aic + 1})
+        for sq, h in ((257, 1), (7, 73), (4, 128), (3, 171), (17, 257), (129, 128))
+        for sk in (1, 33, 257, 511, 512)
+    ]
+    compare(scheduler, oracle, cases, artifact_dir, f"multiblock-{ratio}")
+    # Exercise every source-adjusted base, including odd values, rather than
+    # assuming that all M blocks are 128 or 256 rows.
+    cases = [case(10, 2, m, 65, 20, ratio) for m in range(128, 257)]
+    results = compare(scheduler, oracle, cases, artifact_dir, f"adjusted-m-{ratio}")
+    assert [row[1] for row in results] == list(range(128, 257))
+
+
+@pytest.mark.parametrize("ratio", (1, 2))
 def test_local_memory_boundaries(scheduler, ratio):
     good = case(ratio=ratio)
     assert evaluate(scheduler, [good])[0][0] == 0
@@ -240,14 +257,17 @@ def test_local_memory_boundaries(scheduler, ratio):
         ({"heads": -1}, 1),
         ({"sk": 0}, 1),
         ({"sk": -1}, 1),
-        ({"heads": 257}, 1),
-        ({"sq": 3}, 1),
+        ({"heads": 2**23}, 2),
+        ({"sq": 2**30 + 1, "heads": 1}, 2),
         ({"sk": 513}, 1),
         ({"batch": 2**32}, 2),
         ({"sq": 2**63 - 1}, 2),
         ({"heads": 2**32}, 2),
         ({"sk": 2**32}, 2),
-        ({"sq": 2**32 - 1, "heads": 2**32 - 1}, 1),
+        ({"sq": 2**32 - 1, "heads": 2**32 - 1}, 2),
+        ({"sq": 2**30 - 63, "heads": 4}, 2),
+        ({"batch": 2**24, "sq": 2**30, "heads": 1}, 2),
+        ({"batch": 2**31, "sq": 513, "heads": 1, "aic": 1}, 2),
         ({"batch": 2**32 - 1}, 2),  # Source uint32 lcm would overflow before allocating vectors.
         ({"batch": 2**31, "heads": 256, "aic": 3}, 2),
         ({"aic": 0, "aiv": 0}, 3),

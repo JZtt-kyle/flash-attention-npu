@@ -24,7 +24,17 @@ def arguments(dtype, shape=(2, 3, 4, 17)):
     }
 
 
-@pytest.mark.parametrize("shape", [(1, 1, 1, 1), (2, 7, 16, 65), (21, 2, 128, 511)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 1, 1, 1),
+        (2, 7, 16, 65),
+        (21, 2, 128, 511),
+        (1, 257, 1, 17),
+        (2, 3, 171, 65),
+        (10, 2, 129, 33),
+    ],
+)
 def test_metadata_dispatcher_schema_and_record(dtype, shape):
     args = arguments(dtype, shape)
     op = torch.ops.flash_attn_npu_3._mla_dense_metadata.default
@@ -57,15 +67,15 @@ def test_metadata_dispatcher_schema_and_record(dtype, shape):
         ("batch_size", 2**32),
         ("max_seqlen_q", -1),
         ("max_seqlen_q", 0),
-        ("max_seqlen_q", 65),
-        ("max_seqlen_q", 257),
+        ("max_seqlen_q", 2**30 - 63),
+        ("max_seqlen_q", 2**30 + 1),
         ("max_seqlen_k", -1),
         ("max_seqlen_k", 0),
         ("max_seqlen_k", 513),
         ("num_heads_q", -1),
         ("num_heads_q", 0),
-        ("num_heads_q", 86),
-        ("num_heads_q", 257),
+        ("num_heads_q", 2**32 - 1),
+        ("num_heads_q", 2**23),
         ("qkv_dtype", torch.float32),
         ("qkv_dtype", torch.int32),
     ],
@@ -86,6 +96,15 @@ def test_metadata_dispatcher_length_tensor_boundary(dtype, fake, fault):
         args = arguments(dtype)
         args["cache_seqlens"] = malformed(args["cache_seqlens"], fault)
         with pytest.raises(RuntimeError, match="MLA: cache_seqlens"):
+            torch.ops.flash_attn_npu_3._mla_dense_metadata(**args)
+
+
+@pytest.mark.parametrize("fake", [False, True])
+def test_metadata_dispatcher_rejects_tensor_byte_overflow(dtype, fake):
+    with FakeTensorMode() if fake else nullcontext():
+        args = arguments(dtype)
+        args.update(batch_size=2**24, max_seqlen_q=2**30, num_heads_q=1)
+        with pytest.raises(RuntimeError, match="dense shape bounds"):
             torch.ops.flash_attn_npu_3._mla_dense_metadata(**args)
 
 

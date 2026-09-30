@@ -215,9 +215,11 @@ extern "C" int launch_dense(void* stream, void* qc, void* qr, void* kv, void* kr
                             void* workspace, const MlaDenseKernelSchedule* params, float scale)
 {
     if (!params || !qc || !qr || !kv || !kr || !kvList || !output || !lse || !workspace || !std::isfinite(scale) ||
-        params->batch == 0 || params->sq == 0 || params->heads == 0 || uint64_t(params->sq) * params->heads > 256 ||
-        params->sk == 0 || params->sk > 512 || params->cvRatio != 2 || params->usedCoreNum == 0 ||
-        params->usedCoreNum > 26 || params->blockDim < params->usedCoreNum) {
+        params->batch == 0 || params->sq == 0 || params->sq > (1U << 30) || params->heads == 0 ||
+        params->heads > UINT32_MAX / 512 || uint64_t(params->sq) * params->heads > UINT32_MAX - 255 ||
+        uint64_t(params->batch) * params->sq * params->heads > uint64_t(INT64_MAX) / 1024 || params->sk == 0 ||
+        params->sk > 512 || params->cvRatio != 2 || params->usedCoreNum == 0 || params->usedCoreNum > 26 ||
+        params->blockDim < params->usedCoreNum) {
         return -1;
     }
     // This standalone probe, like the validated production range, is C1V2 only.

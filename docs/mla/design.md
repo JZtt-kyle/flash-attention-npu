@@ -281,6 +281,10 @@ CANN 9.0 的 Bisheng ASC launcher 未提供调度模式参数；生产扩展用�
 
 源 `SetSplitOutput` 固定读取 `usedCoreNum*2` 项 FD Vector 端点，而 C1V1 的源 vector 只有 `aicNum*cvRatio` 项。本仓按 vector 实际长度复制到 52 项容量数组，未用项初始化为零；CPU oracle 比较原 `SplitCore` 的完整输出 vector，不执行该可能越界的序列化循环。此调整不改变分核算法、FD 判定或设备计算。
 
+M04c1 将上述 dense 范围扩展到 S1G 多块，`Sq*Hq>256` 使用同一个源 `CalcMBaseSize` / `SplitCore` 和 Kernel 三项任务环，不重新定义切块策略；KV 容量仍为 `1..512`，每个 M 块只有一个 S2 块且不启用 FD。`mBaseSize` 可以是 128..256 间任意源候选值（包括 129/255），非 256 候选须整除总行数；metadata 消费者据此检查基本块、完整端点和 workspace，401 字的版本 1 协议不变。公开 `flash_attn_func`、只读 kvcache 和 metadata 的真实/fake/C++ 边界同步扩展。
+
+源字段和寻址仍有资源上界，均在窄化或分配前检查：`Sq<=2^30`（LSE DMA 字节 stride）、`Hq<=floor((2^32-1)/512)`（query 元素 stride）、`Sq*Hq<=2^32-256`（uint32 ceil-div 的 255 行余量），以及 `B*Sq*Hq<=floor((2^63-1)/1024)`（输出张量字节数）。调度继续检查源 uint32 LCM、总 M 任务数、平台资源及 workspace 溢出。这些是实现字段/地址限制，不是官方 FA3 的接口限制。
+
 ### 6.3 数值路径与资源布局
 
 QK 的 L1 循环顺序为 N→K→M，M/N 子块均为 128。576 维并非先算完整内容再算完整 RoPE：两组 288 依次为 `[content 0:256, rope 0:32]`、`[rope 32:64, content 256:512]`，每组按 K=96 的 L0 片累加到 FP32 L0C。Q 的 64 维 RoPE 一次复制跨越相邻 Q/P 槽，尾 M 用 padding 偏移保持相邻关系；复制前必须同时取得两个槽的释放事件。最终 QK 以 FP32 ND 写入 GM，再乘 scale。
@@ -329,6 +333,8 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 调度的独立验收比较源 `SplitCore` 输出的基本块、端点数组、使用核数、FD 标志和 workspace，oracle 从固定 commit 读取，不能调用待测调度实现。覆盖单/多 batch、平台核数及其两侧、M 的 16/128/256 边界、KV 的 16/32/128/256/512 边界和两种 CV 比例。无实际长度数组的步骤无需读取 NPU tensor；后续 AICPU 必须复用同一计算。
 
 首个 kernel 的精度用 D01/D02 加上述边界、内容两半与 RoPE 两半的独立扰动、非零 storage offset、默认/零/负/显式 scale、交错形状重复入队核对 O/LSE。性能代表固定为 D01（默认及 0.23）、D02、`(B,Sq,Hq,Sk)=(1,1,128,512)` 与 `(2,2,128,511)`，两种 dtype 按接通进度验收，保存同轮 CANN 分派、kernel 与公开调用 E2E。M04b 无 metadata 的数据仅作诊断；M05 在同组代表用例验收第 7 节的 metadata E2E 门槛。
+
+M04c1 增加 257/511/512/513 行、非整齐 M 基块、跨 query/head 和 batch 的分核端点，以及每核超过三项任务的流水覆盖；两种 dtype 的 O/LSE 对照固定源并通过独立数学 reference。性能在原五组之外固定增加 `(B,Sq,Hq,Sk)=(1,257,1,257)`、`(2,7,73,65)`、`(1,4,128,512)`、`(2,171,3,511)`、`(10,3,86,65)` 和 `(1,129,128,33)` 六组默认 scale。固定 CANN 主机入口将 Decode MLA 的 Hq 限于 1..128，故 513 行和 M=129 的性能用例分别采用 `171*3` 和 `3*86`；这不限制 FA3 的 Hq，更多头数由固定源 Kernel 与数学对照验收。metadata 复用、生成加一次/四次前向均按第 7 节逐例比较，采样前固定 CPU 亲和性并在同一进程应用于双方。
 
 ## 7. 验收口径
 

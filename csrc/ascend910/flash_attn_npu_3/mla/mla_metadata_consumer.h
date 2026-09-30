@@ -75,9 +75,11 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
         return Status::DtypeMismatch;
     }
     const uint64_t rows = uint64_t(c.sq) * c.heads;
-    if (c.batch == 0 || rows == 0 || rows > 256 || c.sk == 0 || c.sk > 512 || MLA_WORD(schedule.bSize) != c.batch ||
-        MLA_WORD(schedule.s1Size) != c.sq || MLA_WORD(schedule.gSize) != c.heads || MLA_WORD(schedule.s2Size) != c.sk ||
-        MLA_WORD(schedule.n2Size) != 1 || MLA_WORD(schedule.headDim) != 512 || MLA_WORD(schedule.headDimRope) != 64) {
+    if (c.batch == 0 || rows == 0 || rows > kMlaMaxDenseRows || c.sq > kMlaMaxQueryLength ||
+        c.heads > kMlaMaxQueryHeads || uint64_t(c.batch) * rows > kMlaMaxBatchRows || c.sk == 0 || c.sk > 512 ||
+        MLA_WORD(schedule.bSize) != c.batch || MLA_WORD(schedule.s1Size) != c.sq ||
+        MLA_WORD(schedule.gSize) != c.heads || MLA_WORD(schedule.s2Size) != c.sk || MLA_WORD(schedule.n2Size) != 1 ||
+        MLA_WORD(schedule.headDim) != 512 || MLA_WORD(schedule.headDimRope) != 64) {
         return Status::ShapeMismatch;
     }
     MlaDenseKernelSchedule s{};
@@ -96,8 +98,10 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
     }
     s.mBaseSize = MLA_WORD(schedule.mBaseSize);
     s.s2BaseSize = MLA_WORD(schedule.s2BaseSize);
-    if ((s.mBaseSize != 256 && !(s.mBaseSize == 128 && rows == 256)) || s.s2BaseSize != c.sk ||
-        MLA_WORD(schedule.numOfFdHead) != 0 || MLA_WORD(schedule.maxS2SplitNum) != 0 ||
+    // CalcMBaseSize may choose any divisor in [128,256], including odd values.
+    // A 256-row base also permits a final partial block.
+    if (s.mBaseSize < 128 || s.mBaseSize > 256 || (s.mBaseSize != 256 && rows % s.mBaseSize != 0) ||
+        s.s2BaseSize != c.sk || MLA_WORD(schedule.numOfFdHead) != 0 || MLA_WORD(schedule.maxS2SplitNum) != 0 ||
         MLA_WORD(schedule.usedVecNumOfFd) != 0) {
         return Status::InvalidTiling;
     }

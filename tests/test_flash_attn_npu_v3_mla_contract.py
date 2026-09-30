@@ -326,7 +326,7 @@ def test_each_unsupported_dense_option(entry, option, dtype):
         _forward(entry, args)
 
 
-@pytest.mark.parametrize("shape", [(0, 1, 1), (1, 257, 1), (1, 2, 129)])
+@pytest.mark.parametrize("shape", [(0, 1, 1), (1, 0, 1)])
 def test_dense_query_limits(entry, shape, dtype):
     args = _inputs(dtype=dtype)
     args["q"] = torch.empty((*shape, 64), dtype=dtype, device="npu")

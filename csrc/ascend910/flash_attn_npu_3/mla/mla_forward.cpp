@@ -112,8 +112,7 @@ at::Tensor DenseMetadata(int64_t batch, int64_t sq, int64_t heads, int64_t sk, a
 at::Tensor DenseMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, at::ScalarType dtype,
                            const at::Tensor& cacheSeqlens)
 {
-    TORCH_CHECK(batch > 0 && batch <= UINT32_MAX && sq > 0 && sq <= 256 && heads > 0 && heads <= 256 &&
-                    sq * heads <= 256 && sk > 0 && sk <= 512,
+    TORCH_CHECK(FitsDenseShape(batch, sq, heads, sk),
                 "MLA scheduler metadata is not implemented yet outside the dense shape bounds");
     TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
     CheckCacheLengths(cacheSeqlens, batch, cacheSeqlens.device());

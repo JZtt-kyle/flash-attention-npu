@@ -23,9 +23,10 @@ def run(dtype_name, fault, directory):
     assert "910B" in device_name
     # The invalid final batch catches checks that accidentally inspect only
     # the first sample or only the first launch core's own work.
+    heads = 171 if fault in ("m_base", "m_end") else 4
     device = {
         n: torch.zeros(
-            (21, 3 if n in ("q", "qv") else 17, 4 if n in ("q", "qv") else 1, d),
+            (21, 3 if n in ("q", "qv") else 17, heads if n in ("q", "qv") else 1, d),
             dtype=dtype,
             device="npu",
         )
@@ -47,7 +48,14 @@ def run(dtype_name, fault, directory):
                 diagnostic = generate(device, lengths).cpu()
                 assert diagnostic[5].item() == 4 and diagnostic[8:].count_nonzero().item() == 0
         else:
-            mutations = dict(magic=(0, 0), dtype=(4, 3), shape=(8, 22), workspace=(368, -1))
+            mutations = dict(
+                magic=(0, 0),
+                dtype=(4, 3),
+                shape=(8, 22),
+                workspace=(368, -1),
+                m_base=(15, 129),
+                m_end=(49, 3),
+            )
             word, value = mutations[fault]
             record[word] = value
         stage = "launch"
@@ -66,6 +74,7 @@ def run(dtype_name, fault, directory):
             report = dict(
                 fault=fault,
                 dtype=dtype_name,
+                shape=list(device["q"].shape),
                 pid=os.getpid(),
                 device=device_name,
                 visible_devices=os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),

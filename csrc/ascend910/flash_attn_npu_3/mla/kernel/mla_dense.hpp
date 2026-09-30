@@ -14,7 +14,8 @@
 // Init, InitOutputSingleCore, InitCalcParamsEach, CalcParams, UpdateAxisInfo,
 // FlashAttention, CreateTask, ShouldExecuteTask and ExecuteTask.
 // Specialization: nonempty contiguous BSND, Hkv=1, no mask/FD/length arrays,
-// 1<=Sq*Hq<=256, 1<=Sk<=512. The caller supplies a validated M04b1 schedule.
+// Sq*Hq>0, 1<=Sk<=512. The caller validates source field/address bounds and
+// supplies the source M-block partition, including cross-core and tail blocks.
 #pragma once
 #include "../mla_dense_params.h"
 #include "../block/mla_vector.hpp"

@@ -259,6 +259,20 @@ def test_synthetic_resources_on_aicpu(probe, oracle, aic, ratio):
 
 
 @pytest.mark.parametrize("dtype", (1, 2))
+def test_multiblock_on_aicpu(probe, oracle, dtype):
+    cases = [
+        case(b, sq, h, sk)
+        for b, (sq, h), sk in itertools.product(
+            (1, 19, 20, 21),
+            ((257, 1), (7, 73), (4, 128), (3, 171), (17, 257), (129, 128)),
+            (1, 65, 512),
+        )
+    ]
+    cases += [case(10, 2, m, 65) for m in range(128, 257)]
+    compare(probe, cases, dtype, oracle, "multiblock")
+
+
+@pytest.mark.parametrize("dtype", (1, 2))
 def test_wide_fields_and_platform_policy(probe, oracle, dtype):
     cases = [case(batch=3, block_dim=20), case(batch=4, aic=3), case(batch=10, heads=256)]
     budget = evaluate(oracle, [cases[0]])[0][13]
@@ -275,7 +289,7 @@ def test_device_failure_status(probe, dtype):
     failures = [
         ({"batch": 0}, 1),
         ({"sq": -1}, 1),
-        ({"heads": 257}, 1),
+        ({"heads": 2**23}, 2),
         ({"sk": 513}, 1),
         ({"batch": 2**32}, 2),
         ({"sq": 2**63 - 1}, 2),

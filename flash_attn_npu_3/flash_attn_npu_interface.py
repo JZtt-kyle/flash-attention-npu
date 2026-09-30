@@ -158,10 +158,9 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         )
         check(q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
         check(
-            0 < q.shape[0] <= 2**32 - 1
-            and 1 <= q.shape[1] * heads_q <= 256
-            and 1 <= k.shape[1] <= 512,
-            "MLA compressed forward is not implemented yet outside B>0, 1<=Sq*Hq<=256, 1<=Sk<=512",
+            _fits_mla_dense_shape(q.shape[0], q.shape[1], heads_q, k.shape[1]),
+            "MLA compressed forward is not implemented yet outside B>0, positive S1G within "
+            "address/field bounds, 1<=Sk<=512",
         )
         for tensor in (q, k, v, qv):
             check(
@@ -1790,17 +1789,23 @@ def _check_mla_metadata_options(
         )
 
 
+def _fits_mla_dense_shape(batch, sq, heads, sk):
+    # Match mla_schedule.h: source ceil-div, query/LSE DMA strides and tensor bytes.
+    return (
+        0 < batch <= 2**32 - 1
+        and 0 < sq <= 2**30
+        and 0 < heads <= (2**32 - 1) // 512
+        and sq * heads <= 2**32 - 256
+        and batch * sq * heads <= (2**63 - 1) // 1024
+        and 0 < sk <= 512
+    )
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_dense_metadata")
 def _mla_dense_metadata_fake(
     batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
 ):
-    if not (
-        0 < batch_size <= 0xFFFFFFFF
-        and 0 < max_seqlen_q <= 256
-        and 0 < num_heads_q <= 256
-        and max_seqlen_q * num_heads_q <= 256
-        and 0 < max_seqlen_k <= 512
-    ):
+    if not _fits_mla_dense_shape(batch_size, max_seqlen_q, num_heads_q, max_seqlen_k):
         raise RuntimeError(
             "MLA scheduler metadata is not implemented yet outside the dense shape bounds"
         )

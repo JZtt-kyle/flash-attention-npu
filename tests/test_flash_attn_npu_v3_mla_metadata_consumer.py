@@ -273,3 +273,31 @@ def test_extra_launch_blocks(consumer):
     record, context = make_record(consumer, block_dim=20)
     status, output, _ = consume(consumer, record, context)
     assert status == 0 and output[6:8] == [2, 20]
+
+
+@pytest.mark.parametrize("dtype", (1, 2))
+def test_multiblock_and_adjusted_m_partitions(consumer, dtype):
+    shapes = [(10, 2, m, 65) for m in range(128, 257)]
+    shapes += [
+        (b, sq, h, sk)
+        for b, (sq, h), sk in itertools.product(
+            (1, 2, 19, 20, 21, 41),
+            ((257, 1), (7, 73), (4, 128), (3, 171), (17, 257), (129, 128)),
+            (1, 33, 257, 511, 512),
+        )
+    ]
+    for shape in shapes:
+        record, context = make_record(consumer, shape, dtype)
+        assert consume(consumer, record, context)[0] == 0, shape
+    (consumer[1] / f"multiblock-{dtype}.json").write_text(
+        json.dumps(dict(cases=len(shapes))) + "\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "word,value,expected", [(15, 127, 7), (15, 129, 7), (49, 3, 8), (23, 2, 8)]
+)
+def test_corrupt_multiblock_partition(consumer, word, value, expected):
+    record, context = make_record(consumer, (2, 3, 171, 65))
+    record[word] = value
+    assert consume(consumer, record, context)[0] == expected

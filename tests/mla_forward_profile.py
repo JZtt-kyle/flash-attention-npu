@@ -26,7 +26,18 @@ from tests.mla_cann_baseline import (
 from tests.mla_dense_profile import CASES
 
 
-def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False):
+# Fixed M04c1 additions: row boundaries, adjusted M and per-core task-ring reuse.
+S1G_CASES = [
+    ((1, 257, 1, 257), None),
+    ((2, 7, 73, 65), None),
+    ((1, 4, 128, 512), None),
+    ((2, 171, 3, 511), None),
+    ((10, 3, 86, 65), None),
+    ((1, 129, 128, 33), None),
+]
+
+
+def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CASES):
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     vendor = check_vendor_configuration(vendor)
     directory = Path(directory).resolve()
@@ -59,12 +70,12 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False):
             qv=tensors["qv"],
             cache_seqlens=lengths[index],
             scheduler_metadata=record,
-            softmax_scale=CASES[index][1],
+            softmax_scale=cases[index][1],
             num_splits=1,
             return_softmax_lse=True,
         )
 
-    for shape, scale in CASES:
+    for shape, scale in cases:
         batch, sq, heads, sk = shape
         cpu = make_inputs(
             Case("public", "compressed", batch, sq, sk, heads, 1), dtype, seed=20260929
@@ -115,7 +126,7 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False):
                 return [cached(index, record) for _ in range(1 if name == "generate_1" else 4)]
             return cached(index, metadata[index])
         return api.flash_attn_func(
-            **inputs[index], softmax_scale=CASES[index][1], num_splits=1, return_attn_probs=True
+            **inputs[index], softmax_scale=cases[index][1], num_splits=1, return_attn_probs=True
         )
 
     names = ("fa3", "native_cann")
@@ -125,13 +136,13 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False):
         else names
     )
     snapshot("npu-before.log")
-    for index in range(len(CASES)):
+    for index in range(len(cases)):
         for _ in range(5):
             for name in wall_names:
                 result = call(index, name)
                 torch.npu.synchronize()
     wall = []
-    for index in range(len(CASES)):
+    for index in range(len(cases)):
         for r in range(5):
             for i in range(20):
                 for name in wall_names if r % 2 == 0 else wall_names[::-1]:
@@ -154,7 +165,7 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False):
     trace = directory / "profiler"
     with profiler.profile(
         activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU],
-        schedule=profiler.schedule(wait=0, warmup=1, active=len(CASES) * 5 * 10 * 2, repeat=1),
+        schedule=profiler.schedule(wait=0, warmup=1, active=len(cases) * 5 * 10 * 2, repeat=1),
         on_trace_ready=profiler.tensorboard_trace_handler(str(trace)),
         experimental_config=profiler._ExperimentalConfig(
             profiler_level=profiler.ProfilerLevel.Level0,
@@ -165,7 +176,7 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False):
         result = call(0, "fa3")
         torch.npu.synchronize()
         prof.step()
-        for index in range(len(CASES)):
+        for index in range(len(cases)):
             for r in range(5):
                 for i in range(10):
                     for name in names if r % 2 == 0 else names[::-1]:
@@ -214,7 +225,7 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False):
             label["metadata_kernel_us"] = float(producer["Duration(us)"])
         previous_end = Decimal(row["Start Time(us)"].strip()) + Decimal(row["Duration(us)"].strip())
     results = []
-    for index, (shape, scale) in enumerate(CASES):
+    for index, (shape, scale) in enumerate(cases):
         item = dict(shape=shape, scale=scale, native_call=native[index].description())
         for name in wall_names:
             kernels = [x for x in labels if x["case"] == index and x["name"] == name]
@@ -283,4 +294,5 @@ if __name__ == "__main__":
         os.environ["MLA_CANN_VENDOR"],
         os.environ.get("MLA_FORWARD_DTYPE", "fp16"),
         os.environ.get("MLA_FORWARD_METADATA_REUSE") == "1",
+        CASES + S1G_CASES if os.environ.get("MLA_FORWARD_S1G_MULTIBLOCK") == "1" else CASES,
     )

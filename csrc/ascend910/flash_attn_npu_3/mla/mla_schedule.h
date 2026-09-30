@@ -22,6 +22,13 @@ namespace flash_attn::mla {
 // This is an endpoint capacity, not a hard-coded device core count.
 constexpr uint32_t kMlaMaxAic = 26;
 
+// Preserve the source's uint32 S1G ceil-div, dense query stride (Hq*512)
+// and LSE DMA stride ((Sq-1)*sizeof(float)) without wrapping any field.
+constexpr uint32_t kMlaMaxDenseRows = UINT32_MAX - 255;
+constexpr uint32_t kMlaMaxQueryHeads = UINT32_MAX / 512;
+constexpr uint32_t kMlaMaxQueryLength = UINT32_MAX / sizeof(float) + 1;
+constexpr uint64_t kMlaMaxBatchRows = INT64_MAX / (512 * 2);
+
 struct MlaDenseShape {
     int64_t batch;
     int64_t queryLength;
@@ -121,7 +128,8 @@ enum class MlaScheduleStatus {
 };
 
 // Pure CPU scheduling for contiguous BSND, shared 512+64 KV, Hkv=1,
-// 1<=Sq*Hq<=256, 1<=Sk<=512, B>0, no mask/length arrays, num_splits=1.
+// Sq*Hq>0 within the address/field bounds above, 1<=Sk<=512, B>0,
+// no mask/length arrays, num_splits=1.
 // FP16 and BF16 have identical scheduling. This is not a public forward or
 // metadata entry point; callers must separately validate tensor/layout/options.
 // No tensor addresses or scale are stored. On failure, output is unchanged.

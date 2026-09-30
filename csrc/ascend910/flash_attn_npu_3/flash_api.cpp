@@ -721,9 +721,8 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   std::optional<double> softcap_, std::optional<double> softmax_scale)
 {
     if (flash_attn::mla::CheckMetadataBoundary(headdim, headdim_v)) {
-        TORCH_CHECK(batch_size > 0 && batch_size <= UINT32_MAX && max_seqlen_q > 0 && max_seqlen_q <= 256 &&
-                        num_heads_q > 0 && num_heads_q <= 256 && max_seqlen_q * num_heads_q <= 256 &&
-                        max_seqlen_k > 0 && max_seqlen_k <= 512 && num_heads_kv == 1,
+        TORCH_CHECK(flash_attn::mla::FitsDenseShape(batch_size, max_seqlen_q, num_heads_q, max_seqlen_k) &&
+                        num_heads_kv == 1,
                     "MLA scheduler metadata is not implemented yet outside the dense shape bounds");
         TORCH_CHECK(!cu_seqlens_q && !cu_seqlens_k && !cu_seqlens_k_new && !seqused_q && !cache_leftpad && !page_size &&
                         max_seqlen_k_new == 0 && !causal && window_size_left == -1 && window_size_right == -1 &&

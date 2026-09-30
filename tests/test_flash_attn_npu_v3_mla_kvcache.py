@@ -114,7 +114,17 @@ def test_metadata_official_entries(metadata_entry, dtype):
         ]
 
 
-@pytest.mark.parametrize("shape", [(1, 1, 1, 1), (2, 7, 16, 65), (21, 2, 128, 511)])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 1, 1, 1),
+        (2, 7, 16, 65),
+        (21, 2, 128, 511),
+        (1, 257, 1, 17),
+        (2, 3, 171, 65),
+        (10, 2, 129, 33),
+    ],
+)
 def test_public_record_matches_host(probe, dtype, shape):
     args = metadata_args(dtype, shape)
     record = api.get_scheduler_metadata(**args)
@@ -132,12 +142,12 @@ def test_public_record_matches_host(probe, dtype, shape):
         ("batch_size", 0),
         ("batch_size", 2**32),
         ("max_seqlen_q", 0),
-        ("max_seqlen_q", 257),
-        ("max_seqlen_q", 65),
+        ("max_seqlen_q", 2**30 + 1),
+        ("max_seqlen_q", 2**30 - 63),
         ("max_seqlen_k", 0),
         ("max_seqlen_k", 513),
         ("num_heads_q", 0),
-        ("num_heads_q", 257),
+        ("num_heads_q", 2**23),
         ("num_heads_kv", 2),
         ("qkv_dtype", torch.float32),
         ("headdim_v", 128),
@@ -408,7 +418,7 @@ def test_compile_metadata_reuse(dtype):
         for mode in ("generated", "implicit", "reused")
         for value in ("negative", "zero", "short", "over")
     ]
-    + ["magic", "dtype", "shape", "workspace"],
+    + ["magic", "dtype", "shape", "workspace", "m_base", "m_end"],
 )
 def test_public_runtime_error(dtype, fault, tmp_path):
     dtype_name = "fp16" if dtype == torch.float16 else "bf16"

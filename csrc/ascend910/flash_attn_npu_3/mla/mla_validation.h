@@ -9,6 +9,13 @@
 // Keep the corresponding Python/fake checks in _check_mla_inputs in sync.
 namespace flash_attn::mla {
 
+inline bool FitsDenseShape(int64_t batch, int64_t sq, int64_t heads, int64_t sk)
+{
+    return batch > 0 && batch <= UINT32_MAX && sq > 0 && sq <= kMlaMaxQueryLength && heads > 0 &&
+           heads <= kMlaMaxQueryHeads && uint64_t(sq) * heads <= kMlaMaxDenseRows &&
+           uint64_t(batch) * sq * heads <= kMlaMaxBatchRows && sk > 0 && sk <= 512;
+}
+
 inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                  const std::optional<at::Tensor>& qv, bool varlenQ, bool varlenK, bool pagedKV)
 {
@@ -52,9 +59,9 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
         TORCH_CHECK(!varlenQ && !varlenK && !pagedKV,
                     "MLA compressed forward is not implemented yet for TND or paged KV");
         TORCH_CHECK(q.size(0) == k.size(0), "MLA: dense batch sizes must match");
-        TORCH_CHECK(q.size(0) > 0 && q.size(0) <= UINT32_MAX && q.size(1) > 0 && q.size(1) <= 256 && headsQ <= 256 &&
-                        uint64_t(q.size(1)) * uint64_t(headsQ) <= 256 && k.size(1) > 0 && k.size(1) <= 512,
-                    "MLA compressed forward is not implemented yet outside B>0, 1<=Sq*Hq<=256, 1<=Sk<=512");
+        TORCH_CHECK(FitsDenseShape(q.size(0), q.size(1), headsQ, k.size(1)),
+                    "MLA compressed forward is not implemented yet outside B>0, positive S1G within address/field "
+                    "bounds, 1<=Sk<=512");
         for (const auto& t : {q, k, v, *qv}) {
             TORCH_CHECK(t.is_contiguous(), "MLA compressed forward is not implemented yet for noncontiguous BSND");
             TORCH_CHECK(!t.requires_grad(), "MLA compressed forward is not implemented yet for gradients");

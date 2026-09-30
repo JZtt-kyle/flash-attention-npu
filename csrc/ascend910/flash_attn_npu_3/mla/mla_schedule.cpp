@@ -13,7 +13,7 @@
 // CalcInnerSize, CalcMBaseSize, CreateSplitInput, Split, CalcMmResSize,
 // FillTilingWorkspaceParams, CalcNormalWorkspaceSize, CalcNumBlocks, CalcScheduleMode.
 // The upstream license is reproduced in LICENSE.cann next to this file.
-// Changes: remove gert/registration, restrict inputs to the first dense milestone,
+// Changes: remove gert/registration, restrict inputs to dense single-S2-block MLA,
 // separate platform/launch data, check arithmetic/resources before source narrowing.
 
 #include "mla_schedule.h"
@@ -103,8 +103,12 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
     }
     // Multiplication is wide even for rejected input; never overflow the caller's int64 shape.
     uint64_t rows = uint64_t(shape.queryLength) * uint64_t(shape.queryHeads);
-    if (rows > 256 || shape.kvLength > 512) {
+    if (shape.kvLength > 512) {
         return MlaScheduleStatus::UnsupportedShape;
+    }
+    if (rows > kMlaMaxDenseRows || shape.queryHeads > kMlaMaxQueryHeads || shape.queryLength > kMlaMaxQueryLength ||
+        uint64_t(shape.batch) * rows > kMlaMaxBatchRows) {
+        return MlaScheduleStatus::FieldOverflow;
     }
     if (platform.aicNum == 0 || platform.aicNum > kMlaMaxAic || platform.aivNum == 0 ||
         platform.aivNum % platform.aicNum != 0) {
