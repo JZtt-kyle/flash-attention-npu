@@ -7,6 +7,8 @@
 #ifndef FLASH_ATTENTION_REGULAR_H
 #define FLASH_ATTENTION_REGULAR_H
 
+#include <cstdint>
+
 struct coreNode {
     int startBIdx;
     int startN1Idx;
@@ -50,8 +52,6 @@ struct FAInferTilingData {
     uint64_t mm2OutSize;
     uint64_t UpdateSize;
     uint64_t workSpaceSize;
-    float scaleValue;
-    float softcapValue;
     uint64_t padding1;
     uint64_t padding2;
     uint32_t padding3;
@@ -87,8 +87,6 @@ struct FAInferTilingData {
     uint64_t get_mm2OutSize() const { return mm2OutSize; }
     uint64_t get_UpdateSize() const { return UpdateSize; }
     uint64_t get_workSpaceSize() const { return workSpaceSize; }
-    float get_scaleValue() const { return scaleValue; }
-    float get_softcapValue() const { return softcapValue; }
     uint64_t get_padding1() const { return padding1; }
     uint64_t get_padding2() const { return padding2; }
     uint32_t get_padding3() const { return padding3; }
@@ -122,8 +120,6 @@ struct FAInferTilingData {
     void set_mm2OutSize(uint64_t value) { mm2OutSize = value; }
     void set_UpdateSize(uint64_t value) { UpdateSize = value; }
     void set_workSpaceSize(uint64_t value) { workSpaceSize = value; }
-    void set_scaleValue(float value) { scaleValue = value; }
-    void set_softcapValue(float value) { softcapValue = value; }
     void set_padding1(uint64_t value) { padding1 = value; }
     void set_padding2(uint64_t value) { padding2 = value; }
     void set_padding3(uint32_t value) { padding3 = value; }
@@ -135,6 +131,13 @@ struct FAInferTilingData {
     void set_numSplits(uint32_t value) { numSplits = value; }
     void set_kvNewSeqlen(uint32_t value) { kvNewSeqlen = value; }
     void set_kvCacheSeqlen(uint32_t value) { kvCacheSeqlen = value; }
+};
+
+// Per-forward values accompany the reusable device tiling at kernel launch.
+struct FAInferTilingParams {
+    uint64_t tilingDataAddr;
+    float scaleValue;
+    float softcapValue;
 };
 
 #endif

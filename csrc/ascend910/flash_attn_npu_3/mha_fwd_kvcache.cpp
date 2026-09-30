@@ -142,7 +142,7 @@ namespace SplitFuse {
         __aicore__ inline
         void operator()(FAIKernelParams const &params)
         {
-            __gm__ FAInferTilingData *fATilingData = reinterpret_cast<__gm__ FAInferTilingData *>(params.tiling);
+            __gm__ FAInferTilingData *fATilingData = reinterpret_cast<__gm__ FAInferTilingData *>(params.tiling.tilingDataAddr);
             mm1OutSize = fATilingData->mm1OutSize;
             smOnlineOutSize = fATilingData->smOnlineOutSize;
             mm2OutSize = fATilingData->mm2OutSize;
@@ -159,8 +159,8 @@ namespace SplitFuse {
             maskType = fATilingData->maskType;
             windowSizeLeft = fATilingData->windowSizeLeft;
             windowSizeRight = fATilingData->windowSizeRight;
-            scaleValue = fATilingData->scaleValue;
-            softcapValue = fATilingData->softcapValue;
+            scaleValue = params.tiling.scaleValue;
+            softcapValue = params.tiling.softcapValue;
             maxQSeqlen = fATilingData->maxQSeqlen;
             maxKvSeqlen = fATilingData->maxKvSeqlen;
             flashDecodeFlag = fATilingData->flashDecodeFlag;
@@ -1314,7 +1314,7 @@ namespace SplitFuse {
         GM_ADDR actualQseqlen,
         GM_ADDR actualKvseqlen,
         GM_ADDR workspace,
-        GM_ADDR tiling,
+        FAInferTilingParams tiling,
         GM_ADDR kNew,
         GM_ADDR vNew)
     {

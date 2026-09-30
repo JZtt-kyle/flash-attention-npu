@@ -131,7 +131,6 @@ def _metadata(
     is_causal=False,
     window_size=WINDOW_SIZE,
     softcap=0.0,
-    softmax_scale=None,
     num_splits=0,
     max_seqlen_k_new=0,
 ):
@@ -148,8 +147,7 @@ def _metadata(
         page_size=page_size,
         causal=is_causal,
         window_size=window_size,
-        softcap=softcap,
-        softmax_scale=softmax_scale,
+        has_softcap=softcap > 0.0,
         num_splits=num_splits,
         max_seqlen_k_new=max_seqlen_k_new,
         sm_margin=0,
@@ -666,7 +664,7 @@ def test_flash_attn_kvcache_metadata_flash_decode(
             num_heads=num_heads, kv_heads=1, head_size=head_size,
             cache_seqlens=cache_seqlens, data_type=data_type,
             cu_seqlens_q=cu_seqlens_q, page_size=block_size,
-            is_causal=is_causal, softcap=softcap, softmax_scale=scale,
+            is_causal=is_causal, softcap=softcap,
             num_splits=num_splits, max_seqlen_k_new=new_length,
         ) if use_metadata else None
         keys, values = key_cache.clone(), value_cache.clone()
@@ -942,6 +940,7 @@ def test_flash_attn_varlen_func_metadata_swa(
     "data_type, batch_size, num_heads, kv_heads, q_seqlen, kv_seqlen, head_size, block_size, is_causal, window_size, softcap",
     KV_CACHE_SWA_SOFTCAP_CASES,
 )
+@pytest.mark.parametrize("execution", ["eager", "streams", "graph"])
 @pytest.mark.skipif(not _is_ascend910(), reason="Ascend910 only")
 def test_flash_attn_kvcache_metadata_swa_softcap(
     data_type,
@@ -955,7 +954,9 @@ def test_flash_attn_kvcache_metadata_swa_softcap(
     is_causal,
     window_size,
     softcap,
+    execution,
 ):
+    """A reusable schedule must not retain a forward's scale or softcap."""
     query = make_random_tensor(
         (batch_size, q_seqlen, num_heads, head_size), data_type, low=-1.0, high=1.0, device="npu"
     )
@@ -979,43 +980,74 @@ def test_flash_attn_kvcache_metadata_swa_softcap(
         window_size=window_size,
         softcap=softcap,
     )
-    output_npu, softmax_lse_npu, *_ = flash_attn_with_kvcache(
-        query,
-        key_cache,
-        value_cache,
-        cache_seqlens=cache_seqlens,
-        page_table=page_table,
-        max_seqlen_q=q_seqlen,
-        softmax_scale=None,
-        causal=is_causal,
-        window_size=window_size,
-        softcap=softcap,
-        rotary_interleaved=False,
-        scheduler_metadata=scheduler_metadata,
-        num_splits=0,
-        return_softmax_lse=True,
-    )
+    metadata_before = scheduler_metadata.cpu().clone()
+    parameters = [(None, softcap), (0.23, softcap * 0.5), (0.07, softcap * 1.5)]
+
+    def run(call_scale, call_softcap):
+        return flash_attn_with_kvcache(
+            query,
+            key_cache,
+            value_cache,
+            cache_seqlens=cache_seqlens,
+            page_table=page_table,
+            max_seqlen_q=q_seqlen,
+            softmax_scale=call_scale,
+            causal=is_causal,
+            window_size=window_size,
+            softcap=call_softcap,
+            rotary_interleaved=False,
+            scheduler_metadata=scheduler_metadata,
+            num_splits=0,
+            return_softmax_lse=True,
+        )
+
+    if execution == "streams":
+        current_stream = torch.npu.current_stream()
+        streams = [torch.npu.Stream() for _ in parameters]
+        outputs = []
+        for stream, (call_scale, call_softcap) in zip(streams, parameters):
+            stream.wait_stream(current_stream)
+            with torch.npu.stream(stream):
+                outputs.append(run(call_scale, call_softcap))
+        for stream in streams:
+            current_stream.wait_stream(stream)
+    elif execution == "graph":
+        for call_scale, call_softcap in parameters:
+            run(call_scale, call_softcap)
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            outputs = [run(*params) for params in parameters]
+        for _ in range(2):
+            graph.replay()
+        torch.npu.synchronize()
+    else:
+        outputs = [run(*params) for params in parameters]
+
+    assert torch.equal(scheduler_metadata.cpu(), metadata_before)
 
     key_cache_cpu = key_cache.detach().cpu()
     value_cache_cpu = value_cache.detach().cpu()
     page_table_cpu = page_table.cpu()
-    _assert_bsnd_matches_ref(
-        output_npu,
-        softmax_lse_npu,
-        query,
-        gather_paged_kv_batch(
-            key_cache_cpu, value_cache_cpu, page_table_cpu, kv_seqlen, block_size
-        ),
-        batch_size=batch_size,
-        q_seqlen=q_seqlen,
-        num_heads=num_heads,
-        head_size=head_size,
-        scale=scale,
-        data_type=data_type,
-        is_causal=is_causal,
-        window_size=window_size,
-        softcap=softcap,
+    kv_batches = gather_paged_kv_batch(
+        key_cache_cpu, value_cache_cpu, page_table_cpu, kv_seqlen, block_size
     )
+    for (output_npu, softmax_lse_npu, *_), (call_scale, call_softcap) in zip(outputs, parameters):
+        _assert_bsnd_matches_ref(
+            output_npu,
+            softmax_lse_npu,
+            query,
+            kv_batches,
+            batch_size=batch_size,
+            q_seqlen=q_seqlen,
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale if call_scale is None else call_scale,
+            data_type=data_type,
+            is_causal=is_causal,
+            window_size=window_size,
+            softcap=call_softcap,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1067,7 +1099,6 @@ def test_flash_attn_kvcache_metadata_paged_short_kv_window(
         is_causal=is_causal,
         window_size=window_size,
         softcap=softcap,
-        softmax_scale=scale,
     )
 
     def _run(metadata):
@@ -1180,8 +1211,7 @@ def test_flash_attn_kvcache_metadata_tnd_max_seqlen_k(monkeypatch, max_seqlen_k)
     scheduler_metadata._fa_scheduler_params = dict(
         causal=False,
         window_size=WINDOW_SIZE,
-        softcap=0.0,
-        softmax_scale=128 ** (-0.5),
+        has_softcap=False,
         varlen_q=True,
         num_splits=0,
         max_seqlen_q=16,
@@ -1257,7 +1287,7 @@ def test_flash_attn_kvcache_metadata_paged_mismatch_rejected():
 
 @pytest.mark.skipif(not _is_ascend910(), reason="Ascend910 only")
 def test_flash_attn_kvcache_metadata_softcap_mismatch_rejected():
-    """softcap/softmax_scale are baked into the tiling; mismatches must be rejected."""
+    """The softcap scheduling flag must match the forward's feature selection."""
     data_type = torch.bfloat16
     batch_size, num_heads, kv_heads = 1, 2, 2
     q_seqlen, kv_seqlen, head_size, block_size = 512, 512, 128, 128

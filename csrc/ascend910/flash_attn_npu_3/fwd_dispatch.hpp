@@ -21,6 +21,7 @@
 #pragma once
 
 #include <cstdint>
+#include "tilingdata.h"
 #include "acl/acl.h"
 
 struct FwdLaunchArgs {
@@ -45,7 +46,7 @@ struct FwdLaunchArgs {
     uint8_t *qSeqDevice;
     uint8_t *kvSeqDevice;
     uint8_t *workspaceDevice;
-    uint8_t *tilingDevice;
+    FAInferTilingParams tiling;
 };
 
 // Per-(dtype, layout) implementation, defined in autogen/fwd_dispatch_<dtype>_<layout>.cpp
