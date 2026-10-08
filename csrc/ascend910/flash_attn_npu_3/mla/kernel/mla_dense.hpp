@@ -13,9 +13,12 @@
 // attention/fused_infer_attention_score/op_kernel/arch22/fia_kernel_nonquant_mla.h:
 // Init, InitOutputSingleCore, InitCalcParamsEach, CalcParams, UpdateAxisInfo,
 // FlashAttention, CreateTask, ShouldExecuteTask and ExecuteTask.
-// Specialization: nonempty contiguous BSND, Hkv=1, no mask/FD/length arrays,
+// Specialization: nonempty contiguous BSND capacity, Hkv=1, no mask/FD,
 // Sq*Hq>0, 1<=Sk<=16384. The caller validates source field/address bounds and
 // supplies the source M-block partition, including cross-core and tail blocks.
+// HasKvLengths additionally consumes a validated v2 int32 length snapshot.
+// Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
+// compute endpoints. FA3 requires -inf (source +inf) LSE for these empty rows.
 #pragma once
 #include "../mla_dense_params.h"
 #include "../block/mla_vector.hpp"
@@ -23,7 +26,7 @@
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
-template <typename InputT>
+template <typename InputT, bool HasKvLengths = false>
 class MlaDense {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
@@ -31,9 +34,12 @@ class MlaDense {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
                                       GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
-                                      TPipe* pipe)
+                                      TPipe* pipe, GM_ADDR kvLengths = nullptr)
     {
         params = schedule;
+        if constexpr (HasKvLengths) {
+            lengths.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(kvLengths));
+        }
         uint32_t index = GetBlockIdx();
         uint32_t ratio = 1;
         if ASCEND_IS_AIV {
@@ -55,9 +61,7 @@ class MlaDense {
         sEnd = params.s2End[core];
 
         if ASCEND_IS_AIV {
-            // The source does not initialize O for dense nonempty unmasked Q.
-            // LSE initialization and the all-Vector barrier are still required.
-            InitOutputSingleCore(lse, ratio);
+            InitOutputSingleCore(output, lse, ratio);
         }
         const uint64_t r1 = params.mm1ResSize, r2 = params.mm2ResSize;
         uint64_t offset = 0;
@@ -103,23 +107,46 @@ class MlaDense {
     Block::MlaCube<InputT> cube;
     Block::MlaVector<InputT> vector;
     MlaDenseKernelSchedule params;
+    GlobalTensor<uint32_t> lengths;
+    uint32_t actualKvLength = 0;
     uint32_t core, bStart, mStart, sStart, bEnd, mEnd, sEnd;
     uint32_t bn2IdxInCurCore = 0;
 
-    __aicore__ inline void InitOutputSingleCore(GM_ADDR lse, uint32_t ratio)
+    __aicore__ inline void InitOutputSingleCore(GM_ADDR output, GM_ADDR lse, uint32_t ratio)
     {
         GlobalTensor<float> lseGm;
         lseGm.SetGlobalBuffer((__gm__ float*)lse);
         uint32_t event = 0;
         SetFlag<HardEvent::MTE3_V>(event);
         uint64_t total = uint64_t(params.batch) * params.sq * params.heads;
+        if constexpr (HasKvLengths) {
+            bool needInit = false;
+            for (uint32_t b = 0; b < params.batch; ++b) {
+                needInit |= lengths.GetValue(b) == 0;
+            }
+            // Like source needInit, cover every output, including zero-KV
+            // samples beyond the last compute endpoint. Never read their Q/KV.
+            if (needInit) {
+                const uint64_t outputSize = total * 512;
+                const uint64_t single = (outputSize + params.usedCoreNum * ratio - 1) / (params.usedCoreNum * ratio);
+                const uint64_t start = GetBlockIdx() * single;
+                WaitFlag<HardEvent::MTE3_V>(event);
+                if (start < outputSize) {
+                    GlobalTensor<InputT> outGm;
+                    outGm.SetGlobalBuffer(reinterpret_cast<__gm__ InputT*>(output));
+                    const uint64_t remaining = outputSize - start;
+                    matmul::InitOutput<InputT>(outGm[start], remaining < single ? remaining : single, 0);
+                }
+                SetFlag<HardEvent::MTE3_V>(event);
+            }
+        }
         uint64_t single = (total + params.usedCoreNum * ratio - 1) / (params.usedCoreNum * ratio);
         uint64_t start = GetBlockIdx() * single;
         uint64_t tail = total - start;
         uint64_t count = tail < single ? tail : single;
         WaitFlag<HardEvent::MTE3_V>(event);
         if (start < total && count > 0) {
-            matmul::InitOutput<float>(lseGm[start], count, float(1.0 / 0.0));
+            matmul::InitOutput<float>(lseGm[start], count, HasKvLengths ? -float(1.0 / 0.0) : float(1.0 / 0.0));
         }
         SetFlag<HardEvent::MTE3_V>(event);
         WaitFlag<HardEvent::MTE3_V>(event);
@@ -139,8 +166,9 @@ class MlaDense {
             info.actMBaseSize = rows - m * params.mBaseSize;
         }
         info.actualSingleProcessSInnerSize = params.s2BaseSize;
-        if ((s + 1) * params.s2BaseSize > params.sk) {
-            info.actualSingleProcessSInnerSize = params.sk - s * params.s2BaseSize;
+        const uint32_t kvLength = HasKvLengths ? actualKvLength : params.sk;
+        if ((s + 1) * params.s2BaseSize > kvLength) {
+            info.actualSingleProcessSInnerSize = kvLength - s * params.s2BaseSize;
         }
         info.actualSingleProcessSInnerSizeAlign = Tile::Align(info.actualSingleProcessSInnerSize, 32U);
         // Every non-FD M block starts at S2=0 and consumes all of its S2 blocks.
@@ -149,14 +177,15 @@ class MlaDense {
             ++bn2IdxInCurCore;
         }
         info.bn2IdxInCurCore = bn2IdxInCurCore - 1;
-        info.isLastS2Loop = (s + 1 == (params.sk + params.s2BaseSize - 1) / params.s2BaseSize);
+        info.isLastS2Loop = (s + 1 == (kvLength + params.s2BaseSize - 1) / params.s2BaseSize);
         info.s2BatchOffset = s * params.s2BaseSize;
     }
 
     __aicore__ inline void UpdateAxisInfo(uint32_t& b, uint32_t& m, uint32_t& s)
     {
         uint32_t mLoops = (params.sq * params.heads + params.mBaseSize - 1) / params.mBaseSize;
-        uint32_t sLoops = (params.sk + params.s2BaseSize - 1) / params.s2BaseSize;
+        uint32_t kvLength = HasKvLengths ? actualKvLength : params.sk;
+        uint32_t sLoops = (kvLength + params.s2BaseSize - 1) / params.s2BaseSize;
         if (s + 1 < sLoops) {
             ++s;
             return;
@@ -211,11 +240,23 @@ class MlaDense {
         RunInfo tasks[kTaskCount];
         uint32_t b = bStart, m = mStart, s = sStart;
         uint64_t created = 0, executed = 0;
+        uint32_t previousBatch = UINT32_MAX;
         bool dispatch = true, execute = false;
         while (dispatch || execute) {
             dispatch = (b != bEnd || m != mEnd || s != sEnd);
             if (dispatch) {
-                // GetTaskDealMode always creates in the nonempty unmasked range.
+                if constexpr (HasKvLengths) {
+                    if (b != previousBatch) {
+                        actualKvLength = lengths.GetValue(b);
+                        previousBatch = b;
+                    }
+                    if (actualKvLength == 0) {
+                        // Preserve the source task-ring counters while skipping
+                        // DEAL_ZERO/SKIP_ZERO. Pending tasks drain after dispatch.
+                        UpdateAxisInfo(b, m, s);
+                        continue;
+                    }
+                }
                 CalcParams(created, b, m, s, tasks[created % kTaskCount]);
                 ++created;
                 UpdateAxisInfo(b, m, s);

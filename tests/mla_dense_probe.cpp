@@ -5,7 +5,7 @@
 #include "runtime/rt_ffts.h"
 #include "kernel_operator.h"
 #include "mla/mla_dense_params.h"
-#ifdef MLA_DENSE_METADATA
+#if defined(MLA_DENSE_METADATA) || defined(MLA_BSND_ATTENTION)
 #include "mla/mla_metadata_consumer.h"
 #endif
 using namespace AscendC;
@@ -97,8 +97,28 @@ using OracleFd = typename std::conditional<g_coreType == AscendC::AIC, FiaBlockV
 #endif
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #include "mla/kernel/mla_dense.hpp"
+#ifdef MLA_BSND_ATTENTION
+#include "mla/kernel/mla_bsnd_metadata.hpp"
+#endif
 #ifdef MLA_DENSE_METADATA
 #include "mla/kernel/mla_metadata.hpp"
+#endif
+#endif
+#endif
+
+#ifdef MLA_BSND_ATTENTION
+#undef DENSE_ENTRY
+#ifdef MLA_DENSE_ORACLE
+#ifdef MLA_DENSE_BF16
+#define DENSE_ENTRY cann_bsnd_bf16_probe
+#else
+#define DENSE_ENTRY cann_bsnd_probe
+#endif
+#else
+#ifdef MLA_DENSE_BF16
+#define DENSE_ENTRY mla_bsnd_bf16_probe
+#else
+#define DENSE_ENTRY mla_bsnd_probe
 #endif
 #endif
 #endif
@@ -109,7 +129,14 @@ __global__ __aicore__ __mix__(1, 2) void DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, 
                                                      GM_ADDR metadata, uint32_t words, GM_ADDR status,
                                                      flash_attn::mla::MlaDenseMetadataContext context, float scale)
 #else
-                                                     MlaDenseKernelSchedule params, float scale)
+                                                     MlaDenseKernelSchedule params, float scale
+#ifdef MLA_BSND_ATTENTION
+                                                     ,
+                                                     GM_ADDR lengths, GM_ADDR metadata, uint32_t words,
+                                                     flash_attn::mla::MlaDenseMetadataContext context,
+                                                     bool sourceNeedInit
+#endif
+)
 #endif
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
@@ -138,6 +165,12 @@ __global__ __aicore__ __mix__(1, 2) void DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, 
     }
 #endif
 #endif
+#if defined(MLA_BSND_ATTENTION) && !defined(MLA_DENSE_ORACLE)
+    if (!flash_attn::mla::Kernel::LoadBsndKvLengthMetadata<InputT>(metadata, words, context, lengths,
+                                                                   lengths ? context.batch : 0, params)) {
+        return;
+    }
+#endif
     SetSyncBaseAddr(ffts);
     TPipe pipe;
 #ifdef MLA_DENSE_ORACLE
@@ -153,6 +186,16 @@ __global__ __aicore__ __mix__(1, 2) void DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, 
     tiling.baseParams.usedCoreNum = params.usedCoreNum;
     tiling.baseParams.batchContinuous = 1;
     tiling.baseParams.softmaxLseFlag = 1;
+    GM_ADDR sourceLengths = nullptr;
+#ifdef MLA_BSND_ATTENTION
+    sourceLengths = lengths;
+    tiling.baseParams.actualSeqS2Dims = lengths ? params.batch : 0;
+    // FiaInfoParser::ProcessKVActualSeqLoop: BSND needs initialization when
+    // any actual KV length differs from capacity. This is a host tiling flag
+    // in CANN; keep it out of the source Kernel timing and never trust it in
+    // the migrated consumer, which derives empty rows from validated v2 data.
+    tiling.baseParams.needInit = sourceNeedInit;
+#endif
     tiling.innerSplitParams.mBaseSize = params.mBaseSize;
     tiling.innerSplitParams.s2BaseSize = params.s2BaseSize;
     tiling.workspaceParams.mm1ResSize = params.mm1ResSize;
@@ -163,13 +206,19 @@ __global__ __aicore__ __mix__(1, 2) void DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, 
         tiling.outerSplitParams.s2End[i] = params.s2End[i];
     }
     FiaKernelNonQuantMla<Types, OracleCube, OracleVector, OracleFd> op;
-    op.Init(qc, kvList, kvList, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+    op.Init(qc, kvList, kvList, nullptr, nullptr, nullptr, sourceLengths, nullptr, nullptr, nullptr, nullptr, nullptr,
             nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
             qr, kr, nullptr, nullptr, output, lse, workspace, &tiling, nullptr, &pipe);
     op.Process();
 #else
+#ifdef MLA_BSND_ATTENTION
+    flash_attn::mla::Kernel::MlaDense<InputT, true> op;
+    op(params, scale, qc, qr, kv, kr, output, lse, workspace, &pipe,
+       metadata + flash_attn::mla::kMlaBsndKvLengthMetadataPrefixWords * sizeof(uint32_t));
+#else
     flash_attn::mla::Kernel::MlaDense<InputT> op;
     op(params, scale, qc, qr, kv, kr, output, lse, workspace, &pipe);
+#endif
 #endif
 #endif
 }
@@ -212,7 +261,13 @@ extern "C" int launch_dense_metadata(void* stream, void* qc, void* qr, void* kv,
 }
 #else
 extern "C" int launch_dense(void* stream, void* qc, void* qr, void* kv, void* kr, void* kvList, void* output, void* lse,
-                            void* workspace, const MlaDenseKernelSchedule* params, float scale)
+                            void* workspace, const MlaDenseKernelSchedule* params, float scale
+#ifdef MLA_BSND_ATTENTION
+                            ,
+                            void* lengths, void* metadata, uint32_t words,
+                            const flash_attn::mla::MlaDenseMetadataContext* context, bool sourceNeedInit
+#endif
+)
 {
     if (!params || !qc || !qr || !kv || !kr || !kvList || !output || !lse || !workspace || !std::isfinite(scale) ||
         params->batch == 0 || params->sq == 0 || params->sq > (1U << 30) || params->heads == 0 ||
@@ -236,9 +291,14 @@ extern "C" int launch_dense(void* stream, void* qc, void* qr, void* kv, void* kr
 #if !defined(__NPU_ARCH__)
     auto before = batchLaunchCount;
 #endif
-    DENSE_ENTRY<<<params->blockDim, nullptr, stream>>>(ffts, (uint8_t*)qc, (uint8_t*)qr, (uint8_t*)kv, (uint8_t*)kr,
-                                                       (uint8_t*)kvList, (uint8_t*)output, (uint8_t*)lse,
-                                                       (uint8_t*)workspace, *params, scale);
+    DENSE_ENTRY<<<params->blockDim, nullptr, stream>>>(
+        ffts, (uint8_t*)qc, (uint8_t*)qr, (uint8_t*)kv, (uint8_t*)kr, (uint8_t*)kvList, (uint8_t*)output, (uint8_t*)lse,
+        (uint8_t*)workspace, *params, scale
+#ifdef MLA_BSND_ATTENTION
+        ,
+        (uint8_t*)lengths, (uint8_t*)metadata, words, *context, sourceNeedInit
+#endif
+    );
 #if !defined(__NPU_ARCH__)
     return batchLaunchCount == before + 1 ? batchLaunchError : -2;
 #else

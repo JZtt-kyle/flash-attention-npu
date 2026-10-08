@@ -19,14 +19,16 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build_probes(artifacts, dtype="fp16", *, metadata=False):
+def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False):
     assert dtype in ("fp16", "bf16")
+    assert not (metadata and bsnd)
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
     paths = [
         "attention/common/op_kernel",
         "attention/fused_infer_attention_score/op_kernel",
+        "attention/fused_infer_attention_score/op_host/fused_infer_attention_score_tiling_info_parser.cpp",
         "attention/fused_infer_attention_score/op_host/fused_infer_attention_score_tiling.h",
     ]
     archive = subprocess.check_output(["git", "-C", str(source), "archive", COMMIT, *paths])
@@ -99,6 +101,8 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False):
     ]
     if dtype == "bf16":
         common.append("-DMLA_DENSE_BF16")
+    if bsnd:
+        common += ["-DMLA_BSND_ATTENTION", "-DNDEBUG"]
 
     def compile_probe(name):
         output = artifacts / f"{name}.so"
@@ -157,6 +161,8 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False):
         assert all(header in dependencies for header in expected)
         if name in ("metadata", "metadata_checked"):
             assert "mla_metadata_consumer.h" in dependencies and "mla_metadata.hpp" in dependencies
+        if bsnd and name == "migrated":
+            assert "mla_bsnd_metadata.hpp" in dependencies
         assert ("oracle-source" in dependencies) == (name == "oracle")
         return str(output)
 
@@ -200,10 +206,13 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False):
         ROOT / "tests/mla_dense_probe.cpp",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_metadata_consumer.h",
+        ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.h",
+        ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata_consumer.h",
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("*/*.hpp")),
     ]
     manifest = {
         "dtype": dtype,
+        "bsnd": bsnd,
         "oracle_tiling_sha256": sha256(artifacts / "oracle_tiling.h"),
         "libraries": {
             name: {"path": path, "sha256": sha256(Path(path))} for name, path in libraries.items()

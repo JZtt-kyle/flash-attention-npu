@@ -64,7 +64,19 @@ def probes(tmp_path_factory, request):
     return load_probes(build_probes(artifacts, request.param), artifacts, dtype)
 
 
-def make_case(probes, batch, sq, heads, sk, *, scale=None, offset=16, perturb=None, amplitude=1.0):
+def make_case(
+    probes,
+    batch,
+    sq,
+    heads,
+    sk,
+    *,
+    scale=None,
+    offset=16,
+    perturb=None,
+    amplitude=1.0,
+    schedule_details=None,
+):
     case = Case("dense-probe", "compressed", batch, sq, sk, heads, 1, scale=scale)
     dtype = probes[0]["dtype"]
     inputs = make_inputs(case, dtype, seed=20260929)
@@ -76,11 +88,16 @@ def make_case(probes, batch, sq, heads, sk, *, scale=None, offset=16, perturb=No
         inputs[name][..., lo:hi] = torch.randn(batch, sq, heads, hi - lo, generator=gen).to(dtype)
     inputs["q"].mul_(amplitude)
     inputs["qv"].mul_(amplitude)
-    schedule, details = Schedule(), (ctypes.c_uint64 * 16)()
-    assert (
-        probes[0]["schedule"].prepare_dense(batch, sq, heads, sk, ctypes.byref(schedule), details)
-        == 0
-    )
+    if schedule_details is None:
+        schedule, details = Schedule(), (ctypes.c_uint64 * 16)()
+        assert (
+            probes[0]["schedule"].prepare_dense(
+                batch, sq, heads, sk, ctypes.byref(schedule), details
+            )
+            == 0
+        )
+    else:
+        schedule, details = schedule_details
     assert details[14] == 1 and details[15] == 0  # source BATCH_MODE, no FD
     assert schedule.ratio == 2
     storage = []
