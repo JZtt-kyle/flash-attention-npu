@@ -1,7 +1,8 @@
-# CANN FIA MLA → FA3 NPU：适配方案
+# CANN FIA MLA → FA3 NPU：契约与架构
 
-状态：方案已确认，按小步提交推进。本文描述目标契约，不表示这些能力已经实现。
-当前进展见 [status.md](status.md)，迭代顺序见 [plan.md](plan.md)。
+方案已确认。本文保存目标范围、固定来源、接口契约、架构和验收口径；**目标能力不等于已经开放的能力**。当前支持边界与最近证据只查 [status](status.md)，步骤与完成条件查 [plan](plan.md)。
+
+阅读入口：[接口映射](#3-两种-mla-的接口映射) · [功能边界](#4-功能边界) · [metadata](#5-metadata-设计) · [代码结构](#6-代码结构) · [验收口径](#7-验收口径)。
 
 ## 1. 范围与固定依据
 
@@ -166,58 +167,89 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 
 [CPU 验收](../../tests/test_flash_attn_npu_v3_mla_reference.py) 用独立标量求和/指数 oracle 和手写可见列矩阵核对上述数学规则；不共用 reference 的 mask 或张量收缩。M01 覆盖 D/P 数学、共享边界、scale、GQA、stride、mask、softcap 与全局空张量；TND/PA 解析、metadata、split accumulator 和图仍按计划逐步验证。
 
-M02a 的 [CANN 执行器](../../tests/mla_cann_baseline.py) 与 [910B 验收](../../tests/test_flash_attn_npu_v3_mla_cann.py) 仅覆盖无 mask 的 BSND D01/D02/P01，显式传入相同 scale 并保留 prefill split 视图的 192 行 stride。使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv 维输出，避免 torch_npu 2.7.1 默认包装器将 combined 192/128 的输出错分配为 192。O/LSE 均调用原仓 `assert_fa_close`，无 softcap 时阈值固定为 `max(2 * max|pt-ref| + 2 * ULP(ref), 1e-5)`；不因基线误差修改阈值。
+[CANN 执行器](../../tests/mla_cann_baseline.py) 与 [910B 验收](../../tests/test_flash_attn_npu_v3_mla_cann.py) 仅覆盖无 mask 的 BSND D01/D02/P01，显式传入相同 scale 并保留 prefill split 视图的 192 行 stride。使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv 维输出，避免 torch_npu 2.7.1 默认包装器将 combined 192/128 的输出错分配为 192。O/LSE 均调用原仓 `assert_fa_close`，无 softcap 时阈值固定为 `max(2 * max|pt-ref| + 2 * ULP(ref), 1e-5)`；不因基线误差修改阈值。
 
-该执行器记录安装版本、进程实际加载的算子库及 SHA256、输入 shape/stride/offset、每轮 event span 和逐调用同步端到端时间。输入 H2D 与一次性视图创建不计时，输出分配及包装器内转换计时；event span 可能含 host 发射间隙，不当作纯 kernel 时间。安装包与固定源码的二进制对应关系未经验证时，结果仅验收执行器；M02b 必须建立固定源码基线并用 profiler 核实模板、kernel 时间与转换成本，之后才能用于迁移性能验收。
+该执行器记录安装版本、进程实际加载的算子库及 SHA256、输入 shape/stride/offset、每轮 event span 和逐调用同步端到端时间。输入 H2D 与一次性视图创建不计时，输出分配及包装器内转换计时；event span 可能含 host 发射间隙，不当作纯 kernel 时间。安装包与固定源码的二进制对应关系未经验证时，结果仅验收执行器；性能验收须使用已建立的固定源码隔离构建及 profiler 分派证据，不能只凭安装版本归因。相关工具为 [来源核验](../../tests/test_flash_attn_npu_v3_mla_provenance.py) 和 [profiler 核验](../../tests/test_flash_attn_npu_v3_mla_profile.py)。
 
 ## 5. metadata 设计
 
-metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链，不另造调用协议。
+metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链。兼容公开调用语义，NPU 记录布局由本后端管理，不与 CUDA buffer 互换。
 
-1. **公开签名以官方为准。** 使用 `headdim`、`headdim_v`、`has_softcap` 等官方参数及顺序。现仓额外 `softcap` / `softmax_scale` 如需兼容，只作为旧调用的关键字兼容层，不占官方位置参数、不成为 MLA 必填项；新调用和测试统一用官方形式。
-2. **分离调度与计算数值。** metadata 保存切块、分核、split、长度等调度结果；前向本次调用提供 scale、softcap 数值、张量地址及 stride。metadata 接口没有 qv 参数，不应依据维度臆测 qv 存在，也不应把缺省 `1/sqrt(Dq)` 写死。只有 `has_softcap` 这类影响调度的特征进入调度契约。
-3. **设备侧准备。** 复用现仓 AICPU 启动与事件同步，从固定 CANN 抽取不依赖 gert/optiling 的 MLA 调度函数，保留源判断条件和调度结果；FA3 显式 split 等契约差异单独映射。迁移调度计算位置和复用结果不等于重新设计切块、分核或 split 启发式。host 只用 shape、dtype、stride 等静态信息；长度读取与解析在设备侧完成，steady-state 不调用 `.cpu()`、`.item()` 或主机同步。
-4. **不复制 GPU 内部二进制布局。** 新 MLA metadata 使用 NPU 上连续 int32 tensor，内容由 NPU 后端管理，带版本/类型及边界信息；兼容的是调用语义，不是 CUDA 与 NPU buffer 互换。普通 FA 现有 byte metadata 的过渡需保持既有调用可用，不能误送入 MLA kernel。
-5. **有/无 metadata 共用调度。** 不传时内部生成；显式生成时可以复用相同调度条件。两条路径共享计算函数，不能分别维护两套容易漂移的 tiling 算法。
-6. **生命周期明确。** 同设备、同调度参数与长度下可跨层复用；实际长度改变要重新计算。图内捕获 metadata 计算时，每次 replay 重新读取设备长度；图外生成的旧快照不会自动跟随长度张量变化。读写 workspace、计数器和 stream 的所有权要明确，禁止共享可变 scratch 造成并发污染。
-7. **校验与图模式一致。** 校验尺寸、dtype、设备和可获得的静态参数；必要的内容检查留在设备侧。Python tensor 私有属性不能成为唯一正确性依据；不能为了校验在 graph 中读取设备标量。真实输出与 fake 的 metadata 大小、O/LSE/accumulator shape 必须一致。
+### 5.1 签名与复用规则
 
-M05b2a 对齐公开 `get_scheduler_metadata` 的官方位置参数及默认值，内部 custom op、fake 和 C++ 使用相同的 `has_softcap` 位置。`softcap` / `softmax_scale` 只作为公开关键字兼容项；普通 FA3 仍返回原 `uint8` 协议，其中保存数值，因此单独 `has_softcap=True` 暂时明确拒绝，须通过旧关键字提供正 `softcap`。旧调用省略 `has_softcap` 时仍以数值 `softcap` 启用该功能；显式 True 与零值冲突、负值或非有限值均拒绝。M05b2b3b 接通下述 dense MLA 的公开生成与复用；MLA 不接收这两个数值兼容关键字，scale 只由当次前向提供。其余 MLA metadata 组合继续明确拒绝。
+- 保留官方参数名、顺序与默认值。`get_scheduler_metadata` 没有 `qv`、`cu_seqlens_k` 或 `seqused_q` 参数；`flash_attn_func` / `flash_attn_varlen_func` 没有显式 metadata 参数，MLA 接入这两者时采用内部生成。公开显式复用通过只读 kvcache 路径接入，不为迁移增加公共参数。
+- metadata 保存形状、dtype、调度特征、切块、分核及长度信息；当次前向提供 scale、softcap 数值、张量地址和 stride。生成器只选择调度族，前向仍独立校验真实 qv 与 Q/K/V。记录不含可变 scratch，不依据 head dimension 固化缺省 scale。
+- 不传 metadata 时内部生成；显式复用时不再次发射生成器。有/无记录共用源调度函数，不维护另一套 tiling 公式。host 只读 shape/dtype/stride 等静态信息，AICPU/设备读取长度值，steady-state 不增加长度 D2H、`.item()` 或主机同步。
+- 同设备、同调度条件和长度下可跨层复用；长度变化后重新生成。记录可克隆或用连续偏移视图复用，正确性不依赖 Python 私有属性。消费期间记录及长度保持只读，各调用拥有独立 O/LSE/workspace。
+- 静态尺寸、dtype、设备、stride 由真实/fake/C++ 校验，内容留在设备侧。图内生成应在 replay 时重读设备长度，图外旧快照不会自动变化；完整图生命周期验收在 M16，fake/compile 通过不代表 graph replay 已验收。
+
+普通 FA3 继续使用原 `uint8` 协议。公开 `softcap` / `softmax_scale` 只作为旧调用的关键字兼容项；byte 记录仍保存数值，单独 `has_softcap=True` 明确拒绝，需同时提供正 `softcap`。省略 `has_softcap` 时可由正 `softcap` 启用；True 与零值冲突、负值和非有限值均拒绝。MLA 不接受这两个数值兼容关键字，scale 由前向传入；softcap 的 MLA 接入在 M15。
+
+### 5.2 v1：整容量 dense 记录与消费者
+
+[`mla_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h) 定义连续 `int32[401]`：`magic=0x4d4c4131`、`version=1`、`kind=1`。前 8 字依次为 magic、版本、类型、总字数、dtype、生成状态、源调度状态、保留位；后 393 字为 `MlaMetadataSchedule`，保存几何、端点、FD 字段、workspace 与资源需求。64 位字段以低/高 32 位保存，只要求 4 字节对齐，允许奇数 storage offset。
+
+[`BuildDenseMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.cpp) 的可选长度必须逐项等于 KV 容量；缺省表示整容量。生成失败时写非成功头部并清零调度载荷。公开生成器要求 NPU 上连续 `int32[B]`；只读前向接受 `None`、等于容量的整数或同设备的连续 `int32[B]`。整数在 host 校验后转为设备 tensor；设备长度值由 AICPU 校验，不做 D2H。
+
+[`mla_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata_consumer.h) 共用 CPU/设备解码与校验，[`kernel/mla_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_metadata.hpp) 提供设备适配：先检查字数、头部、生成状态和 dtype，再对照调用方独立提供的形状、平台、实际 blockDim、workspace 容量和局部资源；非空 dense 的分核端点须单调并覆盖全部任务。检查通过后才构造 Kernel 调度，不窄化 64 位 workspace。
+
+所有 Cube/Vector 在进入 attention 之前执行 `LoadDenseMetadata`，并通过 `CheckDenseCacheLengths` 重新核对当次长度；失败执行不受 `NDEBUG` 影响的 `AscendC::Trap()`。**生成器写失败记录，前向消费该记录或发现当次长度不合法时才触发 Trap**，由调用或同步点报告异常。拒绝不写 O/LSE/attention workspace；异常测试使用独立进程，不承诺错误上下文可继续复用。诊断驱动的状态缓冲不属于公开返回值。
+
+校验保证记录兼容性和计算地址边界，不验证来源真实性；`maxCost`、未启用 FD 的记账字段及未使用核端点不驱动计算。全局空容量使用同一协议与校验路径，具体规则见 [6.2](#62-调度字段与边界)。
+
+### 5.3 v2：BSND 实际 KV 长度生成协议
+
+[`mla_bsnd_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.h) 定义 `version=2`、`kind=2`，magic 与 v1 相同。记录恰为 `401+B` 个 int32：401 字前缀沿用 v1 的字段顺序和调度编码，末尾 B 字按 batch 保存实际 KV 长度，保留位为零。只根据静态 batch 检查 `B>=0`、`401+B<=UINT32_MAX` 后分配；隐式整容量也物化快照，B=0 时仍靠版本/类型区分于 v1。
+
+长度取值必须在 `[0,Sk]`，非均匀、等长短序列和全零长度使用 `BuildBsndKvLengthSchedule`；workspace 仍按容量预算。非零容量中的全零实际长度不能当作全局空容量。源端点可能停在零 KV 尾部之前，保留规则见 [6.2](#62-调度字段与边界)。
+
+[`BuildBsndKvLengthMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.cpp) 先检查输出指针、对齐、地址加法、精确字数及输入输出区间重叠；不安全缓冲返回错误且不写记录。缓冲合法后，未支持 dtype 记 `UnsupportedDtype`，长度描述符错误记 `InvalidCacheLengths`，形状/长度值/调度错误记 `ScheduleFailure` 并保存调度状态（越界长度为 `UnsupportedShape`）；失败均清零整个调度与快照。生成期间长度不可修改，成功快照与调度使用同一份长度。
+
+[`mla_bsnd_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.aicpu) 已列入生产构建，直接编译上述调度与序列化源码，写完执行设备屏障；**目前仅独立驱动发射，尚无 v2 设备消费者或公开前向**。v1 消费者通过字数或版本拒绝 v2。M06b2b 才实现快照与当前长度、资源及端点的设备校验、过期/损坏记录 Trap 和拒绝不写输出；不能用 v2 直接驱动旧 dense Kernel。
+
+### 5.4 stream 与内存生命周期
+
+v1 生产路径和 v2 独立驱动均沿用当前 stream / AICPU stream 的双事件依赖：输入就绪后生成，生成完成后当前 stream 才能消费。`MlaMetadataArgs` 中的地址仅属于当次发射；对 AICPU 使用的长度与记录登记 allocator stream，并保留 tensor 生命周期。生成完成后记录不依赖原长度存储。
+
+跨 stream 复用由调用方建立正常 stream/event 依赖；前向对本次使用的输入、长度和记录登记 stream。不能在生成或消费未完成时改写记录/长度，也不能共享可变 scratch。新增协议必须更新版本、类型和 wordCount 校验，不能让旧记录被新语义误读。
 
 ## 6. 代码结构
 
-实现接入点保持 [flash_api.cpp](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp) 和现有 Python 包。新增代码拟放在 `csrc/ascend910/flash_attn_npu_3/mla/`：
+接入点为现有 [Python FA3 包](../../flash_attn_npu_3/flash_attn_npu_interface.py) 与 [flash_api.cpp](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp)。MLA 适配位于 `csrc/ascend910/flash_attn_npu_3/mla/`，使用如下现有结构：
 
 ```text
 Python FA3 入口 / custom op / fake
         ↓
-C++ 校验、形状与 stride 解析、MHA/MLA 分派
+C++ 校验与分派：mla_validation.h、mla_forward.cpp
         ↓
-MlaLaunchParams（本次地址、scale 等） + MlaSchedule（可复用调度）
+MlaLaunchArgs（当次地址、scale、独立 context）
+        + AICPU metadata（MlaSchedule 编码）
         ↓
-CATLASS Kernel：保留 CANN tile 循环、缓冲、Cube/Vector 同步
+mla_launch_impl.hpp：LoadDenseMetadata → MlaDenseKernelSchedule
         ↓
-Block：QK + RoPE / online softmax / PV / rescale / split combine
+kernel/mla_dense.hpp：任务环、缓冲、Cube/Vector 同步
         ↓
-CATLASS Tile copy、Mmad、布局与硬件资源
+block/mla_cube.hpp、mla_vector.hpp：QK + RoPE / softmax / PV / aMLA 更新
+        ↓
+tile/：源复制与向量操作、CATLASS TileMmad
 ```
 
-- **以固定 CANN 源码为实现起点。** 将其已有 Kernel / Cube / Vector / FlashDecode 逻辑对应到 CATLASS Kernel / Block / Tile；保留函数来源及版权。CATLASS `examples/19_mla` 用于理解分层，不能替代 CANN 的实际执行流程。
-- **允许的结构改动。** 文件拆分、类和模板组织、命名、参数封装、构建接入及框架依赖解耦；已有 Block / Tile 仅在运算、数据布局、精度及资源/同步契约等价时复用。无法等价复用时在本仓封装源逻辑，不为套用现成组件改变 CANN 行为。
-- **保留的设备行为。** 对应输入和资源下的切块/分核策略、矩阵乘与 softmax/输出更新顺序、中间 dtype、累加和舍入位置、尾块处理、内部数据布局、缓冲数量与生命周期、预取时机及事件依赖。这些执行策略按固定 CANN 保持一致，结构重构围绕其接口和代码组织展开。
-- **必要的接口差异单独处理。** 按第 3/5 节完成 FA3 参数、长度/stride、scale、mask、split 及 metadata 映射；保留原流水所需的调度字段。每项确需偏离 CANN 的行为要注明契约依据和最小影响范围，不能借接口适配顺带优化 kernel；不搬入范围外的 FIA 大签名、图引擎注册或量化框架。
-- 910B/C 共用适用的算法，但 Cube/Vector 比例、可用核数和存储资源从平台信息获取；保留源 MLA 的 C1V1/C1V2 适配分支，不能用 910B 实测参数硬编码替代 910C 兼容性。
-- 满足上述等价条件时复用已有 Tile；MLA 特有 Block 与 Kernel 先放本仓，避免每步改子模块。编译分派沿用轻量 host 头和独立实例化单元，更新生成器而非仅手改 autogen。
-- metadata 的新 AICPU 源如独立成文件，必须同时修改 `setup.py`：当前构建只寻找固定的 `fa_metadata.aicpu`。header 改动的增量依赖也必须核查，防止链接旧对象。
-- 测试使用独立数学 reference 和 CANN 基线适配器。生产入口不能直接调用 `torch_npu.npu_fused_infer_attention_score*` 充当移植实现。
+以上为已实现的 dense 链路；v2 生成尚未接入消费者，FD 合并与 192/128 通用路径按计划迁移。
 
-### 6.1 首个 dense 实现的源对应关系
+- 以固定 CANN 源码为起点，保留来源及版权；许可证位于 [`LICENSE.cann`](../../csrc/ascend910/flash_attn_npu_3/mla/LICENSE.cann)。CATLASS 示例用于理解分层，不能替代源执行流程。
+- 允许文件拆分、命名、类/模板组织、参数封装、构建接入和 gert/optiling 解耦。复用已有组件须保证运算、布局、精度、资源与同步契约等价；无法等价时在本仓封装源逻辑，不修改 CATLASS 子模块来容纳常规迭代。
+- 保留切块/分核策略、数值顺序、中间 dtype、累加与舍入、尾块、内部布局、缓冲数量及生命周期、预取和事件依赖。FA3 必需的指针/长度/stride/mask/split 差异单列，不顺带改变 Kernel 算法。
+- 目标兼容 910B/C 的资源配置；平台核数、Cube/Vector 比例及存储容量来自查询。调度和源逻辑保留 C1V1/C1V2，但当前生产平台检查只开放 910B C1V2；合成 C1V1 调度测试不等于 910C 前向验收。
+- 新 AICPU 文件须加入 `setup.py`，设备 header 的增量依赖也须覆盖；构建细节见 [6.5](#65-生产接入与构建)。生产入口不调用原 CANN attention 算子充当迁移实现。
+
+### 6.1 压缩 MLA 的来源映射
 
 以下映射固定到第 1 节 CANN commit；路径仍相对于 FIA 根目录，`../common/` 指 `attention/common/`。目标路径相对于本仓 `csrc/ascend910/flash_attn_npu_3/mla/`，各模块的实现状态见 [plan](plan.md)。
 
 | 固定源文件 / 函数 | CATLASS 层次与迁移位置 | 必须保留的行为 |
 | --- | --- | --- |
 | `op_host/arch22/fia_tiling_nonquant_mla.cpp`：`CalcInnerSize`、`CalcMBaseSize`、`Split`、`CalcMmResSize`、`CalcNormalWorkspaceSize` | `mla_schedule.h/.cpp`，host/AICPU 共用的无 gert 调度计算 | 切块、分核输入、workspace 尺寸及核数；不另写一套形状启发式 |
+| 同一 tiling：`DealSameSeqEachBatch`、`CreateSplitInput`；`SplitCore` 的 `GetS1SeqSize/GetS2SeqSize` | `mla_bsnd_schedule.h/.cpp`，BSND 实际 KV 长度调度 | int32 长度完整校验后数值转换为源 int64；非均匀长度的 M 基块、成本与零长度尾部端点规则 |
 | `../common/op_host/split_core.cpp`：`SplitCore`、`CalcSplitInfo`、`CalcCostInfo`、`CalcSplitPlan`、`AssignByBatch/Row/Block`、`ForceAssign` | 调度模块私有的 `detail/cann_split_core.h/.cpp` | 枚举核数、cost、容差、遍历次序和相同 cost 时保留已有方案的规则；专用 MLA 使用此文件，不是 `split_core_v2.cpp`；保留源算法分支不表示开放对应功能 |
 | `op_host/fused_infer_attention_score_tiling.h`；`op_kernel/arch22/fia_public_define.h`：`ConstInfo`、`RunInfo` | 调度字段与 Kernel 运行时参数 | 明确字段宽度、单位、端点语义和运行时状态，见 6.2 |
 | `op_kernel/arch22/fused_infer_attention_score_v3.cpp`：`INVOKE_FIA_OP_GENERAL_IMPL` 的 `BSH_KVBSH_MLA_TILING` 分支 | 独立实例化单元、launcher 和生成器 | FP16/BF16、无 PA、无 FD、BSND 输入输出、C1V1/C1V2；不带入 FIA 注册与大签名 |
@@ -229,73 +261,35 @@ CATLASS Tile copy、Mmad、布局与硬件资源
 | `op_kernel/arch22/memory_copy.h`：`CopyAttenOutUbToGm`、`DataCopySoftmaxLseBSND` | `block/mla_vector.hpp` 的 dense 写回 | 保留 O 的 query/head 首段、中段和尾段复制，以及 LSE 的 `[B,Hq,Sq]` 寻址 |
 | `../common/op_kernel/vector_common.h`：`RowDivs`、`RowMuls`、`ComputeSoftMaxLse` | `tile/mla_vector_ops.hpp` | 保留行列 repeat 选择、广播布局、向量指令及 barrier 顺序 |
 
-首步对应 C1V2 dense 非 FD key 为 FP16 `105000000010000001`、BF16 `105000000010022221`；C1V1 分别为 `105000000110000001`、`105000000110022221`。key 只用于核对来源，FA3 不暴露 CANN key。源 `FiaKernelNonQuantMla::FlashDecode` 与 `fia_block_vec_flashdecode_arch22.h` 的合并保留到 M10；192/128 的通用 `fia_kernel_nonquant.h` 保留到 M11，均不混入首步分派。
+对应 C1V2 dense 非 FD key 为 FP16 `105000000010000001`、BF16 `105000000010022221`；C1V1 分别为 `105000000110000001`、`105000000110022221`。key 只用于核对来源，FA3 不暴露 CANN key。源 `FiaKernelNonQuantMla::FlashDecode` 与 `fia_block_vec_flashdecode_arch22.h` 的合并保留到 M10；192/128 的通用 `fia_kernel_nonquant.h` 保留到 M11，均不混入现有 dense 分派。
 
-### 6.2 调度字段和首步边界
+### 6.2 调度字段与边界
 
-首个前向范围为 **512+64 共享 KV，FP16/BF16，连续 BSND，B>0，`1 <= Sq*Hq <= 256`，`1 <= Sk <= 512`，Hkv=1，无 mask，显式 `num_splits=1`**。输入允许连续视图的非零 storage offset；接通时检查尺寸乘积、地址及 workspace 溢出。先开放 `flash_attn_func`，varlen/kvcache 接入随对应步骤验收。首步暂不接受 metadata、实际长度、非连续外层 stride、softcap、非默认调度选项或梯度请求；真实、fake、自定义算子和 C++ 的边界一致。
+[`BuildDenseSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.cpp) 是整容量、无 gert/torch 的调度实现；host 和 v1 AICPU 编译同一源码。[`BuildBsndKvLengthSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_schedule.cpp) 为 BSND 实际 KV 长度入口，复用同一 `detail/cann_split_core.*`；缺省或整容量长度须退化为既有 dense 结果。公共开放范围见 [status](status.md)。
 
-这是实现里程碑的临时边界，不是缩小第 4 节的最终契约。`Sq*Hq>256`、多块/长 KV、零容量分别在 M04c 子步骤接通；TND/stride、PA、mask、split 和调度选项沿用 M06..M16。
+`mBaseSize` 初值 256。固定源 `CalcMBaseSize` 仅在等长且 `(B*Hkv)%aicNum != 0` 时，按最小公倍数求可均分 S1G 的候选，须整除 `Sq*Hq` 并在 128..256；非均匀实际 KV 长度保持 256。不能改成按头数选择 8/16 行。正常 tiling 只调用一次 `Split`；非 PA 的 `s2BaseSize=min(Sk,512)`，不在分核后擅自重跑 `CalcInnerSize`。
 
-源 `mBaseSize` 初值为 256。`CalcMBaseSize` 仅在等长、`(B*Hkv)%aicNum != 0` 时，以两者最小公倍数计算可均分的 S1G 块；候选须整除 `Sq*Hq` 且在 128..256，否则保持 256。不能改成按头数选择 8/16 行。`DoOpTiling` 的正常分支只调用一次 `Split`；首轮 `splitKVFlag_` 为 false，非 PA 的 `s2BaseSize=min(Sk,512)`，不在分核后擅自重跑 `CalcInnerSize`。首步每个 S1G 块只有一个 S2 基本块，源分核不拆开基本块，因而无需 FD；调度验收仍逐例检查 `numOfFdHead==0`。
-
-| 源字段 / 计算 | 本仓归属与单位 | 首步处理及后续约束 |
+| 源字段 / 计算 | 本仓归属与单位 | 规则 |
 | --- | --- | --- |
-| `baseParams.bSize/n2Size/gSize/s1Size/s2Size/headDim/headDimRope` | `MlaSchedule` 的静态几何；元素/头/序列计数 | 分别映射 B、1、Hq、Sq、Sk、512、64；整型窄化前检查范围 |
-| `innerSplitParams.mBaseSize/s2BaseSize` | 可复用调度，元素数 | 保留上述源计算；`gS1` 对 BSND 是 `s1*Hq+head`，不是 head-major |
-| `outerSplitParams.bN2End/gS1End/s2End`、`usedCoreNum` | 每核任务区间的排他结束三元组；gS1/S2 为块索引 | 第 0 核从 `(0,0,0)` 起，其余从前核结束点起；`CalcParams` 才乘基本块变成元素索引 |
-| 平台 `aicNum/aivNum/cvRatio`、`CalcNumBlocks`、`CalcScheduleMode` | 资源信息、启动维度、BATCH_MODE | 平台核数、实际使用核数与启动 blockDim 分开；保留 `CalcTschBlockDim` 对应关系及 C1V1/C1V2。源端点数组容量是 26，移植时显式校验容量，不把它写成芯片核数 |
-| `workspaceParams.mm1ResSize/mm2ResSize` | 每核每槽的元素数，字节计算用宽整数 | `M=align16(min(Sq*Hq,mBaseSize))`，`N=align32(s2BaseSize)`，`R1=M*N`、`R2=M*512`；这里 N 按 32 个元素对齐，不是 32 字节 |
-| `fdParams` 的任务、split、归约端点及 `fdAccumOutSize/fdLogSumExpSize` | split 调度与额外 workspace | 首步确认没有 FD 后使用非 FD 实例；保留调度计算结果供来源对照，不能把非零 FD 字段强行清零后宣称等价 |
-| `scaleValue`、输入输出地址、实际 stride、workspace 地址 | `MlaLaunchParams`，每次前向传入 | scale 从源 tiling 中移出，仍在 QK 完成后的同一 FP32 Muls 位置使用；缺省 `1/sqrt(576)`，不写入可复用 metadata |
-| `softmaxLseFlag/outputLayout/batchContinuous/needInit`、长度、PA、mask 标志 | 可复用的布局/功能条件；地址另传 | 首步固定连续 BSND、非空无 mask、无长度数组；按源保留 LSE 初始化及同步。其余字段在对应功能接通时映射，不当作未定义 padding |
-| `RunInfo.loop/bn2IdxInCurCore/isFirstSInnerLoop/isLastS2Loop/isValid` | 每次 launch、每核私有的运行状态 | 不放进跨调用复用的 metadata；任务环、缓冲轮换和状态初始化属于 Kernel |
+| `baseParams.bSize/n2Size/gSize/s1Size/s2Size/headDim/headDimRope` | `MlaSchedule` 静态几何，元素/头/序列计数 | 对共享 KV 分别为 B、1、Hq、Sq、Sk、512、64；窄化前校验 |
+| `innerSplitParams.mBaseSize/s2BaseSize` | 可复用调度，元素数 | 保留源基本块；BSND 的 `gS1=s1*Hq+head`，不是 head-major |
+| `outerSplitParams.bN2End/gS1End/s2End`、`usedCoreNum` | 每核区间的排他结束三元组；gS1/S2 是块索引 | 第 0 核从零开始，其余从前核端点开始；Kernel 再乘基本块 |
+| `aicNum/aivNum/cvRatio`、`CalcNumBlocks/CalcScheduleMode` | 平台资源、启动维度、`BATCH_MODE` | 核数、使用核数、blockDim 分开；端点容量 26 不是芯片核数 |
+| `mm1ResSize/mm2ResSize` | 每核每槽元素数，字节计算用宽整数 | `M=align16(min(Sq*Hq,mBaseSize))`、`N=align32(s2BaseSize)`、`R1=M*N`、`R2=M*512`；N 对齐 32 个元素 |
+| `fdParams`、`fdAccumOutSize/fdLogSumExpSize` | split 调度及 workspace 记账 | 保留源字段作对照；非 FD 路径不消费 split，不能清零原 FD 方案冒充等价 |
+| `scaleValue`、地址、stride、workspace 地址 | 当次 launch 参数；独立于记录 | scale 仍在 QK 后 FP32 Muls 生效，缺省为 `1/sqrt(576)` |
+| `softmaxLseFlag/outputLayout/batchContinuous/needInit`、长度/PA/mask 标志 | 布局与功能条件；地址另传 | 按功能步骤映射；dense 保留 LSE 初始化与同步，未接通组合明确拒绝 |
+| `RunInfo.loop/bn2IdxInCurCore/isFirstSInnerLoop/isLastS2Loop/isValid` | 每次 launch、每核私有状态 | 任务环和缓冲轮换不进入可复用记录 |
 
-M04b 先使用无设备长度读取的静态调度模块；M05 将同一计算接入 AICPU 和版本化 int32 metadata，不维护第二套公式。普通 FA byte metadata 继续使用原协议。
+**FA3 禁止 split 的映射。** `num_splits=1` 先运行原 `SplitCore`；无 FD 时保留原结果，有 FD 时将端点向上对齐到完整 M 块结束处、合并空区间，重建 `s2End=0` 分区。按源 `CalcBatchCache/CalcS1GCache` 重算正常块与尾块成本。基本块、原候选算法和设备数值/事件顺序不变；映射结果与原生非 FD 输出分开验收，不称为原生 CANN 输出。
 
-MLA 的内部 dense metadata 由 [`mla_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h) 定义：版本 1 为 401 个 int32 字，前 8 字保存 magic、版本、类型、总字数、dtype、生成状态、源调度状态和保留位，其后完整保存 `MlaSchedule` 的几何、分核端点、FD 字段、workspace 和资源需求。64 位字段按低/高 32 位保存，允许连续 tensor 的奇数 storage offset，不能窄化 workspace 大小。调度失败或 dtype 未支持时，记录非成功状态并清零整个调度载荷；消费者必须先检查头部再读取调度。scale、输入输出地址和可变 scratch 不进入可复用记录。
+**实际长度与零尾部。** 先校验全部 int32 长度再数值转换为源 int64，不重解释指针。源 `CalcSplitPlan` 在成本耗尽后可能把尾部零 KV 样本留在计算端点之外；调度检查省略部分逐样本为零。M06b2b 消费者须保留此条件，M06b3 须按源 `InitActualSeqLenQ/KV`、`InitOutputSingleCore`、`GetTaskDealMode/DEAL_ZERO` 独立初始化空行，不能仅凭计算分区覆盖它们。
 
-M06b2a 新增独立的 [`mla_bsnd_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.h) 生成协议：magic 沿用 MLA 家族，`version=2`、`kind=2`，连续 int32 记录恰为 `401+B` 字；前 8 字字段顺序与 v1 相同，保留位为零，后 393 字仍使用同一 `MlaMetadataSchedule` 编码，末尾 B 字是按 batch 顺序保存的实际 KV 长度。字数只由静态 batch 确定，先检查 `B>=0` 及 `401+B<=UINT32_MAX`，不读取长度值分配；隐式整容量也物化 B 个长度，B=0 时仍以版本/类型区分于 v1。长度必须在 `[0,Sk]` 内；非均匀、等长短序列及全零长度复用 M06b1 调度，保留源可能停在零 KV 尾部之前的端点与容量决定的 workspace，不能把样本全零误记为全局空容量。
+**平台与溢出。** `MlaPlatformInfo` 携带可用 L1/UB/L0、libapi 预留及平台 `CalcTschBlockDim(c*cvRatio,c,c*cvRatio)` 表，按实际使用核数索引，不能猜测 blockDim。源 `SetSplitOutput` 对 C1V1 的 FD vector 可能按两倍核数读取；本仓按 vector 实长复制到 52 项容量数组并清零剩余项，oracle 比较原完整 vector，不执行该越界序列化循环。
 
-[`mla_bsnd_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.aicpu) 为独立生产编译单元，直接编译同一 BSND 调度和序列化源码；本步只由独立验收驱动发射，不接公共生成器或前向。输出指针、对齐、地址加法、精确字数及输入输出区间重叠先检查，不安全缓冲返回入口错误且不写记录。缓冲合法后，未支持 dtype 记 `UnsupportedDtype`，长度描述符错误记 `InvalidCacheLengths`，静态形状、长度值或调度错误记 `ScheduleFailure` 并保存源状态（越界长度为 `UnsupportedShape`）；这些失败均清零整个调度和 B 字快照。成功时保存的快照与调度读取同一份在生成期间不可修改的长度，记录写完执行设备写屏障。host/AICPU 的参数 ABI 仍为 `MlaMetadataArgs`，地址只用于本次发射；当前 stream 与 AICPU stream 沿用双事件依赖，驱动保留输入并登记 allocator stream，生成结束后记录独立于原长度存储。旧 dense 的 v1 内容与公开拒绝边界不变；v1 消费者按字数或版本拒绝 v2。专用 v2 设备消费者、与当前长度比较及真实 Trap 由 M06b2b 验收，本步不宣称已接通复用前向或过期记录拒绝。
+字段与地址限制由 [`mla_schedule.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.h) 定义：`B<=2^32-1`、`Sq<=2^30`、`Hq<=floor((2^32-1)/512)`、`Sq*Hq<=2^32-256`、`B*Sq*Hq<=floor((2^63-1)/1024)`。还须检查 uint32 LCM/总物理块数、资源及 uint64 workspace 加法。它们是实现限制，不是官方 FA3 接口限制。QK/P workspace 按 S2 基块预算，不按完整 KV 容量分配；调度失败不改写调用方原输出。
 
-[`mla_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.aicpu) 直接编译相同的调度、分核和序列化源码，输出后执行设备写屏障。AICPU 发射参数携带静态形状、平台资源、输出缓冲和可选的设备长度地址/数量；长度值在 AICPU 读取。M05a 的独立驱动按既有事件协议在当前 stream 与 AICPU stream 之间同步；M05b1 增加独立设备消费链路，M05b2b3b 再接通公开 dense 子集。生产构建单独链接该 AICPU 对象，并跟踪包含的头文件、`.cpp` 及编译选项以判断是否需要重编译。
-
-M05b1 的 [`mla_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata_consumer.h) 共用 CPU/设备解码与校验，[`kernel/mla_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_metadata.hpp) 负责设备读取。先验证大小、头部、生成状态和 dtype，再检查调用方独立提供的形状、平台、实际 launch blockDim、workspace 容量和本地内存条件；分核端点须单调且完整覆盖任务。64 位 workspace 字段不窄化；通过后才构造 Kernel 调度并进入原计算与同步。校验失败不改写调度输出，不进入 attention Kernel。此检查保证兼容性和地址边界，不验证记录来源真实性；`maxCost`、未启用的 FD 记账和未使用核的端点不驱动计算。记录须在生产/消费 stream 依赖完成后保持只读，跨调用 scratch 独立。独立验收驱动仍在 host 准备启动维度和分配预算。诊断驱动让各核以独占缓存行报告校验状态，供拒绝路径的不写输出检查使用。M05b2b2 增加同一设备适配头中的 `LoadDenseMetadata`：所有 Cube/Vector 在进入 attention Kernel 前校验同一份只读记录，任意非成功状态执行 `AscendC::Trap()`，由正常调用或同步点报告运行时异常；成功路径不需要状态 tensor、D2H 或主机同步。该检查不受 `NDEBUG` 影响。Trap 会使当前执行上下文进入错误状态，异常验收须用独立进程；不承诺出错后继续复用该 stream。M05b2b3a 先验收生产内部链路，M05b2b3b 再接通公开生成与复用，最终公开 metadata E2E 在 M05c 验收。
-
-M04b2c 的生产适配由 `mla_forward.cpp` 读取实际平台资源、调用同一 `BuildDenseSchedule`、分配 O/LSE 和每次调用独立的 workspace，并传递本次 scale 与地址。`mla_launch_impl.hpp` 通过生成器分别提供 FP16/BF16 C1V2 编译单元，按输入 dtype 分派。M04b3 将同一 Kernel / Block / Tile 按输入类型实例化，保持 M04b2b 的计算、资源和同步次序；aMLA 因子、P 和 O 使用各自输入 dtype，保留第 6.3 节的舍入规则。两种 dtype 均为 2 字节，共用同一调度和 workspace 布局。当前只开放 910B C1V2，其他设备及比例在相应实例验收前明确拒绝。首步公开入口为不带预分配输出的 `flash_attn_func`；内部 `out_` 也明确拒绝，避免绕过现有 functional custom op 的 alias 契约。
-
-M05b2b3a 将该前向改为内部 AICPU 生成 v1 metadata，再由生产 FP16/BF16 launcher 的 `LoadDenseMetadata` 校验并消费。每次调用独立分配记录、O/LSE 和 workspace；沿用普通 FA3 的当前 stream/AICPU stream 双事件依赖，对 metadata 的 AICPU 使用登记 allocator stream，并由提交闭包保留全部 tensor。host 暂时仍调用同一 `BuildDenseSchedule`，仅为 launch blockDim、分配容量和独立校验 context 提供边界；设备实际使用的切块与分核端点全部来自记录。scale 继续作为当次前向参数。此步不开放显式 metadata，也不改变 kvcache/实际长度等拒绝边界；`flash_attn_func` 的官方签名不增加 metadata 参数。重复 host 调度及公开复用成本留给后续接入和 M05c。
-
-M05b2b3b 开放官方 `get_scheduler_metadata` 的 64/512 dense 调度，以及 `flash_attn_with_kvcache` 的只读连续 BSND 子集：仍为 FP16/BF16、Hkv=1、B>0、`1<=Sq*Hq<=256`、KV 容量 `1..512`，无 mask、显式 `num_splits=1`。生成器没有 qv 参数；它只选择调度族，前向仍独立检查真实 qv、Q/K/V 和记录的 dtype/形状。追加 KV、TND/PA、非连续输入、梯度及其他未接通选项均明确拒绝。
-
-生成器要求 NPU 上的连续 `int32[B]` cache_seqlens；只读前向接受 `None`（整容量）、等于容量的整数或同设备的连续 `int32[B]`，允许非零 storage offset。生成时 AICPU 校验全部 B 个长度，非整容量值写失败状态并清零 payload；消费时所有 Cube/Vector 在进入 attention 前再次检查当次传入的全部长度，避免显式复用旧记录时忽略长度变化。设备值非法由正常同步点报告 Trap；static dtype、device、rank、size、stride 由真实/fake/C++ 一致校验，不做长度 D2H 或主机等待。metadata 是快照，不保存输入长度地址；更新长度后须重算，未重算的记录不自动变化。
-
-公开 metadata 仍为 v1 的 401 字 int32 tensor，可克隆或用连续偏移视图跨层复用，不依赖 Python 私有属性；消费前检查其类型、形状和设备，内容由现有消费者校验。显式复用不再发射 AICPU 生成；无 metadata 的 kvcache 和 `flash_attn_func` 继续内部生成。生成/消费各自登记 allocator stream，提交闭包保留输入、长度和记录；生成完成后由当前 stream 等待 AICPU，跨 stream 使用时调用方建立正常 stream/event 依赖。记录在消费期间保持只读，各前向独立分配 O/LSE/workspace；scale 按当次调用生效。公开 kvcache 的 LSE 返回值为四项，未分割时两个 accumulator 是与官方包装一致的空 tensor（默认 FP32），真实/fake 一致。重复 host 调度和调用成本留给 M05c；图捕获生命周期留给 M16。
-
-M05c1 为上述只读 dense kvcache 增加内部 C++ dispatcher `_mla_dense_forward`，只接收 q/k/v/qv、当次 scale、长度和 metadata，返回 O/LSE。公共入口先识别 MLA 并拒绝未支持选项；真实 C++ 和 fake 实现分别执行张量、scale、长度及记录外形校验。Autograd 层透传到真实/fake 分派，两者都明确拒绝 requires_grad；不提供反向。请求 LSE 时公共包装再创建两个遵循 PyTorch 默认浮点 dtype 的空 accumulator。此入口复用原 `DenseForward` 的调度、分配、stream 和设备校验，不改变公开签名、metadata 协议或 Kernel；通用前向及普通 FA3 保持原分派。
-
-M05c2 为同一 dense 子集增加内部 C++ dispatcher `_mla_dense_metadata`，只接收 batch、Q/KV 长度上界、query 头数、dtype 和设备 cache_seqlens。公开生成入口先检查 head dimensions 并拒绝未支持选项；真实/fake 分别校验形状、dtype 和长度张量外形，再复用原 AICPU 生成、事件依赖及 allocator 生命周期。真实实现也明确拒绝 CPU 长度；Autograd 层透传，浮点长度即使 requires_grad 也按 dtype 拒绝。公共签名、401 字记录和设备长度校验保持不变，普通 FA3 继续使用通用 custom op 和原 byte metadata。
-
-只读 dense kvcache 的 NPU qv 路径先做表示识别及选项拒绝，再由 `_mla_dense_forward` 的真实/fake 实现完成张量、长度、metadata 和 scale 校验，避免在 Python 重复检查全部张量。缺省 scale 由已验证 64+512 表示的 dispatcher 提供。整数 cache_seqlens 在创建设备长度张量前仍检查几何和整容量值；其他表示、CPU 输入、TND/PA 继续走公共识别/拒绝路径。
-
-CANN 9.0 的 Bisheng ASC launcher 未提供调度模式参数；生产扩展用仅在 MLA 发射期间生效的线程局部作用域，为实际 ACL launch 设置源 `BATCH_MODE`。封装保留其他 launch 属性和错误码，未进入该作用域的普通 FA3 发射原样透传；编译器绕过已验收 ACL 路径或单次作用域出现非一次发射时明确失败。构建为 MLA 编译单元额外生成设备预处理依赖，避免最终 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头文件。
-
-`BuildDenseSchedule` 的平台输入携带核数、实际可用 L1/UB/L0 容量、libapi 预留和平台 `CalcTschBlockDim(c*cvRatio,c,c*cvRatio)` 的结果表；调度通过实际使用核数索引该表，避免在无 gert 模块中猜测芯片启动维度。输出采用固定容量数组，workspace 字段保留元素与字节单位；几何、源 uint32 最小公倍数/块数、资源和 uint64 workspace 加法检查失败时不改写调用方的原调度。
-
-源 `SetSplitOutput` 固定读取 `usedCoreNum*2` 项 FD Vector 端点，而 C1V1 的源 vector 只有 `aicNum*cvRatio` 项。本仓按 vector 实际长度复制到 52 项容量数组，未用项初始化为零；CPU oracle 比较原 `SplitCore` 的完整输出 vector，不执行该可能越界的序列化循环。此调整不改变分核算法、FD 判定或设备计算。
-
-M04c1 将上述 dense 范围扩展到 S1G 多块，`Sq*Hq>256` 使用同一个源 `CalcMBaseSize` / `SplitCore` 和 Kernel 三项任务环，不重新定义切块策略；KV 容量仍为 `1..512`，每个 M 块只有一个 S2 块且不启用 FD。`mBaseSize` 可以是 128..256 间任意源候选值（包括 129/255），非 256 候选须整除总行数；metadata 消费者据此检查基本块、完整端点和 workspace，401 字的版本 1 协议不变。公开 `flash_attn_func`、只读 kvcache 和 metadata 的真实/fake/C++ 边界同步扩展。
-
-源字段和寻址仍有资源上界，均在窄化或分配前检查：`Sq<=2^30`（LSE DMA 字节 stride）、`Hq<=floor((2^32-1)/512)`（query 元素 stride）、`Sq*Hq<=2^32-256`（uint32 ceil-div 的 255 行余量），以及 `B*Sq*Hq<=floor((2^63-1)/1024)`（输出张量字节数）。调度继续检查源 uint32 LCM、总 M 任务数、平台资源及 workspace 溢出。这些是实现字段/地址限制，不是官方 FA3 的接口限制。
-
-M04c2 将 KV 容量扩展到 `1..1024`，保留源 `s2BaseSize=min(Sk,512)`；513..1024 的每个 M 块顺序计算两个 S2 块。`num_splits=1` 禁止跨核分割 KV：先运行原 `SplitCore`，无 FD 时原样保留；原方案有 FD 时，将每个源端点向上对齐到所在 M 块结束处，合并因此产生的空区间，重新构造所有 `s2End=0` 的完整 M 分区。按源 `CalcBatchCache/CalcS1GCache` 的正常块和尾块成本重新计算各核及最大成本。只筛除原 FD 候选会丢弃原本均衡的分区，端点映射以源选中的分区为起点，在完整 M 块约束下保留非空分区。这是 FA3 禁止 split 的必要调度映射；源基本块、成本、原候选算法、设备数值和事件顺序均不变，不清零已有 FD 方案来伪造非 FD 记录。
-
-metadata 仍为 v1 的 401 字记录，消费者按 S2 基块计算 QK/P workspace，不按完整 KV 容量分配；端点只允许完整 M 块，总物理块数 `B*ceil(Sq*Hq/mBaseSize)*ceil(Sk/s2BaseSize)` 须适合源 uint32。真实/fake/C++ 同步接受该 dense 范围。更长 KV、自动/显式多 split 和其他未接通组合继续拒绝。
-
-M04c3 将 KV 容量扩展到 `1..16384`，覆盖 8193 的第 17 个尾块以及 16384 的 32 个完整 S2 块。仍使用 `s2BaseSize=min(Sk,512)` 和 M04c2 的完整 M 分区映射；`num_splits=1`、401 字 v1 metadata、workspace 和设备计算/同步顺序不变。更长 KV 继续明确拒绝。
-
-M04c4 接通 dense 全局空容量：`B=0`、`Sq=0`、`Sk=0` 及其组合，Hq 仍须为正。沿用上述字段和地址上界，非零 KV 容量仍最多 16384。空容量的 v1 metadata 保留真实形状、dtype 和平台信息，使用一个校验核；M/S2 基块、端点、FD 字段、workspace 及局部内存需求全部为零。AICPU 仍检查每个 `cache_seqlens` 等于 KV 容量，消费者仍检查记录全部字段和当次长度，不能用空输出绕过错误上报。校验通过后不进入 attention Kernel，不访问 Q/K/V/qv 或申请 attention workspace。`B=0` 或 `Sq=0` 返回对应空 shape；`B>0、Sq>0、Sk=0` 在同一 stream 校验之后按固定 FA3 的 host 分支填充 `O=0、LSE=+inf`。这属于 FA3 空容量契约适配；非零容量中的样本零长度仍在 M06 接通，不能据此返回 `+inf`。普通 FA3 metadata 协议及非空 CANN 计算流程保持原样。
+**全局空容量。** `B=0`、`Sq=0` 或 `Sk=0` 时，v1 保留真实形状、dtype、平台信息，使用一个校验核；基本块、端点、FD、workspace 和局部内存需求为零。生成和消费仍校验全部当次长度，不能因空输出绕过错误上报。校验后跳过 attention，不访问 Q/K/V/qv 或分配 attention workspace；空 batch/query 返回空 shape，全局空 KV 在同一 stream 填 `O=0、LSE=+inf`。非零容量中的样本零 KV 应为 `LSE=-inf`，接入留给 M06。
 
 ### 6.3 数值路径与资源布局
 
@@ -311,7 +305,7 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 | L0A / L0B / L0C | 分别为 `2*32 / 2*32 / 2*64 KiB`；A/B 共同跟随 K 片，C 轮换与 M/N 循环绑定；首 K 清零，最终 K/写回以 unitFlag=3 配对，其余累加用 2 |
 | Vector UB | input1 `2*32 KiB`、input2 `2*8 KiB`、output1 `32 KiB`、output2 C1V2/C1V1 为 `4/8 KiB`、tmp1 `32 KiB`、mask tmp `8 KiB`；n/cof/aMlaSum/max/exp/sum 各 `2*1 KiB`，默认 max/sum 各 `1 KiB`，合计 `170/174 KiB`。即使无 mask 也保留源分区复用 |
 | GM workspace | Kernel 顺序为双槽 QK FP32、P 输入 dtype、PV FP32、vec2 FP32。QK/P 用 `loop%2`，PV 用 `bn2IdxInCurCore%2`（每个新 S1G 任务递增），不是统一使用 tile 序号；调用间不得共用可变 scratch |
-| workspace 预算 | 源 host 普通部分为 `2*aicNum*(6*R1+8*R2+8*mBaseSize)` 字节，包含 nUpdate/sum 的额外预留；设备按 `GetBlockNum()` 排四个段，nUpdate 实际在 UB 生成并操作 PV 的 int32 别名。首步保留预算与段界，不把预留当成新的 GM 数据流；框架 `libapiSize` 与用户 workspace 单列 |
+| workspace 预算 | 源 host 普通部分为 `2*aicNum*(6*R1+8*R2+8*mBaseSize)` 字节，包含 nUpdate/sum 的额外预留；设备按 `GetBlockNum()` 排四个段，nUpdate 实际在 UB 生成并操作 PV 的 int32 别名。保留预算与段界，不把预留当成新的 GM 数据流；框架 `libapiSize` 与用户 workspace 单列 |
 | 任务 / 行分工 | 三项 `RunInfo` 环、两槽 GM；外层 M 基块最多 256。C1V2 将 M 按 16 行边界分给两条 Vector，M<=16 时第二条零行仍参与事件；C1V1 全部行由一条 Vector 处理，V1 内层每次至多 128 行 |
 
 ### 6.4 同步依赖与组件复用结论
@@ -326,33 +320,31 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 | `syncV1NupdateC2=5` | V1 `PIPE_MTE3` → PV 首次 Fixpipe 前 wait | nUpdate 原子加完成；首块跳过 nUpdate 计算也必须发/收事件 |
 | `syncC2V2=9` | Cube `PIPE_FIX` → V2 wait | PV 写回完成；V2 在非末块也消费事件 |
 
-`syncV0C1=6` 在源常量中存在，但此非量化 dense 路径不使用。L1 Q/P 的本地事件为 2/3/4/5，K/V 为 6/7/1，保留 `MTE1_MTE2` 释放和 `MTE2_MTE1` 就绪配对；L0 的 `M_MTE1` / `MTE1_M` 与 unitFlag 共同约束覆盖写。Vector 保留 input 的 `V_MTE2` / `MTE2_V` 和 output 的 `MTE3_V` / `V_MTE3`；`AllocEventID/FreeEventID` 和零行同步不能被提前返回绕过。启用 LSE 时，源 `InitOutputSingleCore` 的初始化与 `SyncAll` 也在首步执行链内。
+`syncV0C1=6` 在源常量中存在，但此非量化 dense 路径不使用。L1 Q/P 的本地事件为 2/3/4/5，K/V 为 6/7/1，保留 `MTE1_MTE2` 释放和 `MTE2_MTE1` 就绪配对；L0 的 `M_MTE1` / `MTE1_M` 与 unitFlag 共同约束覆盖写。Vector 保留 input 的 `V_MTE2` / `MTE2_V` 和 output 的 `MTE3_V` / `V_MTE3`；`AllocEventID/FreeEventID` 和零行同步不能被提前返回绕过。启用 LSE 时，源 `InitOutputSingleCore` 的初始化与 `SyncAll` 也在 dense 执行链内。
 
-固定 CATLASS 的复用结论如下；源码核对仅确定可用条件，设备等价性仍须在实现步验证。
+固定 CATLASS 的复用结论如下；源码核对确定可用条件，组件实际接入仍须通过设备等价验收。
 
 | 组件 | 核对结论 |
 | --- | --- |
 | `gemm/tile/tile_mmad.hpp::TileMmad` | 优先复用。FP16/BF16、M/N 已向 16 对齐时，可透传源的 K、initC、unitFlag，且包含同样的 `(M/16)*(N/16)<10` PIPE_M barrier；源 `MatmulKPP` 的 K 循环和加载/释放时机仍由本仓 Block 保留 |
 | `gemm/tile/atlasa2/copy_l0c_to_gm.hpp::CopyL0CToGm` | FP32、RowMajor、无量化/无 ReLU 的特化可映射源 Fixpipe 的 M/N、src/dst stride 和 unitFlag；原子模式由源 Block 在同一位置开关，不能交给默认 epilogue |
 | GM→L1、L1→L0 Tile | 在本仓封装源分段复制与加载，逐项匹配 NZ/ZN、转置、尾块和 stride 后再复用。`CopyGmToL1DynamicOptimized` 对小 M 改走 DataCopy，不能直接代替源 ND→NZ；Q 的跨槽 RoPE 复制也需专门保留 |
-| `epilogue/block/block_epilogue_amla_tp1_softmax.hpp` / `block_epilogue_amla_tp1_rescale_o.hpp` | 同有 aMLA 思路，但使用自有归约、UB/事件和部分不同 Cast 模式；不能整体替换源 Vector。首步在本仓按源封装 `SoftmaxFlashV2Compute/AmlaVecCompute` 等函数 |
-| `arch/resource.hpp`、`arch/cross_core_sync.hpp` | 可复用资源/简单 flag 表达；Resource 构造会 `pipe.Destroy()`，必须统一资源所有权，不能与另一套 TPipe 分配混用。带 reverse-depth 的同步封装会增加等待，首步保留源事件协议 |
+| `epilogue/block/block_epilogue_amla_tp1_softmax.hpp` / `block_epilogue_amla_tp1_rescale_o.hpp` | 同有 aMLA 思路，但使用自有归约、UB/事件和部分不同 Cast 模式；不能整体替换源 Vector。本仓按源封装 `SoftmaxFlashV2Compute/AmlaVecCompute` 等函数 |
+| `arch/resource.hpp`、`arch/cross_core_sync.hpp` | 可复用资源/简单 flag 表达；Resource 构造会 `pipe.Destroy()`，必须统一资源所有权，不能与另一套 TPipe 分配混用。带 reverse-depth 的同步封装会增加等待，保留源事件协议 |
 
-### 6.5 必要的 FA3 差异与验收切面
+### 6.5 生产接入与构建
 
-首步只调整第 3 节的 q/qv/K/V 指针映射、公开返回结构、scale 默认值与参数存放位置，以及去除 gert/算子注册依赖；保持 O 的 BSND 写回和 LSE 的 `[B,Hq,Sq]` 寻址。`num_splits=1` 在此单 S2 块范围与源非 FD 结果一致；以后长 KV 可能被 CANN 自动分核到 FD，必须单列 FA3 禁止 split 的调度约束，不能将源 FD 结果直接套入非 FD kernel。mask/空行符号和设备长度解析在对应步骤按第 3 节适配。
+[`mla_forward.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 查询平台，分配 O/LSE 与每次调用独立的 workspace，并传递本次 scale 与地址。`DenseForward` **仍在 host 调用 `BuildDenseSchedule`**，用于 launch、分配预算和独立校验 context；设备计算的切块与端点来自 AICPU 记录。公开复用省去的是 AICPU 生成，不表示全部 host 调度已消除。
 
-调度的独立验收比较源 `SplitCore` 输出的基本块、端点数组、使用核数、FD 标志和 workspace，oracle 从固定 commit 读取，不能调用待测调度实现。覆盖单/多 batch、平台核数及其两侧、M 的 16/128/256 边界、KV 的 16/32/128/256/512 边界和两种 CV 比例。无实际长度数组的步骤无需读取 NPU tensor；后续 AICPU 必须复用同一计算。
+只读 kvcache 的 `_mla_dense_forward` 精简 dispatcher 接收 q/k/v/qv、scale、长度与记录，`_mla_dense_metadata` 接收静态几何、dtype 和设备长度。公开包装拒绝未支持选项，真实 C++ 与 fake 各自保留完整张量/scale/记录外形检查；Autograd 层透传，两者都拒绝梯度。`flash_attn_func` 内部生成 v1，不增加显式 metadata 参数。内部预分配 `out_` 仍拒绝，避免破坏 functional custom op 的 alias 契约。
 
-首个 kernel 的精度用 D01/D02 加上述边界、内容两半与 RoPE 两半的独立扰动、非零 storage offset、默认/零/负/显式 scale、交错形状重复入队核对 O/LSE。性能代表固定为 D01（默认及 0.23）、D02、`(B,Sq,Hq,Sk)=(1,1,128,512)` 与 `(2,2,128,511)`，两种 dtype 按接通进度验收，保存同轮 CANN 分派、kernel 与公开调用 E2E。M04b 无 metadata 的数据仅作诊断；M05 在同组代表用例验收第 7 节的 metadata E2E 门槛。
+只读 kvcache 请求 LSE 时包装为四项返回值；未 split 时两个 accumulator 为同设备空 tensor，dtype 随 PyTorch 默认浮点 dtype（通常 FP32）。不依赖普通 FA3 的 Python metadata 属性。fake/compile 与真实路径的返回形状一致。
 
-M04c1 增加 257/511/512/513 行、非整齐 M 基块、跨 query/head 和 batch 的分核端点，以及每核超过三项任务的流水覆盖；两种 dtype 的 O/LSE 对照固定源并通过独立数学 reference。性能在原五组之外固定增加 `(B,Sq,Hq,Sk)=(1,257,1,257)`、`(2,7,73,65)`、`(1,4,128,512)`、`(2,171,3,511)`、`(10,3,86,65)` 和 `(1,129,128,33)` 六组默认 scale。固定 CANN 主机入口将 Decode MLA 的 Hq 限于 1..128，故 513 行和 M=129 的性能用例分别采用 `171*3` 和 `3*86`；这不限制 FA3 的 Hq，更多头数由固定源 Kernel 与数学对照验收。metadata 复用、生成加一次/四次前向均按第 7 节逐例比较，采样前固定 CPU 亲和性并在同一进程应用于双方。
+[`generate_kernels.py`](../../csrc/ascend910/flash_attn_npu_3/autogen/generate_kernels.py) 生成 FP16/BF16 C1V2 实例，通过 `mla_launch_impl.hpp` 共用 Kernel/Block/Tile；两种 dtype 均为 2 字节，调度与 workspace 一致，数值舍入遵循 6.3。修改实例集合应改生成器，不仅手改 autogen。
 
-M04c2 增加 KV 513/527/528/529/543/544/545/769/1023/1024、M 尾块、跨块最大值变化（含超过 aMLA `-30` 截断）、内容/RoPE 分量、重复执行和多流 metadata 复用。固定源 Kernel 使用相同的无 FD 调度，O/LSE 要求逐元素一致，再通过独立双 reference。原生 CANN 仍保留自动 FD 分派；当其数值顺序不同，两边分别按既定精度准则对照数学 reference，不能要求与非 FD 逐元素相同，也不能修改原生 CANN 分派作为性能基线。
+CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射期间使用线程局部作用域给实际 ACL launch 设置源 `BATCH_MODE`，保留其他属性及错误码。普通 FA3 发射原样透传；绕过已验收 ACL 路径或作用域内不恰好发射一次时明确失败。
 
-在原 11 组性能用例之外，采样前固定增加 `(2,1,8,513)` 默认/0.23、`(1,7,16,769)`、`(1,1,128,1024)`、`(2,2,128,1023)`、`(10,3,86,769)` 和 `(21,171,3,1024)`，共七组。沿用双 dtype、预热 5 次、五轮各 20 个 wall 样本、R=1/4、相同 CPU 亲和性及逐例 1.0 门槛；单列 metadata 生成、原生 CANN 分派和 attention Kernel 时间。
-
-M04c3 增加 KV 1025/1535/1536/1537/2049/4095/4096/4097/8191/8192/8193/16383/16384，覆盖连续 S2 累加、任务环和双缓冲复用、尾块以及跨多个块的最大值变化。沿用固定源无 FD Kernel 逐元素 O/LSE 和独立双数学 reference。性能保留原 18 组，并在采样前固定增加 `(2,1,8,1025)`、`(2,1,8,8193)` 默认/0.23、`(1,7,16,8193)`、`(1,1,128,16384)`、`(2,2,128,4097)`、`(10,3,86,8193)`、`(21,1,8,16384)` 八组；沿用上述双 dtype、采样次数和 R=1/4。按第 7 节区分同路径组件对照与公开 E2E，仅双方执行路径均已迁移的用例适用逐例 1.0 E2E 门槛。
+[`setup.py`](../../setup.py) 的 910 FA3 构建显式包含 `fa_metadata.aicpu`、`mla/mla_metadata.aicpu`、`mla/mla_bsnd_metadata.aicpu` 三个 AICPU 单元。编译选项、包含的头文件与 `.cpp` 都参与依赖检查；MLA 设备预处理依赖另外生成，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 或对象不证明源码已生效，复现时核对实际加载路径、哈希与链接对象。
 
 ## 7. 验收口径
 
@@ -377,3 +369,24 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 **覆盖：** 两种表示 × FP16/BF16 × dense/TND/PA × mask × 长短 KV × 单/多 query × 分组/尾块/stride；加 metadata 有无、重复使用、不同 scale、长度变更、split 自动/显式、graph replay。可采用代表性组合加针对性边界测试，不要求机械的全笛卡尔积，但每项源能力都要能追溯到用例或明确排除理由。
 
 **版本可追溯：** CANN 源码 commit 不代表当前已安装算子版本。实测前记录实际生效的 OPP/算子库路径、构建版本或文件哈希，确认其对应本次来源；记录本仓扩展的实际加载路径与构建版本。910C 需要实现与资源配置兼容，按需求不作 910C 实机验收承诺。
+
+### 7.1 固定 dense 矩阵与阶段边界
+
+性能形状的单一代码清单为 [`mla_profile_cases.py`](../../tests/mla_profile_cases.py)，在采样前固定；双 dtype 使用同一矩阵。原生 CANN 自动 FD 的用例继续保留并单列，不按耗时删选。
+
+| 清单 | 用例数 | 引入目的 |
+| --- | --- | --- |
+| `CASES` | 5 | D01 默认/0.23、D02、128 query heads、511 KV 尾块 |
+| `S1G_CASES` | 6 | 257/511/512/513 行、非整齐 M 基块、跨核尾块与长任务环 |
+| `KV_CASES` | 7 | 513..1024 的两个 S2 块及 `num_splits=1` 映射 |
+| `LONG_KV_CASES` | 8 | 1025..16384，含 8193 的第 17 个尾块 |
+
+源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。全 26 组作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E。
+
+调度验收比较固定源的基本块、完整端点、使用核数、FD 字段与 workspace，并独立枚举任务，检查无遗漏/重复及每核成本。覆盖 B=0/1/多 batch、平台核数两侧、C1V1/C1V2、M 的 16/128/256 边界及尾块、KV 的 16/32/128/256/512 边界；实际长度增加 0/1/511/512/513/8193/16384、等长短序列、非均匀/全零长度及端点外零尾部。对应 [dense 调度检查](../../tests/test_flash_attn_npu_v3_mla_schedule.py) 与 [BSND 长度调度检查](../../tests/test_flash_attn_npu_v3_mla_bsnd_schedule.py)；oracle 从固定 commit 提取，不调用待测调度。
+
+功能检查另覆盖 M 的 16/128/256 边界、非整齐 M=129/255、KV 对齐两侧及长 KV、内容/RoPE 各半独立扰动、非零 offset、scale 默认/零/负/显式值、跨块最大值变化（含 aMLA `-30` 截断）、双缓冲/任务环、重复执行和多流复用。固定源同调度非 FD Kernel 的 O/LSE 要逐元素一致，再通过独立双 reference；原生自动 FD 数值顺序不同时分别检查数学精度，不强求非 FD 与 FD 逐元素一致。
+
+既有公开性能采样为双 dtype、预热 5 次、五轮各 20 个 wall 样本、R=1/4，同一进程对双方固定相同 CPU 亲和性；单列 metadata 生成、Kernel 和分派证据。噪声不确定时保留原数据并补测。全局空容量在固定 dense CANN 基线之外，耗时只作诊断；M06b2a 的 ctypes AICPU 生成时间也不是 attention 或公开 E2E。
+
+M06 起的长度/布局检查必须区分分配位置与有效范围：FA3 带起始 0 的 `cu_seqlens` 决定样本起点，`seqused` 限定使用范围，不能按缩短后的累计和重排后续样本。对未使用 query 槽位只断言固定官方定义的输出区域。独立 oracle 不得与待测端共享长度/页表解析；全零实际长度、尾部零样本及 poison padding 单独覆盖。新增公开能力按本节同一路径 E2E 口径验收，TND varlen 的内部生成计入完整调用段。
