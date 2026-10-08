@@ -1,0 +1,25 @@
+// Dedicated entry for v2 BSND lengths. Compile the same b1 source algorithm;
+// no installed CANN operator or host copy of device lengths is involved.
+#include "aicpu_api.h"
+#include "mla_metadata_args.h"
+#include "mla_bsnd_metadata.cpp"
+#include "mla_metadata.cpp"
+#include "mla_bsnd_schedule.cpp"
+#include "mla_schedule.cpp"
+#include "detail/cann_split_core.cpp"
+
+__global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaMetadataArgs*>(args);
+    if (!BuildBsndKvLengthMetadata(input.shape, input.platform, input.dtype,
+                                   reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
+                                   reinterpret_cast<const int32_t*>(input.cacheSeqlensAddr), input.cacheSeqlensCount)) {
+        return 1;
+    }
+    AscendC::DataStoreBarrier();
+    return 0;
+}

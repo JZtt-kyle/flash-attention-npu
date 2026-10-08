@@ -79,6 +79,9 @@ static_assert(alignof(MlaDenseMetadata) == alignof(int32_t));
 static_assert(offsetof(MlaDenseMetadata, schedule) == 8 * sizeof(int32_t));
 static_assert(std::is_standard_layout_v<MlaDenseMetadata> && std::is_trivially_copyable_v<MlaDenseMetadata>);
 
+// Shared wire encoding only; each protocol supplies its own header and checks.
+MlaMetadataSchedule SerializeMlaSchedule(const MlaSchedule& schedule);
+
 // Deterministic full record, also on failure: a non-success header and zero
 // payload replace any previous schedule. No scale, addresses or mutable scratch.
 // Optional lengths must all equal shape.kvLength, including zero capacity.

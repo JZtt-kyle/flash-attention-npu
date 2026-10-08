@@ -1,4 +1,4 @@
-// Private host/AICPU launch ABI. Lengths are read on AICPU, never serialized.
+// Private host/AICPU launch ABI. Addresses never belong in serialized records.
 #pragma once
 #include "mla_metadata.h"
 

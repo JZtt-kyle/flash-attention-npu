@@ -29,7 +29,9 @@ MlaMetadataWide Wide(uint64_t value)
     return {static_cast<uint32_t>(value), static_cast<uint32_t>(value >> 32)};
 }
 
-MlaMetadataSchedule Serialize(const MlaSchedule& s)
+} // namespace
+
+MlaMetadataSchedule SerializeMlaSchedule(const MlaSchedule& s)
 {
     MlaMetadataSchedule out{};
     out.bSize = s.bSize;
@@ -71,8 +73,6 @@ MlaMetadataSchedule Serialize(const MlaSchedule& s)
     out.requiredLocalMemory = {Wide(m.l1Bytes), Wide(m.ubBytes), Wide(m.l0aBytes), Wide(m.l0bBytes), Wide(m.l0cBytes)};
     return out;
 }
-} // namespace
-
 void BuildDenseMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                         MlaDenseMetadata& output, const int32_t* cacheSeqlens, uint64_t cacheSeqlensCount)
 {
@@ -94,7 +94,7 @@ void BuildDenseMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platf
             // Failure leaves the entire payload zero, including after reuse.
             metadata.status = static_cast<uint32_t>(CheckCacheLengths(shape, cacheSeqlens, cacheSeqlensCount));
             if (metadata.status == static_cast<uint32_t>(MlaMetadataStatus::Success)) {
-                metadata.schedule = Serialize(schedule);
+                metadata.schedule = SerializeMlaSchedule(schedule);
             }
         } else {
             metadata.status = static_cast<uint32_t>(MlaMetadataStatus::ScheduleFailure);

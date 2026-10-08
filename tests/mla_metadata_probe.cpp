@@ -5,6 +5,10 @@
 #include <cstring>
 
 extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
+#ifdef MLA_BSND_METADATA
+#include "mla/mla_bsnd_metadata.h"
+extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
+#endif
 using namespace flash_attn::mla;
 
 extern "C" uint32_t metadata_args_size()
@@ -46,7 +50,8 @@ extern "C" void metadata_host(const MlaMetadataArgs* args, void* output)
     std::memcpy(output, &metadata, sizeof(metadata));
 }
 
-extern "C" int launch_metadata(void* current, void* worker, void* ready, void* done, const MlaMetadataArgs* args)
+template <bool Bsnd>
+int LaunchMetadata(void* current, void* worker, void* ready, void* done, const MlaMetadataArgs* args)
 {
     // Mirror the existing FA3 metadata stream handshake. Events are owned by
     // the test fixture; it synchronizes before releasing them or any storage.
@@ -57,9 +62,36 @@ extern "C" int launch_metadata(void* current, void* worker, void* ready, void* d
     if (status != ACL_SUCCESS)
         return status;
     MlaMetadataArgs launchArgs = *args;
-    ComputeMlaDenseMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
+#ifdef MLA_BSND_METADATA
+    if constexpr (Bsnd) {
+        ComputeMlaBsndKvLengthMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
+    } else
+#endif
+    {
+        ComputeMlaDenseMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
+    }
     status = aclrtRecordEvent(done, worker);
     if (status != ACL_SUCCESS)
         return status;
     return aclrtStreamWaitEvent(current, done);
 }
+
+extern "C" int launch_metadata(void* current, void* worker, void* ready, void* done, const MlaMetadataArgs* args)
+{
+    return LaunchMetadata<false>(current, worker, ready, done, args);
+}
+
+#ifdef MLA_BSND_METADATA
+extern "C" int launch_bsnd_metadata(void* current, void* worker, void* ready, void* done, const MlaMetadataArgs* args)
+{
+    return LaunchMetadata<true>(current, worker, ready, done, args);
+}
+
+extern "C" uint32_t bsnd_metadata_host(const MlaMetadataArgs* args, uint32_t* output)
+{
+    return BuildBsndKvLengthMetadata(args->shape, args->platform, args->dtype, output, args->outputWords,
+                                     reinterpret_cast<const int32_t*>(args->cacheSeqlensAddr), args->cacheSeqlensCount)
+               ? 0
+               : 1;
+}
+#endif

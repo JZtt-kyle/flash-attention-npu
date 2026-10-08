@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前已将 FP16/BF16 dense MLA 的源调度和 Kernel 接入 910B FA3。M05a/M05b1 完成 AICPU 生成、版本化 metadata 的设备读取与校验；M05b2a 对齐官方签名并保留普通 FA3 关键字兼容。M05b2b1/b2 完成设备长度读取和错误上报，b3a 完成生产内部生成/消费，b3b 已接通公开 `get_scheduler_metadata` 及只读 dense `flash_attn_with_kvcache` 复用。范围外组合仍明确拒绝。M05c1/M05c2 已完成精简 C++ 前向与 metadata dispatcher，并消除公开 dense qv 路径的重复张量检查；两种 dtype 各五组在相同固定 CPU 亲和性下的复用前向、一次生成加一次/四次前向均达到同轮 CANN E2E 中位数门槛，M05 已闭环。M04c1 已完成 dense S1G 多块、源 128..256 M 基块及跨核尾块验收；M04c2 已完成 KV 513..1024、禁止跨核 KV split 的端点映射及双 dtype 精度/性能验收，M04c3 已将 KV 容量扩展到 1..16384（含 8193），完成同路径源 Kernel、公开 E2E 及功能验收。M04c4 已完成 dense 全局空容量边界，2177 项检查通过；双 dtype 各 13 组同路径公开 E2E 达标。M06b1 已完成独立 BSND 实际 KV 长度解析与 CPU 调度；312 项去重 CPU 检查通过，包含 33,736 组实际长度源对照。唯一下一步为 M06b2：BSND 实际长度的 AICPU metadata 生成与设备校验消费。
+当前已将 FP16/BF16 dense MLA 的源调度和 Kernel 接入 910B FA3。M05a/M05b1 完成 AICPU 生成、版本化 metadata 的设备读取与校验；M05b2a 对齐官方签名并保留普通 FA3 关键字兼容。M05b2b1/b2 完成设备长度读取和错误上报，b3a 完成生产内部生成/消费，b3b 已接通公开 `get_scheduler_metadata` 及只读 dense `flash_attn_with_kvcache` 复用。范围外组合仍明确拒绝。M05c1/M05c2 已完成精简 C++ 前向与 metadata dispatcher，并消除公开 dense qv 路径的重复张量检查；两种 dtype 各五组在相同固定 CPU 亲和性下的复用前向、一次生成加一次/四次前向均达到同轮 CANN E2E 中位数门槛，M05 已闭环。M04c1 已完成 dense S1G 多块、源 128..256 M 基块及跨核尾块验收；M04c2 已完成 KV 513..1024、禁止跨核 KV split 的端点映射及双 dtype 精度/性能验收，M04c3 已将 KV 容量扩展到 1..16384（含 8193），完成同路径源 Kernel、公开 E2E 及功能验收。M04c4 已完成 dense 全局空容量边界，2177 项检查通过；双 dtype 各 13 组同路径公开 E2E 达标。M06b1 已完成独立 BSND 实际 KV 长度解析与 CPU 调度；312 项去重 CPU 检查通过，包含 33,736 组实际长度源对照。M06b2a 已完成版本化实际长度记录和独立 AICPU 生成，1,168 项去重检查通过；唯一下一步为 M06b2b 的设备校验消费者。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能只验收已迁移的执行路径：组件按固定源同路径对照，双方路径均已迁移的公开调用按 metadata E2E 逐例比较。
 
@@ -68,7 +68,8 @@ M05c1 依据公开入口/C++ 调用及 Python profile 定位通用 custom-op 的
 | --- | --- | --- | --- |
 | M06a | 已完成（纯文档） | 源依赖核对、实施拆分和下一步边界 | 固定源锚点、既有入口签名、文档链接及交接证据核查通过；生产能力保持 M04c4 |
 | M06b1 | 已完成 | 连续 BSND、Q 使用完整容量的实际 KV 长度解析与调度；仅独立 CPU 入口，不接生产 | 312 项去重 CPU 检查通过；33,736 组实际长度源对照分别核查原生非 FD 和 FA3 无 split 映射，含零长度尾部端点；1441 组整容量/全局空容量退化一致；非法长度、字段、workspace 与 ASan/UBSan 通过 |
-| M06b2 | 唯一下一步 | BSND 实际 KV 长度的 AICPU metadata 生成和设备校验消费者；公开短长度继续拒绝 | 真正记录调度与长度快照；CPU/AICPU 一致，损坏/过期记录设备拒绝、无长度 D2H、只读复用和生命周期检查通过；旧 dense 与普通 FA3 metadata 回归通过 |
+| M06b2a | 已完成 | BSND 实际 KV 长度的 v2 metadata 序列化与独立 AICPU 生成；不接前向 | 1,168 项去重检查通过；6,484 条 CPU 和 3,244 条 AICPU 记录经固定源对照，含零 KV 尾部；缓冲/失败清零、sanitizer、无 D2H、生命周期、18 对象构建及旧 dense/普通 FA3 回归通过；生成耗时诊断完成 |
+| M06b2b | 唯一下一步 | BSND 实际长度记录的设备校验消费者；公开短长度继续拒绝 | 版本/类型/大小、长度快照和当前长度、调度/资源边界均校验；省略尾部逐样本为零，损坏/过期记录真实 Trap、拒绝不写输出、只读复用和生命周期检查通过；旧 dense 与普通 FA3 metadata 回归通过 |
 | M06b3 | 待开始 | 按样本实际 KV 长度执行的 BSND Kernel / Block / Tile，独立设备驱动 | 双 dtype 的短 KV、跨 S2 块、混合零长度、全零实际长度及 poison padding 精度通过；源组件性能对照完成，现有 dense Kernel 回归通过 |
 | M06b4 | 待开始 | 公开只读 BSND `cache_seqlens`、metadata 生成及复用 | None/整数/int32 tensor、真实/fake/C++、有/无及过期 metadata、跨 stream 与 compile 正确；普通 FA3 回归及同路径公开 E2E 达标 |
 | M06c1 | 待开始 | 紧凑 TND 的 `cu_seqlens_q/k` 解析、样本起点和源调度；仅独立 CPU 入口 | T01 前缀和、空样本、总容量/max 上界分别校验；起始 0、单调性、尾值、计数及溢出边界通过；BSND 等价输入与固定源累计长度对照通过 |
@@ -85,7 +86,9 @@ M05c1 依据公开入口/C++ 调用及 Python profile 定位通用 custom-op 的
 
 M06b1 的源对照从固定 CANN commit 提取 `attention/common/op_host/split_core.cpp` 的 `GetS1SeqSize`、`GetS2SeqSize`、`SplitCore`，以及 `fia_tiling_nonquant_mla.cpp` 的 `DealSameSeqEachBatch`、`CalcMBaseSize`、`CreateSplitInput`。特别覆盖 KV 实际长度不相等时不调整 M 基块的分支；对源原生非 FD 比较完整输出，需禁止跨核 KV split 的组合单独核对 FA3 `num_splits=1` 映射和任务覆盖，不能将改装结果称为原生源输出。矩阵包含 B=0/1/多 batch、核数两侧、M=128/256 及尾块、KV 使用长度 0/1/511/512/513/8193/16384、等长短序列、非均匀和全零序列；比较基本块、端点、核数、FD 字段及 workspace，并检查无任务遗漏/重复。此步不被生产调用，只运行相关 CPU 源差分、既有 dense 调度/metadata 消费回归与 ASan/UBSan，不需要 NPU 精度或 E2E。
 
-**后续步骤的验收约束。** 设备长度路径以固定源 `fia_kernel_nonquant_mla.h` 的 `InitActualSeqLenQ/KV`、`InitOutputSingleCore`、`GetTaskDealMode` 和 `DEAL_ZERO` 分支为起点，保留原计算和同步顺序。源 `CalcSplitPlan` 在计算成本耗尽后允许端点停在尾部零 KV 样本之前；b2 的消费者须逐样本验证省略的尾部全部为零长度，b3 的 O/LSE 初始化须独立覆盖这些空行，不能要求所有计算端点都到 B 或仅依靠计算分区逐行写零。源累计长度与 FA3 带起始 0 的前缀和分开解析；`cu_seqlens` 给分配位置，`seqused` 给有效范围，不用缩短后的累计和重排后续样本。非零 KV 容量中的样本零长度写 `O=0、LSE=-inf`，全局空 KV 的 `+inf` 沿用 M04c4；未使用的 query 槽位是否写回以固定官方实现为准，不能把未定义区域当作零行要求。
+**M06b2 的提交拆分。** 变长记录生成与设备校验分别有独立验收面，按 b2a、b2b 两次提交推进；b2a 不提供前向消费者，b2b 接通前保持旧公开边界。b2a 复用 b1 的源调度，记录版本/类型区分 v1，静态 batch 决定分配字数，长度快照由 AICPU 读取并保存；不通过新长度记录驱动旧 dense Kernel。
+
+**后续步骤的验收约束。** 设备长度路径以固定源 `fia_kernel_nonquant_mla.h` 的 `InitActualSeqLenQ/KV`、`InitOutputSingleCore`、`GetTaskDealMode` 和 `DEAL_ZERO` 分支为起点，保留原计算和同步顺序。源 `CalcSplitPlan` 在计算成本耗尽后允许端点停在尾部零 KV 样本之前；b2b 的消费者须逐样本验证省略的尾部全部为零长度，b3 的 O/LSE 初始化须独立覆盖这些空行，不能要求所有计算端点都到 B 或仅依靠计算分区逐行写零。源累计长度与 FA3 带起始 0 的前缀和分开解析；`cu_seqlens` 给分配位置，`seqused` 给有效范围，不用缩短后的累计和重排后续样本。非零 KV 容量中的样本零长度写 `O=0、LSE=-inf`，全局空 KV 的 `+inf` 沿用 M04c4；未使用的 query 槽位是否写回以固定官方实现为准，不能把未定义区域当作零行要求。
 
 新增 metadata 布局时更新版本/类型及 wordCount 校验，并在该实现步补充 design 的具体记录契约；不能让旧 401 字记录被新语义误读。记录保留长度快照及验证所需的调度信息，不存张量地址、scale 或可变 scratch；生成和消费均验证本次长度，变化后重算。host 只依据 shape/dtype/stride 和静态容量分配，AICPU/设备读取实际值，预留容量不足明确报错，不增加 steady-state D2H 或同步。每次协议或公共入口变化补普通 FA3 回归。
 

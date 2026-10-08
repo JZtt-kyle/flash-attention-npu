@@ -45,7 +45,7 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def build_probe(directory):
+def build_probe(directory, *, bsnd=False):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     output = directory / "metadata.so"
@@ -53,6 +53,13 @@ def build_probe(directory):
         obj = metadata_builder(force=True)._build_aicpu_object(
             str(output), str(MLA / "mla_metadata.aicpu")
         )
+        objects = [obj]
+        if bsnd:
+            objects.append(
+                metadata_builder(force=True)._build_aicpu_object(
+                    str(output), str(MLA / "mla_bsnd_metadata.aicpu")
+                )
+            )
     cann = Path(os.environ["ASCEND_HOME_PATH"])
     command = [
         str(cann / "bin/bisheng"),
@@ -63,6 +70,7 @@ def build_probe(directory):
         "-O2",
         "-fPIC",
         "-shared",
+        *(["-DMLA_BSND_METADATA"] if bsnd else []),
         f"-I{MLA.parent}",
         f"-I{cann}/include",
         f"-L{cann}/lib64",
@@ -70,9 +78,10 @@ def build_probe(directory):
         str(MLA / "mla_metadata.cpp"),
         str(MLA / "mla_schedule.cpp"),
         str(MLA / "detail/cann_split_core.cpp"),
+        *([str(MLA / "mla_bsnd_metadata.cpp"), str(MLA / "mla_bsnd_schedule.cpp")] if bsnd else []),
         "-x",
         "none",
-        obj,
+        *objects,
         "-lascendcl",
         "-lruntime",
         "-ltiling_api",
@@ -95,12 +104,25 @@ def build_probe(directory):
     ):
         assert str(MLA / name) in dependencies
     sources = [ROOT / "setup.py", ROOT / "tests/mla_metadata_probe.cpp", Path(__file__)]
+    if bsnd:
+        extra_dependencies = (
+            Path(objects[1] + ".d").read_text().replace("\\\n", " ").split(":", 1)[1].split()
+        )
+        for name in (
+            "mla_bsnd_metadata.h",
+            "mla_bsnd_metadata.cpp",
+            "mla_bsnd_schedule.h",
+            "mla_bsnd_schedule.cpp",
+        ):
+            assert str(MLA / name) in extra_dependencies
+        dependencies += extra_dependencies
     sources += [Path(p) for p in dependencies if Path(p).is_relative_to(ROOT)]
     manifest = dict(
         library=str(output),
         library_sha256=sha256(output),
         object=str(obj),
         object_sha256=sha256(obj),
+        objects={str(p): sha256(p) for p in objects},
         dependencies_sha256=sha256(obj + ".d"),
         sources={str(p.relative_to(ROOT)): sha256(p) for p in sources},
         cann=str(cann),

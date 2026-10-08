@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 import shutil
 
+import pytest
+
 from tests.mla_metadata_build import MLA, metadata_builder
 
 
@@ -90,15 +92,20 @@ def test_aicpu_sources_by_backend():
         expected = [f"csrc/{directory}/fa_metadata.aicpu"]
         if name == "flash_attn_npu_3.flash_attn_npu_3":
             expected.append(f"csrc/{directory}/mla/mla_metadata.aicpu")
+            expected.append(f"csrc/{directory}/mla/mla_bsnd_metadata.aicpu")
         assert builder._build_aicpu_metadata("unused.so", name) == expected
     assert builder._build_aicpu_metadata("unused.so", "unknown") == []
 
 
-def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "stem,header_name",
+    [("mla_metadata", "mla_schedule.h"), ("mla_bsnd_metadata", "mla_bsnd_schedule.h")],
+)
+def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, header_name):
     monkeypatch.delenv("FLASH_ATTN_FORCE_REBUILD", raising=False)
     source = tmp_path / "mla"
     shutil.copytree(MLA, source)
-    src, out = str(source / "mla_metadata.aicpu"), str(tmp_path / "test.so")
+    src, out = str(source / (stem + ".aicpu")), str(tmp_path / "test.so")
     builder = metadata_builder()
     obj = Path(builder._build_aicpu_object(out, src))
     dependencies = Path(str(obj) + ".d").read_text()
@@ -109,11 +116,19 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys):
         "cann_split_core.cpp",
     ):
         assert name in dependencies
+    if stem == "mla_bsnd_metadata":
+        for name in (
+            "mla_bsnd_metadata.h",
+            "mla_bsnd_metadata.cpp",
+            "mla_bsnd_schedule.h",
+            "mla_bsnd_schedule.cpp",
+        ):
+            assert name in dependencies
     capsys.readouterr()
     assert builder._build_aicpu_object(out, src) == str(obj)
     assert "[compile-aicpu-skip]" in capsys.readouterr().out
     # Change a transitive header while keeping the .aicpu source untouched.
-    header = source / "mla_schedule.h"
+    header = source / header_name
     header.write_text(header.read_text() + "// dependency invalidation probe\n")
     before = obj.stat().st_mtime_ns
     builder._build_aicpu_object(out, src)

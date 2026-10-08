@@ -28,7 +28,7 @@
 #include <numeric>
 
 namespace flash_attn::mla {
-namespace {
+namespace bsnd_schedule_detail {
 
 constexpr uint64_t Align(uint64_t value, uint64_t alignment)
 {
@@ -310,13 +310,13 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
     return MlaScheduleStatus::Success;
 }
 
-} // namespace
+} // namespace bsnd_schedule_detail
 
 MlaScheduleStatus BuildBsndKvLengthSchedule(const MlaDenseShape& shape, const MlaPlatformInfo& platform,
                                             const int32_t* kvLengths, uint64_t lengthCount, MlaSchedule& output)
 {
     try {
-        return Calculate(shape, platform, kvLengths, lengthCount, output);
+        return bsnd_schedule_detail::Calculate(shape, platform, kvLengths, lengthCount, output);
     } catch (const std::bad_alloc&) {
         return MlaScheduleStatus::AllocationFailure;
     }

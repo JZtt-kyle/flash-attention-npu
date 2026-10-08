@@ -391,6 +391,7 @@ class BishengBuildExt(build_ext):
         sources = [os.path.join(src_dir, "fa_metadata.aicpu")]
         if ext_name == "flash_attn_npu_3.flash_attn_npu_3":
             sources.append(os.path.join(src_dir, "mla", "mla_metadata.aicpu"))
+            sources.append(os.path.join(src_dir, "mla", "mla_bsnd_metadata.aicpu"))
         return [self._build_aicpu_object(ext_fullpath, src) for src in sources]
 
     def _build_aicpu_object(self, ext_fullpath, aicpu_src):
