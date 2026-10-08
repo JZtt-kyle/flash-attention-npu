@@ -159,8 +159,8 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         check(q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
         check(
             _fits_mla_dense_shape(q.shape[0], q.shape[1], heads_q, k.shape[1]),
-            "MLA compressed forward is not implemented yet outside B>0, positive S1G within "
-            "address/field bounds, 1<=Sk<=16384",
+            "MLA compressed forward is not implemented yet outside B>=0, nonnegative S1G within "
+            "address/field bounds, 0<=Sk<=16384",
         )
         for tensor in (q, k, v, qv):
             check(
@@ -1792,12 +1792,12 @@ def _check_mla_metadata_options(
 def _fits_mla_dense_shape(batch, sq, heads, sk):
     # Match mla_schedule.h: source ceil-div, query/LSE DMA strides and tensor bytes.
     return (
-        0 < batch <= 2**32 - 1
-        and 0 < sq <= 2**30
+        0 <= batch <= 2**32 - 1
+        and 0 <= sq <= 2**30
         and 0 < heads <= (2**32 - 1) // 512
         and sq * heads <= 2**32 - 256
         and batch * sq * heads <= (2**63 - 1) // 1024
-        and 0 < sk <= 16384
+        and 0 <= sk <= 16384
     )
 
 

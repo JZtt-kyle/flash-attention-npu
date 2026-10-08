@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-当前已将 FP16/BF16 dense MLA 的源调度和 Kernel 接入 910B FA3。M05a/M05b1 完成 AICPU 生成、版本化 metadata 的设备读取与校验；M05b2a 对齐官方签名并保留普通 FA3 关键字兼容。M05b2b1/b2 完成设备长度读取和错误上报，b3a 完成生产内部生成/消费，b3b 已接通公开 `get_scheduler_metadata` 及只读 dense `flash_attn_with_kvcache` 复用。范围外组合仍明确拒绝。M05c1/M05c2 已完成精简 C++ 前向与 metadata dispatcher，并消除公开 dense qv 路径的重复张量检查；两种 dtype 各五组在相同固定 CPU 亲和性下的复用前向、一次生成加一次/四次前向均达到同轮 CANN E2E 中位数门槛，M05 已闭环。M04c1 已完成 dense S1G 多块、源 128..256 M 基块及跨核尾块验收；M04c2 已完成 KV 513..1024、禁止跨核 KV split 的端点映射及双 dtype 精度/性能验收，M04c3 已将 KV 容量扩展到 1..16384（含 8193），完成同路径源 Kernel、公开 E2E 及功能验收。唯一下一步是 M04c4，处理 dense 全局空容量边界。
+当前已将 FP16/BF16 dense MLA 的源调度和 Kernel 接入 910B FA3。M05a/M05b1 完成 AICPU 生成、版本化 metadata 的设备读取与校验；M05b2a 对齐官方签名并保留普通 FA3 关键字兼容。M05b2b1/b2 完成设备长度读取和错误上报，b3a 完成生产内部生成/消费，b3b 已接通公开 `get_scheduler_metadata` 及只读 dense `flash_attn_with_kvcache` 复用。范围外组合仍明确拒绝。M05c1/M05c2 已完成精简 C++ 前向与 metadata dispatcher，并消除公开 dense qv 路径的重复张量检查；两种 dtype 各五组在相同固定 CPU 亲和性下的复用前向、一次生成加一次/四次前向均达到同轮 CANN E2E 中位数门槛，M05 已闭环。M04c1 已完成 dense S1G 多块、源 128..256 M 基块及跨核尾块验收；M04c2 已完成 KV 513..1024、禁止跨核 KV split 的端点映射及双 dtype 精度/性能验收，M04c3 已将 KV 容量扩展到 1..16384（含 8193），完成同路径源 Kernel、公开 E2E 及功能验收。M04c4 已完成 dense 全局空容量边界，2177 项检查通过；双 dtype 各 13 组同路径公开 E2E 达标。唯一下一步是 M06，实施前先拆分非分页 TND、实际长度和外层 stride 的独立验收小步。
 
 实现原则见 [design](design.md)：以固定 CANN 源实现为起点，保持计算、精度、切块分核、缓冲和同步行为，按 CATLASS Kernel / Block / Tile 组织代码。FA3 参数映射与 metadata 接入遵循官方契约。性能只验收已迁移的执行路径：组件按固定源同路径对照，双方路径均已迁移的公开调用按 metadata E2E 逐例比较。
 
@@ -34,8 +34,8 @@
 | M04c1 | 已完成 | dense 的 S1G 多块，解除首步 `Sq*Hq<=256` 限制 | 2,008 项检查通过；51,129 组源调度一致；双 dtype 的 257/511/512/513 行、非整齐 M、跨核尾块、重复执行、metadata 和普通 FA3 回归通过；原五组加六组多块的复用及 R=1/4 E2E 逐例 <=1.0，KV 仍为 1..512 |
 | M04c2 | 已完成 | dense 的 KV 513..1024、显式 num_splits=1 | 2,113 项检查通过；58,689 组源调度对照，双 dtype 各 31 组源 Kernel O/LSE 逐元素一致；保留 aMLA nUpdate、PV 原子加和事件依赖，完整 M 端点映射禁止 FD；原 11 组加 7 组新用例的复用及 R=1/4 E2E 逐例 <=1.0 |
 | M04c3 | 已完成 | dense KV 1..16384，含 8193 | 2,217 项去重检查通过，78,345 组源调度对照；双 dtype 各 26 组非 FD 源 Kernel 对照完成，同路径各 13 组公开 metadata 复用及 R=1/4 E2E 逐例 <=1.0；显式 num_splits=1 |
-| M04c4 | 唯一下一步 | dense 全局空 Q/K/V 容量边界 | `Sq=0`、`Sk=0`、二者均零及空 batch 的 shape、O 和 FA3 的 LSE 符号正确；有/无 metadata、fake、真实及普通 FA3 回归通过；样本内零长度在 M06 验收 |
-| M06 | 待开始 | 512+64 非分页 TND、实际长度和外层 stride | 不均匀 Q/KV、seqused、前缀和、零长度、尾块与 poison padding 通过；steady-state 无长度 D2H；相关 E2E 通过 |
+| M04c4 | 已完成 | dense 全局空 Q/K/V 容量边界 | 2177 项检查通过；全部空容量组合的 O/LSE、metadata 校验、fake/compile、跨流及普通 FA3 正确；42 项真实 Trap 通过；双 dtype 各 13 组同路径公开 E2E 逐例 <=1.0，噪声用例补测闭环；样本内零长度留给 M06 |
+| M06 | 唯一下一步，先拆分 | 512+64 非分页 TND、实际长度和外层 stride | 不均匀 Q/KV、seqused、前缀和、零长度、尾块与 poison padding 通过；steady-state 无长度 D2H；相关 E2E 通过 |
 | M07 | 待开始 | 512+64 的 ND paged cache | BSND/TND query、乱序页表、尾页、源有效页大小、K/V 独立首维 stride；精度及 PA E2E 通过 |
 | M08 | 待开始 | 512+64 的右下 causal | Sq<Sk、Sq>Sk、多 query、空行、PA/TND 与 metadata 一致；精度及 E2E 通过 |
 | M09 | 待开始 | 512+64 的局部窗口 | 有限/单侧窗口、causal 叠加、FA3 边界和页边界；精度及 E2E 通过 |

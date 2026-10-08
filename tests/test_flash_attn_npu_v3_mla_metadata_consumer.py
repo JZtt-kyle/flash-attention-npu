@@ -187,6 +187,40 @@ def consume(consumer, record, context, words=WORDS):
 
 
 @pytest.mark.parametrize("dtype", (1, 2))
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (b, sq, 17, sk)
+        for b, sq, sk in itertools.product((0, 2), (0, 3), (0, 16384))
+        if not b * sq * sk
+    ],
+)
+def test_empty_records_and_corruption(consumer, dtype, shape):
+    record, context = make_record(consumer, shape, dtype)
+    status, output, _ = consume(consumer, record, context)
+    assert status == 0
+    assert output[:11] == [*shape, 0, 0, 1, 1, 2, 0, 0]
+    assert not any(output[11:])
+    # Any nonzero tile, endpoint, FD state, scratch or local-memory reservation
+    # could turn a no-work record into a stale nonempty schedule. Reject it.
+    for word in (15, 16, *range(23, WORDS)):
+        record[word] = 1
+        assert consume(consumer, record, context)[0] == 7, word
+        record[word] = 0
+    for field in ("batch", "sq", "heads", "sk"):
+        saved = getattr(context, field)
+        setattr(context, field, saved + 1)
+        assert consume(consumer, record, context)[0] == 5, field
+        setattr(context, field, saved)
+
+
+def test_nonempty_schedule_cannot_be_relabelled_empty(consumer):
+    record, context = make_record(consumer)
+    record[12] = context.sk = 0
+    assert consume(consumer, record, context)[0] == 7
+
+
+@pytest.mark.parametrize("dtype", (1, 2))
 def test_valid_partition_matrix(consumer, dtype):
     count = 0
     for aic in (1, 2, 3, 20, 24, 26):

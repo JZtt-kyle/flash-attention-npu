@@ -134,7 +134,7 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
 {
     constexpr auto u32Max = std::numeric_limits<uint32_t>::max();
     for (int64_t size : {shape.batch, shape.queryLength, shape.queryHeads, shape.kvLength}) {
-        if (size <= 0) {
+        if (size < 0) {
             return MlaScheduleStatus::UnsupportedShape;
         }
         if (uint64_t(size) > u32Max) {
@@ -143,7 +143,7 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
     }
     // Multiplication is wide even for rejected input; never overflow the caller's int64 shape.
     uint64_t rows = uint64_t(shape.queryLength) * uint64_t(shape.queryHeads);
-    if (shape.kvLength > kMlaMaxKvLength) {
+    if (shape.queryHeads == 0 || shape.kvLength > kMlaMaxKvLength) {
         return MlaScheduleStatus::UnsupportedShape;
     }
     if (rows > kMlaMaxDenseRows || shape.queryHeads > kMlaMaxQueryHeads || shape.queryLength > kMlaMaxQueryLength ||
@@ -168,10 +168,6 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
         return MlaScheduleStatus::InsufficientLocalMemory;
     }
     uint32_t batch = static_cast<uint32_t>(shape.batch);
-    if (uint64_t(batch / std::gcd(batch, platform.aicNum)) * platform.aicNum > u32Max) {
-        return MlaScheduleStatus::FieldOverflow;
-    }
-
     MlaSchedule schedule{};
     schedule.bSize = batch;
     schedule.n2Size = 1;
@@ -180,13 +176,24 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
     schedule.s2Size = static_cast<uint32_t>(shape.kvLength);
     schedule.headDim = 512;
     schedule.headDimRope = 64;
-    schedule.mBaseSize = CalcMBaseSize(batch, static_cast<uint32_t>(rows), platform.aicNum);
-    // First and only CalcInnerSize pass: splitKVFlag=false, pageAttentionFlag=false.
-    schedule.s2BaseSize = std::min(schedule.s2Size, 512U);
     schedule.aicNum = platform.aicNum;
     schedule.aivNum = platform.aivNum;
     schedule.cvRatio = ratio;
     schedule.scheduleMode = 1;
+    if (batch == 0 || rows == 0 || shape.kvLength == 0) {
+        // FA3 global-empty adaptation, not a CANN attention partition. A single
+        // core validates metadata/lengths; no tiles, endpoints or scratch exist.
+        schedule.usedCoreNum = 1;
+        schedule.blockDim = platform.blockDims[0];
+        output = schedule;
+        return MlaScheduleStatus::Success;
+    }
+    if (uint64_t(batch / std::gcd(batch, platform.aicNum)) * platform.aicNum > u32Max) {
+        return MlaScheduleStatus::FieldOverflow;
+    }
+    schedule.mBaseSize = CalcMBaseSize(batch, static_cast<uint32_t>(rows), platform.aicNum);
+    // First and only CalcInnerSize pass: splitKVFlag=false, pageAttentionFlag=false.
+    schedule.s2BaseSize = std::min(schedule.s2Size, 512U);
     schedule.requiredLocalMemory = requiredMemory;
     uint32_t mBlocks = (rows + schedule.mBaseSize - 1) / schedule.mBaseSize;
     uint32_t s2Blocks = (schedule.s2Size + schedule.s2BaseSize - 1) / schedule.s2BaseSize;

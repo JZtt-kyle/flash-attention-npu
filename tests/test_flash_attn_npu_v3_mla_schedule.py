@@ -321,13 +321,10 @@ def test_local_memory_boundaries(scheduler, ratio):
 @pytest.mark.parametrize(
     "overrides,status",
     [
-        ({"batch": 0}, 1),
         ({"batch": -1}, 1),
-        ({"sq": 0}, 1),
         ({"sq": -1}, 1),
         ({"heads": 0}, 1),
         ({"heads": -1}, 1),
-        ({"sk": 0}, 1),
         ({"sk": -1}, 1),
         ({"heads": 2**23}, 2),
         ({"sq": 2**30 + 1, "heads": 1}, 2),

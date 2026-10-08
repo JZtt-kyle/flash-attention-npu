@@ -21,26 +21,40 @@ def run(dtype_name, fault, directory):
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     device_name = torch.npu.get_device_name(0)
     assert "910B" in device_name
+    empty, separator, base_fault = fault.partition(":")
+    if separator:
+        fault = base_fault
+    else:
+        empty = ""
     # The invalid final batch catches checks that accidentally inspect only
     # the first sample or only the first launch core's own work.
     heads = 171 if fault in ("m_base", "m_end") else 4
     sk = 16384 if fault.startswith("kv_") else 17
+    batch = 0 if empty == "emptyb" else 21
+    sq = 0 if empty == "emptyq" else 3
+    if empty == "emptyk":
+        sk = 0
     device = {
         n: torch.zeros(
-            (21, 3 if n in ("q", "qv") else sk, heads if n in ("q", "qv") else 1, d),
+            (batch, sq if n in ("q", "qv") else sk, heads if n in ("q", "qv") else 1, d),
             dtype=dtype,
             device="npu",
         )
         for n, d in (("q", 64), ("k", 64), ("v", 512), ("qv", 512))
     }
-    lengths = torch.full((21,), sk, dtype=torch.int32, device="npu")
+    lengths = torch.full((batch,), sk, dtype=torch.int32, device="npu")
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
         record = generate(device, lengths)
         good = cached(device, record, lengths)
         torch.testing.assert_close(good[0].cpu(), torch.zeros(good[0].shape, dtype=dtype))
-        torch.testing.assert_close(good[1].cpu(), torch.full(good[1].shape, float(sk)).log())
+        expected_lse = (
+            torch.full(good[1].shape, float("inf"))
+            if sk == 0
+            else torch.full(good[1].shape, float(sk)).log()
+        )
+        torch.testing.assert_close(good[1].cpu(), expected_lse)
         mode, _, detail = fault.partition("-")
         if mode in ("generated", "implicit", "reused"):
             value = dict(negative=-1, zero=0, short=16, over=18)[detail]
@@ -77,6 +91,7 @@ def run(dtype_name, fault, directory):
             extension = Path(api.flash_attn_npu_3.__file__).resolve()
             report = dict(
                 fault=fault,
+                empty_capacity=empty,
                 dtype=dtype_name,
                 shape=list(device["q"].shape),
                 sk=sk,

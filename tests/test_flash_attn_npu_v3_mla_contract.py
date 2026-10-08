@@ -161,14 +161,26 @@ def test_mla_invalid_inputs(entry, case, message, dtype):
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
 @pytest.mark.parametrize("sq,sk", [(0, 3), (3, 0), (0, 0)])
-def test_mla_empty_is_still_unimplemented(entry, representation, sq, sk, dtype):
+def test_mla_empty_contract(entry, representation, sq, sk, dtype):
     args = _inputs(representation, dtype=dtype)
     args["q"] = args["q"][:, :sq]
     args["k"], args["v"] = args["k"][:, :sk], args["v"][:, :sk]
     if args["qv"] is not None:
         args["qv"] = args["qv"][:, :sq]
-    with pytest.raises(RuntimeError, match="forward is not implemented yet"):
-        _forward(entry, args)
+    if representation == "prefill":
+        with pytest.raises(RuntimeError, match="forward is not implemented yet"):
+            _forward(entry, args)
+    else:
+        args = {
+            name: value.contiguous() if isinstance(value, torch.Tensor) else value
+            for name, value in args.items()
+        }
+        out, lse, *_ = _forward(entry, args)
+        assert out.shape == (2, sq, 4, 512) and lse.shape == (2, 4, sq)
+        if entry != "fake":
+            assert out.cpu().count_nonzero() == 0
+            if sk == 0:
+                assert lse.cpu().isposinf().all()
 
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
@@ -327,21 +339,22 @@ def test_each_unsupported_dense_option(entry, option, dtype):
 
 
 @pytest.mark.parametrize("shape", [(0, 1, 1), (1, 0, 1)])
-def test_dense_query_limits(entry, shape, dtype):
+def test_dense_empty_queries(entry, shape, dtype):
     args = _inputs(dtype=dtype)
     args["q"] = torch.empty((*shape, 64), dtype=dtype, device="npu")
     args["qv"] = torch.empty((*shape, 512), dtype=dtype, device="npu")
     args["k"] = args["k"][: shape[0]]
     args["v"] = args["v"][: shape[0]]
-    with pytest.raises(RuntimeError, match="outside B>0"):
-        _forward(entry, args)
+    out, lse, *_ = _forward(entry, args)
+    assert out.shape == (*shape, 512) and out.numel() == 0
+    assert lse.shape == (shape[0], shape[2], shape[1]) and lse.numel() == 0
 
 
 def test_dense_kv_limit(entry, dtype):
     args = _inputs(dtype=dtype)
     args["k"] = torch.empty((2, 16385, 1, 64), dtype=dtype, device="npu")
     args["v"] = torch.empty((2, 16385, 1, 512), dtype=dtype, device="npu")
-    with pytest.raises(RuntimeError, match="outside B>0"):
+    with pytest.raises(RuntimeError, match="outside B>=0"):
         _forward(entry, args)
 
 
@@ -366,7 +379,7 @@ def test_fake_batch_field_overflow(dtype):
             name: torch.empty((2**32, 1, 1, dim), dtype=dtype, device="npu")
             for name, dim in (("q", 64), ("k", 64), ("v", 512), ("qv", 512))
         }
-        with pytest.raises(RuntimeError, match="outside B>0"):
+        with pytest.raises(RuntimeError, match="outside B>=0"):
             api._flash_attn_forward(**args)
 
 

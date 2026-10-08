@@ -82,7 +82,7 @@ MetadataSubmission PrepareMetadata(const MlaDenseShape& shape, const MlaPlatform
         TORCH_CHECK(aclrtCreateEvent(&events.metadataDone) == ACL_SUCCESS, "MLA: metadata event creation failed");
     }
     c10_npu::NPUCachingAllocator::recordStream(metadata.storage().data_ptr(), worker);
-    if (lengths) {
+    if (lengths && lengths->numel() != 0) {
         c10_npu::NPUCachingAllocator::recordStream(lengths->storage().data_ptr(), worker);
     }
     MlaMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
@@ -144,7 +144,8 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     auto metadata = schedulerMetadata ? *schedulerMetadata : producer->metadata;
     for (const auto& t : {q, k, v, qv, out, lse, workspace, metadata}) {
         auto address = reinterpret_cast<uintptr_t>(t.data_ptr());
-        TORCH_CHECK(address != 0 && uint64_t(t.nbytes()) <= std::numeric_limits<uintptr_t>::max() - address,
+        TORCH_CHECK((t.numel() == 0 || address != 0) &&
+                        uint64_t(t.nbytes()) <= std::numeric_limits<uintptr_t>::max() - address,
                     "MLA: tensor address overflow");
     }
     MlaLaunchArgs a{};
@@ -154,9 +155,11 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     auto stream = c10_npu::getCurrentNPUStream();
     a.stream = stream.stream(false);
     for (const auto& t : {q, k, v, qv, metadata}) {
-        c10_npu::NPUCachingAllocator::recordStream(t.storage().data_ptr(), stream);
+        if (t.numel() != 0) {
+            c10_npu::NPUCachingAllocator::recordStream(t.storage().data_ptr(), stream);
+        }
     }
-    if (cacheSeqlens) {
+    if (cacheSeqlens && cacheSeqlens->numel() != 0) {
         c10_npu::NPUCachingAllocator::recordStream(cacheSeqlens->storage().data_ptr(), stream);
         a.cacheSeqlens = static_cast<uint8_t*>(cacheSeqlens->data_ptr());
     }
@@ -168,7 +171,8 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     a.lse = static_cast<uint8_t*>(lse.data_ptr());
     // Reserve libapi bytes separately, as in the source, even though this
     // dense specialization only consumes user workspace.
-    a.workspace = static_cast<uint8_t*>(workspace.data_ptr()) + s.workspace.libApiBytes;
+    a.workspace =
+        workspace.numel() == 0 ? nullptr : static_cast<uint8_t*>(workspace.data_ptr()) + s.workspace.libApiBytes;
     a.scale = scale;
     const uint32_t dtype = uint32_t(q.scalar_type() == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16);
     // The host schedule currently supplies only launch/allocation bounds. The
@@ -195,6 +199,12 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
         return 0;
     };
     at_npu::native::OpCommand::RunOpApiV2("ascendc_mla_dense", launch);
+    if (k.size(1) == 0 && out.numel() != 0) {
+        // TriDao FA3 d15f1531, hopper/flash_api.cpp::mha_fwd global-empty
+        // branch. These stream-ordered fills follow metadata/length validation.
+        out.zero_();
+        lse.fill_(std::numeric_limits<float>::infinity());
+    }
     return {out, lse, at::Tensor(), at::Tensor()};
 }
 

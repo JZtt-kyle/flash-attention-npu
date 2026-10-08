@@ -23,6 +23,9 @@ __global__ __aicore__ __mix__(1, 2) void MLA_DENSE_ENTRY(uint64_t ffts, GM_ADDR 
     if (!Kernel::CheckDenseCacheLengths(cacheSeqlens, context.batch, context.sk)) {
         return;
     }
+    if (context.batch == 0 || context.sq == 0 || context.sk == 0) {
+        return;
+    }
     AscendC::SetSyncBaseAddr(ffts);
     AscendC::TPipe pipe;
     Kernel::MlaDense<MLA_DENSE_TYPE> op;

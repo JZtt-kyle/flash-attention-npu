@@ -201,9 +201,12 @@ def compare(probe, cases, dtype, oracle=None, name="cases"):
         assert row[7] == 0
         if row[5] == 0:
             assert row[6] == 0
-            projected = source_projection(row, cases[i])
-            if source is not None:
-                assert projected == source[i], (cases[i], projected, source[i])
+            if cases[i][0] * cases[i][1] * cases[i][3] == 0:
+                assert source is None  # FA3 global-empty adaptation has no CANN attention schedule.
+            else:
+                projected = source_projection(row, cases[i])
+                if source is not None:
+                    assert projected == source[i], (cases[i], projected, source[i])
         else:
             assert not any(row[8:])  # Error output never retains a previous payload.
         rows.append(row)
@@ -287,7 +290,7 @@ def test_wide_fields_and_platform_policy(probe, oracle, dtype):
 @pytest.mark.parametrize("dtype", (1, 2))
 def test_device_failure_status(probe, dtype):
     failures = [
-        ({"batch": 0}, 1),
+        ({"batch": -1}, 1),
         ({"sq": -1}, 1),
         ({"heads": 2**23}, 2),
         ({"sk": 16385}, 1),
@@ -306,6 +309,21 @@ def test_device_failure_status(probe, dtype):
     ]
     rows = compare(probe, [case(**options) for options, _ in failures], dtype, name="failures")
     assert [r[5:7] for r in rows] == [[2, status] for _, status in failures]
+
+
+@pytest.mark.parametrize("dtype", (1, 2))
+def test_device_empty_schedules(probe, dtype):
+    cases = [
+        case(b, sq, 17, sk)
+        for b, sq, sk in itertools.product((0, 2), (0, 3), (0, 16384))
+        if not b * sq * sk
+    ]
+    rows = compare(probe, cases, dtype, name="empty-capacities")
+    for row in rows:
+        assert row[5:8] == [0, 0, 0]
+        assert row[15:17] == [0, 0]
+        assert row[20:23] == [1, 1, 1]
+        assert not any(row[23:])
 
 
 @pytest.mark.parametrize("dtype", (1, 2))

@@ -50,7 +50,7 @@ def test_dispatcher_schema_and_outputs(dtype, reuse):
         ("device", "same device"),
         ("stride", "noncontiguous BSND"),
         ("grad", "gradients"),
-        ("shape", "outside B>0"),
+        ("shape", "outside B>=0"),
         ("scale", "finite in FP32"),
         ("length_dtype", "cache_seqlens must have dtype"),
         ("metadata_device", "scheduler_metadata must be on the same"),

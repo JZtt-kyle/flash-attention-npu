@@ -75,11 +75,10 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
         return Status::DtypeMismatch;
     }
     const uint64_t rows = uint64_t(c.sq) * c.heads;
-    if (c.batch == 0 || rows == 0 || rows > kMlaMaxDenseRows || c.sq > kMlaMaxQueryLength ||
-        c.heads > kMlaMaxQueryHeads || uint64_t(c.batch) * rows > kMlaMaxBatchRows || c.sk == 0 ||
-        c.sk > kMlaMaxKvLength || MLA_WORD(schedule.bSize) != c.batch || MLA_WORD(schedule.s1Size) != c.sq ||
-        MLA_WORD(schedule.gSize) != c.heads || MLA_WORD(schedule.s2Size) != c.sk || MLA_WORD(schedule.n2Size) != 1 ||
-        MLA_WORD(schedule.headDim) != 512 || MLA_WORD(schedule.headDimRope) != 64) {
+    if (c.heads == 0 || rows > kMlaMaxDenseRows || c.sq > kMlaMaxQueryLength || c.heads > kMlaMaxQueryHeads ||
+        uint64_t(c.batch) * rows > kMlaMaxBatchRows || c.sk > kMlaMaxKvLength || MLA_WORD(schedule.bSize) != c.batch ||
+        MLA_WORD(schedule.s1Size) != c.sq || MLA_WORD(schedule.gSize) != c.heads || MLA_WORD(schedule.s2Size) != c.sk ||
+        MLA_WORD(schedule.n2Size) != 1 || MLA_WORD(schedule.headDim) != 512 || MLA_WORD(schedule.headDimRope) != 64) {
         return Status::ShapeMismatch;
     }
     MlaDenseKernelSchedule s{};
@@ -98,6 +97,23 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
     }
     s.mBaseSize = MLA_WORD(schedule.mBaseSize);
     s.s2BaseSize = MLA_WORD(schedule.s2BaseSize);
+    if (c.batch == 0 || c.sq == 0 || c.sk == 0) {
+        // The v1 empty record has one validation core and no attention state.
+        // Check every unused payload word so a nonempty schedule cannot be
+        // reinterpreted as an empty one by changing its shape alone.
+        if (s.usedCoreNum != 1 || s.mBaseSize != 0 || s.s2BaseSize != 0 || c.workspaceBytes != 0 ||
+            c.libApiBytes != 0) {
+            return Status::InvalidTiling;
+        }
+        for (uint32_t word = offsetof(MlaDenseMetadata, schedule.bN2End) / sizeof(uint32_t);
+             word < kMlaDenseMetadataWords; ++word) {
+            if (read(word) != 0) {
+                return Status::InvalidTiling;
+            }
+        }
+        output = s;
+        return Status::Success;
+    }
     const uint32_t s2Base = c.sk < 512 ? c.sk : 512;
     // CalcMBaseSize may choose any divisor in [128,256], including odd values.
     // A 256-row base also permits a final partial block.

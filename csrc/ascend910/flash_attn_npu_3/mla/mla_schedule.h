@@ -130,8 +130,10 @@ enum class MlaScheduleStatus {
 };
 
 // Pure CPU scheduling for contiguous BSND, shared 512+64 KV, Hkv=1,
-// Sq*Hq>0 within the address/field bounds above, 1<=Sk<=kMlaMaxKvLength, B>0,
+// Sq*Hq>=0 within the address/field bounds above, 0<=Sk<=kMlaMaxKvLength, B>=0,
 // no mask/length arrays, num_splits=1.
+// A zero batch/query/KV capacity produces a validation-only schedule: one
+// launch core, zero tiles/endpoints/workspace. No attention Kernel consumes it.
 // FP16 and BF16 have identical scheduling. This is not a public forward or
 // metadata entry point; callers must separately validate tensor/layout/options.
 // No tensor addresses or scale are stored. On failure, output is unchanged.

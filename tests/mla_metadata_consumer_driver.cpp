@@ -99,5 +99,20 @@ int main()
     assert(output.batch == 2 && output.sk == 257 && output.usedCoreNum == 2);
     context.libApiBytes = UINT64_MAX;
     assert(consume_metadata(storage + 1, kMlaDenseMetadataWords, &context, &output, &reads) != 0);
+    for (auto shape : {MlaDenseShape{0, 3, 17, 16384}, MlaDenseShape{2, 0, 17, 16384}, MlaDenseShape{2, 3, 17, 0},
+                       MlaDenseShape{0, 0, 17, 0}}) {
+        args.shape = shape;
+        build_metadata(&args, &metadata, &context);
+        std::memcpy(storage + 1, &metadata, sizeof(metadata));
+        assert(consume_metadata(storage + 1, kMlaDenseMetadataWords, &context, &output, &reads) == 0);
+        assert(output.mBaseSize == 0 && output.s2BaseSize == 0 && output.mm1ResSize == 0 && output.mm2ResSize == 0);
+        for (uint32_t i = 23; i < kMlaDenseMetadataWords; ++i) {
+            storage[i + 1] = 1;
+            output = before;
+            assert(consume_metadata(storage + 1, kMlaDenseMetadataWords, &context, &output, &reads) != 0);
+            assert(std::memcmp(&before, &output, sizeof(output)) == 0);
+            storage[i + 1] = 0;
+        }
+    }
 }
 #endif

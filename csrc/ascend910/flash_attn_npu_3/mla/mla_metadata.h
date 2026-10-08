@@ -81,8 +81,8 @@ static_assert(std::is_standard_layout_v<MlaDenseMetadata> && std::is_trivially_c
 
 // Deterministic full record, also on failure: a non-success header and zero
 // payload replace any previous schedule. No scale, addresses or mutable scratch.
-// Optional lengths must all equal shape.kvLength: shorter, empty, nonuniform or
-// over-capacity sequences are not implemented by the current dense Kernel.
+// Optional lengths must all equal shape.kvLength, including zero capacity.
+// Shorter, nonuniform or over-capacity sequences remain unsupported.
 // (nullptr, 0) uses full capacity. A non-null buffer must have B aligned int32
 // entries, readable on the executing processor (host tests or AICPU).
 void BuildDenseMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,

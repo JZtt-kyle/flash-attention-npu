@@ -291,6 +291,8 @@ metadata 仍为 v1 的 401 字记录，消费者按 S2 基块计算 QK/P workspa
 
 M04c3 将 KV 容量扩展到 `1..16384`，覆盖 8193 的第 17 个尾块以及 16384 的 32 个完整 S2 块。仍使用 `s2BaseSize=min(Sk,512)` 和 M04c2 的完整 M 分区映射；`num_splits=1`、401 字 v1 metadata、workspace 和设备计算/同步顺序不变。更长 KV 继续明确拒绝。
 
+M04c4 接通 dense 全局空容量：`B=0`、`Sq=0`、`Sk=0` 及其组合，Hq 仍须为正。沿用上述字段和地址上界，非零 KV 容量仍最多 16384。空容量的 v1 metadata 保留真实形状、dtype 和平台信息，使用一个校验核；M/S2 基块、端点、FD 字段、workspace 及局部内存需求全部为零。AICPU 仍检查每个 `cache_seqlens` 等于 KV 容量，消费者仍检查记录全部字段和当次长度，不能用空输出绕过错误上报。校验通过后不进入 attention Kernel，不访问 Q/K/V/qv 或申请 attention workspace。`B=0` 或 `Sq=0` 返回对应空 shape；`B>0、Sq>0、Sk=0` 在同一 stream 校验之后按固定 FA3 的 host 分支填充 `O=0、LSE=+inf`。这属于 FA3 空容量契约适配；非零容量中的样本零长度仍在 M06 接通，不能据此返回 `+inf`。普通 FA3 metadata 协议及非空 CANN 计算流程保持原样。
+
 ### 6.3 数值路径与资源布局
 
 QK 的 L1 循环顺序为 N→K→M，M/N 子块均为 128。576 维并非先算完整内容再算完整 RoPE：两组 288 依次为 `[content 0:256, rope 0:32]`、`[rope 32:64, content 256:512]`，每组按 K=96 的 L0 片累加到 FP32 L0C。Q 的 64 维 RoPE 一次复制跨越相邻 Q/P 槽，尾 M 用 padding 偏移保持相邻关系；复制前必须同时取得两个槽的释放事件。最终 QK 以 FP32 ND 写入 GM，再乘 scale。
