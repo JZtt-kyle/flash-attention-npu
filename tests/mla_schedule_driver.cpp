@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <functional>
 #include <numeric>
 #include <vector>
 
@@ -12,6 +13,11 @@ struct Input {
     uint32_t aic, aiv;
     uint64_t l1, ub, l0a, l0b, l0c, libapi;
     uint32_t blockDimOverride;
+#ifdef BSND_KV_LENGTHS
+    bool hasLengths = false;
+    uint64_t lengthCount = 0;
+    std::vector<int32_t> kvLengths;
+#endif
 };
 
 template <class T>
@@ -45,6 +51,19 @@ enum class ScheduleMode {
     NORMAL_MODE = 0,
     BATCH_MODE = 1
 };
+#ifdef BSND_KV_LENGTHS
+struct LengthTensor {
+    std::vector<int64_t> values;
+    template <typename T>
+    const T* GetData() const
+    {
+        return values.data();
+    }
+};
+struct TensorSlot {
+    const LengthTensor* tensor = nullptr;
+};
+#endif
 struct FiaInfo {
     uint32_t bSize, n2Size = 1, s1Size, gSize;
     int64_t s2Size;
@@ -53,6 +72,17 @@ struct FiaInfo {
     uint32_t blockSize = 0;
     TilingKeyLayout inputLayout = TilingKeyLayout::BSH_BSND;
     const Input* platformInfo;
+#ifdef BSND_KV_LENGTHS
+    bool batchContinuousFlag = true, actualSeqLenFlag = false;
+    bool isSameActualseq = true, isSameSeqAllKVTensor = true;
+    bool isAccumQSeq = false, isAccumKVSeq = false, attenMaskFlag = false;
+    uint32_t actualLenQDims = 0, actualLenKvDims = 0;
+    int64_t preToken = 0, nextToken = 0;
+    int32_t sparseMode = 0;
+    struct {
+        TensorSlot actualSeqLengthsQ, actualSeqLengths;
+    } opParamInfo;
+#endif
 };
 struct WorkspaceParams {
     uint64_t mm1ResSize = 0, mm2ResSize = 0, fdAccumOutSize = 0, fdLogSumExpSize = 0;
@@ -104,10 +134,16 @@ class FiaTilingNonQuantMla {
     ScheduleMode scheduleMode_ = ScheduleMode::NORMAL_MODE;
     TilingData tilingData_;
 
+#ifdef BSND_KV_LENGTHS
+    uint32_t mFdBaseSize_ = 8;
+    bool DealSameSeqEachBatch() const;
+    void CreateSplitInput(BaseInfo&, SplitParam&) const;
+#else
     bool DealSameSeqEachBatch() const
     {
         return true;
     }
+#endif
     void CalcInnerSize(uint32_t seqSize);
     void CalcMBaseSize();
     void CalcMmResSize();
@@ -133,6 +169,19 @@ void Run(const Input& in)
     info.gSize = in.heads;
     info.s2Size = in.sk;
     info.platformInfo = &in;
+#ifdef BSND_KV_LENGTHS
+    // Oracle input shim owns true int64 storage, as required by the unmodified
+    // pinned CreateSplitInput. It does not share the migrated length parser.
+    LengthTensor tensor{};
+    if (in.hasLengths) {
+        tensor.values.assign(in.kvLengths.begin(), in.kvLengths.end());
+        info.actualSeqLenFlag = true;
+        info.actualLenKvDims = tensor.values.size();
+        info.opParamInfo.actualSeqLengths.tensor = &tensor;
+        info.isSameActualseq = std::adjacent_find(tensor.values.begin(), tensor.values.end(),
+                                                  std::not_equal_to<int64_t>()) == tensor.values.end();
+    }
+#endif
     FiaTilingNonQuantMla host{};
     host.fiaInfo_ = &info;
     host.aicNum_ = host.coreNum_ = in.aic;
@@ -140,14 +189,24 @@ void Run(const Input& in)
     host.libapiSize_ = in.libapi;
     host.CalcInnerSize(in.sk);
     BaseInfo base{};
+#ifndef BSND_KV_LENGTHS
     base.bSize = in.batch;
     base.s1Size = in.sq;
     base.gSize = in.heads;
     base.s2Size = in.sk;
     base.n2Size = 1;
+#endif
     SplitParam param{};
     param.mBaseSize = host.mBaseSize_;
     param.s2BaseSize = host.sInnerSize_;
+#ifdef BSND_KV_LENGTHS
+    host.CreateSplitInput(base, param);
+    for (uint32_t b = 0; b < info.bSize; ++b) {
+        if (GetS1SeqSize(b, base) != in.sq || GetS2SeqSize(b, base) != (in.hasLengths ? in.kvLengths.at(b) : in.sk)) {
+            std::abort();
+        }
+    }
+#endif
     SplitResult split(in.aic, host.cvRatio_);
     SplitCore(in.aic, base, param, split);
     if (split.numOfFdHead && !std::getenv("MLA_ORACLE_AUTOMATIC_FD")) {
@@ -157,7 +216,9 @@ void Run(const Input& in)
         SplitContext context(base, param);
         CalcSplitInfo(context);
         const uint32_t rows = context.splitInfo.s1GBaseNum[0];
+#ifndef BSND_KV_LENGTHS
         const uint32_t columns = context.splitInfo.s2BaseNum[0];
+#endif
         std::vector<int64_t> costs;
         for (uint32_t b = 0; b < in.batch; ++b) {
             BatchCache batch{};
@@ -170,8 +231,16 @@ void Run(const Input& in)
         }
         std::vector<uint64_t> ends;
         for (uint32_t i = 0; i < split.usedCoreNum; ++i) {
+#ifdef BSND_KV_LENGTHS
+            uint64_t end = uint64_t(split.bN2End[i]) * rows + split.gS1End[i];
+            if (split.s2End[i] > 0) {
+                ++end;
+            }
+            ends.push_back(end);
+#else
             const uint64_t physical = (uint64_t(split.bN2End[i]) * rows + split.gS1End[i]) * columns + split.s2End[i];
             ends.push_back((physical + columns - 1) / columns);
+#endif
         }
         ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
         SplitResult whole(in.aic, host.cvRatio_);
@@ -220,6 +289,9 @@ void Run(const Input& in)
 
 #else
 #include "mla_schedule.h"
+#ifdef BSND_KV_LENGTHS
+#include "mla_bsnd_schedule.h"
+#endif
 #include <cstring>
 #include <type_traits>
 
@@ -244,7 +316,16 @@ void Run(const Input& in)
     std::memset(&schedule, 0xa5, sizeof(schedule));
     std::array<unsigned char, sizeof(schedule)> before;
     std::memcpy(before.data(), &schedule, sizeof(schedule));
+#ifdef BSND_KV_LENGTHS
+    const int32_t emptyLength = 0;
+    const int32_t* lengths = in.hasLengths ? (in.kvLengths.empty() ? &emptyLength : in.kvLengths.data()) : nullptr;
+    auto status = std::getenv("MLA_BSND_USE_DENSE")
+                      ? BuildDenseSchedule({in.batch, in.sq, in.heads, in.sk}, platform, schedule)
+                      : BuildBsndKvLengthSchedule({in.batch, in.sq, in.heads, in.sk}, platform, lengths, in.lengthCount,
+                                                  schedule);
+#else
     auto status = BuildDenseSchedule({in.batch, in.sq, in.heads, in.sk}, platform, schedule);
+#endif
     std::cout << '[' << static_cast<uint32_t>(status);
     if (status != MlaScheduleStatus::Success) {
         if (std::memcmp(before.data(), &schedule, sizeof(schedule)) != 0) {
@@ -265,12 +346,13 @@ void Run(const Input& in)
         }
         cursor += sizes[i] * s.blockDim * 2;
     }
+    const bool empty = in.batch == 0 || in.sq == 0 || in.sk == 0;
     if (cursor != w.kernelBytes || cursor > w.userBytes || s.bSize != in.batch || s.gSize != in.heads ||
         s.s1Size != in.sq || s.s2Size != in.sk || s.n2Size != 1 || s.headDim != 512 || s.headDimRope != 64 ||
         s.aicNum != in.aic || s.aivNum != in.aiv || s.cvRatio != in.aiv / in.aic ||
-        s.requiredLocalMemory.l1Bytes != 516096 || s.requiredLocalMemory.l0aBytes != 65536 ||
-        s.requiredLocalMemory.l0bBytes != 65536 || s.requiredLocalMemory.l0cBytes != 131072 ||
-        s.requiredLocalMemory.ubBytes != (s.cvRatio == 1 ? 178176 : 174080)) {
+        (!empty && (s.requiredLocalMemory.l1Bytes != 516096 || s.requiredLocalMemory.l0aBytes != 65536 ||
+                    s.requiredLocalMemory.l0bBytes != 65536 || s.requiredLocalMemory.l0cBytes != 131072 ||
+                    s.requiredLocalMemory.ubBytes != (s.cvRatio == 1 ? 178176 : 174080)))) {
         std::abort();
     }
     for (uint64_t x : {uint64_t(s.mBaseSize), uint64_t(s.s2BaseSize), uint64_t(s.usedCoreNum), uint64_t(s.maxCost),
@@ -299,6 +381,18 @@ int main()
     Input in{};
     while (std::cin >> in.batch >> in.sq >> in.heads >> in.sk >> in.aic >> in.aiv >> in.l1 >> in.ub >> in.l0a >>
            in.l0b >> in.l0c >> in.libapi >> in.blockDimOverride) {
+#ifdef BSND_KV_LENGTHS
+        size_t supplied = 0;
+        if (!(std::cin >> in.hasLengths >> in.lengthCount >> supplied)) {
+            return 1;
+        }
+        in.kvLengths = std::vector<int32_t>(supplied);
+        for (auto& length : in.kvLengths) {
+            if (!(std::cin >> length)) {
+                return 1;
+            }
+        }
+#endif
         Run(in);
     }
     return std::cin.eof() ? 0 : 1;

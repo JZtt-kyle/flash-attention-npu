@@ -2,34 +2,29 @@
 
 ## 当前能力与唯一下一步
 
-- 本次完成 M06a（纯文档）：核对固定源的长度/调度依赖，将 M06 拆为 BSND 实际 KV 长度、紧凑 TND、`seqused` 和外层 stride 的独立验收步骤，见 [plan](plan.md#m06非分页长度tnd-与-stride)。已确认的范围和接口契约不变，未修改 design、生产代码或测试。
-- 当前生产能力仍为 M04c4：FP16/BF16、512+64 共享 KV、连续 BSND、Hkv=1、无 mask、显式 `num_splits=1`，非空 KV 容量最多 16384；支持 `B=0`、`Sq=0`、`Sk=0` 及其组合。全局空 KV 返回 `O=0、LSE=+inf`；空 batch/query 保留空 shape。401 字 v1 metadata 生成/消费仍要求所有样本使用完整容量；样本短长度、TND、非连续外层 stride 等尚未接通。
-- 分支 `feat/mla-cann-migration`，本步基点 `85ce13d`，接手时工作区干净。唯一下一步为 **M06b1：独立的 BSND 实际 KV 长度解析与 CPU 源调度对照**；只新增无 gert/torch 依赖的独立入口，不接生产 metadata 或前向。范围、矩阵、固定源对照及 sanitizer 条件见 plan 的 M06b1。方案已确认，后续在此范围内推进，无需重复确认。
+- 本次完成 M06b1：新增独立、无 gert/torch 依赖的 `BuildBsndKvLengthSchedule`，解析执行处理器可读的 `int32[B]` 实际 KV 长度，完整校验后逐值转换为源 int64 向量，复用固定源 `SplitCore`。支持非均匀、等长短序列和全零实际长度；缺省或整容量长度回到既有 dense 调度。独立入口未列入生产编译，也未接公共前向或 metadata。
+- 当前生产能力仍为 M04c4：FP16/BF16、512+64 共享 KV、连续 BSND、Hkv=1、无 mask、显式 `num_splits=1`，非空 KV 容量最多 16384；支持 `B=0`、`Sq=0`、`Sk=0` 及其组合。全局空 KV 返回 `O=0、LSE=+inf`；空 batch/query 保留空 shape。401 字 v1 metadata 和公开路径仍要求所有样本使用完整 KV 容量。
+- 分支 `feat/mla-cann-migration`，本步基点 `b2e9355`，接手时工作区干净。唯一下一步为 **M06b2：BSND 实际 KV 长度的 AICPU metadata 生成和设备校验消费者**；公开短长度继续拒绝。已确认范围和完成条件见 [plan](plan.md#m06非分页长度tnd-与-stride)，后续在此范围内推进，无需重复确认。
 
-## 本次文档闭环
+## 本次 CPU 闭环与证据
 
-- 证据目录：`build/mla-m06a-plan/`。`handoff-audit.json` 核对上步验收索引、8 条最终命令及成功退出码、18 个生产/测试文件哈希和扩展文件哈希；与 M04c4 记录一致。上步证据清单哈希与 `checksums-verification.json` 一致，本次未重新哈希全部 1210 个大日志/构建文件，也未重跑 NPU 测试。
-- 固定 CANN 源的三个文件及函数锚点已核查：host MLA tiling 的 `DealSameSeqEachBatch`、`CalcMBaseSize`、`CreateSplitInput`，公共 `SplitCore` 的实际长度读取，以及设备 Kernel 的长度解析和零任务分支。工作树中的这些文件与固定 commit 逐字节一致；已有 FA3 源快照用于核对公开签名，未增加接口。
-- 本步 25 个本地链接/片段锚点、14 个 M06 子步骤顺序、唯一下一步及两文件范围检查通过，见 `doc-checks.json`；复现脚本为 `check_docs.py`。`git diff --check`、暂存差异检查及 `ci/code_quality.sh --staged` 通过，三个适用文档钩子通过，其余六项因无对应文件跳过；日志和退出码见 `diff-check*`、`staged-diff-check*`、`quality-staged*`。只暂存 plan/status，提交成功后停止。
-
-## 最近一次代码闭环与证据
-
-- M04c4 代码提交为 `85ce13d`，完整验收保存在 `build/mla-m04c4-empty/acceptance.json`，命令、环境和退出码见同目录的 `*-command.json` / `*-exit.json`，构建来源见 `build-provenance.json`。本节为既有结果，不是本次重新运行。
-- 2177 项去重 pytest 检查通过，无失败/跳过：CPU/ASan/UBSan 220 项（含 78,345 组固定源调度差分）、空容量功能 180 项、设备拒绝 42 项、入口/AICPU/metadata/签名 1715 项、普通 FA3 20 项。42 个独立进程均触发真实 Trap；最终 FP16/BF16、KV=8193/16384 源 Kernel O/LSE 逐元素一致，双 reference 和三条公开路径重复检查通过。
-- 双 dtype 各 13 组源原生非 FD 用例的 metadata 复用、生成加一次/四次前向共 78 个 E2E 中位数比值均 `<=1.0`。一次生成加一次前向的噪声用例经补测闭环，见 `performance-verdict.json`、`noise-recheck.json`。生产 Kernel 比值为 FP16 0.976–1.068、BF16 0.972–1.043，不能声称所有 Kernel 均不劣化；空容量只有调用延迟诊断，没有同义 CANN E2E 基线。
-- 原始失败和修正仍保留在上步 `acceptance.json`：NPU/LeakSanitizer 沙箱限制、质量工具路径和 formatter 修正、CPU 背景负载、性能统计窗口及补测准备问题均未改写为通过。最终适用检查已经通过，没有待处理的上步失败。
+- 证据目录：`build/mla-m06b1-lengths/`；最终索引为 `acceptance.json`，复核脚本为 `audit.py`，命令、环境和退出码保存在 `*-command.json` / `*-exit.json`。上步证据哈希、18 个既有生产/测试文件哈希、源仓状态与扩展哈希核查一致，见 `handoff-audit.json`。
+- **312 项去重 pytest 检查通过，无失败/跳过**：上步 CPU 最小闭环 220 项全部重跑；最终新增 92 项全部通过，并对共享测试驱动重跑 5 项既有 dense 检查（重复项不累加）。最终证据为 `baseline-cpu.xml` 和 `lengths-verified.xml`。首批 37 项与修复定向 6 项单独留存，不额外计数。
+- 新增 **33,736 组实际长度源差分**：25,156 组与原生非 FD 输出完全一致，8,580 组独立检查 FA3 `num_splits=1` 的完整 M 端点映射；后者不称作原生源输出。比较基本块、端点、核数、FD 字段及 workspace，独立枚举所有正长度计算任务并核对每核成本。覆盖 AIC=1..26、C1V1/C1V2、核数两侧 batch、M=128..256 及尾块、KV 实际长度 0/1/511/512/513/8193/16384，包含 18 组计算端点之外的零 KV 尾部。
+- 1441 组整容量/缺省长度及全局空容量与原 dense 结果逐字段一致。负值、超容量、长度计数、字段/任务量/地址及 workspace 溢出、局部内存不足、blockDim 约束均检查；拒绝时输出字节保持不变。迁移端和独立固定源 oracle 均启用 ASan/UBSan；源函数逐字节提取并保留清单，见 `lengths-verified/source-manifest.json`、输入、输出摘要与编译记录。
+- 原完整矩阵曾失败：15 核混合长度下，源 `CalcSplitPlan` 在成本耗尽后停于尾部零 KV 样本之前，新入口误用 dense 的末端等于 B 校验。已按源行为保留端点，并验证省略的样本全部为零 KV，完整矩阵重跑通过。原失败保存在 `lengths-final.log`、`lengths-final-exit.json`、`failure-cases.json`；修复回归为 `zero-fix.xml`。固定源独立初始化 O/LSE 的依据见 `source-zero-initialization.*`；M06b2/b3 须保留这一依赖，不能仅凭计算分区覆盖空行。
+- 生产 `BuildDenseSchedule`、公共入口、401 字 v1 metadata、Kernel 和构建列表未修改；本步未构建生产扩展，未运行 NPU 精度/E2E 或普通 FA3 设备回归，不将这些项目记为本次通过。最近一次设备闭环仍为 M04c4 的 `85ce13d`，其 2177 项检查、同路径 E2E 和原始失败见 `build/mla-m04c4-empty/acceptance.json`。
+- 初次 clang-format 修改文件后，代码质量复核和最终暂存检查通过：六项适用钩子通过，其余三项无对应文件跳过，见 `quality-staged-*`。差异与 `git diff --check` / 暂存检查通过；只暂存本步六个文件，提交一次后停止。
 
 ## 环境与后续复现
 
-- 本次为文档步骤，未构建、导入扩展或探测当前 NPU 健康/占用。上步运行环境为 Python `/usr/local/python3.11.15/bin/python3` 3.11.15、torch `2.7.1+cpu`、torch_npu `2.7.1`、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`、bisheng clang 15.0.5，实机为 Ascend910B3。后续开发/实机验证前仍需重新核查环境及实际加载路径。
-- 当前磁盘扩展 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so` 的 SHA256 为 `ef4eb188fc2a193a4f4ecb96e07e350756d605f4796d32b7e3324de1f6be0b7a`，与上步实际加载的构建产物一致；这不替代后续进程的加载核查。
-- CATLASS 为 `769cd40a8716b28650b6bebb08db4834eea4462f`，工作树干净；只读 CANN 源为 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，其接手时已有 67 条删除/未跟踪记录保存在 `cann-status-before.txt`，本步未修改。上步 2/3/4 号卡健康记录及性能测量的真实 CPU 背景负载只描述当时条件，不用于推断当前设备空闲。
-- 文档检查复现如下。M06b1 开始后复核上步 CPU 最小闭环，并新增实际长度源差分；ASan/UBSan 使用可正常运行 sanitizer 的主机环境。NPU 代码接入时再重跑受影响的 910B 精度、性能和普通 FA3 回归，精确历史命令可从上述命令记录取得。
+- Python `/usr/local/python3.11.15/bin/python3` 3.11.15、torch `2.7.1+cpu`、torch_npu `2.7.1`、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`、bisheng clang 15.0.5、g++ 11.4.0。主机探测到 8 张 Ascend910B3，健康均为 OK；这只描述探测时状态，不代表后续设备空闲。初次沙箱内 `npu-smi` 初始化失败已保留，后续主机探测成功，见 `environment-sandbox-failure.json` 和 `environment.json`；sanitizer 均在正常主机环境运行。
+- 实际加载扩展为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 为 `ef4eb188fc2a193a4f4ecb96e07e350756d605f4796d32b7e3324de1f6be0b7a`，与 M04c4 的构建来源及加载记录一致；本次独立入口不在该扩展中。
+- CATLASS 为 `769cd40a8716b28650b6bebb08db4834eea4462f`，工作树干净；只读 CANN 源为 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，接手时已有的 67 条删除/未跟踪记录保持原样。本步四个代码/测试文件最终哈希见 `final-code-hashes.json`，修复前版本哈希单独保留。
+- 完整 CPU 复现命令如下；精确分批运行命令见上述证据目录。M06b2 修改 metadata 协议及设备消费时须另行完成 AICPU/设备和普通 FA3 回归，并按 plan 更新 design 的具体记录契约。
 
 ```bash
-python3 build/mla-m06a-plan/check_docs.py
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 MLA_SCHEDULE_SANITIZE=1 MLA_CONSUMER_SANITIZE=1 python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_bsnd_schedule.py tests/test_flash_attn_npu_v3_mla_schedule.py tests/test_flash_attn_npu_v3_mla_metadata_consumer.py tests/test_flash_attn_npu_v3_mla_build.py
 git diff --check
 PYTHONPATH="/tmp/mla-m01-precommit:${PYTHONPATH:-}" PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache bash ci/code_quality.sh --staged
-# 上步 CPU 最小闭环；新的实际长度检查随 M06b1 增补。
-TORCH_DEVICE_BACKEND_AUTOLOAD=0 MLA_SCHEDULE_SANITIZE=1 MLA_CONSUMER_SANITIZE=1 python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_schedule.py tests/test_flash_attn_npu_v3_mla_metadata_consumer.py tests/test_flash_attn_npu_v3_mla_build.py
 ```
