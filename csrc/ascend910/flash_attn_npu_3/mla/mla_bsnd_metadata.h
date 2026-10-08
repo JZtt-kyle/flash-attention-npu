@@ -1,5 +1,5 @@
-// Private BSND actual-KV-length protocol. Generation only until its dedicated
-// device consumer is validated; never pass this record to the v1 dense Kernel.
+// Private BSND actual-KV-length protocol with a dedicated validation consumer;
+// never pass this record to the v1 dense Kernel.
 #pragma once
 #include "mla_metadata.h"
 

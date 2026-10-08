@@ -197,7 +197,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 校验保证记录兼容性和计算地址边界，不验证来源真实性；`maxCost`、未启用 FD 的记账字段及未使用核端点不驱动计算。全局空容量使用同一协议与校验路径，具体规则见 [6.2](#62-调度字段与边界)。
 
-### 5.3 v2：BSND 实际 KV 长度生成协议
+### 5.3 v2：BSND 实际 KV 长度记录与消费者
 
 [`mla_bsnd_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.h) 定义 `version=2`、`kind=2`，magic 与 v1 相同。记录恰为 `401+B` 个 int32：401 字前缀沿用 v1 的字段顺序和调度编码，末尾 B 字按 batch 保存实际 KV 长度，保留位为零。只根据静态 batch 检查 `B>=0`、`401+B<=UINT32_MAX` 后分配；隐式整容量也物化快照，B=0 时仍靠版本/类型区分于 v1。
 
@@ -205,7 +205,11 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 [`BuildBsndKvLengthMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.cpp) 先检查输出指针、对齐、地址加法、精确字数及输入输出区间重叠；不安全缓冲返回错误且不写记录。缓冲合法后，未支持 dtype 记 `UnsupportedDtype`，长度描述符错误记 `InvalidCacheLengths`，形状/长度值/调度错误记 `ScheduleFailure` 并保存调度状态（越界长度为 `UnsupportedShape`）；失败均清零整个调度与快照。生成期间长度不可修改，成功快照与调度使用同一份长度。
 
-[`mla_bsnd_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.aicpu) 已列入生产构建，直接编译上述调度与序列化源码，写完执行设备屏障；**目前仅独立驱动发射，尚无 v2 设备消费者或公开前向**。v1 消费者通过字数或版本拒绝 v2。M06b2b 才实现快照与当前长度、资源及端点的设备校验、过期/损坏记录 Trap 和拒绝不写输出；不能用 v2 直接驱动旧 dense Kernel。
+[`mla_bsnd_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.aicpu) 已列入生产构建，直接编译上述调度与序列化源码，写完执行设备屏障。生成器和 v2 消费者均由独立驱动验收，**尚未接入实际长度 attention 或公开短长度前向**；v1 消费者继续通过字数或版本拒绝 v2，不能用 v2 直接驱动旧 dense Kernel。
+
+[`mla_bsnd_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata_consumer.h) 与 v1 共用头部、形状、平台、切块、workspace 和局部资源校验，仅区分协议头、长度快照与端点覆盖规则。按调用方静态 B 检查精确字数及加法上界后，每个快照值必须在 `[0,Sk]`，并与当次长度逐项相等；当次长度缺省表示整容量，不能解释为信任快照。全局空容量同样检查长度；非零容量的全零长度仍使用完整调度和资源校验。端点须单调且位于完整 M 块之间；省略的尾部必须从样本边界开始，且所有省略样本的快照均为零。
+
+[`kernel/mla_bsnd_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_bsnd_metadata.hpp) 检查地址、对齐、地址加法、编译 dtype 和实际 blockDim；每个 Cube/Vector 使用同一只读记录/长度进行校验。诊断读取失败不改写输出调度，运行时 `LoadBsndKvLengthMetadata` 则执行不受 `NDEBUG` 影响的真实 Trap，调用方必须在任何 attention 输出、workspace 写入或同步之前调用。记录的 blockDim 仍须匹配实际发射；可在生成时将平台 blockDims 固定为全核发射，以支持长度更新后无需 D2H 的重生成/消费。只导出几何调度不等于实际长度计算已实现。
 
 ### 5.4 stream 与内存生命周期
 

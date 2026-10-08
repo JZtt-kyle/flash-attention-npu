@@ -12,7 +12,7 @@
 
 // Source bounds/workspace: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0,
 // fia_tiling_nonquant_mla.cpp and fia_kernel_nonquant_mla.h, as mapped in mla_schedule.cpp.
-// Validation/decoding of the private v1 dense metadata, shared by CPU tests and
+// Validation/decoding of the private BSND metadata, shared by CPU tests and
 // the device consumer. Scheduling remains in the CANN-derived mla_schedule.cpp;
 // the formulas below only check the Kernel's addressing/resource contract.
 #pragma once
@@ -39,6 +39,7 @@ enum class MlaMetadataReadStatus : uint32_t {
     InvalidEndpoints,
     InvalidWorkspace,
     InsufficientLocalMemory,
+    InvalidCacheLengths,
 };
 
 template <typename Reader>
@@ -47,39 +48,63 @@ MLA_METADATA_INLINE uint64_t ReadMetadataWide(const Reader& read, uint32_t word)
     return uint64_t(read(word)) | (uint64_t(read(word + 1)) << 32);
 }
 
-// Reader fetches one aligned 32-bit word. Check the size/header before touching
-// the payload; use only wide arithmetic until every narrowing has been checked.
-// Output is unchanged on failure. This checks compatibility and memory safety,
-// not authenticity: maxCost and inactive FD bookkeeping do not drive the Kernel.
 template <typename Reader>
-MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, uint32_t words,
-                                                            const MlaDenseMetadataContext& c,
-                                                            MlaDenseKernelSchedule& output)
+MLA_METADATA_INLINE MlaMetadataReadStatus ReadMetadataHeader(const Reader& read, uint32_t words, uint32_t expectedWords,
+                                                             uint32_t version, uint32_t kind, uint32_t dtype)
 {
     using Status = MlaMetadataReadStatus;
 #define MLA_WORD(field) read(offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
-#define MLA_WIDE(field) ReadMetadataWide(read, offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
-    if (words != kMlaDenseMetadataWords) {
+    if (words != expectedWords) {
         return Status::InvalidBuffer;
     }
-    if (MLA_WORD(magic) != kMlaMetadataMagic || MLA_WORD(version) != kMlaMetadataVersion ||
-        MLA_WORD(kind) != kMlaMetadataDenseSharedKV || MLA_WORD(wordCount) != kMlaDenseMetadataWords ||
-        MLA_WORD(reserved) != 0) {
+    if (MLA_WORD(magic) != kMlaMetadataMagic || MLA_WORD(version) != version || MLA_WORD(kind) != kind ||
+        MLA_WORD(wordCount) != expectedWords || MLA_WORD(reserved) != 0) {
         return Status::InvalidHeader;
     }
     if (MLA_WORD(status) != 0 || MLA_WORD(scheduleStatus) != 0) {
         return Status::GenerationFailed;
     }
-    if ((c.dtype != uint32_t(MlaMetadataDtype::Fp16) && c.dtype != uint32_t(MlaMetadataDtype::Bf16)) ||
-        MLA_WORD(dtype) != c.dtype) {
+    if ((dtype != uint32_t(MlaMetadataDtype::Fp16) && dtype != uint32_t(MlaMetadataDtype::Bf16)) ||
+        MLA_WORD(dtype) != dtype) {
         return Status::DtypeMismatch;
     }
+    return Status::Success;
+#undef MLA_WORD
+}
+
+struct DenseMetadataLengths {
+    MLA_METADATA_INLINE bool Check(uint32_t, uint32_t) const
+    {
+        return true;
+    }
+    MLA_METADATA_INLINE bool Covers(uint64_t end, uint64_t tasks, uint32_t, uint32_t) const
+    {
+        return end == tasks;
+    }
+};
+
+// Call only after checking the protocol header. Both versions use the same
+// fixed schedule encoding and resource bounds. Lengths supplies only the
+// snapshot check and endpoint coverage rule, never alternative tiling formulas.
+// Output is unchanged on failure. This checks compatibility and memory safety,
+// not authenticity: maxCost and inactive FD bookkeeping do not drive the Kernel.
+template <typename Reader, typename Lengths>
+MLA_METADATA_INLINE MlaMetadataReadStatus ReadMetadataSchedule(const Reader& read, const MlaDenseMetadataContext& c,
+                                                               const Lengths& lengths, MlaDenseKernelSchedule& output)
+{
+    using Status = MlaMetadataReadStatus;
+#define MLA_WORD(field) read(offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
+#define MLA_WIDE(field) ReadMetadataWide(read, offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
     const uint64_t rows = uint64_t(c.sq) * c.heads;
     if (c.heads == 0 || rows > kMlaMaxDenseRows || c.sq > kMlaMaxQueryLength || c.heads > kMlaMaxQueryHeads ||
         uint64_t(c.batch) * rows > kMlaMaxBatchRows || c.sk > kMlaMaxKvLength || MLA_WORD(schedule.bSize) != c.batch ||
         MLA_WORD(schedule.s1Size) != c.sq || MLA_WORD(schedule.gSize) != c.heads || MLA_WORD(schedule.s2Size) != c.sk ||
         MLA_WORD(schedule.n2Size) != 1 || MLA_WORD(schedule.headDim) != 512 || MLA_WORD(schedule.headDimRope) != 64) {
         return Status::ShapeMismatch;
+    }
+    // Even global empty capacities must validate every stored/current length.
+    if (!lengths.Check(c.batch, c.sk)) {
+        return Status::InvalidCacheLengths;
     }
     MlaDenseKernelSchedule s{};
     s.batch = c.batch;
@@ -138,7 +163,7 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
         }
         previous = end;
     }
-    if (previous != tasks) {
+    if (!lengths.Covers(previous, tasks, mBlocks, c.batch)) {
         return Status::InvalidEndpoints;
     }
     const uint64_t m = ((rows < s.mBaseSize ? rows : s.mBaseSize) + 15) / 16 * 16;
@@ -167,6 +192,21 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
     return Status::Success;
 #undef MLA_WORD
 #undef MLA_WIDE
+}
+
+// Reader fetches one aligned 32-bit word. Check size/header before the payload;
+// use wide arithmetic until every narrowing has been checked.
+template <typename Reader>
+MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, uint32_t words,
+                                                            const MlaDenseMetadataContext& c,
+                                                            MlaDenseKernelSchedule& output)
+{
+    const auto status = ReadMetadataHeader(read, words, kMlaDenseMetadataWords, kMlaMetadataVersion,
+                                           kMlaMetadataDenseSharedKV, c.dtype);
+    if (status != MlaMetadataReadStatus::Success) {
+        return status;
+    }
+    return ReadMetadataSchedule(read, c, DenseMetadataLengths{}, output);
 }
 } // namespace flash_attn::mla
 #undef MLA_METADATA_INLINE
