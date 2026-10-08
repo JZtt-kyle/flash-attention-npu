@@ -273,6 +273,40 @@ def test_two_kv_blocks_without_flashdecode(scheduler, oracle, artifact_dir, rati
 
 
 @pytest.mark.parametrize("ratio", (1, 2))
+def test_long_kv_without_flashdecode(scheduler, oracle, artifact_dir, ratio):
+    cases = [
+        case(b, sq, h, sk, aic, ratio)
+        for aic in range(1, 27)
+        for b in sorted({1, max(1, aic // 2), aic, aic + 1, 2 * aic + 1})
+        for sq, h in ((1, 1), (1, 17), (1, 128), (2, 128), (171, 3), (129, 128))
+        for sk in (1025, 1535, 1536, 1537, 2049, 4095, 4096, 4097, 8191, 8192, 8193, 16383, 16384)
+    ]
+    results = compare(scheduler, oracle, cases, artifact_dir, f"long-kv-{ratio}")
+    automatic = evaluate(oracle, cases, automatic_fd=True)
+    counts = dict(unchanged=0, constrained=0)
+    for shape, got, auto in zip(cases, results, automatic):
+        assert got[2] == 512
+        assert all(end == 0 for end in got[70:96])
+        if auto[5] == 0:
+            assert got == auto
+            counts["unchanged"] += 1
+        else:
+            assert got[5:8] == [0, 0, 0]
+            m_blocks = (shape[1] * shape[2] + got[1] - 1) // got[1]
+            ends = sorted(
+                {
+                    auto[18 + i] * m_blocks + auto[44 + i] + bool(auto[70 + i])
+                    for i in range(auto[3])
+                }
+            )
+            assert got[3] == len(ends)
+            assert [got[18 + i] * m_blocks + got[44 + i] for i in range(got[3])] == ends
+            counts["constrained"] += 1
+    assert all(counts.values())
+    (artifact_dir / f"long-fd-constraint-{ratio}.json").write_text(json.dumps(counts) + "\n")
+
+
+@pytest.mark.parametrize("ratio", (1, 2))
 def test_local_memory_boundaries(scheduler, ratio):
     good = case(ratio=ratio)
     assert evaluate(scheduler, [good])[0][0] == 0
@@ -297,7 +331,8 @@ def test_local_memory_boundaries(scheduler, ratio):
         ({"sk": -1}, 1),
         ({"heads": 2**23}, 2),
         ({"sq": 2**30 + 1, "heads": 1}, 2),
-        ({"sk": 1025}, 1),
+        ({"sk": 16385}, 1),
+        ({"batch": 2**27, "heads": 1, "sk": 16384, "aic": 1}, 2),
         ({"batch": 2**32}, 2),
         ({"sq": 2**63 - 1}, 2),
         ({"heads": 2**32}, 2),

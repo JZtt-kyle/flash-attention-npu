@@ -13,7 +13,7 @@
 // CalcInnerSize, CalcMBaseSize, CreateSplitInput, Split, CalcMmResSize,
 // FillTilingWorkspaceParams, CalcNormalWorkspaceSize, CalcNumBlocks, CalcScheduleMode.
 // The upstream license is reproduced in LICENSE.cann next to this file.
-// Changes: remove gert/registration, restrict inputs to dense MLA with Sk<=1024,
+// Changes: remove gert/registration, restrict inputs to the validated dense MLA range,
 // align source endpoints for FA3 num_splits=1, separate platform/launch
 // data, check arithmetic/resources before source narrowing.
 
@@ -143,7 +143,7 @@ MlaScheduleStatus Calculate(const MlaDenseShape& shape, const MlaPlatformInfo& p
     }
     // Multiplication is wide even for rejected input; never overflow the caller's int64 shape.
     uint64_t rows = uint64_t(shape.queryLength) * uint64_t(shape.queryHeads);
-    if (shape.kvLength > 1024) {
+    if (shape.kvLength > kMlaMaxKvLength) {
         return MlaScheduleStatus::UnsupportedShape;
     }
     if (rows > kMlaMaxDenseRows || shape.queryHeads > kMlaMaxQueryHeads || shape.queryLength > kMlaMaxQueryLength ||

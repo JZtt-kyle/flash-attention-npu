@@ -71,7 +71,7 @@ def test_metadata_dispatcher_schema_and_record(dtype, shape):
         ("max_seqlen_q", 2**30 + 1),
         ("max_seqlen_k", -1),
         ("max_seqlen_k", 0),
-        ("max_seqlen_k", 1025),
+        ("max_seqlen_k", 16385),
         ("num_heads_q", -1),
         ("num_heads_q", 0),
         ("num_heads_q", 2**32 - 1),

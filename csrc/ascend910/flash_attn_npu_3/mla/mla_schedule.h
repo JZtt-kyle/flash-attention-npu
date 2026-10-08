@@ -28,6 +28,8 @@ constexpr uint32_t kMlaMaxDenseRows = UINT32_MAX - 255;
 constexpr uint32_t kMlaMaxQueryHeads = UINT32_MAX / 512;
 constexpr uint32_t kMlaMaxQueryLength = UINT32_MAX / sizeof(float) + 1;
 constexpr uint64_t kMlaMaxBatchRows = INT64_MAX / (512 * 2);
+// Validated dense KV capacity; larger sequences remain explicitly unsupported.
+constexpr uint32_t kMlaMaxKvLength = 16384;
 
 struct MlaDenseShape {
     int64_t batch;
@@ -128,7 +130,7 @@ enum class MlaScheduleStatus {
 };
 
 // Pure CPU scheduling for contiguous BSND, shared 512+64 KV, Hkv=1,
-// Sq*Hq>0 within the address/field bounds above, 1<=Sk<=1024, B>0,
+// Sq*Hq>0 within the address/field bounds above, 1<=Sk<=kMlaMaxKvLength, B>0,
 // no mask/length arrays, num_splits=1.
 // FP16 and BF16 have identical scheduling. This is not a public forward or
 // metadata entry point; callers must separately validate tensor/layout/options.

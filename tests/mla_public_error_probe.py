@@ -24,7 +24,7 @@ def run(dtype_name, fault, directory):
     # The invalid final batch catches checks that accidentally inspect only
     # the first sample or only the first launch core's own work.
     heads = 171 if fault in ("m_base", "m_end") else 4
-    sk = 1024 if fault.startswith("kv_") else 17
+    sk = 16384 if fault.startswith("kv_") else 17
     device = {
         n: torch.zeros(
             (21, 3 if n in ("q", "qv") else sk, heads if n in ("q", "qv") else 1, d),

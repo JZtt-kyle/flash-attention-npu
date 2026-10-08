@@ -320,7 +320,7 @@ def test_interleaved_shapes_and_runtime_scale(probes):
 
 @pytest.mark.parametrize(
     "shape",
-    [(0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 0, 1), (1, 1, 1, 0), (1, 1, 2**23, 1), (1, 1, 1, 1025)],
+    [(0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 0, 1), (1, 1, 1, 0), (1, 1, 2**23, 1), (1, 1, 1, 16385)],
 )
 def test_unsupported_schedule(probes, shape):
     schedule, details = Schedule(), (ctypes.c_uint64 * 16)()

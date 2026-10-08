@@ -14,7 +14,7 @@
 // Init, InitOutputSingleCore, InitCalcParamsEach, CalcParams, UpdateAxisInfo,
 // FlashAttention, CreateTask, ShouldExecuteTask and ExecuteTask.
 // Specialization: nonempty contiguous BSND, Hkv=1, no mask/FD/length arrays,
-// Sq*Hq>0, 1<=Sk<=1024. The caller validates source field/address bounds and
+// Sq*Hq>0, 1<=Sk<=16384. The caller validates source field/address bounds and
 // supplies the source M-block partition, including cross-core and tail blocks.
 #pragma once
 #include "../mla_dense_params.h"

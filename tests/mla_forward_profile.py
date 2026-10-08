@@ -23,34 +23,14 @@ from tests.mla_cann_baseline import (
     environment,
     make_inputs,
 )
-from tests.mla_dense_profile import CASES
-
-
-# Fixed M04c1 additions: row boundaries, adjusted M and per-core task-ring reuse.
-S1G_CASES = [
-    ((1, 257, 1, 257), None),
-    ((2, 7, 73, 65), None),
-    ((1, 4, 128, 512), None),
-    ((2, 171, 3, 511), None),
-    ((10, 3, 86, 65), None),
-    ((1, 129, 128, 33), None),
-]
-
-# Fixed M04c2 additions, selected before sampling. CANN may automatically use
-# FD; FA3 num_splits=1 uses complete M blocks on each core at the same Sk.
-KV_CASES = [
-    ((2, 1, 8, 513), None),
-    ((2, 1, 8, 513), 0.23),
-    ((1, 7, 16, 769), None),
-    ((1, 1, 128, 1024), None),
-    ((2, 2, 128, 1023), None),
-    ((10, 3, 86, 769), None),
-    ((21, 171, 3, 1024), None),
-]
+from tests.mla_profile_cases import CASES, KV_CASES, LONG_KV_CASES, S1G_CASES
 
 
 def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CASES):
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
+    timed_cpu_threads = torch.get_num_threads()
+    reference_cpu_threads = int(os.environ.get("MLA_FORWARD_REFERENCE_THREADS", timed_cpu_threads))
+    assert reference_cpu_threads > 0
     vendor = check_vendor_configuration(vendor)
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=False)
@@ -105,7 +85,13 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
                 **device, softmax_scale=scale, num_splits=1, return_attn_probs=True
             )
         source = native[-1]()
-        refs = mla_reference_pair(**cpu, softmax_scale=scale)
+        # The long-KV CPU oracle is outside every timed region. Restore the
+        # caller's thread count even on failure, before any warmup or sampling.
+        try:
+            torch.set_num_threads(reference_cpu_threads)
+            refs = mla_reference_pair(**cpu, softmax_scale=scale)
+        finally:
+            torch.set_num_threads(timed_cpu_threads)
         for i, name in enumerate(("out", "lse")):
             if sk <= 512:
                 torch.testing.assert_close(actual[i].cpu(), source[i].cpu(), rtol=0, atol=0)
@@ -161,6 +147,7 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
         else names
     )
     snapshot("npu-before.log")
+    assert torch.get_num_threads() == timed_cpu_threads
     for index in range(len(cases)):
         for _ in range(5):
             for name in wall_names:
@@ -302,6 +289,8 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
         rounds=5,
         wall_iterations=20,
         profiler_iterations=10,
+        reference_cpu_threads=reference_cpu_threads,
+        timed_cpu_threads=timed_cpu_threads,
         timing="public call through device completion, including validation, scheduling, output/workspace allocation and launch; input H2D excluded on both paths",
         kernel_csv=str(csvs[0]),
         raw_kernel_csv=str(raw_csvs[0]),
@@ -321,5 +310,6 @@ if __name__ == "__main__":
         os.environ.get("MLA_FORWARD_METADATA_REUSE") == "1",
         CASES
         + (S1G_CASES if os.environ.get("MLA_FORWARD_S1G_MULTIBLOCK") == "1" else [])
-        + (KV_CASES if os.environ.get("MLA_FORWARD_KV_MULTIBLOCK") == "1" else []),
+        + (KV_CASES if os.environ.get("MLA_FORWARD_KV_MULTIBLOCK") == "1" else [])
+        + (LONG_KV_CASES if os.environ.get("MLA_FORWARD_LONG_KV") == "1" else []),
     )

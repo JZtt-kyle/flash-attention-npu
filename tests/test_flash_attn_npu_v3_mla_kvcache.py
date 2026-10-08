@@ -145,7 +145,7 @@ def test_public_record_matches_host(probe, dtype, shape):
         ("max_seqlen_q", 2**30 + 1),
         ("max_seqlen_q", 2**30 - 63),
         ("max_seqlen_k", 0),
-        ("max_seqlen_k", 1025),
+        ("max_seqlen_k", 16385),
         ("num_heads_q", 0),
         ("num_heads_q", 2**23),
         ("num_heads_kv", 2),

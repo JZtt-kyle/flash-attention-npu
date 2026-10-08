@@ -290,7 +290,7 @@ def test_device_failure_status(probe, dtype):
         ({"batch": 0}, 1),
         ({"sq": -1}, 1),
         ({"heads": 2**23}, 2),
-        ({"sk": 1025}, 1),
+        ({"sk": 16385}, 1),
         ({"batch": 2**32}, 2),
         ({"sq": 2**63 - 1}, 2),
         ({"aic": 0}, 3),
@@ -319,6 +319,19 @@ def test_two_kv_block_source_schedules(probe, dtype, oracle):
     compare(probe, cases, dtype, oracle, "two-kv-blocks")
 
 
+@pytest.mark.parametrize("dtype", (1, 2))
+def test_long_kv_source_schedules(probe, dtype, oracle):
+    cases = [
+        case(b, sq, h, sk)
+        for b, (sq, h), sk in itertools.product(
+            (1, 2, 10, 20, 21, 41),
+            ((1, 17), (2, 128), (171, 3), (129, 128)),
+            (1025, 1536, 4097, 8192, 8193, 16384),
+        )
+    ]
+    compare(probe, cases, dtype, oracle, "long-kv")
+
+
 @pytest.mark.parametrize("dtype", (0, 3, 0xFFFFFFFF))
 def test_unsupported_dtype(probe, dtype):
     assert compare(probe, [case()], dtype, name="dtype")[0][5:7] == [1, 0]
@@ -333,7 +346,7 @@ def test_repeated_overwrite_and_streams(probe):
             for iteration in range(4):
                 for c in (
                     case(batch=2, heads=8, sk=257),
-                    case(sk=1025),
+                    case(sk=16385),
                     case(sq=7, heads=16, sk=65),
                 ):
                     host = enqueue(probe, arguments(c, 1 + iteration % 2), storage, worker=i)
@@ -345,7 +358,7 @@ def test_repeated_overwrite_and_streams(probe):
 
 
 @pytest.mark.parametrize("dtype", (1, 2))
-@pytest.mark.parametrize("sk", (1, 17, 65, 257, 512, 513, 1024))
+@pytest.mark.parametrize("sk", (1, 17, 65, 257, 512, 513, 1024, 1025, 8193, 16384))
 def test_device_cache_lengths(probe, dtype, sk):
     # Nonzero, only 4-byte-aligned offset, with a batch spanning multiple cores.
     batch = 2 * probe["platform"].aic + 1

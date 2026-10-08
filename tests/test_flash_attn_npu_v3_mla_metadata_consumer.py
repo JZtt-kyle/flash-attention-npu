@@ -314,10 +314,22 @@ def test_two_kv_blocks(consumer, dtype):
         assert consume(consumer, record, context)[0] == 0
 
 
+@pytest.mark.parametrize("dtype", (1, 2))
+def test_long_kv(consumer, dtype):
+    shapes = itertools.product(
+        (1, 2, 10, 20, 21, 41), ((1, 17), (2, 128), (171, 3)), (1025, 1536, 4097, 8192, 8193, 16384)
+    )
+    for b, (sq, h), sk in shapes:
+        record, context = make_record(consumer, (b, sq, h, sk), dtype)
+        assert record[16] == 512 and record[103:106] == [0, 0, 0]
+        assert consume(consumer, record, context)[0] == 0
+
+
 @pytest.mark.parametrize(
     "word,value,expected", [(16, 1024, 7), (75, 1, 8), (103, 1, 7), (367, 16384, 9)]
 )
-def test_reject_split_or_wrong_workspace_for_two_kv_blocks(consumer, word, value, expected):
-    record, context = make_record(consumer, (2, 171, 3, 1024))
+@pytest.mark.parametrize("sk", (1024, 8193, 16384))
+def test_reject_split_or_wrong_workspace_for_kv_blocks(consumer, word, value, expected, sk):
+    record, context = make_record(consumer, (2, 171, 3, sk))
     record[word] = value
     assert consume(consumer, record, context)[0] == expected

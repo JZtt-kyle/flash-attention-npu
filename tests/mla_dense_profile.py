@@ -18,37 +18,48 @@ import torch_npu
 
 from tests.mla_cann_baseline import CannCall, check_vendor_configuration, environment
 from tests.mla_dense_build import ROOT, build_probes
+from tests.mla_profile_cases import CASES, KV_CASES, LONG_KV_CASES, S1G_CASES
 from tests.test_flash_attn_npu_v3_mla_dense import check_case, launch, load_probes, make_case
 
 
-CASES = [
-    ((2, 1, 8, 257), None),
-    ((2, 1, 8, 257), 0.23),
-    ((1, 7, 16, 65), None),
-    ((1, 1, 128, 512), None),
-    ((2, 2, 128, 511), None),
-]
 NAMES = ("oracle", "migrated", "native_cann")
 
 
-def profile(directory, vendor):
-    vendor = check_vendor_configuration(vendor)
+def profile(directory, vendor=None, dtype_name="fp16", *, cases=CASES, source_only=False):
+    if not source_only:
+        vendor = check_vendor_configuration(vendor)
     directory = Path(directory).resolve()
-    probes = load_probes(build_probes(directory), directory)
+    dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
+    probes = load_probes(build_probes(directory, dtype_name), directory, dtype)
     device = torch.npu.get_device_name(0)
     assert torch.npu.device_count() == 1
-    cases = [make_case(probes, *shape, scale=scale) for shape, scale in CASES]
-    native = [CannCall(case["device"], scale=case["scale"]) for case in cases]
-    for case, call in zip(cases, native):
-        check_case(probes, case)
-        result = call()
-        torch.npu.synchronize()
-        for actual, expected in zip(result, case["outputs"]["migrated"]):
-            torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
-    source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
-    (directory / "native-environment.json").write_text(
-        json.dumps(environment(source, vendor), indent=2) + "\n"
+    cases = [make_case(probes, *shape, scale=scale) for shape, scale in cases]
+    names = ("oracle", "migrated") if source_only else NAMES
+    native = (
+        [] if source_only else [CannCall(case["device"], scale=case["scale"]) for case in cases]
     )
+    if source_only:
+        # Independent mathematical acceptance is a separate test suite. Here
+        # both implementations consume the exact same non-FD schedule/inputs.
+        for case in cases:
+            assert case["details"][15] == 0 and not any(case["schedule"].s_end)
+            for _ in range(3):
+                for name in names:
+                    launch(probes[0][name], case, name)
+                torch.npu.synchronize()
+                for actual, expected in zip(case["outputs"]["migrated"], case["outputs"]["oracle"]):
+                    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+    else:
+        for case, call in zip(cases, native):
+            check_case(probes, case)
+            result = call()
+            torch.npu.synchronize()
+            for actual, expected in zip(result, case["outputs"]["migrated"]):
+                torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+        source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
+        (directory / "native-environment.json").write_text(
+            json.dumps(environment(source, vendor), indent=2) + "\n"
+        )
 
     def snapshot(name):
         (directory / name).write_text(subprocess.check_output(["npu-smi", "info"], text=True))
@@ -60,12 +71,12 @@ def profile(directory, vendor):
         return cases[index]["outputs"][name]
 
     def order(round_id):
-        return NAMES if round_id % 2 == 0 else NAMES[::-1]
+        return names if round_id % 2 == 0 else names[::-1]
 
     snapshot("npu-before.log")
     for index in range(len(cases)):
         for _ in range(5):
-            for name in NAMES:
+            for name in names:
                 result = call(index, name)
                 torch.npu.synchronize()
     samples = []
@@ -94,7 +105,7 @@ def profile(directory, vendor):
     with profiler.profile(
         activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU],
         schedule=profiler.schedule(
-            wait=0, warmup=1, active=len(cases) * 5 * 10 * len(NAMES), repeat=1
+            wait=0, warmup=1, active=len(cases) * 5 * 10 * len(names), repeat=1
         ),
         on_trace_ready=profiler.tensorboard_trace_handler(str(trace)),
         experimental_config=profiler._ExperimentalConfig(
@@ -130,9 +141,10 @@ def profile(directory, vendor):
     raw.sort(key=lambda row: Decimal(row["Task Start Time(us)"].strip()))
     assert len(rows) == len(raw) == len(labels), (len(rows), len(raw), len(labels))
     assert len({row["Device_id"] for row in rows}) == 1
+    suffix = "_bf16_probe" if dtype_name == "bf16" else "_probe"
     prefixes = dict(
-        oracle="cann_dense_probe",
-        migrated="mla_dense_probe",
+        oracle="cann_dense" + suffix,
+        migrated="mla_dense" + suffix,
         native_cann="FusedInferAttentionScore",
     )
     for row, source_row, label in zip(rows, raw, labels):
@@ -148,10 +160,27 @@ def profile(directory, vendor):
         assert 0 < label["kernel_us"] < 1e6
     results = []
     for index, case in enumerate(cases):
+        schedule = case["schedule"]
         result = dict(
-            shape=case["shape"], scale=case["scale"], native_call=native[index].description()
+            shape=case["shape"],
+            scale=case["scale"],
+            source_schedule=dict(
+                m=schedule.m_base,
+                n=schedule.s2_base,
+                cores=schedule.cores,
+                block_dim=schedule.block_dim,
+                endpoints=list(
+                    zip(
+                        schedule.b_end[: schedule.cores],
+                        schedule.m_end[: schedule.cores],
+                        schedule.s_end[: schedule.cores],
+                    )
+                ),
+            ),
         )
-        for name in NAMES:
+        if not source_only:
+            result["native_call"] = native[index].description()
+        for name in names:
             kernels = [s for s in labels if s["case"] == index and s["name"] == name]
             walls = [s for s in samples if s["case"] == index and s["name"] == name]
             result[name] = dict(
@@ -169,13 +198,27 @@ def profile(directory, vendor):
         result["kernel_ratio_to_source_probe"] = (
             result["migrated"]["median_kernel_us"] / result["oracle"]["median_kernel_us"]
         )
-        result["kernel_ratio_to_native_cann"] = (
-            result["migrated"]["median_kernel_us"] / result["native_cann"]["median_kernel_us"]
-        )
+        if not source_only:
+            result["kernel_ratio_to_native_cann"] = (
+                result["migrated"]["median_kernel_us"] / result["native_cann"]["median_kernel_us"]
+            )
         results.append(result)
     snapshot("npu-after.log")
     report = dict(
-        scope="Standalone dense Kernel diagnostics; preallocated probes versus native CANN including its output allocation and public dispatch. Not FA3 or metadata E2E.",
+        scope=(
+            "Migrated non-FD Kernel versus pinned source non-FD Kernel with identical schedules; preallocated probe call times are not public metadata E2E."
+            if source_only
+            else "Standalone dense Kernel diagnostics; preallocated probes versus native CANN including its output allocation and public dispatch. Not FA3 or metadata E2E."
+        ),
+        dtype=dtype_name,
+        source_only=source_only,
+        source_build_manifest=str(directory / "build-manifest.json"),
+        accuracy="O/LSE elementwise source equality; independent mathematical tests are separate"
+        if source_only
+        else "source equality and independent mathematical references",
+        cpu_affinity=sorted(os.sched_getaffinity(0)),
+        cpu_threads=torch.get_num_threads(),
+        pid=os.getpid(),
         device=device,
         visible_devices=os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
         torch=torch.__version__,
@@ -196,4 +239,13 @@ def profile(directory, vendor):
 
 
 if __name__ == "__main__":
-    profile(os.environ["MLA_DENSE_ARTIFACT_DIR"], os.environ["MLA_CANN_VENDOR"])
+    profile(
+        os.environ["MLA_DENSE_ARTIFACT_DIR"],
+        os.environ.get("MLA_CANN_VENDOR"),
+        os.environ.get("MLA_DENSE_DTYPE", "fp16"),
+        source_only=os.environ.get("MLA_DENSE_SOURCE_ONLY") == "1",
+        cases=CASES
+        + (S1G_CASES if os.environ.get("MLA_FORWARD_S1G_MULTIBLOCK") == "1" else [])
+        + (KV_CASES if os.environ.get("MLA_FORWARD_KV_MULTIBLOCK") == "1" else [])
+        + (LONG_KV_CASES if os.environ.get("MLA_FORWARD_LONG_KV") == "1" else []),
+    )

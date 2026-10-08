@@ -76,8 +76,8 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadDenseMetadata(const Reader& read, 
     }
     const uint64_t rows = uint64_t(c.sq) * c.heads;
     if (c.batch == 0 || rows == 0 || rows > kMlaMaxDenseRows || c.sq > kMlaMaxQueryLength ||
-        c.heads > kMlaMaxQueryHeads || uint64_t(c.batch) * rows > kMlaMaxBatchRows || c.sk == 0 || c.sk > 1024 ||
-        MLA_WORD(schedule.bSize) != c.batch || MLA_WORD(schedule.s1Size) != c.sq ||
+        c.heads > kMlaMaxQueryHeads || uint64_t(c.batch) * rows > kMlaMaxBatchRows || c.sk == 0 ||
+        c.sk > kMlaMaxKvLength || MLA_WORD(schedule.bSize) != c.batch || MLA_WORD(schedule.s1Size) != c.sq ||
         MLA_WORD(schedule.gSize) != c.heads || MLA_WORD(schedule.s2Size) != c.sk || MLA_WORD(schedule.n2Size) != 1 ||
         MLA_WORD(schedule.headDim) != 512 || MLA_WORD(schedule.headDimRope) != 64) {
         return Status::ShapeMismatch;
