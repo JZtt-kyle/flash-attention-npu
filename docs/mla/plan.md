@@ -2,7 +2,64 @@
 
 本文件只记录迭代顺序、每步产物与完成条件。当前公开能力、最近一次闭环和复现命令见 [status](status.md)，目标范围、协议与验收口径见 [design](design.md)。步骤编号沿用历史，M04c 在 M05 闭环后执行；不按编号重新排序。
 
-已完成 M06c2a1，唯一下一步为 **M06c2a2：TND v3 设备校验消费者**。原 M06c2a 已拆为生成（c2a1）与消费（c2a2）。后续继续在已确认范围内按下表执行。
+已完成 M06c2a1，唯一下一步为 **M06c2a2：TND v3 设备校验消费者**。按已确认范围推进；独立组件完成不代表公开入口开放。先读 [下一步完成条件](#下一步m06c2a2)，历史步骤保留在 [已完成步骤](#已完成步骤)。
+
+## M06：非分页长度、TND 与 stride
+
+512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、显式 `num_splits=1`。BSND 每样本 KV 容量 `Sk` 与 TND 每段长度上界 `maxKvLength` 均为 0..16384；TND 总 Q/KV 容量各自不超过 `INT32_MAX`，并受 [字段、地址及资源边界](design.md#62-调度字段与边界) 约束。先 BSND 实际 KV 长度，再紧凑 TND，再区分 used 与分配长度，最后外层 stride。PA、mask、FD、192/128 与调度选项仍按后续步骤推进。
+
+每行单独验收、提交。BSND 按 b1 调度 → b2a 生成 → b2b 消费 → b3 计算 → b4 公开接入完成；TND 沿用同一顺序，c2a 已拆为生成（c2a1）与消费（c2a2）。
+
+### 下一步：M06c2a2
+
+输入为 c2a1 的 [v3 记录](design.md#54-v3紧凑-tnd-记录与独立-aicpu-生成) 与当次两组 `int32[B+1]` 前缀和，Q/KV 均为紧凑 TND。产物是独立设备校验消费者及其验收驱动，公开 TND 继续拒绝；attention 寻址留给 c2b，公开接入留给 c3。
+
+- 校验版本、类型、精确字数、dtype、总容量/max 上界、每样本起点与段长、当前前缀和、调度端点、平台及资源；保留变长 M 块和零成本后缀规则。覆盖 B=0、总 Q/KV 为零、空样本和记录/输入 offset。
+- v1/v2、损坏记录及前缀变更在 release 构建中触发真实 Trap；在 attention 输出、workspace 写入和同步之前拒绝，无长度 D2H 或主机等待。异常用独立进程验收。
+- 验证只读复用、跨 stream 与释放/分配复用，回归旧 metadata 和普通 FA3。按根目录约定完成适用检查后更新 status 并提交一次；used、TND Q + BSND KV、设备寻址与公开前向分别留在后续步骤。
+
+### M06 步骤表
+
+表中记录各步完成时的接入边界；当前公开能力以 [status](status.md#当前可调用能力) 为准。
+
+| 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
+| --- | --- | --- | --- |
+| M06a | 已完成（文档） | 源依赖核对与实施拆分 | 源锚点、官方签名、交接证据与步骤边界一致 |
+| M06b1 | 已完成 | 独立 BSND 实际 KV 长度 CPU 调度，Q 使用整容量 | 原生非 FD/无 split 映射分开对照，零尾部、退化 dense、非法长度及 sanitizer 通过 |
+| M06b2a | 已完成 | v2 序列化与独立 AICPU 生成，不接前向 | CPU/AICPU/固定源一致，失败清零、对齐/字数/重叠、生命周期、构建及旧路径回归；生成耗时诊断 |
+| M06b2b | 已完成 | BSND 实际长度记录的设备校验消费者；该步未开放公开短长度 | 版本/类型/字数、快照与当前长度、调度/资源均校验；省略尾部逐样本为零；损坏/过期记录真实 Trap，拒绝不写输出；只读复用、生命周期、旧 dense 与普通 FA3 metadata 回归通过 |
+| M06b3 | 已完成 | 按样本实际 KV 长度执行的 BSND Kernel / Block / Tile，独立驱动 | 双 dtype 短 KV、跨 S2 块、混合/全零长度、端点外空行与 poison padding 精度；源组件性能及 dense 回归通过 |
+| M06b4 | 已完成 | 公开只读 BSND `cache_seqlens`、metadata 生成/复用 | None/整数/int32 tensor、真实/fake/C++、有/无/过期记录、跨流与 compile；普通 FA3 及适用公开 E2E 达标 |
+| M06c1 | 已完成 | 紧凑 TND 前缀和解析、起点与 CPU 调度 | T01 的起始 0、单调性、尾值、计数、空样本、总容量/max 上界/溢出；BSND 等价与固定源累计长度对照通过 |
+| M06c2a1 | 已完成 | TND v3 记录与独立 AICPU 生成；不接消费者或公开 TND | 解析与 c1 一致，起点/长度/总容量/max 上界与调度完整保存；CPU/AICPU/固定源一致，失败清零、缓冲边界、生命周期、构建与普通 FA3 metadata 回归通过；生成耗时诊断 |
+| M06c2a2 | 唯一下一步 | TND v3 设备校验消费者；公开 TND 仍拒绝 | 见 [下一步完成条件](#下一步m06c2a2)：记录/前缀/资源校验、真实 Trap、拒绝不写输出、生命周期与回归 |
+| M06c2b | 待开始 | 紧凑 TND Q/KV 和 TND Q + BSND KV 设备寻址，独立驱动 | 双 dtype T01、多 query/跨样本尾块/零样本/offset、O/LSE 布局；源精度/组件性能与 BSND 回归通过 |
+| M06c3 | 待开始 | 公开 varlen 及 TND query 只读 kvcache / metadata | varlen 内部生成、kvcache 按原签名复用；真实/fake/C++、空总容量、生命周期、普通 FA3 与适用 E2E 达标 |
+| M06d1 | 待开始 | BSND/TND 实际 Q/KV 使用长度 CPU 归一与调度 | U01/T01 used 小于分配长度；起点不随 used 重排；源对照与 sanitizer 通过 |
+| M06d2 | 待开始 | used 的 AICPU、设备消费与独立 Kernel 链路 | 有效行/零 Q/KV/poison padding/长度更新/Trap；仅检查官方定义输出区，组件性能与 metadata/普通 FA3 回归通过 |
+| M06d3 | 待开始 | varlen `seqused_q/k` 与内部 BSND Q-used 接入 | 不增加公共参数，签名/真实/fake/C++/有效输出/普通 FA3 与适用 E2E 通过；无公开等价的 BSND Q-used 只验收内部入口 |
+| M06e1 | 待开始 | BSND 最后一维连续的合法外层 stride | Q/qv/K/V 独立 batch/row/head stride/offset、BNSD 视图与 U01；无完整 cache 复制，精度/性能/普通 FA3 通过 |
+| M06e2 | 待开始 | TND 合法外层 stride，完成 M06 | ST01 token/head stride、NTD 视图、独立 offset、T01/used/BSND cache 组合；精度/性能/普通 FA3 通过 |
+
+M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[源调度与零尾部](design.md#62-调度字段与边界)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定性能矩阵与阶段边界)。生成记录、校验记录和执行 attention 分别验收；全部样本实际长度为零也不等于全局空容量。
+
+## M07 之后
+
+以下为顺序和完成边界；进入每项前将过大的步骤拆为可独立验收的提交，不提前开放未验收组合。
+
+| 步骤 | 状态 | 产物 | 完成条件 |
+| --- | --- | --- | --- |
+| M07 | 待开始 | 512+64 ND paged cache | BSND/TND query、乱序页表、尾页、源有效页大小、K/V 独立首维 stride；精度及 PA E2E 通过 |
+| M08 | 待开始 | 512+64 右下 causal | Sq<Sk/Sq>Sk、多 query、空行、PA/TND/metadata；精度及 E2E 通过 |
+| M09 | 待开始 | 512+64 局部窗口 | 有限/单侧窗口、causal 叠加、FA3 归一化和页边界；精度及 E2E 通过 |
+| M10 | 待开始 | 512+64 split-KV 与合并 | 源分割/合并流程，自动/1/显式 split、dense/TND/PA/空 split、O/LSE/accumulator/metadata；长 KV E2E 通过 |
+| M11 | 待开始 | 192/128 prefill BSND 前向与 metadata | 源通用非量化路径，qv=None、独立 K/V、分组头/真实 stride；O/LSE 及 E2E 通过 |
+| M12 | 待开始 | prefill TND 与实际长度 | 非均匀长度、seqused、边界/GQA 与 reference 一致，精度及 E2E 通过 |
+| M13 | 待开始 | prefill ND paged cache | 页寻址、内容/RoPE 真实 stride、精度及 PA E2E 通过 |
+| M14 | 待开始 | prefill mask 与 split 组合 | 右下 causal/window、split 合并及 metadata 组合；拆分后逐项验收 |
+| M15 | 待开始 | MLA softcap 与调度选项 | softcap/has_softcap、pack_gqa、sm_margin 的有效语义与资源校验；适用 E2E 通过 |
+| M16 | 待开始 | 图执行与 metadata 生命周期 | eager/图一致，图内更新长度并重算，跨层复用、多 stream、fake/真实输出一致 |
+| M17 | 待开始 | 全范围验收与用户示例 | 必迁能力均有用例，精度/逐例 metadata E2E/普通 FA3 回归通过；核对 910B/C 实现及资源兼容，实机验收仍只要求 910B；README 说明调用与边界 |
 
 ## 已完成步骤
 
@@ -35,51 +92,6 @@
 | M04c2 | 已完成 | KV 513..1024 与无 split 端点映射 | 保留 nUpdate/PV 原子加/事件；同调度源精度及适用 E2E 通过 |
 | M04c3 | 已完成 | KV 上界扩展至 16384 | 含 8193 尾块，固定 26 组同路径组件对照及适用公开 E2E 通过 |
 | M04c4 | 已完成 | 全局空 batch/query/KV 容量 | 空 shape、O/LSE、记录校验、真实 Trap、普通 FA3 及适用 E2E 通过 |
-
-## M06：非分页长度、TND 与 stride
-
-512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、显式 `num_splits=1`，KV 容量仍为 0..16384。先 BSND 实际 KV 长度，再紧凑 TND，再区分 used 与分配长度，最后外层 stride。PA、mask、FD、192/128 与调度选项仍按后续步骤推进。
-
-每行单独验收、提交；独立组件完成不代表公开能力开放。b2 已拆为生成（b2a）与消费（b2b），b3 才接实际长度计算，b4 才接公开短长度。
-
-| 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
-| --- | --- | --- | --- |
-| M06a | 已完成（文档） | 源依赖核对与实施拆分 | 源锚点、官方签名、交接证据与步骤边界一致 |
-| M06b1 | 已完成 | 独立 BSND 实际 KV 长度 CPU 调度，Q 使用整容量 | 原生非 FD/无 split 映射分开对照，零尾部、退化 dense、非法长度及 sanitizer 通过 |
-| M06b2a | 已完成 | v2 序列化与独立 AICPU 生成，不接前向 | CPU/AICPU/固定源一致，失败清零、对齐/字数/重叠、生命周期、构建及旧路径回归；生成耗时诊断 |
-| M06b2b | 已完成 | BSND 实际长度记录的设备校验消费者；公开短长度继续拒绝 | 版本/类型/字数、快照与当前长度、调度/资源均校验；省略尾部逐样本为零；损坏/过期记录真实 Trap，拒绝不写输出；只读复用、生命周期、旧 dense 与普通 FA3 metadata 回归通过 |
-| M06b3 | 已完成 | 按样本实际 KV 长度执行的 BSND Kernel / Block / Tile，独立驱动 | 双 dtype 短 KV、跨 S2 块、混合/全零长度、端点外空行与 poison padding 精度；源组件性能及 dense 回归通过 |
-| M06b4 | 已完成 | 公开只读 BSND `cache_seqlens`、metadata 生成/复用 | None/整数/int32 tensor、真实/fake/C++、有/无/过期记录、跨流与 compile；普通 FA3 及适用公开 E2E 达标 |
-| M06c1 | 已完成 | 紧凑 TND 前缀和解析、起点与 CPU 调度 | T01 的起始 0、单调性、尾值、计数、空样本、总容量/max 上界/溢出；BSND 等价与固定源累计长度对照通过 |
-| M06c2a1 | 已完成 | TND v3 记录与独立 AICPU 生成；不接消费者或公开 TND | 解析与 c1 一致，起点/长度/总容量/max 上界与调度完整保存；CPU/AICPU/固定源一致，失败清零、缓冲边界、生命周期、构建与普通 FA3 metadata 回归通过；生成耗时诊断 |
-| M06c2a2 | 唯一下一步 | TND v3 设备校验消费者；公开 TND 仍拒绝 | 起点/有效长度/当前前缀和/调度/资源均校验；旧/篡改/变更记录真实 Trap，拒绝不写输出，无 D2H；只读复用、生命周期及旧 metadata/普通 FA3 回归通过 |
-| M06c2b | 待开始 | 紧凑 TND Q/KV 和 TND Q + BSND KV 设备寻址，独立驱动 | 双 dtype T01、多 query/跨样本尾块/零样本/offset、O/LSE 布局；源精度/组件性能与 BSND 回归通过 |
-| M06c3 | 待开始 | 公开 varlen 及 TND query 只读 kvcache / metadata | varlen 内部生成、kvcache 按原签名复用；真实/fake/C++、空总容量、生命周期、普通 FA3 与适用 E2E 达标 |
-| M06d1 | 待开始 | BSND/TND 实际 Q/KV 使用长度 CPU 归一与调度 | U01/T01 used 小于分配长度；起点不随 used 重排；源对照与 sanitizer 通过 |
-| M06d2 | 待开始 | used 的 AICPU、设备消费与独立 Kernel 链路 | 有效行/零 Q/KV/poison padding/长度更新/Trap；仅检查官方定义输出区，组件性能与 metadata/普通 FA3 回归通过 |
-| M06d3 | 待开始 | varlen `seqused_q/k` 与内部 BSND Q-used 接入 | 不增加公共参数，签名/真实/fake/C++/有效输出/普通 FA3 与适用 E2E 通过；无公开等价的 BSND Q-used 只验收内部入口 |
-| M06e1 | 待开始 | BSND 最后一维连续的合法外层 stride | Q/qv/K/V 独立 batch/row/head stride/offset、BNSD 视图与 U01；无完整 cache 复制，精度/性能/普通 FA3 通过 |
-| M06e2 | 待开始 | TND 合法外层 stride，完成 M06 | ST01 token/head stride、NTD 视图、独立 offset、T01/used/BSND cache 组合；精度/性能/普通 FA3 通过 |
-
-M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[源调度与零尾部](design.md#62-调度字段与边界)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定-dense-矩阵与阶段边界)。不能因 b1/b2a 已生成真实调度就绕过 b2b/b3，或把全部样本零长度当作全局空容量。
-
-## M07 之后
-
-以下为顺序和完成边界；进入每项前将过大的步骤拆为可独立验收的提交，不提前开放未验收组合。
-
-| 步骤 | 状态 | 产物 | 完成条件 |
-| --- | --- | --- | --- |
-| M07 | 待开始 | 512+64 ND paged cache | BSND/TND query、乱序页表、尾页、源有效页大小、K/V 独立首维 stride；精度及 PA E2E 通过 |
-| M08 | 待开始 | 512+64 右下 causal | Sq<Sk/Sq>Sk、多 query、空行、PA/TND/metadata；精度及 E2E 通过 |
-| M09 | 待开始 | 512+64 局部窗口 | 有限/单侧窗口、causal 叠加、FA3 归一化和页边界；精度及 E2E 通过 |
-| M10 | 待开始 | 512+64 split-KV 与合并 | 源分割/合并流程，自动/1/显式 split、dense/TND/PA/空 split、O/LSE/accumulator/metadata；长 KV E2E 通过 |
-| M11 | 待开始 | 192/128 prefill BSND 前向与 metadata | 源通用非量化路径，qv=None、独立 K/V、分组头/真实 stride；O/LSE 及 E2E 通过 |
-| M12 | 待开始 | prefill TND 与实际长度 | 非均匀长度、seqused、边界/GQA 与 reference 一致，精度及 E2E 通过 |
-| M13 | 待开始 | prefill ND paged cache | 页寻址、内容/RoPE 真实 stride、精度及 PA E2E 通过 |
-| M14 | 待开始 | prefill mask 与 split 组合 | 右下 causal/window、split 合并及 metadata 组合；拆分后逐项验收 |
-| M15 | 待开始 | MLA softcap 与调度选项 | softcap/has_softcap、pack_gqa、sm_margin 的有效语义与资源校验；适用 E2E 通过 |
-| M16 | 待开始 | 图执行与 metadata 生命周期 | eager/图一致，图内更新长度并重算，跨层复用、多 stream、fake/真实输出一致 |
-| M17 | 待开始 | 全范围验收与用户示例 | 必迁能力均有用例，精度/逐例 metadata E2E/普通 FA3 回归通过；核对 910B/C 实现及资源兼容，实机验收仍只要求 910B；README 说明调用与边界 |
 
 ## 每步完成条件
 
