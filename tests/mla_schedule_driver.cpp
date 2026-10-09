@@ -18,6 +18,12 @@ struct Input {
     uint64_t lengthCount = 0;
     std::vector<int32_t> kvLengths;
 #endif
+#ifdef TND_LENGTHS
+    int64_t totalQuery, totalKv;
+    bool hasQuery = false;
+    uint64_t queryCount = 0;
+    std::vector<int32_t> cuQuery;
+#endif
 };
 
 template <class T>
@@ -63,6 +69,28 @@ struct LengthTensor {
 struct TensorSlot {
     const LengthTensor* tensor = nullptr;
 };
+#endif
+#ifdef TND_LENGTHS
+enum class FiaLayout {
+    TND,
+    NTD,
+    BSND
+};
+enum class KvStorageMode {
+    BATCH_CONTINUOUS,
+    PAGE_ATTENTION
+};
+// Only the state read/written by the pinned ProcessKVActualSeqLoop body.
+class FiaInfoParser {
+  public:
+    bool antiQuantFlag_ = false, needInit_ = false, isSameActualseq_ = true;
+    FiaLayout qLayout_ = FiaLayout::TND;
+    KvStorageMode kvStorageMode_ = KvStorageMode::BATCH_CONTINUOUS;
+    uint32_t s1Size_ = 0;
+    int64_t s2Size_ = 0, maxActualseq_ = 0;
+    void ProcessKVActualSeqLoop(const int64_t*, uint32_t);
+};
+#include "source_parser.inc"
 #endif
 struct FiaInfo {
     uint32_t bSize, n2Size = 1, s1Size, gSize;
@@ -173,6 +201,22 @@ void Run(const Input& in)
     // Oracle input shim owns true int64 storage, as required by the unmodified
     // pinned CreateSplitInput. It does not share the migrated length parser.
     LengthTensor tensor{};
+#ifdef TND_LENGTHS
+    LengthTensor query{};
+    // The oracle owns int64 *tails*, independently of ParseTndLengths.
+    // GetS1/GetS2SeqSize below are the original cumulative-length functions.
+    query.values.assign(in.cuQuery.begin() + 1, in.cuQuery.end());
+    tensor.values.assign(in.kvLengths.begin() + 1, in.kvLengths.end());
+    FiaInfoParser parser;
+    parser.ProcessKVActualSeqLoop(tensor.values.data(), in.batch);
+    info.inputLayout = TilingKeyLayout::TND;
+    info.isAccumQSeq = info.isAccumKVSeq = true;
+    info.actualSeqLenFlag = true;
+    info.actualLenQDims = info.actualLenKvDims = in.batch;
+    info.opParamInfo.actualSeqLengthsQ.tensor = &query;
+    info.opParamInfo.actualSeqLengths.tensor = &tensor;
+    info.isSameActualseq = parser.isSameActualseq_;
+#else
     if (in.hasLengths) {
         tensor.values.assign(in.kvLengths.begin(), in.kvLengths.end());
         info.actualSeqLenFlag = true;
@@ -182,13 +226,24 @@ void Run(const Input& in)
                                                   std::not_equal_to<int64_t>()) == tensor.values.end();
     }
 #endif
+#endif
     FiaTilingNonQuantMla host{};
     host.fiaInfo_ = &info;
     host.aicNum_ = host.coreNum_ = in.aic;
     host.cvRatio_ = in.aiv / in.aic;
     host.libapiSize_ = in.libapi;
-    host.CalcInnerSize(in.sk);
     BaseInfo base{};
+#ifdef TND_LENGTHS
+    SplitParam initial{};
+    host.CreateSplitInput(base, initial);
+    info.s1Size = info.s2Size = 0;
+    for (uint32_t b = 0; b < info.bSize; ++b) {
+        info.s1Size = std::max(info.s1Size, GetS1SeqSize(b, base));
+        info.s2Size = std::max(info.s2Size, int64_t(GetS2SeqSize(b, base)));
+    }
+    base = {};
+#endif
+    host.CalcInnerSize(info.s2Size);
 #ifndef BSND_KV_LENGTHS
     base.bSize = in.batch;
     base.s1Size = in.sq;
@@ -201,11 +256,13 @@ void Run(const Input& in)
     param.s2BaseSize = host.sInnerSize_;
 #ifdef BSND_KV_LENGTHS
     host.CreateSplitInput(base, param);
+#ifndef TND_LENGTHS
     for (uint32_t b = 0; b < info.bSize; ++b) {
         if (GetS1SeqSize(b, base) != in.sq || GetS2SeqSize(b, base) != (in.hasLengths ? in.kvLengths.at(b) : in.sk)) {
             std::abort();
         }
     }
+#endif
 #endif
     SplitResult split(in.aic, host.cvRatio_);
     SplitCore(in.aic, base, param, split);
@@ -215,23 +272,53 @@ void Run(const Input& in)
         // dense prefix formula, then sum the rows assigned to each core.
         SplitContext context(base, param);
         CalcSplitInfo(context);
+#ifndef TND_LENGTHS
         const uint32_t rows = context.splitInfo.s1GBaseNum[0];
+#endif
 #ifndef BSND_KV_LENGTHS
         const uint32_t columns = context.splitInfo.s2BaseNum[0];
 #endif
         std::vector<int64_t> costs;
+#ifdef TND_LENGTHS
+        // Explicit row coordinates/costs, unlike the migrated batch-prefix formula.
+        std::vector<std::pair<uint32_t, uint32_t>> positions;
+#endif
         for (uint32_t b = 0; b < in.batch; ++b) {
             BatchCache batch{};
             CalcBatchCache(b, context, batch);
+#ifdef TND_LENGTHS
+            const uint32_t rows = context.splitInfo.s1GBaseNum[b];
+#endif
             for (uint32_t m = 0; m < rows; ++m) {
                 S1GCache row{};
                 CalcS1GCache(m, context, batch, row);
                 costs.push_back(row.s1GCost);
+#ifdef TND_LENGTHS
+                positions.emplace_back(b, m);
+#endif
             }
         }
         std::vector<uint64_t> ends;
+#ifdef TND_LENGTHS
+        std::vector<std::pair<uint32_t, uint32_t>> boundaries;
+#endif
         for (uint32_t i = 0; i < split.usedCoreNum; ++i) {
-#ifdef BSND_KV_LENGTHS
+#ifdef TND_LENGTHS
+            auto boundary = std::make_pair(split.bN2End[i], split.gS1End[i]);
+            if (split.s2End[i] != 0) {
+                ++boundary.second;
+            }
+            if (boundary.first < in.batch && boundary.second != 0 &&
+                boundary.second == context.splitInfo.s1GBaseNum[boundary.first]) {
+                ++boundary.first;
+                boundary.second = 0;
+            }
+            const uint64_t end = std::lower_bound(positions.begin(), positions.end(), boundary) - positions.begin();
+            if (ends.empty() || ends.back() != end) {
+                ends.push_back(end);
+                boundaries.push_back(boundary);
+            }
+#elif defined(BSND_KV_LENGTHS)
             uint64_t end = uint64_t(split.bN2End[i]) * rows + split.gS1End[i];
             if (split.s2End[i] > 0) {
                 ++end;
@@ -251,8 +338,16 @@ void Run(const Input& in)
                 cost += costs.at(m);
             }
             auto i = whole.usedCoreNum++;
+#ifdef TND_LENGTHS
+            // Preserve the source boundary across empty-query samples. Several
+            // batch coordinates can have the same flat row offset in TND.
+            auto boundary = boundaries.at(i);
+            whole.bN2End[i] = boundary.first;
+            whole.gS1End[i] = boundary.second;
+#else
             whole.bN2End[i] = end / rows;
             whole.gS1End[i] = end % rows;
+#endif
             whole.maxCost = std::max(whole.maxCost, cost);
             start = end;
         }
@@ -284,6 +379,16 @@ void Run(const Input& in)
     EmitArray(split.fdRes.gS1LastPartSizeOfFdHead, 26);
     EmitArray(split.fdRes.gS1IdxEndOfFdHead, 52);
     EmitArray(split.fdRes.gS1IdxEndOfFdHeadSplit, 52);
+#ifdef TND_LENGTHS
+    Emit(info.s1Size);
+    Emit(info.s2Size);
+    for (uint32_t b = 0; b < info.bSize; ++b) {
+        Emit(b == 0 ? 0 : query.values[b - 1]);
+        Emit(b == 0 ? 0 : tensor.values[b - 1]);
+        Emit(GetS1SeqSize(b, base));
+        Emit(GetS2SeqSize(b, base));
+    }
+#endif
     std::cout << "]\n";
 }
 
@@ -291,6 +396,9 @@ void Run(const Input& in)
 #include "mla_schedule.h"
 #ifdef BSND_KV_LENGTHS
 #include "mla_bsnd_schedule.h"
+#endif
+#ifdef TND_LENGTHS
+#include "mla_tnd_schedule.h"
 #endif
 #include <cstring>
 #include <type_traits>
@@ -312,11 +420,35 @@ void Run(const Input& in)
     for (uint32_t i = 0; i < kMlaMaxAic; ++i) {
         platform.blockDims[i] = in.blockDimOverride ? in.blockDimOverride : i + 1;
     }
+#ifdef TND_LENGTHS
+    MlaTndSchedule tnd;
+    tnd.lengths.maxQueryLength = 99;
+    tnd.lengths.maxKvLength = 77;
+    tnd.lengths.sequences.push_back({11, 22, 33, 44});
+    const auto beforeLengths = tnd.lengths;
+    auto& schedule = tnd.schedule;
+#else
     MlaSchedule schedule;
+#endif
     std::memset(&schedule, 0xa5, sizeof(schedule));
     std::array<unsigned char, sizeof(schedule)> before;
     std::memcpy(before.data(), &schedule, sizeof(schedule));
-#ifdef BSND_KV_LENGTHS
+#ifdef TND_LENGTHS
+    const int32_t sentinel = 1234;
+    const int32_t* cq = in.hasQuery ? (in.cuQuery.empty() ? &sentinel : in.cuQuery.data()) : nullptr;
+    const int32_t* ck = in.hasLengths ? (in.kvLengths.empty() ? &sentinel : in.kvLengths.data()) : nullptr;
+    MlaTndShape shape{in.batch, in.totalQuery, in.totalKv, in.heads, in.sq, in.sk};
+    const bool parseOnly = std::getenv("MLA_TND_PARSE_ONLY") != nullptr;
+    auto status = parseOnly ? ParseTndLengths(shape, cq, in.queryCount, ck, in.lengthCount, tnd.lengths)
+                            : BuildTndSchedule(shape, platform, cq, in.queryCount, ck, in.lengthCount, tnd);
+    if (status != MlaScheduleStatus::Success &&
+        (tnd.lengths.maxQueryLength != beforeLengths.maxQueryLength ||
+         tnd.lengths.maxKvLength != beforeLengths.maxKvLength ||
+         tnd.lengths.sequences.size() != beforeLengths.sequences.size() ||
+         std::memcmp(tnd.lengths.sequences.data(), beforeLengths.sequences.data(), sizeof(MlaTndSequence)) != 0)) {
+        std::abort();
+    }
+#elif defined(BSND_KV_LENGTHS)
     const int32_t emptyLength = 0;
     const int32_t* lengths = in.hasLengths ? (in.kvLengths.empty() ? &emptyLength : in.kvLengths.data()) : nullptr;
     auto status = std::getenv("MLA_BSND_USE_DENSE")
@@ -336,6 +468,29 @@ void Run(const Input& in)
     }
     auto& s = schedule;
     auto& w = s.workspace;
+#ifdef TND_LENGTHS
+    const auto emitLengths = [&]() {
+        Emit(tnd.lengths.maxQueryLength);
+        Emit(tnd.lengths.maxKvLength);
+        for (const auto& seq : tnd.lengths.sequences) {
+            Emit(seq.queryStart);
+            Emit(seq.kvStart);
+            Emit(seq.queryLength);
+            Emit(seq.kvLength);
+        }
+    };
+    if (parseOnly) {
+        if (std::memcmp(before.data(), &schedule, sizeof(schedule)) != 0) {
+            std::abort();
+        }
+        emitLengths();
+        std::cout << "]\n";
+        return;
+    }
+    const uint32_t sq = tnd.lengths.maxQueryLength, sk = tnd.lengths.maxKvLength;
+#else
+    const int64_t sq = in.sq, sk = in.sk;
+#endif
     // Bounds derived from segment lengths, independently of the host budget expression.
     uint64_t cursor = 0;
     std::array<uint64_t, 4> offsets{w.qkOffsetBytes, w.pOffsetBytes, w.pvOffsetBytes, w.vec2OffsetBytes};
@@ -346,9 +501,9 @@ void Run(const Input& in)
         }
         cursor += sizes[i] * s.blockDim * 2;
     }
-    const bool empty = in.batch == 0 || in.sq == 0 || in.sk == 0;
+    const bool empty = in.batch == 0 || sq == 0 || sk == 0;
     if (cursor != w.kernelBytes || cursor > w.userBytes || s.bSize != in.batch || s.gSize != in.heads ||
-        s.s1Size != in.sq || s.s2Size != in.sk || s.n2Size != 1 || s.headDim != 512 || s.headDimRope != 64 ||
+        s.s1Size != sq || s.s2Size != sk || s.n2Size != 1 || s.headDim != 512 || s.headDimRope != 64 ||
         s.aicNum != in.aic || s.aivNum != in.aiv || s.cvRatio != in.aiv / in.aic ||
         (!empty && (s.requiredLocalMemory.l1Bytes != 516096 || s.requiredLocalMemory.l0aBytes != 65536 ||
                     s.requiredLocalMemory.l0bBytes != 65536 || s.requiredLocalMemory.l0cBytes != 131072 ||
@@ -372,6 +527,9 @@ void Run(const Input& in)
     EmitArray(s.fd.gS1LastPartSizeOfFdHead, 26);
     EmitArray(s.fd.gS1IdxEndOfFdHead, 52);
     EmitArray(s.fd.gS1IdxEndOfFdHeadSplit, 52);
+#ifdef TND_LENGTHS
+    emitLengths();
+#endif
     std::cout << "]\n";
 }
 #endif
@@ -389,6 +547,18 @@ int main()
         in.kvLengths = std::vector<int32_t>(supplied);
         for (auto& length : in.kvLengths) {
             if (!(std::cin >> length)) {
+                return 1;
+            }
+        }
+#endif
+#ifdef TND_LENGTHS
+        size_t querySupplied = 0;
+        if (!(std::cin >> in.totalQuery >> in.totalKv >> in.hasQuery >> in.queryCount >> querySupplied)) {
+            return 1;
+        }
+        in.cuQuery = std::vector<int32_t>(querySupplied);
+        for (auto& value : in.cuQuery) {
+            if (!(std::cin >> value)) {
                 return 1;
             }
         }

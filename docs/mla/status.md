@@ -1,8 +1,8 @@
 # MLA 当前状态
 
-本轮完成 **M06b4：公开只读 BSND 实际 KV 长度与 metadata 生成/复用**，功能、普通 FA3 回归及适用公开 E2E 已闭环。分支 `feat/mla-cann-migration`，本轮起点为 `c7e6706a0bde438eb3c8bbf0b03827153efde636`。中断恢复后核对了源码、构建、进程和既有验证，继续同一步，未重复提交或启动后续开发。
+本轮完成 **M06c1：紧凑 TND 前缀和解析、起点与 CPU 调度**，新 CPU 套件 111 项、完整 ASan/UBSan 复验 111 项及受影响 dense/BSND 回归 185 项全部通过。分支 `feat/mla-cann-migration`，本轮起点 `276b7dcc7e282ffb0b9297ccbaf27cbc959d88ba`。公开能力仍停留在已闭环 M06b4。
 
-唯一下一步为 **M06c1：紧凑 TND 前缀和解析、起点与 CPU 调度**；本轮未开始该步。范围与完成条件见 [plan](plan.md#m06非分页长度tnd-与-stride)，后续在已确认范围内推进，无需重复确认。
+唯一下一步为 **M06c2a：TND AICPU 记录与设备消费者**；本轮未开始该步。范围与完成条件见 [plan](plan.md#m06非分页长度tnd-与-stride)，后续在已确认范围内推进，无需重复确认。
 
 ## 当前支持边界
 
@@ -19,48 +19,43 @@
 
 生产入口在 TPipe、attention 事件或输出写入前完成 v2 校验。非空 v2 使用平台全核 blockDim，工作核数由设备记录决定；workspace 按源最大 M 基块 256 预算，覆盖非均匀长度使 M 增大的情形。长度与记录无 D2H，使用既有双事件和 allocator stream 生命周期。实现见 [生产生成/发射](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp)、[设备入口](../../csrc/ascend910/flash_attn_npu_3/mla/mla_launch_impl.hpp) 和 [接口校验](../../flash_attn_npu_3/flash_attn_npu_interface.py)。
 
-## 最近闭环与证据
+## 本轮 CPU 组件与证据
 
-证据目录 **`build/mla-m06b4-public/`**，总索引 `acceptance.json`，功能索引 `functional-acceptance.json`。原始日志、JUnit、确切命令/退出码、构建/源码清单、profiler 数据均保存在该忽略目录，交接环境时需一并保留。上轮最小闭环和旧构建已在 `precheck.json` 核验，不计作本轮通过。
+新增 [`mla_tnd_schedule.h/.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_schedule.h) 的 `ParseTndLengths` / `BuildTndSchedule`，仅供独立 CPU 驱动：紧凑 TND Q/KV、共享 512+64 KV、Hkv=1、无 mask、显式无 split。两组 int32 前缀和须含起始 0，计数 B+1、单调、尾值等于总容量；逐样本 token 起点与长度拥有独立存储，max 参数允许大于观测最大值。全部校验后数值转换为源 int64 累计尾值，复用既有 `SplitCore`。失败不改写调用方输出。
 
-| 验收面 | 已核实结果 | 证据（相对上述目录） |
+保留固定源 TND 的特殊等长判定：比较 KV 累计尾值，而非各段长度；源观察最大段长决定基块/workspace。变长 query 按逐样本 M 块映射端点，保留跨零 query 样本的 batch 坐标，尾部省略只允许 Q=0 或 KV=0。全局空总容量与非空总容量中的零成本样本分别处理。字段/地址/物理块数/平台/workspace 上界见 [design 6.2](design.md#62-调度字段与边界)。TND Q + BSND KV、used、AICPU/metadata、设备寻址与公开接入未在本步开放。
+
+证据目录 **`build/mla-m06c1-tnd/`**，总索引 `acceptance.json`，由 `audit.py` 核验；原始命令、退出码、JUnit、完整输入/输出、固定源 blobs、编译命令均保存于该忽略目录，交接环境时须一并保留。
+
+| 验收面 | 结果 | 证据（相对上述目录） |
 | --- | --- | --- |
-| 新公开 BSND 能力 | 192 项通过。含双 dtype 19 组 × 3 scale 的 114 项固定源精度：非空 O/LSE 源逐元素一致，独立双 reference、NaN padding、输入只读、快照克隆/奇数 offset 通过；另含 None/整数/tensor、真实/fake/C++、跨流、长度更新与 compile（eager/fullgraph） | `public-accuracy.xml`、`public-schedules.xml`、`public-boundaries.xml`、`empty-query-lengths.xml`、`attention/*/public-accuracy.jsonl` |
-| 固定源调度 | 双 dtype 各 37 组公开记录与固定源无 FD 调度一致；原生分派 20 组非 FD、17 组 FD，全矩阵保留 | `schedule-aicpu/public-schedules-*-dispatch.json`、`schedule-source/` |
-| 旧 dense 与普通 FA3 | 2124 项去重通过，含普通 FA3 metadata/compile/softcap、MLA contract/dispatch、空容量、长 KV、多块、v1 生产消费者 | `regressions-before-snapshot.xml` 中成功的 1727 项，加 `regressions-remaining.xml` 的 397 项；`regression-nodes.json`、`remaining-nodes.json` |
-| 真实设备错误 | 98 项独立进程真实 Trap 通过，含非法/过期/省略长度、版本/类型/字数/快照、空容量错误；每例先验有效前向，错误发射禁止 host readback | `public-errors.xml`、`public-errors-extra.xml`、`public-errors*/**/runtime-error.json` |
-| 构建与依赖 | 7 项通过，含 ACL 发射桥 ASan/UBSan 和增量依赖；18 个链接对象、212 个源码/依赖和设备 header 依赖匹配，当前加载扩展与本轮构建一致 | `build-tests.xml`、`production-build-manifest.json` |
+| TND CPU 与固定源 | 111 项通过；覆盖 1..26 核、C1V1/C1V2，4,853 组源差分，其中原生非 FD 2,585 组、无 split 映射 2,268 组；100 组保留端点外零成本后缀 | `final.xml`、`final/*-inputs.json` / `*-outputs.json` / `source-manifest.json` |
+| 起点/边界/等价 | T01、混合/空样本、非均匀 Q、跨块尾部、max 上界、INT32_MAX 总 Q、非法计数/单调/尾值、静态/总物理块/workspace 溢出、失败结果不变；216 组与 BSND 全字段一致，源特有 M 基块差异另验覆盖和成本 | `final/bsnd-equivalence.json`、`final/t01-and-tail-equality*`、`final/m-base-*`、`final.xml` |
+| ASan/UBSan | 同一完整 111 项通过，DUT 与固定源 oracle 均启用 address/undefined、不可恢复错误；完整输出与常规构建逐份哈希相同 | `sanitized.xml`、`sanitized/` |
+| 受影响回归 | dense/BSND CPU 185 项通过，共用驱动三种编译分支均覆盖；不涉及公开接口或生产 metadata 修改 | `regressions.xml`、`dense/`、`bsnd/` |
 
-合计 **2421 项去重 pytest 通过，最终选入项无失败/跳过**。`audit.py` 合并每个节点的最终结果，核验 98 份 Trap 与扩展哈希、256 个固定源 blob。保留初始失败：compile 测试 mock 干扰 Dynamo、ctypes Args 类型不一致、旧测试误把零长度当失败；分别修正测试夹具/预期后重跑成功。原失败在 `public-smoke.xml`、`regressions-initial.xml`、`regressions-before-snapshot.xml`，没有删除失败节点或更改精度阈值。
+合计 **296 项去重 pytest 通过，另有同一 TND 套件的 111 项 sanitizer 复验通过，最终选入项无失败/跳过**。
 
-## 公开性能闭环
+初始失败完整保留：`initial.xml` 的 oracle 将跨零 query 样本的不同 batch 端点合并为同一扁平行坐标，已修复 oracle、保留生产源端点；`cpu.xml` 的溢出测试构造实际未超过 uint32，已改为有效前缀且总物理块数恰为 `2^32` 的用例，确认进入源循环前拒绝。对应原始输出均保留，没有删除失败节点或放宽检查。
 
-固定矩阵为双 dtype 各 **37 组**（原 26 组 + `BSND_CASES` 11 组）。固定源原生分派中 **20 组非 FD** 逐例验收，另 **17 组原生 FD** 保留诊断，不按耗时筛选。测试包含复用前向、单独生成、内部生成、生成加 R=1/4 前向及 CANN 对应调用段；双方同一进程/设备，输入 H2D 排除，入口校验、输出/workspace 分配、转换、发射和完成同步计入 E2E。
+## 环境与上一步复核
 
-最终在空闲设备 6，按测量前两次五秒 CPU 空闲度采样固定 `[244,246,247,248,249,251,252,255]`，双 dtype / 双方使用同一亲和性。预热 5 次，每次采集五轮各 20 个 wall 样本，交替调用。FP16 使用一次完整同路径采集；BF16 首次有两例 R=1 超标，按补测前写入的方案再测全部 20 组，**合并两次全部 200 个样本/路径/用例**，包含首次失败样本，不选取较快轮次。严格门槛仍为每例 `<=1.0`。
+Python `/usr/local/python3.11.15/bin/python3` 3.11.15、torch `2.7.1+cpu`、torch_npu `2.7.1`、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`、bisheng clang 15.0.5、g++ 11.4.0。本轮 CPU / 回归 / sanitizer 分别使用 CPU 16–23 / 8–15 / 24–31。八张 Ascend910B3 健康，检查时设备 2–6 空闲；设备 6 用于核对实际加载路径。沙箱内 `npu-smi` 驱动初始化失败，环境核验与完整 sanitizer 在沙箱外执行；本步未修改 kernel，不要求新增 910B 精度或性能验收，合成 C1V1 仍不代表 910C 实机验证。
 
-| dtype | 每路径/用例 wall 样本数 | 复用前向 E2E 比值 | 生成加 R=1 比值 | 生成加 R=4 比值 |
-| --- | --- | --- | --- | --- |
-| FP16 | 100 | 0.5744–0.7646 | 0.8072–0.9052 | 0.4979–0.9031 |
-| BF16 | 200 | 0.5734–0.7947 | 0.8269–0.9155 | 0.5177–0.9389 |
+CATLASS 固定 `769cd40a8716b28650b6bebb08db4834eea4462f` 且干净；CANN 固定 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，原有 67 条删除/未跟踪记录未变。本步不修改两者。TND 独立驱动直接编译本轮源码；没有接入 `setup.py` 或重建生产扩展。已逐项复核旧构建的 212 个源码依赖、18 个对象及实际加载的 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 仍为 **`fa35de6c8b0b08e563fcb62ce4dbea9eb97f43618f6cf836b4b5a7ba11114099`**，详见 `precheck.json`。
 
-两种 dtype 的全部 20 组上述三个比值均达标。逐例数值、生成耗时、内部生成耗时、原始样本、每轮统计、原生 FD 差距见 `performance-acceptance.json` 和 `performance-controlled/{fp16,bf16,bf16-repeat}/`。采集前选择依据、持续主机负载、补测前约定分别在 `host-affinity-selection.json`、`host-load*.jsonl`、`repeat-protocol.json`。完整 37 组证据保留于 `performance-fp16/` 和 `performance-bf16-quiet/`。
+上一步最小命令为 `ASCEND_RT_VISIBLE_DEVICES=6 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 taskset -c 16-23 python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_bsnd_public.py`。已复核 `build/mla-m06b4-public/public-accuracy-command.json` 与退出码 0，以及后续 schedules/boundaries/empty-query 和最终 audit；该步 2,421 项与适用公开 E2E 的闭环证据保留在 `build/mla-m06b4-public/acceptance.json`。生产环境、源码依赖、对象与加载扩展均未改变，本步没有重跑该 NPU 命令，也不计为本轮通过。
 
-Kernel 计时单独报告：FP16 比值 **0.990–4.564**，最小全零用例 FA3 / CANN 为 **15.6105 / 3.4200 微秒**；BF16 比值 **0.961–4.150**，最小全零用例 FA3 / CANN 为 **14.3600 / 3.4600 微秒**。保留 v2 平台全核发射及设备记录/长度校验的实测开销，不把公开 E2E 达标解释为 Kernel 逐例不劣化。原始 `op_summary` 与 `kernel_details` 的名称、设备、起点、耗时逐条匹配：完整矩阵每 dtype 3700 条，最终同路径 FP16 2000 条、BF16 两次共 4000 条；显式复用未出现 metadata 生成任务。`performance-device-proof.json` 将 namespace PID 映射到设备 host PID，核对测量前后仅本进程占用测试设备，并复核固定 CANN 库哈希。
+质量工具通过 `PYTHONPATH=/tmp/mla-m01-precommit:$PYTHONPATH PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache` 使用固定 pre-commit 4.6.2、Ruff 0.16.5、clang-format 21.1.8，保留原 CANN PYTHONPATH。默认 Python 无 pre_commit，root 旧缓存的 Ruff/clang-format 版本不符；已切换到上述既有固定版本环境，未改全局环境。代码格式检查见 `format-final.log`；提交前 staged 质量检查、三份文档链接/锚点/步骤状态/公开签名检查分别见 `quality-staged.log`、`doc-checks.json`。`audit.py` 复核测试、固定源 blobs、两种构建的输出、源码快照、生产构建与源仓状态。
 
-早期失败完整保留：`performance-fp16/` 的索引 4/5/10/16 生成加 R=1 为 1.547/1.511/2.526/1.033，索引 10 的 R=4 为 1.250；`performance-bf16/` 缺少 NPU profiler 数据，未记为通过。设备 7 后来被外部进程占用，恢复时改用空闲设备 6；`performance-*-quiet/` 的 CPU 40–47 测量仍超标。主机负载约 230、该 CPU 组平均约 82% 忙碌的诊断见 `host-load-diagnostic.json`。固定亲和性后，BF16 首次索引 28/29 的 R=1 为 1.224/1.056，已按前述方式纳入最终合并数据。没有删除不利样本或放宽阈值。
+## 最小复现
 
-## 环境与复现
-
-Python `/usr/local/python3.11.15/bin/python3` 3.11.15、torch `2.7.1+cpu`、torch_npu `2.7.1`、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`、bisheng clang 15.0.5、g++ 11.4.0。八张 Ascend910B3 健康。本轮精度设备 6 / CPU 16–23，回归设备 5 / CPU 8–15，错误设备 4 / CPU 32–39（补充设备 6 / CPU 16–23），首轮性能设备 7 / CPU 40–47，恢复后性能设备 6 / 先 CPU 40–47，最终使用上述预选 CPU 组，构建 sanitizer CPU 24–31。实机与完整 sanitizer 在沙箱外执行；保留原 CANN PYTHONPATH。见 `environment.json`、`environment-resume.json` 及性能目录的环境/设备快照。
-
-CATLASS 固定 `769cd40a8716b28650b6bebb08db4834eea4462f` 且干净；CANN 固定 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，原有 67 条删除/未跟踪记录未变，本轮未修改。生产增量构建重编双 dtype 分派、`mla_forward.o`、`flash_api.o` 四个对象，其余 14 个哈希未变。实际加载 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 **`fa35de6c8b0b08e563fcb62ce4dbea9eb97f43618f6cf836b4b5a7ba11114099`**。
-
-最小公开检查（复测前检查设备占用，证据写新目录，不覆盖本轮原始结果）：
+新证据写到其他目录，不覆盖本轮原始结果；完整命令/环境/退出码见 `*-command.json` / `*-exit.json`。
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=6 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 taskset -c 16-23 python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_bsnd_public.py
-FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910 FLASH_ATTN_SKIP_SUBMODULE_INIT=1 python3 setup.py build_ext --inplace
+MLA_TND_SCHEDULE_ARTIFACT_DIR=build/mla-m06c1-recheck python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_tnd_schedule.py
+MLA_SCHEDULE_SANITIZE=1 MLA_TND_SCHEDULE_ARTIFACT_DIR=build/mla-m06c1-recheck-asan python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_tnd_schedule.py
+python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_schedule.py tests/test_flash_attn_npu_v3_mla_bsnd_schedule.py
 ```
 
-用 `MLA_BSND_ATTENTION_DIR`、`MLA_BSND_METADATA_DEVICE_DIR` 和 `MLA_LENGTH_SCHEDULE_ARTIFACT_DIR` 保存独立驱动/AICPU/固定源证据。全部确切命令/环境/退出码见 `*-command.json` / `*-exit.json`；回归续跑按原选择集排除已通过节点，脚本为 `resume_regressions.py`。公开性能脚本为 [`tests/mla_forward_profile.py`](../../tests/mla_forward_profile.py)，本轮包装脚本为 `performance_isolated.py`。三份文档链接/锚点、表格、步骤状态与固定官方公开签名检查见 `doc-checks.json`，`git diff --check` 和仓库质量检查见 `quality-staged.log`，最终一致性核验为 `final_audit.py`。本轮运行生成的 `kernel_meta/` 已归入证据目录，不提交构建产物。当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
+sanitizer 须在支持完整 ASan/UBSan/LeakSanitizer 的环境执行，不能把关闭检查当作通过。当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
