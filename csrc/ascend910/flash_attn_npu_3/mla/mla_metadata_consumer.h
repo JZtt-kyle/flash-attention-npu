@@ -40,6 +40,7 @@ enum class MlaMetadataReadStatus : uint32_t {
     InvalidWorkspace,
     InsufficientLocalMemory,
     InvalidCacheLengths,
+    InvalidPrefixes,
 };
 
 template <typename Reader>
@@ -72,6 +73,88 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadMetadataHeader(const Reader& read,
 #undef MLA_WORD
 }
 
+// Shared wire/platform/resource validation for BSND and compact TND.
+template <typename Reader, typename Context>
+MLA_METADATA_INLINE MlaMetadataReadStatus ReadMetadataPlatform(const Reader& read, const Context& c,
+                                                               MlaDenseKernelSchedule& s)
+{
+    using Status = MlaMetadataReadStatus;
+#define MLA_WORD(field) read(offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
+#define MLA_WIDE(field) ReadMetadataWide(read, offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
+    s.usedCoreNum = MLA_WORD(schedule.usedCoreNum);
+    s.blockDim = MLA_WORD(schedule.blockDim);
+    s.cvRatio = MLA_WORD(schedule.cvRatio);
+    if (c.aicNum == 0 || c.aicNum > kMlaMaxAic || c.aivNum != 2 * c.aicNum || MLA_WORD(schedule.aicNum) != c.aicNum ||
+        MLA_WORD(schedule.aivNum) != c.aivNum || s.cvRatio != 2 || s.usedCoreNum == 0 || s.usedCoreNum > c.aicNum ||
+        s.blockDim != c.blockDim || s.blockDim < s.usedCoreNum || s.blockDim > c.aicNum ||
+        MLA_WORD(schedule.scheduleMode) != 1) {
+        return Status::PlatformMismatch;
+    }
+    return Status::Success;
+#undef MLA_WORD
+#undef MLA_WIDE
+}
+
+// Shared wire/platform/resource validation for BSND and compact TND.
+template <typename Reader, typename Context>
+MLA_METADATA_INLINE MlaMetadataReadStatus ReadEmptyMetadataSchedule(const Reader& read, const Context& c,
+                                                                    MlaDenseKernelSchedule& s)
+{
+    using Status = MlaMetadataReadStatus;
+#define MLA_WORD(field) read(offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
+#define MLA_WIDE(field) ReadMetadataWide(read, offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
+    // A global empty record has one validation core and no attention state.
+    // Check every unused payload word so a nonempty schedule cannot be
+    // reinterpreted as an empty one by changing its shape alone.
+    if (s.usedCoreNum != 1 || s.mBaseSize != 0 || s.s2BaseSize != 0 || c.workspaceBytes != 0 || c.libApiBytes != 0) {
+        return Status::InvalidTiling;
+    }
+    for (uint32_t word = offsetof(MlaDenseMetadata, schedule.bN2End) / sizeof(uint32_t); word < kMlaDenseMetadataWords;
+         ++word) {
+        if (read(word) != 0) {
+            return Status::InvalidTiling;
+        }
+    }
+    return Status::Success;
+#undef MLA_WORD
+#undef MLA_WIDE
+}
+
+// Shared wire/platform/resource validation for BSND and compact TND.
+template <typename Reader, typename Context>
+MLA_METADATA_INLINE MlaMetadataReadStatus ReadMetadataWorkspace(const Reader& read, const Context& c,
+                                                                MlaDenseKernelSchedule& s, uint64_t rows)
+{
+    using Status = MlaMetadataReadStatus;
+#define MLA_WORD(field) read(offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
+#define MLA_WIDE(field) ReadMetadataWide(read, offsetof(MlaDenseMetadata, field) / sizeof(uint32_t))
+    const uint64_t m = ((rows < s.mBaseSize ? rows : s.mBaseSize) + 15) / 16 * 16;
+    const uint64_t r1 = m * ((s.s2BaseSize + 31) / 32 * 32), r2 = m * 512;
+    const uint64_t p = 2 * s.blockDim * r1 * 4, pv = p + 2 * s.blockDim * r1 * 2;
+    const uint64_t vec2 = pv + 2 * s.blockDim * r2 * 4, kernel = vec2 + 2 * s.blockDim * r2 * 4;
+    const uint64_t reserve = uint64_t(2) * c.aicNum * (6 * r1 + 8 * r2 + 8 * s.mBaseSize);
+    if (MLA_WIDE(schedule.workspace.mm1ResSize) != r1 || MLA_WIDE(schedule.workspace.mm2ResSize) != r2 ||
+        MLA_WIDE(schedule.workspace.qkOffsetBytes) != 0 || MLA_WIDE(schedule.workspace.pOffsetBytes) != p ||
+        MLA_WIDE(schedule.workspace.pvOffsetBytes) != pv || MLA_WIDE(schedule.workspace.vec2OffsetBytes) != vec2 ||
+        MLA_WIDE(schedule.workspace.kernelBytes) != kernel || MLA_WIDE(schedule.workspace.userBytes) != reserve ||
+        kernel > reserve || c.workspaceBytes < reserve || MLA_WIDE(schedule.workspace.libApiBytes) != c.libApiBytes ||
+        c.libApiBytes > UINT64_MAX - reserve || MLA_WIDE(schedule.workspace.totalBytes) != c.libApiBytes + reserve) {
+        return Status::InvalidWorkspace;
+    }
+    s.mm1ResSize = r1;
+    s.mm2ResSize = r2;
+    if (MLA_WIDE(schedule.requiredLocalMemory.l1Bytes) != 516096 || c.localMemory.l1Bytes < 516096 ||
+        MLA_WIDE(schedule.requiredLocalMemory.ubBytes) != 174080 || c.localMemory.ubBytes < 174080 ||
+        MLA_WIDE(schedule.requiredLocalMemory.l0aBytes) != 65536 || c.localMemory.l0aBytes < 65536 ||
+        MLA_WIDE(schedule.requiredLocalMemory.l0bBytes) != 65536 || c.localMemory.l0bBytes < 65536 ||
+        MLA_WIDE(schedule.requiredLocalMemory.l0cBytes) != 131072 || c.localMemory.l0cBytes < 131072) {
+        return Status::InsufficientLocalMemory;
+    }
+    return Status::Success;
+#undef MLA_WORD
+#undef MLA_WIDE
+}
+
 struct DenseMetadataLengths {
     MLA_METADATA_INLINE bool Check(uint32_t, uint32_t) const
     {
@@ -83,7 +166,7 @@ struct DenseMetadataLengths {
     }
 };
 
-// Call only after checking the protocol header. Both versions use the same
+// Call only after checking the protocol header. Both BSND versions use the same
 // fixed schedule encoding and resource bounds. Lengths supplies only the
 // snapshot check and endpoint coverage rule, never alternative tiling formulas.
 // Output is unchanged on failure. This checks compatibility and memory safety,
@@ -111,30 +194,16 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadMetadataSchedule(const Reader& rea
     s.sq = c.sq;
     s.heads = c.heads;
     s.sk = c.sk;
-    s.usedCoreNum = MLA_WORD(schedule.usedCoreNum);
-    s.blockDim = MLA_WORD(schedule.blockDim);
-    s.cvRatio = MLA_WORD(schedule.cvRatio);
-    if (c.aicNum == 0 || c.aicNum > kMlaMaxAic || c.aivNum != 2 * c.aicNum || MLA_WORD(schedule.aicNum) != c.aicNum ||
-        MLA_WORD(schedule.aivNum) != c.aivNum || s.cvRatio != 2 || s.usedCoreNum == 0 || s.usedCoreNum > c.aicNum ||
-        s.blockDim != c.blockDim || s.blockDim < s.usedCoreNum || s.blockDim > c.aicNum ||
-        MLA_WORD(schedule.scheduleMode) != 1) {
-        return Status::PlatformMismatch;
+    const auto platformStatus = ReadMetadataPlatform(read, c, s);
+    if (platformStatus != Status::Success) {
+        return platformStatus;
     }
     s.mBaseSize = MLA_WORD(schedule.mBaseSize);
     s.s2BaseSize = MLA_WORD(schedule.s2BaseSize);
     if (c.batch == 0 || c.sq == 0 || c.sk == 0) {
-        // The v1 empty record has one validation core and no attention state.
-        // Check every unused payload word so a nonempty schedule cannot be
-        // reinterpreted as an empty one by changing its shape alone.
-        if (s.usedCoreNum != 1 || s.mBaseSize != 0 || s.s2BaseSize != 0 || c.workspaceBytes != 0 ||
-            c.libApiBytes != 0) {
-            return Status::InvalidTiling;
-        }
-        for (uint32_t word = offsetof(MlaDenseMetadata, schedule.bN2End) / sizeof(uint32_t);
-             word < kMlaDenseMetadataWords; ++word) {
-            if (read(word) != 0) {
-                return Status::InvalidTiling;
-            }
+        const auto emptyStatus = ReadEmptyMetadataSchedule(read, c, s);
+        if (emptyStatus != Status::Success) {
+            return emptyStatus;
         }
         output = s;
         return Status::Success;
@@ -166,27 +235,9 @@ MLA_METADATA_INLINE MlaMetadataReadStatus ReadMetadataSchedule(const Reader& rea
     if (!lengths.Covers(previous, tasks, mBlocks, c.batch)) {
         return Status::InvalidEndpoints;
     }
-    const uint64_t m = ((rows < s.mBaseSize ? rows : s.mBaseSize) + 15) / 16 * 16;
-    const uint64_t r1 = m * ((s2Base + 31) / 32 * 32), r2 = m * 512;
-    const uint64_t p = 2 * s.blockDim * r1 * 4, pv = p + 2 * s.blockDim * r1 * 2;
-    const uint64_t vec2 = pv + 2 * s.blockDim * r2 * 4, kernel = vec2 + 2 * s.blockDim * r2 * 4;
-    const uint64_t reserve = uint64_t(2) * c.aicNum * (6 * r1 + 8 * r2 + 8 * s.mBaseSize);
-    if (MLA_WIDE(schedule.workspace.mm1ResSize) != r1 || MLA_WIDE(schedule.workspace.mm2ResSize) != r2 ||
-        MLA_WIDE(schedule.workspace.qkOffsetBytes) != 0 || MLA_WIDE(schedule.workspace.pOffsetBytes) != p ||
-        MLA_WIDE(schedule.workspace.pvOffsetBytes) != pv || MLA_WIDE(schedule.workspace.vec2OffsetBytes) != vec2 ||
-        MLA_WIDE(schedule.workspace.kernelBytes) != kernel || MLA_WIDE(schedule.workspace.userBytes) != reserve ||
-        kernel > reserve || c.workspaceBytes < reserve || MLA_WIDE(schedule.workspace.libApiBytes) != c.libApiBytes ||
-        c.libApiBytes > UINT64_MAX - reserve || MLA_WIDE(schedule.workspace.totalBytes) != c.libApiBytes + reserve) {
-        return Status::InvalidWorkspace;
-    }
-    s.mm1ResSize = r1;
-    s.mm2ResSize = r2;
-    if (MLA_WIDE(schedule.requiredLocalMemory.l1Bytes) != 516096 || c.localMemory.l1Bytes < 516096 ||
-        MLA_WIDE(schedule.requiredLocalMemory.ubBytes) != 174080 || c.localMemory.ubBytes < 174080 ||
-        MLA_WIDE(schedule.requiredLocalMemory.l0aBytes) != 65536 || c.localMemory.l0aBytes < 65536 ||
-        MLA_WIDE(schedule.requiredLocalMemory.l0bBytes) != 65536 || c.localMemory.l0bBytes < 65536 ||
-        MLA_WIDE(schedule.requiredLocalMemory.l0cBytes) != 131072 || c.localMemory.l0cBytes < 131072) {
-        return Status::InsufficientLocalMemory;
+    const auto resourceStatus = ReadMetadataWorkspace(read, c, s, rows);
+    if (resourceStatus != Status::Success) {
+        return resourceStatus;
     }
     output = s;
     return Status::Success;

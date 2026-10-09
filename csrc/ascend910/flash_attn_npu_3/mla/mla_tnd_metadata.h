@@ -1,5 +1,5 @@
-// Private compact-TND protocol. Generated independently; no TND forward or
-// device consumer is connected yet. Never pass this record to a v1/v2 Kernel.
+// Private compact-TND protocol, generated and validated independently of
+// attention. Never pass this record to a v1/v2 Kernel.
 #pragma once
 #include "mla_metadata.h"
 

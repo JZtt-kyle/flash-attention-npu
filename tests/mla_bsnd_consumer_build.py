@@ -8,11 +8,12 @@ import subprocess
 from tests.mla_metadata_build import MLA, ROOT, sha256
 
 
-def build_consumers(directory):
+def build_consumers(directory, *, tnd=False):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     cann = Path(os.environ["ASCEND_HOME_PATH"])
-    source = ROOT / "tests/mla_bsnd_metadata_consumer_probe.cpp"
+    layout = "tnd" if tnd else "bsnd"
+    source = ROOT / f"tests/mla_{layout}_metadata_consumer_probe.cpp"
     libraries, sources = {}, {source, Path(__file__)}
     for dtype in ("fp16", "bf16"):
         output = directory / f"{dtype}.so"
@@ -29,7 +30,7 @@ def build_consumers(directory):
             "-fPIC",
             f"-I{cann}/include",
             f"-I{MLA.parent}",
-            *(["-DMLA_BSND_BF16"] if dtype == "bf16" else []),
+            *([f"-DMLA_{layout.upper()}_BF16"] if dtype == "bf16" else []),
             str(source),
         ]
         compile_command = [*command, "-shared", f"-L{cann}/lib64", "-lascendcl", "-o", str(output)]
@@ -45,9 +46,9 @@ def build_consumers(directory):
             for p in deps.read_text().replace("\\\n", " ").split(":", 1)[1].split()
         ]
         for name in (
-            "mla_bsnd_metadata_consumer.h",
+            f"mla_{layout}_metadata_consumer.h",
             "mla_metadata_consumer.h",
-            "kernel/mla_bsnd_metadata.hpp",
+            f"kernel/mla_{layout}_metadata.hpp",
         ):
             assert MLA / name in dependencies
         sources.update(p for p in dependencies if p.is_relative_to(ROOT))
@@ -58,7 +59,7 @@ def build_consumers(directory):
         compiler=subprocess.check_output([str(cann / "bin/bisheng"), "--version"], text=True),
         cann=str(cann),
         ndebug=True,
-        scope="v2 validation only; no attention forward",
+        scope=f"{'v3 TND' if tnd else 'v2 BSND'} validation only; no attention forward",
     )
     (directory / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
