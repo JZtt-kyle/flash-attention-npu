@@ -41,7 +41,7 @@ struct MlaTndSchedule {
     MlaSchedule schedule{};
 };
 
-// Independent CPU component for compact TND Q/KV, shared 512+64 KV, Hkv=1.
+// CPU/AICPU component for compact TND Q/KV, shared 512+64 KV, Hkv=1.
 // Both arrays are required, including B=0: int32[B+1], starting at zero,
 // nondecreasing, ending at the corresponding total capacity (<=INT32_MAX).
 // Per-sample differences must fit maxQueryLength/maxKvLength. These are upper
@@ -59,7 +59,7 @@ MlaScheduleStatus ParseTndLengths(const MlaTndShape& shape, const int32_t* cuQue
 // schedule.s1Size/s2Size are observed per-sample maxima. Endpoints use each
 // sample's own M-block count; any omitted suffix must have zero Q or zero KV.
 // Global empty total Q/KV produces a validation-only schedule, as in dense.
-// Not connected to public forward, metadata, AICPU generation or device kernels.
+// Used by the independent v3 producer; not connected to attention or public TND.
 MlaScheduleStatus BuildTndSchedule(const MlaTndShape& shape, const MlaPlatformInfo& platform, const int32_t* cuQuery,
                                    uint64_t queryCount, const int32_t* cuKv, uint64_t kvCount, MlaTndSchedule& output);
 

@@ -9,6 +9,11 @@ extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
 #include "mla/mla_bsnd_metadata.h"
 extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
 #endif
+#ifdef MLA_TND_METADATA
+#include "mla/mla_tnd_metadata.h"
+#include "mla/mla_tnd_metadata_args.h"
+extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
+#endif
 using namespace flash_attn::mla;
 
 extern "C" uint32_t metadata_args_size()
@@ -67,6 +72,7 @@ int LaunchMetadata(void* current, void* worker, void* ready, void* done, const M
         ComputeMlaBsndKvLengthMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
     } else
 #endif
+
     {
         ComputeMlaDenseMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
     }
@@ -93,5 +99,37 @@ extern "C" uint32_t bsnd_metadata_host(const MlaMetadataArgs* args, uint32_t* ou
                                      reinterpret_cast<const int32_t*>(args->cacheSeqlensAddr), args->cacheSeqlensCount)
                ? 0
                : 1;
+}
+#endif
+
+#ifdef MLA_TND_METADATA
+extern "C" uint32_t tnd_metadata_args_size()
+{
+    return sizeof(MlaTndMetadataArgs);
+}
+
+extern "C" uint32_t tnd_metadata_host(const MlaTndMetadataArgs* args, uint32_t* output)
+{
+    return BuildTndMetadata(args->shape, args->platform, args->dtype, output, args->outputWords,
+                            reinterpret_cast<const int32_t*>(args->cuQueryAddr), args->queryCount,
+                            reinterpret_cast<const int32_t*>(args->cuKvAddr), args->kvCount)
+               ? 0
+               : 1;
+}
+
+extern "C" int launch_tnd_metadata(void* current, void* worker, void* ready, void* done, const MlaTndMetadataArgs* args)
+{
+    auto status = aclrtRecordEvent(ready, current);
+    if (status != ACL_SUCCESS)
+        return status;
+    status = aclrtStreamWaitEvent(worker, ready);
+    if (status != ACL_SUCCESS)
+        return status;
+    MlaTndMetadataArgs launchArgs = *args;
+    ComputeMlaTndMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
+    status = aclrtRecordEvent(done, worker);
+    if (status != ACL_SUCCESS)
+        return status;
+    return aclrtStreamWaitEvent(current, done);
 }
 #endif

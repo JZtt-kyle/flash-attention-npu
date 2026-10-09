@@ -15,7 +15,7 @@
 // The upstream license is reproduced in LICENSE.cann next to this file.
 // Changes: FA3 int32 prefix validation and owned token spans; numerical int64
 // cumulative tails for the existing SplitCore; whole-M endpoint mapping for
-// num_splits=1 with variable Q lengths. No production/device entry changes.
+// num_splits=1 with variable Q lengths. Shared by CPU tests and the v3 AICPU producer.
 
 #include "mla_tnd_schedule.h"
 #include "detail/cann_split_core.h"
@@ -84,7 +84,7 @@ MlaScheduleStatus Parse(const MlaTndShape& shape, const int32_t* cuQuery, uint64
     return MlaScheduleStatus::Success;
 }
 
-uint64_t Align(uint64_t value, uint64_t alignment)
+uint64_t AlignTnd(uint64_t value, uint64_t alignment)
 {
     return (value + alignment - 1) / alignment * alignment;
 }
@@ -214,8 +214,8 @@ MlaScheduleStatus Calculate(const MlaTndShape& shape, const MlaPlatformInfo& pla
         blocks.push_back(m);
     }
     auto& w = s.workspace;
-    const uint64_t m = Align(std::min(rows, uint64_t(s.mBaseSize)), 16);
-    w.mm1ResSize = m * Align(s.s2BaseSize, 32);
+    const uint64_t m = AlignTnd(std::min(rows, uint64_t(s.mBaseSize)), 16);
+    w.mm1ResSize = m * AlignTnd(s.s2BaseSize, 32);
     w.mm2ResSize = m * s.headDim;
     w.fdAccumOutSize = uint64_t(s.aicNum) * 2 * s.mBaseSize * s.headDim;
     w.fdLogSumExpSize = uint64_t(s.aicNum) * 2 * 2 * s.mBaseSize * (32 / sizeof(float));

@@ -93,13 +93,19 @@ def test_aicpu_sources_by_backend():
         if name == "flash_attn_npu_3.flash_attn_npu_3":
             expected.append(f"csrc/{directory}/mla/mla_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_bsnd_metadata.aicpu")
+            expected.append(f"csrc/{directory}/mla/mla_tnd_metadata.aicpu")
         assert builder._build_aicpu_metadata("unused.so", name) == expected
     assert builder._build_aicpu_metadata("unused.so", "unknown") == []
 
 
 @pytest.mark.parametrize(
     "stem,header_name",
-    [("mla_metadata", "mla_schedule.h"), ("mla_bsnd_metadata", "mla_bsnd_schedule.h")],
+    [
+        ("mla_metadata", "mla_schedule.h"),
+        ("mla_bsnd_metadata", "mla_bsnd_schedule.h"),
+        ("mla_tnd_metadata", "mla_tnd_schedule.h"),
+        ("mla_tnd_metadata", "mla_tnd_metadata_args.h"),
+    ],
 )
 def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, header_name):
     monkeypatch.delenv("FLASH_ATTN_FORCE_REBUILD", raising=False)
@@ -111,7 +117,7 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, hea
     dependencies = Path(str(obj) + ".d").read_text()
     for name in (
         "mla_metadata.h",
-        "mla_metadata_args.h",
+        "mla_tnd_metadata_args.h" if stem == "mla_tnd_metadata" else "mla_metadata_args.h",
         "mla_schedule.cpp",
         "cann_split_core.cpp",
     ):
@@ -122,6 +128,14 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, hea
             "mla_bsnd_metadata.cpp",
             "mla_bsnd_schedule.h",
             "mla_bsnd_schedule.cpp",
+        ):
+            assert name in dependencies
+    if stem == "mla_tnd_metadata":
+        for name in (
+            "mla_tnd_metadata.h",
+            "mla_tnd_metadata.cpp",
+            "mla_tnd_schedule.h",
+            "mla_tnd_schedule.cpp",
         ):
             assert name in dependencies
     capsys.readouterr()
