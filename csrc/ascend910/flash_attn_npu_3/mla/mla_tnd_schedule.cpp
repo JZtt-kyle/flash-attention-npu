@@ -16,8 +16,11 @@
 // Changes: FA3 int32 prefix validation and owned token spans; numerical int64
 // cumulative tails for the existing SplitCore; whole-M endpoint mapping for
 // num_splits=1 with variable Q lengths. Shared by CPU tests and the v3 AICPU producer.
+// Mixed TND Q/BSND KV additionally preserves physical capacity, noncumulative
+// source KV lengths and 64-bit physical starts; it has no metadata/device entry yet.
 
 #include "mla_tnd_schedule.h"
+#include "mla_tnd_bsnd_schedule.h"
 #include "detail/cann_split_core.h"
 
 #include <algorithm>
@@ -80,6 +83,56 @@ MlaScheduleStatus Parse(const MlaTndShape& shape, const int32_t* cuQuery, uint64
     for (uint64_t b = 0; b < uint64_t(shape.batch); ++b) {
         result.sequences.push_back({uint32_t(cuQuery[b]), uint32_t(cuKv[b]), uint32_t(cuQuery[b + 1] - cuQuery[b]),
                                     uint32_t(cuKv[b + 1] - cuKv[b])});
+    }
+    return MlaScheduleStatus::Success;
+}
+
+MlaScheduleStatus Parse(const MlaTndBsndShape& shape, const int32_t* cuQuery, uint64_t queryCount,
+                        const int32_t* kvLengths, uint64_t kvCount, MlaTndBsndLengths& result)
+{
+    for (int64_t size : {shape.batch, shape.totalQuery, shape.queryHeads, shape.maxQueryLength, shape.kvCapacity}) {
+        if (size < 0) {
+            return MlaScheduleStatus::UnsupportedShape;
+        }
+        if (uint64_t(size) > UINT32_MAX) {
+            return MlaScheduleStatus::FieldOverflow;
+        }
+    }
+    if (shape.queryHeads == 0 || shape.kvCapacity > kMlaMaxKvLength) {
+        return MlaScheduleStatus::UnsupportedShape;
+    }
+    if (shape.totalQuery > INT32_MAX || shape.queryHeads > kMlaMaxQueryHeads ||
+        shape.maxQueryLength > kMlaMaxQueryLength ||
+        uint64_t(shape.maxQueryLength) * shape.queryHeads > kMlaMaxDenseRows ||
+        uint64_t(shape.totalQuery) * shape.queryHeads > kMlaMaxBatchRows) {
+        return MlaScheduleStatus::FieldOverflow;
+    }
+    // The validated B/Sk bounds also keep B*Sk*512*sizeof(input) below INT64_MAX.
+    if (cuQuery == nullptr || queryCount != uint64_t(shape.batch) + 1 || kvCount != uint64_t(shape.batch) ||
+        (shape.batch != 0 && kvLengths == nullptr) || cuQuery[0] != 0) {
+        return MlaScheduleStatus::UnsupportedShape;
+    }
+    uint32_t maxQ = 0, maxKv = 0;
+    for (uint64_t b = 0; b < uint64_t(shape.batch); ++b) {
+        if (cuQuery[b + 1] < cuQuery[b] || kvLengths[b] < 0 || kvLengths[b] > shape.kvCapacity) {
+            return MlaScheduleStatus::UnsupportedShape;
+        }
+        const uint32_t q = uint32_t(cuQuery[b + 1]) - uint32_t(cuQuery[b]);
+        if (q > shape.maxQueryLength) {
+            return MlaScheduleStatus::UnsupportedShape;
+        }
+        maxQ = std::max(maxQ, q);
+        maxKv = std::max(maxKv, uint32_t(kvLengths[b]));
+    }
+    if (cuQuery[shape.batch] != shape.totalQuery) {
+        return MlaScheduleStatus::UnsupportedShape;
+    }
+    result.maxQueryLength = maxQ;
+    result.maxKvLength = maxKv;
+    result.sequences.reserve(shape.batch);
+    for (uint64_t b = 0; b < uint64_t(shape.batch); ++b) {
+        result.sequences.push_back({uint32_t(cuQuery[b]), b * uint64_t(shape.kvCapacity),
+                                    uint32_t(cuQuery[b + 1] - cuQuery[b]), uint32_t(kvLengths[b])});
     }
     return MlaScheduleStatus::Success;
 }
@@ -166,31 +219,31 @@ void SplitWithoutFlashDecode(const detail::BaseInfo& base, const detail::SplitPa
     split = std::move(whole);
 }
 
-MlaScheduleStatus Calculate(const MlaTndShape& shape, const MlaPlatformInfo& platform, MlaTndSchedule& result)
+template <typename Lengths>
+MlaScheduleStatus Calculate(uint32_t batch, uint32_t heads, uint32_t kvCapacity, bool compactKv,
+                            const MlaPlatformInfo& platform, const Lengths& lengths, MlaSchedule& s)
 {
-    const auto& lengths = result.lengths;
-    auto& s = result.schedule;
     // Reuse existing platform/local-memory validation and static geometry.
     // B=0 deliberately avoids the rectangular B*maxQ address/tile bound: TND
     // has only totalQuery rows. Parse already checked its true address bound.
-    auto status = BuildDenseSchedule({0, lengths.maxQueryLength, shape.queryHeads, lengths.maxKvLength}, platform, s);
+    auto status = BuildDenseSchedule({0, lengths.maxQueryLength, heads, kvCapacity}, platform, s);
     if (status != MlaScheduleStatus::Success) {
         return status;
     }
-    s.bSize = uint32_t(shape.batch);
-    if (shape.batch == 0 || shape.totalQuery == 0 || shape.totalKv == 0) {
+    s.bSize = batch;
+    if (batch == 0 || lengths.maxQueryLength == 0 || kvCapacity == 0) {
         return MlaScheduleStatus::Success;
     }
-    // Preserve ProcessKVActualSeqLoop: equality is over cumulative tails,
-    // NOT the per-sample differences (even for uniform compact TND).
-    const uint32_t firstTail = lengths.sequences[0].kvLength;
-    bool sameTails = true;
+    // Preserve ProcessKVActualSeqLoop: equality compares the source array's
+    // values: cumulative tails for compact KV, per-sample lengths for BSND KV.
+    const uint32_t firstKv = lengths.sequences[0].kvLength;
+    bool sameKvValues = true;
     for (const auto& seq : lengths.sequences) {
-        sameTails = sameTails && seq.kvStart + seq.kvLength == firstTail;
+        sameKvValues = sameKvValues && (compactKv ? seq.kvStart + seq.kvLength : seq.kvLength) == firstKv;
     }
     const uint64_t rows = uint64_t(s.s1Size) * s.gSize;
     s.mBaseSize = 256;
-    if (s.bSize % s.aicNum != 0 && sameTails) {
+    if (s.bSize % s.aicNum != 0 && sameKvValues) {
         const uint64_t lcm = uint64_t(s.bSize / std::gcd(s.bSize, s.aicNum)) * s.aicNum;
         if (lcm > UINT32_MAX) {
             return MlaScheduleStatus::FieldOverflow;
@@ -231,13 +284,14 @@ MlaScheduleStatus Calculate(const MlaTndShape& shape, const MlaPlatformInfo& pla
     base.gSize = s.gSize;
     base.s1Size = s.s1Size;
     base.s2Size = s.s2Size;
-    base.isAccumSeqS1 = base.isAccumSeqS2 = true;
+    base.isAccumSeqS1 = true;
+    base.isAccumSeqS2 = compactKv;
     base.actualLenQDims = base.actualLenKvDims = s.bSize;
     base.actualSeqS1Size.reserve(s.bSize);
     base.actualSeqS2Size.reserve(s.bSize);
     for (const auto& seq : lengths.sequences) {
         base.actualSeqS1Size.push_back(int64_t(seq.queryStart) + seq.queryLength);
-        base.actualSeqS2Size.push_back(int64_t(seq.kvStart) + seq.kvLength);
+        base.actualSeqS2Size.push_back(compactKv ? int64_t(seq.kvStart) + seq.kvLength : seq.kvLength);
     }
     detail::SplitParam param{};
     param.mBaseSize = s.mBaseSize;
@@ -292,7 +346,43 @@ MlaScheduleStatus BuildTndSchedule(const MlaTndShape& shape, const MlaPlatformIn
         MlaTndSchedule result;
         auto status = Parse(shape, cuQuery, queryCount, cuKv, kvCount, result.lengths);
         if (status == MlaScheduleStatus::Success) {
-            status = Calculate(shape, platform, result);
+            status = Calculate(shape.batch, shape.queryHeads, result.lengths.maxKvLength, true, platform,
+                               result.lengths, result.schedule);
+        }
+        if (status == MlaScheduleStatus::Success) {
+            output = std::move(result);
+        }
+        return status;
+    } catch (const std::bad_alloc&) {
+        return MlaScheduleStatus::AllocationFailure;
+    }
+}
+
+MlaScheduleStatus ParseTndBsndLengths(const MlaTndBsndShape& shape, const int32_t* cuQuery, uint64_t queryCount,
+                                      const int32_t* kvLengths, uint64_t kvCount, MlaTndBsndLengths& output)
+{
+    try {
+        MlaTndBsndLengths result;
+        const auto status = Parse(shape, cuQuery, queryCount, kvLengths, kvCount, result);
+        if (status == MlaScheduleStatus::Success) {
+            output = std::move(result);
+        }
+        return status;
+    } catch (const std::bad_alloc&) {
+        return MlaScheduleStatus::AllocationFailure;
+    }
+}
+
+MlaScheduleStatus BuildTndBsndSchedule(const MlaTndBsndShape& shape, const MlaPlatformInfo& platform,
+                                       const int32_t* cuQuery, uint64_t queryCount, const int32_t* kvLengths,
+                                       uint64_t kvCount, MlaTndBsndSchedule& output)
+{
+    try {
+        MlaTndBsndSchedule result;
+        auto status = Parse(shape, cuQuery, queryCount, kvLengths, kvCount, result.lengths);
+        if (status == MlaScheduleStatus::Success) {
+            status = Calculate(shape.batch, shape.queryHeads, shape.kvCapacity, false, platform, result.lengths,
+                               result.schedule);
         }
         if (status == MlaScheduleStatus::Success) {
             output = std::move(result);

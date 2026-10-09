@@ -206,11 +206,19 @@ void Run(const Input& in)
     // The oracle owns int64 *tails*, independently of ParseTndLengths.
     // GetS1/GetS2SeqSize below are the original cumulative-length functions.
     query.values.assign(in.cuQuery.begin() + 1, in.cuQuery.end());
+#ifdef TND_BSND_KV
+    // TND Q tails and BSND KV lengths have different accumulation semantics.
+    tensor.values.assign(in.kvLengths.begin(), in.kvLengths.end());
+#else
     tensor.values.assign(in.kvLengths.begin() + 1, in.kvLengths.end());
+#endif
     FiaInfoParser parser;
     parser.ProcessKVActualSeqLoop(tensor.values.data(), in.batch);
     info.inputLayout = TilingKeyLayout::TND;
     info.isAccumQSeq = info.isAccumKVSeq = true;
+#ifdef TND_BSND_KV
+    info.isAccumKVSeq = false;
+#endif
     info.actualSeqLenFlag = true;
     info.actualLenQDims = info.actualLenKvDims = in.batch;
     info.opParamInfo.actualSeqLengthsQ.tensor = &query;
@@ -236,10 +244,15 @@ void Run(const Input& in)
 #ifdef TND_LENGTHS
     SplitParam initial{};
     host.CreateSplitInput(base, initial);
-    info.s1Size = info.s2Size = 0;
+    info.s1Size = 0;
+#ifndef TND_BSND_KV
+    info.s2Size = 0;
+#endif
     for (uint32_t b = 0; b < info.bSize; ++b) {
         info.s1Size = std::max(info.s1Size, GetS1SeqSize(b, base));
+#ifndef TND_BSND_KV
         info.s2Size = std::max(info.s2Size, int64_t(GetS2SeqSize(b, base)));
+#endif
     }
     base = {};
 #endif
@@ -381,10 +394,18 @@ void Run(const Input& in)
     EmitArray(split.fdRes.gS1IdxEndOfFdHeadSplit, 52);
 #ifdef TND_LENGTHS
     Emit(info.s1Size);
+#ifdef TND_BSND_KV
+    Emit(*std::max_element(tensor.values.begin(), tensor.values.end()));
+#else
     Emit(info.s2Size);
+#endif
     for (uint32_t b = 0; b < info.bSize; ++b) {
         Emit(b == 0 ? 0 : query.values[b - 1]);
+#ifdef TND_BSND_KV
+        Emit(uint64_t(b) * in.sk);
+#else
         Emit(b == 0 ? 0 : tensor.values[b - 1]);
+#endif
         Emit(GetS1SeqSize(b, base));
         Emit(GetS2SeqSize(b, base));
     }
@@ -399,6 +420,9 @@ void Run(const Input& in)
 #endif
 #ifdef TND_LENGTHS
 #include "mla_tnd_schedule.h"
+#ifdef TND_BSND_KV
+#include "mla_tnd_bsnd_schedule.h"
+#endif
 #endif
 #include <cstring>
 #include <type_traits>
@@ -421,7 +445,11 @@ void Run(const Input& in)
         platform.blockDims[i] = in.blockDimOverride ? in.blockDimOverride : i + 1;
     }
 #ifdef TND_LENGTHS
+#ifdef TND_BSND_KV
+    MlaTndBsndSchedule tnd;
+#else
     MlaTndSchedule tnd;
+#endif
     tnd.lengths.maxQueryLength = 99;
     tnd.lengths.maxKvLength = 77;
     tnd.lengths.sequences.push_back({11, 22, 33, 44});
@@ -437,15 +465,22 @@ void Run(const Input& in)
     const int32_t sentinel = 1234;
     const int32_t* cq = in.hasQuery ? (in.cuQuery.empty() ? &sentinel : in.cuQuery.data()) : nullptr;
     const int32_t* ck = in.hasLengths ? (in.kvLengths.empty() ? &sentinel : in.kvLengths.data()) : nullptr;
-    MlaTndShape shape{in.batch, in.totalQuery, in.totalKv, in.heads, in.sq, in.sk};
     const bool parseOnly = std::getenv("MLA_TND_PARSE_ONLY") != nullptr;
+#ifdef TND_BSND_KV
+    MlaTndBsndShape shape{in.batch, in.totalQuery, in.heads, in.sq, in.sk};
+    auto status = parseOnly ? ParseTndBsndLengths(shape, cq, in.queryCount, ck, in.lengthCount, tnd.lengths)
+                            : BuildTndBsndSchedule(shape, platform, cq, in.queryCount, ck, in.lengthCount, tnd);
+#else
+    MlaTndShape shape{in.batch, in.totalQuery, in.totalKv, in.heads, in.sq, in.sk};
     auto status = parseOnly ? ParseTndLengths(shape, cq, in.queryCount, ck, in.lengthCount, tnd.lengths)
                             : BuildTndSchedule(shape, platform, cq, in.queryCount, ck, in.lengthCount, tnd);
+#endif
     if (status != MlaScheduleStatus::Success &&
         (tnd.lengths.maxQueryLength != beforeLengths.maxQueryLength ||
          tnd.lengths.maxKvLength != beforeLengths.maxKvLength ||
-         tnd.lengths.sequences.size() != beforeLengths.sequences.size() ||
-         std::memcmp(tnd.lengths.sequences.data(), beforeLengths.sequences.data(), sizeof(MlaTndSequence)) != 0)) {
+         tnd.lengths.sequences.size() != beforeLengths.sequences.size() || tnd.lengths.sequences[0].queryStart != 11 ||
+         tnd.lengths.sequences[0].kvStart != 22 || tnd.lengths.sequences[0].queryLength != 33 ||
+         tnd.lengths.sequences[0].kvLength != 44)) {
         std::abort();
     }
 #elif defined(BSND_KV_LENGTHS)
@@ -487,7 +522,12 @@ void Run(const Input& in)
         std::cout << "]\n";
         return;
     }
-    const uint32_t sq = tnd.lengths.maxQueryLength, sk = tnd.lengths.maxKvLength;
+    const uint32_t sq = tnd.lengths.maxQueryLength;
+#ifdef TND_BSND_KV
+    const uint32_t sk = in.sk;
+#else
+    const uint32_t sk = tnd.lengths.maxKvLength;
+#endif
 #else
     const int64_t sq = in.sq, sk = in.sk;
 #endif

@@ -43,8 +43,10 @@ def tnd_artifacts(tmp_path_factory):
     return directory
 
 
-def compile_driver(directory, oracle):
+def compile_driver(directory, oracle, *, mixed=False):
     name = "oracle" if oracle else "schedule"
+    if mixed:
+        name += "-mixed"
     binary = directory / name
     command = [
         os.environ.get("CXX", "g++"),
@@ -55,6 +57,8 @@ def compile_driver(directory, oracle):
         "-DBSND_KV_LENGTHS",
         "-DTND_LENGTHS",
     ]
+    if mixed:
+        command += ["-DTND_BSND_KV"]
     if os.environ.get("MLA_SCHEDULE_SANITIZE") == "1":
         command += [
             "-fsanitize=address,undefined",
@@ -91,6 +95,10 @@ def bsnd_scheduler(tnd_artifacts):
 
 @pytest.fixture(scope="session")
 def tnd_oracle(tnd_artifacts):
+    return build_oracle(tnd_artifacts)
+
+
+def build_oracle(tnd_artifacts, *, mixed=False):
     source_root = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
     blobs = {
         name: subprocess.check_output(
@@ -114,13 +122,14 @@ def tnd_oracle(tnd_artifacts):
     )
     manifest = dict(
         commit=CANN_COMMIT,
+        kv_layout="BSND" if mixed else "TND",
         functions=functions,
         parser_functions=["ProcessKVActualSeqLoop"],
         split_core_functions=["GetS1SeqSize", "GetS2SeqSize", "SplitCore"],
         files={name: hashlib.sha256(blob).hexdigest() for name, blob in blobs.items()},
     )
     (tnd_artifacts / "source-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    return compile_driver(tnd_artifacts, True)
+    return compile_driver(tnd_artifacts, True, mixed=mixed)
 
 
 def tnd_case(

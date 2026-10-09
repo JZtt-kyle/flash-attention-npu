@@ -2,21 +2,22 @@
 
 本文件只记录迭代顺序、每步产物与完成条件。当前公开能力、最近一次闭环和复现命令见 [status](status.md)，目标范围、协议与验收口径见 [design](design.md)。步骤编号沿用历史，M04c 在 M05 闭环后执行；不按编号重新排序。
 
-已完成 M06c2b1，唯一下一步为 **M06c2b2：TND Q + BSND KV 设备寻址与独立驱动**。按已确认范围推进；独立组件完成不代表公开入口开放。先读 [下一步完成条件](#下一步m06c2b2)，历史步骤保留在 [已完成步骤](#已完成步骤)。
+已完成 M06c2b2a，唯一下一步为 **M06c2b2b：混合布局 metadata 协议与 AICPU 生成**。混合布局按调度、生成、消费、计算拆分；独立组件完成不代表公开入口开放。先读 [下一步完成条件](#下一步m06c2b2b)，历史步骤保留在 [已完成步骤](#已完成步骤)。
 
 ## M06：非分页长度、TND 与 stride
 
-512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、显式 `num_splits=1`。BSND 每样本 KV 容量 `Sk` 与 TND 每段长度上界 `maxKvLength` 均为 0..16384；TND 总 Q/KV 容量各自不超过 `INT32_MAX`，并受 [字段、地址及资源边界](design.md#62-调度字段与边界) 约束。先 BSND 实际 KV 长度，再紧凑 TND，再区分 used 与分配长度，最后外层 stride。PA、mask、FD、192/128 与调度选项仍按后续步骤推进。
+512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、显式 `num_splits=1`。BSND 每样本 KV 容量 `Sk` 与 TND 每段长度上界 `maxKvLength` 均为 0..16384；紧凑 TND 总 Q/KV 容量各自不超过 `INT32_MAX`，混合布局的 BSND 总容量为 64 位 `B*Sk`，均受 [字段、地址及资源边界](design.md#62-调度字段与边界) 约束。先 BSND 实际 KV 长度，再紧凑 TND 与混合布局，再区分 used 与分配长度，最后外层 stride。PA、mask、FD、192/128 与调度选项仍按后续步骤推进。
 
 每行单独验收、提交。BSND 按 b1 调度 → b2a 生成 → b2b 消费 → b3 计算 → b4 公开接入完成；TND 沿用同一顺序，c2a 已拆为生成（c2a1）与消费（c2a2）。
 
-### 下一步：M06c2b2
+### 下一步：M06c2b2b
 
-输入为已验收的紧凑 TND 生成、设备校验及独立 attention 链路。M06c2b 按布局拆为 b1 紧凑 TND Q/KV 与 b2 TND Q + BSND KV；本步处理混合布局的物理容量、实际 KV 长度和起点。公开 TND 仍拒绝，公开接入留给 c3，used 留给 d1..d3。
+输入为已验收的混合布局 CPU 解析与调度，以及既有紧凑 TND v3 生成/消费链路。M06c2b2 的 CPU 小步已完成，后续仍按生成、消费、计算分别提交；公开接入留给 c3，used 留给 d1..d3。
 
-- 在现有 Kernel / Block / Tile 分层内支持 TND Q 和连续 BSND cache；KV 起点按分配容量计算，短长度不重排后续样本。明确记录的布局与容量语义，生成、当前长度校验和消费保持一致。
-- 双 dtype 覆盖非均匀 Q、短/混合/零 KV、跨块、offset、总空容量及 poison padding，核对 O/LSE；校验仍在 attention 同步或输出/workspace 写入前完成。
-- 通过固定源与独立数学 reference 精度、代表性源组件性能及紧凑 TND/BSND/metadata/普通 FA3 回归；若记录适配与计算组合过大，先拆成独立验收的小步。按根目录约定完成验证、状态更新并提交一次。
+- 定义独立混合布局记录，明确绑定 TND Q、BSND KV 的物理容量、Q 总量/max 上界、实际长度和 64 位 KV 起点；不得将混合 span 冒充紧凑 v3，旧协议保持明确隔离。
+- AICPU 共用 `BuildTndBsndSchedule`，读取当次 `int32[B+1]` Q 前缀和及 `int32[B]` KV 长度；生成过程无长度 D2H，静态分配界限、字数、对齐、地址及输入/输出重叠检查完整，失败清零 payload。
+- CPU/AICPU/独立固定源一致；双 dtype 记录、短/混合/全零 KV、变长/零 Q、空物理容量、超过 32 位的起点、更新/复用、生命周期与缓冲边界通过。完成 sanitizer、AICPU 构建依赖及普通 FA3/已有布局回归，并保留生成耗时诊断。
+- 本步不接设备记录消费者或 attention；后续计算步骤完成双 dtype 源/数学精度、offset/poison padding、代表性源组件性能和已有布局回归。
 
 ### M06 步骤表
 
@@ -34,7 +35,10 @@
 | M06c2a1 | 已完成 | TND v3 记录与独立 AICPU 生成；不接消费者或公开 TND | 解析与 c1 一致，起点/长度/总容量/max 上界与调度完整保存；CPU/AICPU/固定源一致，失败清零、缓冲边界、生命周期、构建与普通 FA3 metadata 回归通过；生成耗时诊断 |
 | M06c2a2 | 已完成 | TND v3 设备校验消费者；公开 TND 仍拒绝 | 记录/前缀/变长端点/资源校验、release 真实 Trap、拒绝不写输出、生命周期与旧 metadata/普通 FA3 回归通过 |
 | M06c2b1 | 已完成 | 紧凑 TND Q/KV 设备寻址，独立驱动 | 双 dtype T01、多 query/跨样本尾块/零样本/总空容量/offset、O/LSE 布局；记录先校验，源精度/组件性能与 BSND/metadata/普通 FA3 回归通过 |
-| M06c2b2 | 唯一下一步 | TND Q + BSND KV 的容量、起点与设备寻址，独立驱动 | 不按实际 KV 长度重排 BSND cache；双 dtype 短/混合/零 KV/poison padding/offset、记录校验、源精度/组件性能与已有布局回归通过 |
+| M06c2b2a | 已完成 | TND Q + BSND KV 的 CPU 长度解析与调度 | 64 位物理 KV 起点、容量/实际长度分离、固定源差分、边界及 sanitizer、已有调度/metadata 回归通过 |
+| M06c2b2b | 唯一下一步 | 混合布局独立 metadata 协议与 AICPU 生成 | 布局/物理容量/起点/长度完整保存；CPU/AICPU/固定源一致，失败清零、缓冲边界、生命周期、构建和普通 FA3 回归通过 |
+| M06c2b2c | 待开始 | 混合布局记录设备校验消费者 | 记录、当前 Q 前缀/KV 长度、容量、端点和资源校验；真实 Trap、拒绝不写输出、生命周期与已有布局/普通 FA3 回归通过 |
+| M06c2b2d | 待开始 | 混合布局设备寻址与独立 attention 驱动 | 双 dtype 非均匀 Q、短/混合/零 KV、跨块、空容量、poison padding/offset；源/数学精度、组件性能与已有布局回归通过 |
 | M06c3 | 待开始 | 公开 varlen 及 TND query 只读 kvcache / metadata | varlen 内部生成、kvcache 按原签名复用；真实/fake/C++、空总容量、生命周期、普通 FA3 与适用 E2E 达标 |
 | M06d1 | 待开始 | BSND/TND 实际 Q/KV 使用长度 CPU 归一与调度 | U01/T01 used 小于分配长度；起点不随 used 重排；源对照与 sanitizer 通过 |
 | M06d2 | 待开始 | used 的 AICPU、设备消费与独立 Kernel 链路 | 有效行/零 Q/KV/poison padding/长度更新/Trap；仅检查官方定义输出区，组件性能与 metadata/普通 FA3 回归通过 |
