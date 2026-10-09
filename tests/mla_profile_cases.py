@@ -44,3 +44,20 @@ LONG_KV_CASES = [
     ((10, 3, 86, 8193), None),
     ((21, 1, 8, 16384), None),
 ]
+
+
+# M06b4 public BSND: (allocated shape, scale, actual lengths). All cases
+# remain in reports, including native FD and all-zero length cases.
+BSND_CASES = [
+    ((2, 1, 8, 257), None, [17, 129]),
+    ((2, 1, 8, 257), 0.23, [17, 129]),
+    ((1, 7, 16, 65), None, [33]),
+    ((2, 7, 16, 33), None, [17, 0]),
+    ((2, 2, 128, 1025), None, [511, 513]),
+    ((2, 1, 8, 16384), None, [8193, 16383]),
+    ((16, 1, 1, 513), None, [0, 1, 511, 512, 513] * 3 + [0]),
+    ((1, 1, 1, 1), None, [0]),
+    ((41, 3, 128, 65), None, [0] * 41),
+    ((41, 2, 128, 65), None, [0, 17, 0, 33] * 10 + [0]),
+    ((2, 10, 128, 513), None, [17, 513]),
+]

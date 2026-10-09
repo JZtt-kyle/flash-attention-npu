@@ -50,7 +50,7 @@ def test_metadata_dispatcher_schema_and_record(dtype, shape):
     for mode in (nullcontext(), torch.no_grad(), torch.inference_mode()):
         with mode:
             actual = op(**args)
-        assert actual.dtype == torch.int32 and actual.shape == (401,)
+        assert actual.dtype == torch.int32 and actual.shape == (401 + shape[0],)
         assert actual.device == args["cache_seqlens"].device and actual.is_contiguous()
         assert not actual.requires_grad and not hasattr(actual, "_fa_scheduler_params")
         torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
@@ -133,8 +133,8 @@ def test_metadata_dispatcher_compile_reads_current_lengths(dtype, public):
         lengths.fill_(length)
         record = compiled(lengths)
         torch.testing.assert_close(record.cpu(), run(lengths).cpu(), rtol=0, atol=0)
-        assert record.cpu()[5].item() == (0 if length == 17 else 4)
-        if length != 17:
+        assert record.cpu()[5].item() == (0 if 0 <= length <= 17 else 2)
+        if not 0 <= length <= 17:
             assert record.cpu()[8:].count_nonzero().item() == 0
         records.append(record)
     assert len({r.data_ptr() for r in records}) == len(records)

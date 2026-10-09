@@ -111,7 +111,7 @@ class CannCall:
     timed call. H2D input transfers and one-time creation of views are excluded.
     """
 
-    def __init__(self, inputs, *, scale=None, split_rope=True):
+    def __init__(self, inputs, *, scale=None, split_rope=True, kv_lengths=None):
         q, k, v = (inputs[name] for name in ("q", "k", "v"))
         if q.device.type != "npu" or q.dtype not in DTYPES.values():
             raise ValueError("CANN baseline requires FP16/BF16 NPU inputs")
@@ -133,6 +133,12 @@ class CannCall:
         self.out_shape = (*q.shape[:3], v.shape[-1])
         self.lse_shape = (q.shape[0], q.shape[2], q.shape[1], 1)
         self.operator = torch.ops.npu.npu_fused_infer_attention_score_v2.out
+        if kv_lengths is not None:
+            if len(kv_lengths) != q.shape[0] or any(not 0 <= x <= k.shape[1] for x in kv_lengths):
+                raise ValueError("CANN BSND lengths must fit each allocated cache")
+            # The pinned public torch_npu API takes a host integer list. Its
+            # conversion/submission remains inside each timed operator call.
+            self.kwargs["actual_seq_kvlen"] = list(kv_lengths)
 
     def __call__(self):
         out = torch.empty(self.out_shape, device=self.query.device, dtype=self.query.dtype)
@@ -165,6 +171,7 @@ class CannCall:
             "mask": "none",
             "split": "CANN native automatic policy",
             "metadata": "not exposed by FIA",
+            "actual_seq_kvlen": self.kwargs.get("actual_seq_kvlen"),
             "output_allocation": "every call via explicit out overload",
         }
 

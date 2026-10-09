@@ -2,7 +2,7 @@
 
 本文件只记录迭代顺序、每步产物与完成条件。当前公开能力、最近一次闭环和复现命令见 [status](status.md)，目标范围、协议与验收口径见 [design](design.md)。步骤编号沿用历史，M04c 在 M05 闭环后执行；不按编号重新排序。
 
-已完成 M06b3，唯一下一步为 **M06b4：公开只读 BSND 实际 KV 长度与 metadata 生成/复用**。后续继续在已确认范围内按下表执行。
+已完成 M06b4，唯一下一步为 **M06c1：紧凑 TND 前缀和解析、起点与 CPU 调度**。后续继续在已确认范围内按下表执行。
 
 ## 已完成步骤
 
@@ -49,8 +49,8 @@
 | M06b2a | 已完成 | v2 序列化与独立 AICPU 生成，不接前向 | CPU/AICPU/固定源一致，失败清零、对齐/字数/重叠、生命周期、构建及旧路径回归；生成耗时诊断 |
 | M06b2b | 已完成 | BSND 实际长度记录的设备校验消费者；公开短长度继续拒绝 | 版本/类型/字数、快照与当前长度、调度/资源均校验；省略尾部逐样本为零；损坏/过期记录真实 Trap，拒绝不写输出；只读复用、生命周期、旧 dense 与普通 FA3 metadata 回归通过 |
 | M06b3 | 已完成 | 按样本实际 KV 长度执行的 BSND Kernel / Block / Tile，独立驱动 | 双 dtype 短 KV、跨 S2 块、混合/全零长度、端点外空行与 poison padding 精度；源组件性能及 dense 回归通过 |
-| M06b4 | 唯一下一步 | 公开只读 BSND `cache_seqlens`、metadata 生成/复用 | None/整数/int32 tensor、真实/fake/C++、有/无/过期记录、跨流与 compile；普通 FA3 及适用公开 E2E 达标 |
-| M06c1 | 待开始 | 紧凑 TND 前缀和解析、起点与 CPU 调度 | T01 的起始 0、单调性、尾值、计数、空样本、总容量/max 上界/溢出；BSND 等价与固定源累计长度对照通过 |
+| M06b4 | 已完成 | 公开只读 BSND `cache_seqlens`、metadata 生成/复用 | None/整数/int32 tensor、真实/fake/C++、有/无/过期记录、跨流与 compile；普通 FA3 及适用公开 E2E 达标 |
+| M06c1 | 唯一下一步 | 紧凑 TND 前缀和解析、起点与 CPU 调度 | T01 的起始 0、单调性、尾值、计数、空样本、总容量/max 上界/溢出；BSND 等价与固定源累计长度对照通过 |
 | M06c2a | 待开始 | TND AICPU 记录与设备消费者；公开 TND 仍拒绝 | 解析与 c1 一致，起点/有效长度/调度可校验；旧/篡改/变更记录真实拒绝，无 D2H，普通 FA3 metadata 回归通过 |
 | M06c2b | 待开始 | 紧凑 TND Q/KV 和 TND Q + BSND KV 设备寻址，独立驱动 | 双 dtype T01、多 query/跨样本尾块/零样本/offset、O/LSE 布局；源精度/组件性能与 BSND 回归通过 |
 | M06c3 | 待开始 | 公开 varlen 及 TND query 只读 kvcache / metadata | varlen 内部生成、kvcache 按原签名复用；真实/fake/C++、空总容量、生命周期、普通 FA3 与适用 E2E 达标 |

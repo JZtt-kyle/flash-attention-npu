@@ -22,8 +22,8 @@ from tests.test_flash_attn_npu_v3_metadata_signature import metadata as call_met
 from tests.test_flash_attn_npu_v3_mla_contract import _forward, _inputs
 from tests.test_flash_attn_npu_v3_mla_dense import launch, make_case, make_rounding_case
 from tests.test_flash_attn_npu_v3_mla_dense import probes as probes
-from tests.test_flash_attn_npu_v3_mla_metadata import Args, Shape, WORDS
-from tests.test_flash_attn_npu_v3_mla_metadata import probe as probe
+from tests.test_flash_attn_npu_v3_mla_metadata_consumer import Args, Shape, Platform, WORDS
+from tests.test_flash_attn_npu_v3_mla_bsnd_metadata_aicpu import bsnd_probe as bsnd_probe
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -98,15 +98,15 @@ def cached(device, metadata=None, lengths=None, scale=None, return_lse=True):
 
 def test_metadata_official_entries(metadata_entry, dtype):
     result = call_metadata(metadata_entry, metadata_args(dtype))
-    assert result.shape == (WORDS,) and result.dtype == torch.int32
+    assert result.shape == (WORDS + 2,) and result.dtype == torch.int32
     assert result.device.type == "npu" and result.is_contiguous()
     assert not hasattr(result, "_fa_scheduler_params")
     if not metadata_entry.endswith("fake"):
         assert result.cpu()[:8].tolist() == [
             0x4D4C4131,
-            1,
-            1,
-            WORDS,
+            2,
+            2,
+            WORDS + 2,
             1 if dtype == torch.float16 else 2,
             0,
             0,
@@ -125,14 +125,15 @@ def test_metadata_official_entries(metadata_entry, dtype):
         (10, 2, 129, 33),
     ],
 )
-def test_public_record_matches_host(probe, dtype, shape):
+def test_public_record_matches_host(bsnd_probe, dtype, shape):
     args = metadata_args(dtype, shape)
     record = api.get_scheduler_metadata(**args)
-    host = (ctypes.c_uint32 * WORDS)()
-    launch_args = Args(
-        0, WORDS, 1 if dtype == torch.float16 else 2, Shape(*shape), probe["platform"]
-    )
-    probe["lib"].metadata_host(ctypes.byref(launch_args), host)
+    words = WORDS + shape[0]
+    host = (ctypes.c_uint32 * words)()
+    platform = Platform.from_buffer_copy(bsnd_probe["platform"])
+    platform.block_dims[:] = [platform.block_dims[platform.aic - 1]] * 26
+    launch_args = Args(0, words, 1 if dtype == torch.float16 else 2, Shape(*shape), platform)
+    bsnd_probe["lib"].bsnd_metadata_host(ctypes.byref(launch_args), host)
     assert [x & 0xFFFFFFFF for x in record.cpu().tolist()] == list(host)
 
 
@@ -203,7 +204,7 @@ def test_metadata_length_tensor_boundary(metadata_entry, dtype, fault):
 @pytest.mark.parametrize("fault", ["dtype", "device", "rank", "size", "stride"])
 def test_forward_metadata_tensor_boundary(forward_entry, dtype, name, fault):
     args = _inputs(dtype=dtype)
-    tensor = torch.zeros(2 if name == "seqused_k" else WORDS, dtype=torch.int32, device="npu")
+    tensor = torch.zeros(2 if name == "seqused_k" else WORDS + 2, dtype=torch.int32, device="npu")
     args[name] = malformed(tensor, fault)
     with pytest.raises(RuntimeError, match="MLA: (cache_seqlens|scheduler_metadata)"):
         _forward(forward_entry, args)
@@ -242,9 +243,9 @@ def test_public_return_contract(dtype, fake, length_kind, reuse):
         assert cached(device, record, lengths, return_lse=False).shape == out.shape
 
 
-@pytest.mark.parametrize("length", [-1, 0, 16, 18])
+@pytest.mark.parametrize("length", [-1, 18])
 def test_public_integer_length_rejection(dtype, length):
-    with pytest.raises(RuntimeError, match="cache_seqlens equals KV capacity"):
+    with pytest.raises(RuntimeError, match="cache_seqlens must be between zero and KV capacity"):
         cached(_inputs(dtype=dtype), lengths=length)
 
 
@@ -266,7 +267,7 @@ def test_public_source_accuracy(probes, shape, scale):
     launch(probes[0]["oracle"], case, "oracle")
     lengths = torch.full((shape[0] + 2,), shape[3], dtype=torch.int32, device="npu")[1:-1]
     record = generate(case["device"], lengths)
-    storage = torch.zeros(WORDS + 2, dtype=torch.int32, device="npu")
+    storage = torch.zeros(record.numel() + 2, dtype=torch.int32, device="npu")
     storage[1:-1].copy_(record)
     before = storage.clone()
     results = [cached(case["device"], md, lengths, scale) for md in (None, record, storage[1:-1])]
@@ -390,8 +391,11 @@ def test_producer_input_lifetime_and_snapshot(dtype):
     # A snapshot owns no live length pointer. Updating the original input
     # leaves the record unchanged; a new generation reads the changed values.
     args["cache_seqlens"].zero_()
+    updated = api.get_scheduler_metadata(**args).cpu()
+    assert updated[5].item() == 0 and updated[401:].tolist() == [0, 0]
+    args["cache_seqlens"][-1] = -1
     failed = api.get_scheduler_metadata(**args).cpu()
-    assert failed[5].item() == 4 and failed[8:].count_nonzero().item() == 0
+    assert failed[5].item() == 2 and failed[8:].count_nonzero().item() == 0
     torch.testing.assert_close(records[-1].cpu(), reference, rtol=0, atol=0)
 
 
@@ -416,9 +420,16 @@ def test_compile_metadata_reuse(dtype):
     [
         f"{mode}-{value}"
         for mode in ("generated", "implicit", "reused")
-        for value in ("negative", "zero", "short", "over")
+        for value in ("negative", "over")
     ]
     + [
+        "reused-zero",
+        "reused-short",
+        "version",
+        "kind",
+        "wordcount",
+        "snapshot",
+        "omitted-lengths",
         "magic",
         "dtype",
         "shape",

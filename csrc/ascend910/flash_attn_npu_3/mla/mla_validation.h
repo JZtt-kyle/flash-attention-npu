@@ -1,7 +1,7 @@
 #pragma once
 
 #include <torch/extension.h>
-#include "mla_metadata.h"
+#include "mla_bsnd_metadata.h"
 
 // Host-only boundary for the two representations in docs/mla/design.md.
 // Contract: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
@@ -94,12 +94,19 @@ inline void CheckCacheLengths(const at::Tensor& lengths, int64_t batch, const at
     TORCH_CHECK(lengths.is_contiguous(), "MLA: cache_seqlens must be contiguous");
 }
 
-inline void CheckDenseMetadataTensor(const at::Tensor& metadata, const at::Device& device)
+inline uint32_t CheckBsndMetadataWords(int64_t batch)
+{
+    TORCH_CHECK(batch >= 0 && batch <= UINT32_MAX - kMlaBsndKvLengthMetadataPrefixWords,
+                "MLA: BSND metadata word count overflow");
+    return kMlaBsndKvLengthMetadataPrefixWords + batch;
+}
+
+inline void CheckDenseMetadataTensor(const at::Tensor& metadata, const at::Device& device, int64_t batch)
 {
     TORCH_CHECK(metadata.scalar_type() == at::kInt, "MLA: scheduler_metadata must have dtype int32");
     TORCH_CHECK(metadata.device() == device, "MLA: scheduler_metadata must be on the same NPU device");
-    TORCH_CHECK(metadata.dim() == 1 && metadata.size(0) == kMlaDenseMetadataWords,
-                "MLA: scheduler_metadata must have shape [401]");
+    TORCH_CHECK(metadata.dim() == 1 && metadata.size(0) == CheckBsndMetadataWords(batch),
+                "MLA: scheduler_metadata must have shape [401 + batch_size]");
     TORCH_CHECK(metadata.is_contiguous(), "MLA: scheduler_metadata must be contiguous");
 }
 

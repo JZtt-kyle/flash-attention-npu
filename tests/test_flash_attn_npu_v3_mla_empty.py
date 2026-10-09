@@ -64,7 +64,7 @@ def test_empty_public_and_direct_forward(dtype, shape, fake, offset):
         lengths = torch.full((shape[0],), shape[3], dtype=torch.int32, device="npu")
         record = generate(device, lengths)
         # The wire record may be cloned into a 4-byte-aligned offset view.
-        copied = torch.empty(403, dtype=torch.int32, device="npu")[1:-1]
+        copied = torch.empty(record.numel() + 2, dtype=torch.int32, device="npu")[1:-1]
         copied.copy_(record)
         before = None if fake else copied.cpu().clone()
         with forbid_host_readback():
@@ -93,13 +93,23 @@ def test_empty_metadata_entries(dtype, shape, entry):
     with FakeTensorMode() if entry.endswith("fake") else nullcontext():
         args = metadata_args(dtype, shape)
         record = call_metadata(entry, args)
-        assert record.shape == (401,) and record.dtype == torch.int32
+        assert record.shape == (401 + shape[0],) and record.dtype == torch.int32
         if not entry.endswith("fake"):
             words = record.cpu().tolist()
-            assert words[:8] == [0x4D4C4131, 1, 1, 401, 1 if dtype == torch.float16 else 2, 0, 0, 0]
+            assert words[:8] == [
+                0x4D4C4131,
+                2,
+                2,
+                401 + shape[0],
+                1 if dtype == torch.float16 else 2,
+                0,
+                0,
+                0,
+            ]
             assert words[8:17] == [shape[0], 1, shape[2], shape[1], shape[3], 512, 64, 0, 0]
             assert words[20:23] == [1, 1, 1]
-            assert not any(words[23:])
+            assert not any(words[23:401])
+            assert words[401:] == [shape[3]] * shape[0]
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -164,7 +174,7 @@ def test_empty_does_not_bypass_boundary_checks(dtype, shape, fake):
     [
         f"{empty}:{fault}"
         for empty in ("emptyq", "emptyk", "emptyb")
-        for fault in ("magic", "shape", "workspace")
+        for fault in ("magic", "version", "kind", "shape", "workspace")
     ]
     + [
         f"{empty}:{mode}-{value}"

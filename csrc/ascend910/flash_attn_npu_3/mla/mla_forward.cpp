@@ -10,16 +10,18 @@
 #include "runtime/rt_ffts.h"
 #include <c10/core/DeviceGuard.h>
 #include <torch/library.h>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
 
 extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
 
 namespace flash_attn::mla {
 namespace {
-MlaPlatformInfo DensePlatform()
+MlaPlatformInfo DensePlatform(bool fullLaunch = false)
 {
     const char* soc = aclrtGetSocName();
     TORCH_CHECK(soc && std::strncmp(soc, "Ascend910B", 10) == 0,
@@ -41,6 +43,11 @@ MlaPlatformInfo DensePlatform()
     for (uint32_t c = 1; c <= p.aicNum; ++c) {
         p.blockDims[c - 1] = platform->CalcTschBlockDim(c * 2, c, c * 2);
     }
+    if (fullLaunch) {
+        // The number of working cores depends on device lengths. Launch all
+        // platform cores without reading the generated record back to host.
+        p.blockDims.fill(p.blockDims[p.aicNum - 1]);
+    }
     return p;
 }
 
@@ -50,21 +57,28 @@ struct MetadataSubmission {
     MlaMetadataArgs args;
     aclrtStream current, worker;
     aclrtEvent inputReady, metadataDone;
+    bool hasKvLengths;
 
     void Enqueue()
     {
         TORCH_CHECK(aclrtRecordEvent(inputReady, current) == ACL_SUCCESS, "MLA: input event recording failed");
         TORCH_CHECK(aclrtStreamWaitEvent(worker, inputReady) == ACL_SUCCESS, "MLA: input event wait failed");
-        ComputeMlaDenseMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
+        if (hasKvLengths) {
+            ComputeMlaBsndKvLengthMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
+        } else {
+            ComputeMlaDenseMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
+        }
         TORCH_CHECK(aclrtRecordEvent(metadataDone, worker) == ACL_SUCCESS, "MLA: metadata event recording failed");
         TORCH_CHECK(aclrtStreamWaitEvent(current, metadataDone) == ACL_SUCCESS, "MLA: metadata event wait failed");
     }
 };
 
 MetadataSubmission PrepareMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platform, at::ScalarType dtype,
-                                   const at::TensorOptions& options, const std::optional<at::Tensor>& lengths)
+                                   const at::TensorOptions& options, const std::optional<at::Tensor>& lengths,
+                                   bool hasKvLengths)
 {
-    auto metadata = at::empty({kMlaDenseMetadataWords}, options.dtype(at::kInt));
+    const uint32_t words = hasKvLengths ? CheckBsndMetadataWords(shape.batch) : kMlaDenseMetadataWords;
+    auto metadata = at::empty({words}, options.dtype(at::kInt));
     auto stream = c10_npu::getCurrentNPUStream();
     auto worker = c10_npu::getNPUStreamFromPool();
     // The two record/wait pairs are submitted together before these per-host-
@@ -86,22 +100,23 @@ MetadataSubmission PrepareMetadata(const MlaDenseShape& shape, const MlaPlatform
         c10_npu::NPUCachingAllocator::recordStream(lengths->storage().data_ptr(), worker);
     }
     MlaMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
-                         kMlaDenseMetadataWords,
+                         words,
                          uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),
                          shape,
                          platform,
                          lengths ? reinterpret_cast<uint64_t>(lengths->data_ptr()) : 0,
                          lengths ? uint64_t(lengths->numel()) : 0};
-    return {metadata,           lengths, args, stream.stream(false), worker.stream(false), events.inputReady,
-            events.metadataDone};
+    return {
+        metadata,    lengths, args, stream.stream(false), worker.stream(false), events.inputReady, events.metadataDone,
+        hasKvLengths};
 }
 } // namespace
 
 at::Tensor DenseMetadata(int64_t batch, int64_t sq, int64_t heads, int64_t sk, at::ScalarType dtype,
                          const at::Tensor& cacheSeqlens)
 {
-    auto submission =
-        PrepareMetadata({batch, sq, heads, sk}, DensePlatform(), dtype, cacheSeqlens.options(), cacheSeqlens);
+    auto submission = PrepareMetadata({batch, sq, heads, sk}, DensePlatform(batch != 0 && sq != 0 && sk != 0), dtype,
+                                      cacheSeqlens.options(), cacheSeqlens, true);
     at_npu::native::OpCommand::RunOpApiV2("ascendc_mla_metadata", [submission]() mutable -> int {
         submission.Enqueue();
         return 0;
@@ -124,11 +139,27 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
                                      const at::Tensor& qv, float scale, const std::optional<at::Tensor>& cacheSeqlens,
                                      const std::optional<at::Tensor>& schedulerMetadata)
 {
-    auto p = DensePlatform();
+    const bool hasKvLengths = cacheSeqlens.has_value() || schedulerMetadata.has_value();
+    if (hasKvLengths) {
+        CheckBsndMetadataWords(q.size(0));
+    }
+    const bool nonempty = q.size(0) != 0 && q.size(1) != 0 && k.size(1) != 0;
+    auto p = DensePlatform(hasKvLengths && nonempty);
     MlaSchedule s{};
     auto status = BuildDenseSchedule({q.size(0), q.size(1), q.size(2), k.size(1)}, p, s);
     TORCH_CHECK(status == MlaScheduleStatus::Success, "MLA: dense scheduling failed (status ", int(status), ")");
     TORCH_CHECK(s.cvRatio == 2 && s.scheduleMode == 1 && s.fd.numOfFdHead == 0, "MLA: unexpected dense schedule");
+    if (hasKvLengths && nonempty) {
+        // CANN CalcNormalWorkspaceSize with the maximum M base (256). Unequal
+        // lengths may increase M from the dense candidate. This is only an
+        // allocation bound; AICPU supplies and the device validates real tiling.
+        const uint64_t rows = std::min(uint64_t(s.s1Size) * s.gSize, uint64_t(256));
+        const uint64_t m = (rows + 15) / 16 * 16;
+        const uint64_t n = (std::min(s.s2Size, 512U) + 31) / 32 * 32;
+        s.workspace.userBytes = uint64_t(2) * p.aicNum * (6 * m * n + 8 * m * 512 + 8 * 256);
+        TORCH_CHECK(s.workspace.libApiBytes <= UINT64_MAX - s.workspace.userBytes, "MLA: workspace overflow");
+        s.workspace.totalBytes = s.workspace.libApiBytes + s.workspace.userBytes;
+    }
     TORCH_CHECK(s.workspace.totalBytes <= uint64_t(std::numeric_limits<int64_t>::max()) &&
                     s.workspace.mm1ResSize <= UINT32_MAX && s.workspace.mm2ResSize <= UINT32_MAX,
                 "MLA: workspace or launch field overflow");
@@ -139,7 +170,7 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     std::optional<MetadataSubmission> producer;
     if (!schedulerMetadata) {
         producer = PrepareMetadata({q.size(0), q.size(1), q.size(2), k.size(1)}, p, q.scalar_type(), q.options(),
-                                   cacheSeqlens);
+                                   cacheSeqlens, hasKvLengths);
     }
     auto metadata = schedulerMetadata ? *schedulerMetadata : producer->metadata;
     for (const auto& t : {q, k, v, qv, out, lse, workspace, metadata}) {
@@ -174,6 +205,7 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     a.workspace =
         workspace.numel() == 0 ? nullptr : static_cast<uint8_t*>(workspace.data_ptr()) + s.workspace.libApiBytes;
     a.scale = scale;
+    a.hasKvLengths = hasKvLengths;
     const uint32_t dtype = uint32_t(q.scalar_type() == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16);
     // The host schedule currently supplies only launch/allocation bounds. The
     // Kernel receives all tiling and endpoints from the AICPU record, checked
@@ -224,7 +256,7 @@ std::tuple<at::Tensor, at::Tensor> DenseForwardOp(const at::Tensor& q, const at:
         CheckCacheLengths(*cacheSeqlens, q.size(0), q.device());
     }
     if (schedulerMetadata) {
-        CheckDenseMetadataTensor(*schedulerMetadata, q.device());
+        CheckDenseMetadataTensor(*schedulerMetadata, q.device(), q.size(0));
     }
     const c10::OptionalDeviceGuard deviceGuard(device_of(q));
     auto result = DenseForward(q, k, v, qv, scale, cacheSeqlens, schedulerMetadata);

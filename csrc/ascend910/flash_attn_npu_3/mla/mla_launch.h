@@ -11,6 +11,7 @@ struct MlaLaunchArgs {
     uint8_t *qc, *qr, *kv, *kr, *output, *lse, *workspace, *metadata, *cacheSeqlens;
     MlaDenseMetadataContext context;
     float scale;
+    bool hasKvLengths = false;
 };
 
 aclError LaunchDenseFp16(const MlaLaunchArgs& args);

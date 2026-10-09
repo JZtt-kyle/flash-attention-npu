@@ -237,6 +237,8 @@ def _check_mla_cache_lengths(lengths, batch, device):
 
 
 def _check_mla_forward_metadata(q, cache_seqlens, metadata):
+    if cache_seqlens is not None or metadata is not None:
+        _mla_bsnd_metadata_words(q.shape[0])
     if cache_seqlens is not None:
         _check_mla_cache_lengths(cache_seqlens, q.shape[0], q.device)
     if metadata is not None:
@@ -244,8 +246,8 @@ def _check_mla_forward_metadata(q, cache_seqlens, metadata):
             raise RuntimeError("MLA: scheduler_metadata must have dtype int32")
         if metadata.device != q.device:
             raise RuntimeError("MLA: scheduler_metadata must be on the same NPU device")
-        if metadata.ndim != 1 or metadata.shape[0] != 401:
-            raise RuntimeError("MLA: scheduler_metadata must have shape [401]")
+        if metadata.ndim != 1 or metadata.shape[0] != _mla_bsnd_metadata_words(q.shape[0]):
+            raise RuntimeError("MLA: scheduler_metadata must have shape [401 + batch_size]")
         if not metadata.is_contiguous():
             raise RuntimeError("MLA: scheduler_metadata must be contiguous")
 
@@ -1593,10 +1595,8 @@ def flash_attn_with_kvcache(
             # Integer convenience input needs valid geometry before creating
             # its device tensor. Tensor/None lengths go straight to the op.
             _check_mla_inputs(q, k_cache, v_cache, qv)
-            if cache_seqlens != k_cache.shape[1]:
-                raise RuntimeError(
-                    "MLA compressed forward is not implemented yet unless cache_seqlens equals KV capacity"
-                )
+            if not 0 <= cache_seqlens <= k_cache.shape[1]:
+                raise RuntimeError("MLA: cache_seqlens must be between zero and KV capacity")
             cache_seqlens = torch.full(
                 (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
             )
@@ -1801,6 +1801,12 @@ def _fits_mla_dense_shape(batch, sq, heads, sk):
     )
 
 
+def _mla_bsnd_metadata_words(batch):
+    if not 0 <= batch <= 2**32 - 1 - 401:
+        raise RuntimeError("MLA: BSND metadata word count overflow")
+    return 401 + batch
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_dense_metadata")
 def _mla_dense_metadata_fake(
     batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
@@ -1812,7 +1818,9 @@ def _mla_dense_metadata_fake(
     if qkv_dtype not in (torch.float16, torch.bfloat16):
         raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
     _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
-    return torch.empty((401,), dtype=torch.int32, device=cache_seqlens.device)
+    return torch.empty(
+        (_mla_bsnd_metadata_words(batch_size),), dtype=torch.int32, device=cache_seqlens.device
+    )
 
 
 @torch.library.custom_op(
@@ -1993,7 +2001,7 @@ def get_scheduler_metadata(
     Its legacy ``softcap`` and ``softmax_scale`` arguments are keyword-only; a
     positive legacy softcap enables softcapping even when has_softcap is omitted.
     ``has_softcap=True`` requires a positive legacy softcap for this protocol.
-    MLA returns int32 metadata for the validated full-length dense subset with
+    MLA returns int32 metadata with per-sample BSND KV length snapshots and
     num_splits=1. Its scale is supplied only to forward; legacy numerical
     keywords are not supported. Length values are checked on device.
     """

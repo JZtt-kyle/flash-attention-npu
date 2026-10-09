@@ -23,10 +23,12 @@ from tests.mla_cann_baseline import (
     environment,
     make_inputs,
 )
-from tests.mla_profile_cases import CASES, KV_CASES, LONG_KV_CASES, S1G_CASES
+from tests.mla_profile_cases import BSND_CASES, CASES, KV_CASES, LONG_KV_CASES, S1G_CASES
 
 
-def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CASES):
+def profile(
+    directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CASES, kv_lengths=None
+):
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     timed_cpu_threads = torch.get_num_threads()
     reference_cpu_threads = int(os.environ.get("MLA_FORWARD_REFERENCE_THREADS", timed_cpu_threads))
@@ -37,6 +39,10 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
     torch.npu.set_device(0)
     assert torch.npu.device_count() == 1 and "910B" in torch.npu.get_device_name(0)
     inputs, native, lengths, metadata = [], [], [], []
+    if kv_lengths is None:
+        kv_lengths = [None] * len(cases)
+    assert len(kv_lengths) == len(cases)
+    assert metadata_reuse or not any(x is not None for x in kv_lengths)
 
     def generate(index):
         q, k = inputs[index]["q"], inputs[index]["k"]
@@ -68,16 +74,22 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
         )
 
     accuracy = []
-    for shape, scale in cases:
+    for index, (shape, scale) in enumerate(cases):
         batch, sq, heads, sk = shape
         cpu = make_inputs(
             Case("public", "compressed", batch, sq, sk, heads, 1), dtype, seed=20260929
         )
         device = {name: tensor.npu() for name, tensor in cpu.items()}
         inputs.append(device)
-        native.append(CannCall(device, scale=scale))
+        native.append(CannCall(device, scale=scale, kv_lengths=kv_lengths[index]))
         if metadata_reuse:
-            lengths.append(torch.full((batch,), sk, dtype=torch.int32, device=device["q"].device))
+            lengths.append(
+                torch.tensor(
+                    kv_lengths[index] if kv_lengths[index] is not None else [sk] * batch,
+                    dtype=torch.int32,
+                    device=device["q"].device,
+                )
+            )
             metadata.append(generate(len(inputs) - 1))
             actual = cached(len(inputs) - 1, metadata[-1])
         else:
@@ -89,21 +101,49 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
         # caller's thread count even on failure, before any warmup or sampling.
         try:
             torch.set_num_threads(reference_cpu_threads)
-            refs = mla_reference_pair(**cpu, softmax_scale=scale)
+            if kv_lengths[index] is None:
+                refs = mla_reference_pair(**cpu, softmax_scale=scale)
+            else:
+                from tests.test_flash_attn_npu_v3_mla_bsnd_attention import references
+
+                refs = references(
+                    dict(shape=shape, logical_lengths=kv_lengths[index], inputs=cpu, scale=scale)
+                )
         finally:
             torch.set_num_threads(timed_cpu_threads)
         for i, name in enumerate(("out", "lse")):
+            nonempty = (
+                torch.tensor(kv_lengths[index] if kv_lengths[index] is not None else [sk] * batch)
+                > 0
+            )
             if sk <= 512:
-                torch.testing.assert_close(actual[i].cpu(), source[i].cpu(), rtol=0, atol=0)
+                torch.testing.assert_close(
+                    actual[i].cpu()[nonempty], source[i].cpu()[nonempty], rtol=0, atol=0
+                )
             assert_fa_close(actual[i].cpu(), refs[i], refs[i + 2], name=name)
-            assert_fa_close(source[i].cpu(), refs[i], refs[i + 2], name=name)
+            if nonempty.any():
+                assert_fa_close(
+                    source[i].cpu()[nonempty], refs[i][nonempty], refs[i + 2][nonempty], name=name
+                )
+            if i == 0:
+                assert (source[i].cpu()[~nonempty] == 0).all()
+            else:
+                assert source[i].cpu()[~nonempty].isposinf().all()
         accuracy.append(
             dict(
                 shape=shape,
                 scale=scale,
+                lengths=kv_lengths[index],
                 source_equal=all(torch.equal(actual[i].cpu(), source[i].cpu()) for i in range(2)),
-                fa3_max_error=[float((actual[i].cpu() - refs[i]).abs().max()) for i in range(2)],
-                cann_max_error=[float((source[i].cpu() - refs[i]).abs().max()) for i in range(2)],
+                fa3_max_error=[
+                    float((actual[i].cpu() - refs[i]).abs().nan_to_num().max()) for i in range(2)
+                ],
+                cann_max_error=[
+                    float((source[i].cpu()[nonempty] - refs[i][nonempty]).abs().max())
+                    if nonempty.any()
+                    else 0
+                    for i in range(2)
+                ],
             )
         )
     (directory / "accuracy.json").write_text(json.dumps(accuracy, indent=2) + "\n")
@@ -211,13 +251,20 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
             source["Task Start Time(us)"].strip()
         )
         assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
+
     # Some profiler versions include AICPU tasks here, others export only
     # attention kernels. Never fold producer duration into the attention
     # comparison, and explicitly report whether it was captured.
-    metadata_rows = [row for row in rows if "ComputeMlaDenseMetadata" in row["Name"]]
+    def is_metadata(row):
+        return any(
+            name in row["Name"]
+            for name in ("ComputeMlaDenseMetadata", "ComputeMlaBsndKvLengthMetadata")
+        )
+
+    metadata_rows = [row for row in rows if is_metadata(row)]
     if metadata_reuse:
         assert not metadata_rows, "explicit reuse unexpectedly regenerated metadata"
-    rows = [row for row in rows if "ComputeMlaDenseMetadata" not in row["Name"]]
+    rows = [row for row in rows if not is_metadata(row)]
     assert len(rows) == len(labels), (len(rows), len(labels))
     fa3_count = sum(label["name"] == "fa3" for label in labels)
     assert len(metadata_rows) in (0, fa3_count), (len(metadata_rows), fa3_count)
@@ -238,7 +285,12 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
         previous_end = Decimal(row["Start Time(us)"].strip()) + Decimal(row["Duration(us)"].strip())
     results = []
     for index, (shape, scale) in enumerate(cases):
-        item = dict(shape=shape, scale=scale, native_call=native[index].description())
+        item = dict(
+            shape=shape,
+            scale=scale,
+            lengths=kv_lengths[index],
+            native_call=native[index].description(),
+        )
         for name in wall_names:
             kernels = [x for x in labels if x["case"] == index and x["name"] == name]
             walls = [x for x in wall if x["case"] == index and x["name"] == name]
@@ -303,13 +355,21 @@ def profile(directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CA
 
 
 if __name__ == "__main__":
+    cases = (
+        CASES
+        + (S1G_CASES if os.environ.get("MLA_FORWARD_S1G_MULTIBLOCK") == "1" else [])
+        + (KV_CASES if os.environ.get("MLA_FORWARD_KV_MULTIBLOCK") == "1" else [])
+        + (LONG_KV_CASES if os.environ.get("MLA_FORWARD_LONG_KV") == "1" else [])
+    )
+    lengths = [None] * len(cases)
+    if os.environ.get("MLA_FORWARD_BSND_LENGTHS") == "1":
+        cases += [(shape, scale) for shape, scale, _ in BSND_CASES]
+        lengths += [values for _, _, values in BSND_CASES]
     profile(
         os.environ["MLA_FORWARD_ARTIFACT_DIR"],
         os.environ["MLA_CANN_VENDOR"],
         os.environ.get("MLA_FORWARD_DTYPE", "fp16"),
         os.environ.get("MLA_FORWARD_METADATA_REUSE") == "1",
-        CASES
-        + (S1G_CASES if os.environ.get("MLA_FORWARD_S1G_MULTIBLOCK") == "1" else [])
-        + (KV_CASES if os.environ.get("MLA_FORWARD_KV_MULTIBLOCK") == "1" else [])
-        + (LONG_KV_CASES if os.environ.get("MLA_FORWARD_LONG_KV") == "1" else []),
+        cases,
+        lengths,
     )

@@ -61,9 +61,17 @@ def run(dtype_name, fault, directory):
             lengths[-1] = value
             if mode == "generated":
                 diagnostic = generate(device, lengths).cpu()
-                assert diagnostic[5].item() == 4 and diagnostic[8:].count_nonzero().item() == 0
+                assert diagnostic[5].item() == 2 and diagnostic[8:].count_nonzero().item() == 0
+        elif fault == "omitted-lengths":
+            lengths[-1] = sk - 1
+            record = generate(device, lengths)
+            lengths = None
         else:
             mutations = dict(
+                version=(1, 1),
+                kind=(2, 1),
+                wordcount=(3, 401),
+                snapshot=(401 + batch - 1, sk - 1),
                 magic=(0, 0),
                 dtype=(4, 3),
                 shape=(8, 22),

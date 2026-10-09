@@ -189,7 +189,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 [`mla_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h) 定义连续 `int32[401]`：`magic=0x4d4c4131`、`version=1`、`kind=1`。前 8 字依次为 magic、版本、类型、总字数、dtype、生成状态、源调度状态、保留位；后 393 字为 `MlaMetadataSchedule`，保存几何、端点、FD 字段、workspace 与资源需求。64 位字段以低/高 32 位保存，只要求 4 字节对齐，允许奇数 storage offset。
 
-[`BuildDenseMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.cpp) 的可选长度必须逐项等于 KV 容量；缺省表示整容量。生成失败时写非成功头部并清零调度载荷。公开生成器要求 NPU 上连续 `int32[B]`；只读前向接受 `None`、等于容量的整数或同设备的连续 `int32[B]`。整数在 host 校验后转为设备 tensor；设备长度值由 AICPU 校验，不做 D2H。
+[`BuildDenseMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.cpp) 的可选长度必须逐项等于 KV 容量；缺省表示整容量。生成失败时写非成功头部并清零调度载荷。v1 保留用于不传长度和记录的整容量前向（含 `flash_attn_func`），不再由公开 metadata 生成器返回。显式长度与公开记录走下述 v2 路径。
 
 [`mla_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata_consumer.h) 共用 CPU/设备解码与校验，[`kernel/mla_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_metadata.hpp) 提供设备适配：先检查字数、头部、生成状态和 dtype，再对照调用方独立提供的形状、平台、实际 blockDim、workspace 容量和局部资源；非空 dense 的分核端点须单调并覆盖全部任务。检查通过后才构造 Kernel 调度，不窄化 64 位 workspace。
 
@@ -205,7 +205,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 [`BuildBsndKvLengthMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.cpp) 先检查输出指针、对齐、地址加法、精确字数及输入输出区间重叠；不安全缓冲返回错误且不写记录。缓冲合法后，未支持 dtype 记 `UnsupportedDtype`，长度描述符错误记 `InvalidCacheLengths`，形状/长度值/调度错误记 `ScheduleFailure` 并保存调度状态（越界长度为 `UnsupportedShape`）；失败均清零整个调度与快照。生成期间长度不可修改，成功快照与调度使用同一份长度。
 
-[`mla_bsnd_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.aicpu) 已列入生产构建，直接编译上述调度与序列化源码，写完执行设备屏障。生成器、v2 消费者与实际长度 attention 使用独立驱动；公开短长度接入留在 M06b4。v1 消费者继续通过字数或版本拒绝 v2，不能用 v2 直接驱动旧 dense 特化。
+[`mla_bsnd_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.aicpu) 已列入生产构建，直接编译上述调度与序列化源码，写完执行设备屏障。公开 `get_scheduler_metadata` 的 64/512 分支生成 v2；只读 BSND 前向接受 `None`（整容量）、`0..Sk` 整数或同设备连续 `int32[B]`。整数先在 host 校验再物化设备 tensor，设备长度由 AICPU/消费者读取，不做 D2H。显式记录必须是 v2 的精确字数，旧 v1 经 shape 或版本/类型检查拒绝；不根据记录内容猜测协议。v1 消费者继续拒绝 v2。
 
 [`mla_bsnd_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata_consumer.h) 与 v1 共用头部、形状、平台、切块、workspace 和局部资源校验，仅区分协议头、长度快照与端点覆盖规则。按调用方静态 B 检查精确字数及加法上界后，每个快照值必须在 `[0,Sk]`，并与当次长度逐项相等；当次长度缺省表示整容量，不能解释为信任快照。全局空容量同样检查长度；非零容量的全零长度仍使用完整调度和资源校验。端点须单调且位于完整 M 块之间；省略的尾部必须从样本边界开始，且所有省略样本的快照均为零。
 
@@ -213,7 +213,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 ### 5.4 stream 与内存生命周期
 
-v1 生产路径和 v2 独立驱动均沿用当前 stream / AICPU stream 的双事件依赖：输入就绪后生成，生成完成后当前 stream 才能消费。`MlaMetadataArgs` 中的地址仅属于当次发射；对 AICPU 使用的长度与记录登记 allocator stream，并保留 tensor 生命周期。生成完成后记录不依赖原长度存储。
+v1/v2 生产路径和独立驱动均沿用当前 stream / AICPU stream 的双事件依赖：输入就绪后生成，生成完成后当前 stream 才能消费。`MlaMetadataArgs` 中的地址仅属于当次发射；对 AICPU 使用的长度与记录登记 allocator stream，并保留 tensor 生命周期。生成完成后记录不依赖原长度存储。
 
 跨 stream 复用由调用方建立正常 stream/event 依赖；前向对本次使用的输入、长度和记录登记 stream。不能在生成或消费未完成时改写记录/长度，也不能共享可变 scratch。新增协议必须更新版本、类型和 wordCount 校验，不能让旧记录被新语义误读。
 
@@ -229,7 +229,7 @@ C++ 校验与分派：mla_validation.h、mla_forward.cpp
 MlaLaunchArgs（当次地址、scale、独立 context）
         + AICPU metadata（MlaSchedule 编码）
         ↓
-mla_launch_impl.hpp：LoadDenseMetadata → MlaDenseKernelSchedule
+mla_launch_impl.hpp：LoadDenseMetadata / LoadBsndKvLengthMetadata → MlaDenseKernelSchedule
         ↓
 kernel/mla_dense.hpp：任务环、缓冲、Cube/Vector 同步
         ↓
@@ -238,7 +238,7 @@ block/mla_cube.hpp、mla_vector.hpp：QK + RoPE / softmax / PV / aMLA 更新
 tile/：源复制与向量操作、CATLASS TileMmad
 ```
 
-以上为已实现的 dense 链路；v2 生成尚未接入消费者，FD 合并与 192/128 通用路径按计划迁移。
+以上为已实现的 BSND 链路，v2 消费后将快照传给实际长度特化；FD 合并与 192/128 通用路径按计划迁移。
 
 - 以固定 CANN 源码为起点，保留来源及版权；许可证位于 [`LICENSE.cann`](../../csrc/ascend910/flash_attn_npu_3/mla/LICENSE.cann)。CATLASS 示例用于理解分层，不能替代源执行流程。
 - 允许文件拆分、命名、类/模板组织、参数封装、构建接入和 gert/optiling 解耦。复用已有组件须保证运算、布局、精度、资源与同步契约等价；无法等价时在本仓封装源逻辑，不修改 CATLASS 子模块来容纳常规迭代。
@@ -289,7 +289,7 @@ tile/：源复制与向量操作、CATLASS TileMmad
 
 **实际长度与零尾部。** 先校验全部 int32 长度再数值转换为源 int64，不重解释指针。源 `CalcSplitPlan` 在成本耗尽后可能把尾部零 KV 样本留在计算端点之外；调度检查省略部分逐样本为零。M06b2b 消费者须保留此条件，M06b3 须按源 `InitActualSeqLenQ/KV`、`InitOutputSingleCore`、`GetTaskDealMode/DEAL_ZERO` 独立初始化空行，不能仅凭计算分区覆盖它们。
 
-`MlaDense<InputT, true>` 复用 dense 的 Cube / Vector / Tile：KV batch stride 仍由容量决定，S2 块数、尾块宽度和最后一块标志来自已校验 v2 的逐样本快照。零 KV 任务只推进轴，不递增任务环计数；存在零 KV 时，按全部输出范围清零 O，LSE 初始化为 FA3 的 `-inf`，因此端点之外的零尾部同样有定义结果。非空行由原数值路径覆盖输出；默认 `MlaDense<InputT>` 保持整容量行为。独立驱动在任何 TPipe、事件或输出写入前调用 v2 校验消费者。
+`MlaDense<InputT, true>` 复用 dense 的 Cube / Vector / Tile：KV batch stride 仍由容量决定，S2 块数、尾块宽度和最后一块标志来自已校验 v2 的逐样本快照。零 KV 任务只推进轴，不递增任务环计数；存在零 KV 时，按全部输出范围清零 O，LSE 初始化为 FA3 的 `-inf`，因此端点之外的零尾部同样有定义结果。非空行由原数值路径覆盖输出；默认 `MlaDense<InputT>` 保持整容量行为。生产入口和独立驱动在任何 TPipe、attention 事件或输出写入前调用 v2 校验消费者。
 
 固定源 `FiaInfoParser::ProcessKVActualSeqLoop` 对 BSND 中任意短 KV 设置 host `needInit`，源 probe 原样传入该标志；迁移特化仅在存在零 KV 时清零 O，避免重复初始化随后必被覆盖的非空输出。源零 KV 的 LSE 为 `+inf`，对照逐项检查此差异，并按第 3 节契约验收迁移结果的 `-inf`。
 
@@ -297,7 +297,7 @@ tile/：源复制与向量操作、CATLASS TileMmad
 
 字段与地址限制由 [`mla_schedule.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.h) 定义：`B<=2^32-1`、`Sq<=2^30`、`Hq<=floor((2^32-1)/512)`、`Sq*Hq<=2^32-256`、`B*Sq*Hq<=floor((2^63-1)/1024)`。还须检查 uint32 LCM/总物理块数、资源及 uint64 workspace 加法。它们是实现限制，不是官方 FA3 接口限制。QK/P workspace 按 S2 基块预算，不按完整 KV 容量分配；调度失败不改写调用方原输出。
 
-**全局空容量。** `B=0`、`Sq=0` 或 `Sk=0` 时，v1 保留真实形状、dtype、平台信息，使用一个校验核；基本块、端点、FD、workspace 和局部内存需求为零。生成和消费仍校验全部当次长度，不能因空输出绕过错误上报。校验后跳过 attention，不访问 Q/K/V/qv 或分配 attention workspace；空 batch/query 返回空 shape，全局空 KV 在同一 stream 填 `O=0、LSE=+inf`。非零容量中的样本零 KV 应为 `LSE=-inf`，接入留给 M06。
+**全局空容量。** `B=0`、`Sq=0` 或 `Sk=0` 时，v1/v2 保留真实形状、dtype、平台信息，使用一个校验核；基本块、端点、FD、workspace 和局部内存需求为零。生成和消费仍校验全部当次长度，不能因空输出绕过错误上报。校验后跳过 attention，不访问 Q/K/V/qv 或分配 attention workspace；空 batch/query 返回空 shape，全局空 KV 在同一 stream 填 `O=0、LSE=+inf`。非零容量中的样本零 KV 为 `O=0、LSE=-inf`，与全局空容量分开验收。
 
 ### 6.3 数值路径与资源布局
 
@@ -342,9 +342,9 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 
 ### 6.5 生产接入与构建
 
-[`mla_forward.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 查询平台，分配 O/LSE 与每次调用独立的 workspace，并传递本次 scale 与地址。`DenseForward` **仍在 host 调用 `BuildDenseSchedule`**，用于 launch、分配预算和独立校验 context；设备计算的切块与端点来自 AICPU 记录。公开复用省去的是 AICPU 生成，不表示全部 host 调度已消除。
+[`mla_forward.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 查询平台，分配 O/LSE 与每次调用独立的 workspace，并传递本次 scale 与地址。`DenseForward` **仍在 host 调用 `BuildDenseSchedule`**，用于 launch、分配预算和独立校验 context；设备计算的切块与端点来自 AICPU 记录。公开复用省去的是 AICPU 生成，不表示全部 host 调度已消除。v2 非空容量以平台全核 blockDim 生成和发射，工作核数仍取设备记录；按源 `CalcNormalWorkspaceSize` 的最大 M 基块 256 预留容量，覆盖非均匀长度使 M 基块增大的情况。该预算不决定实际切块、端点或数值路径。全局空容量仍只有一个校验核且无 workspace。
 
-只读 kvcache 的 `_mla_dense_forward` 精简 dispatcher 接收 q/k/v/qv、scale、长度与记录，`_mla_dense_metadata` 接收静态几何、dtype 和设备长度。公开包装拒绝未支持选项，真实 C++ 与 fake 各自保留完整张量/scale/记录外形检查；Autograd 层透传，两者都拒绝梯度。`flash_attn_func` 内部生成 v1，不增加显式 metadata 参数。内部预分配 `out_` 仍拒绝，避免破坏 functional custom op 的 alias 契约。
+只读 kvcache 的 `_mla_dense_forward` 精简 dispatcher 接收 q/k/v/qv、scale、长度与记录，`_mla_dense_metadata` 接收静态几何、dtype 和设备长度。公开包装拒绝未支持选项，真实 C++ 与 fake 各自保留完整张量/scale/记录外形检查；Autograd 层透传，两者都拒绝梯度。`flash_attn_func` 内部生成 v1，不增加显式 metadata 参数；长度/显式记录存在时内部前向切至 v2，公开生成器始终返回 `int32[401+B]`。内部预分配 `out_` 仍拒绝，避免破坏 functional custom op 的 alias 契约。
 
 只读 kvcache 请求 LSE 时包装为四项返回值；未 split 时两个 accumulator 为同设备空 tensor，dtype 随 PyTorch 默认浮点 dtype（通常 FP32）。不依赖普通 FA3 的 Python metadata 属性。fake/compile 与真实路径的返回形状一致。
 
@@ -389,7 +389,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | `KV_CASES` | 7 | 513..1024 的两个 S2 块及 `num_splits=1` 映射 |
 | `LONG_KV_CASES` | 8 | 1025..16384，含 8193 的第 17 个尾块 |
 
-源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。全 26 组作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E。
+源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。全 26 组作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E。M06b4 另以 `BSND_CASES` 固定 11 组实际长度用例：短/非均匀/零尾部/全零/跨块/长 KV 及 M 基块变化，保留全部原生 FD 分派并单列。公开全零实际长度同样计入对应路径的 E2E 验收。
 
 调度验收比较固定源的基本块、完整端点、使用核数、FD 字段与 workspace，并独立枚举任务，检查无遗漏/重复及每核成本。覆盖 B=0/1/多 batch、平台核数两侧、C1V1/C1V2、M 的 16/128/256 边界及尾块、KV 的 16/32/128/256/512 边界；实际长度增加 0/1/511/512/513/8193/16384、等长短序列、非均匀/全零长度及端点外零尾部。对应 [dense 调度检查](../../tests/test_flash_attn_npu_v3_mla_schedule.py) 与 [BSND 长度调度检查](../../tests/test_flash_attn_npu_v3_mla_bsnd_schedule.py)；oracle 从固定 commit 提取，不调用待测调度。
 

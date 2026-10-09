@@ -7,37 +7,52 @@
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #include "kernel/mla_dense.hpp"
 #include "kernel/mla_metadata.hpp"
+#include "kernel/mla_bsnd_metadata.hpp"
 #endif
 
 namespace flash_attn::mla {
 __global__ __aicore__ __mix__(1, 2) void MLA_DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
                                                          GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
                                                          GM_ADDR metadata, GM_ADDR cacheSeqlens,
-                                                         MlaDenseMetadataContext context, float scale)
+                                                         MlaDenseMetadataContext context, float scale,
+                                                         bool hasKvLengths)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     MlaDenseKernelSchedule schedule{};
-    if (!Kernel::LoadDenseMetadata<MLA_DENSE_TYPE>(metadata, kMlaDenseMetadataWords, context, schedule)) {
-        return;
-    }
-    if (!Kernel::CheckDenseCacheLengths(cacheSeqlens, context.batch, context.sk)) {
-        return;
+    if (hasKvLengths) {
+        if (!Kernel::LoadBsndKvLengthMetadata<MLA_DENSE_TYPE>(
+                metadata, kMlaBsndKvLengthMetadataPrefixWords + context.batch, context, cacheSeqlens,
+                cacheSeqlens ? context.batch : 0, schedule)) {
+            return;
+        }
+    } else {
+        if (!Kernel::LoadDenseMetadata<MLA_DENSE_TYPE>(metadata, kMlaDenseMetadataWords, context, schedule) ||
+            !Kernel::CheckDenseCacheLengths(cacheSeqlens, context.batch, context.sk)) {
+            return;
+        }
     }
     if (context.batch == 0 || context.sq == 0 || context.sk == 0) {
         return;
     }
     AscendC::SetSyncBaseAddr(ffts);
     AscendC::TPipe pipe;
-    Kernel::MlaDense<MLA_DENSE_TYPE> op;
-    op(schedule, scale, qc, qr, kv, kr, output, lse, workspace, &pipe);
+    if (hasKvLengths) {
+        Kernel::MlaDense<MLA_DENSE_TYPE, true> op;
+        op(schedule, scale, qc, qr, kv, kr, output, lse, workspace, &pipe,
+           metadata + kMlaBsndKvLengthMetadataPrefixWords * sizeof(int32_t));
+    } else {
+        Kernel::MlaDense<MLA_DENSE_TYPE> op;
+        op(schedule, scale, qc, qr, kv, kr, output, lse, workspace, &pipe);
+    }
 #endif
 }
 
 aclError MLA_DENSE_LAUNCH(const MlaLaunchArgs& a)
 {
     MlaBatchLaunchScope launch;
-    MLA_DENSE_ENTRY<<<a.context.blockDim, nullptr, a.stream>>>(
-        a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse, a.workspace, a.metadata, a.cacheSeqlens, a.context, a.scale);
+    MLA_DENSE_ENTRY<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
+                                                               a.workspace, a.metadata, a.cacheSeqlens, a.context,
+                                                               a.scale, a.hasKvLengths);
     return launch.Result();
 }
 } // namespace flash_attn::mla

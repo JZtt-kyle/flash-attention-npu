@@ -193,7 +193,7 @@ std::vector<at::Tensor> mha_fwd(
             flash_attn::mla::CheckCacheLengths(*seqused_k_, q.size(0), q.device());
         }
         if (scheduler_metadata_) {
-            flash_attn::mla::CheckDenseMetadataTensor(*scheduler_metadata_, q.device());
+            flash_attn::mla::CheckDenseMetadataTensor(*scheduler_metadata_, q.device(), q.size(0));
         }
         return flash_attn::mla::DenseForward(q, k, v, *q_v_, scale, seqused_k_, scheduler_metadata_);
     }
