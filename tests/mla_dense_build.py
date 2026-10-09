@@ -19,9 +19,9 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False):
+def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False, tnd=False):
     assert dtype in ("fp16", "bf16")
-    assert not (metadata and bsnd)
+    assert sum((metadata, bsnd, tnd)) <= 1
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
@@ -103,10 +103,15 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False):
         common.append("-DMLA_DENSE_BF16")
     if bsnd:
         common += ["-DMLA_BSND_ATTENTION", "-DNDEBUG"]
+    if tnd:
+        common += ["-DNDEBUG"]
+    probe_source = ROOT / (
+        "tests/mla_tnd_attention_probe.cpp" if tnd else "tests/mla_dense_probe.cpp"
+    )
 
     def compile_probe(name):
         output = artifacts / f"{name}.so"
-        cmd = [*common, str(ROOT / "tests/mla_dense_probe.cpp")]
+        cmd = [*common, str(probe_source)]
         if name == "oracle":
             base = oracle / "attention/fused_infer_attention_score/op_kernel"
             cmd += [
@@ -161,6 +166,8 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False):
         assert all(header in dependencies for header in expected)
         if name in ("metadata", "metadata_checked"):
             assert "mla_metadata_consumer.h" in dependencies and "mla_metadata.hpp" in dependencies
+        if tnd and name == "migrated":
+            assert "mla_tnd.hpp" in dependencies and "mla_tnd_metadata.hpp" in dependencies
         if bsnd and name == "migrated":
             assert "mla_bsnd_metadata.hpp" in dependencies
         assert ("oracle-source" in dependencies) == (name == "oracle")
@@ -203,7 +210,9 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False):
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.cpp",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/detail/cann_split_core.h",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/detail/cann_split_core.cpp",
-        ROOT / "tests/mla_dense_probe.cpp",
+        probe_source,
+        ROOT / "tests/mla_probe_batch_launch.h",
+        *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("mla_tnd*.h")),
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_metadata_consumer.h",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata.h",
@@ -213,6 +222,8 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False):
     manifest = {
         "dtype": dtype,
         "bsnd": bsnd,
+        "tnd": tnd,
+        "ndebug": bsnd or tnd,
         "oracle_tiling_sha256": sha256(artifacts / "oracle_tiling.h"),
         "libraries": {
             name: {"path": path, "sha256": sha256(Path(path))} for name, path in libraries.items()

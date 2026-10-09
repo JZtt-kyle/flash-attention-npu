@@ -11,7 +11,8 @@
 // Upstream license: ../LICENSE.cann.
 // Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0.
 // attention/fused_infer_attention_score/op_kernel/arch22/fia_block_vec_nonquant_mla.h
-// Dense BSND FP16/BF16, Hkv=1, no mask/FD/length arrays. Scale is launch data.
+// Contiguous BSND/compact TND FP16/BF16, Hkv=1, no mask/FD.
+// TND O is [Tq,Hq,512]; FA3 LSE is [Hq,Tq] (source LSE is [Tq,Hq]). Scale is launch data.
 // SoftmaxFlashV2, aMLA, all UB partitions, casts and events follow the source.
 // Cross-S2 nUpdate retains the source int32 atomic update of the FP32 PV bits.
 #pragma once
@@ -30,7 +31,7 @@ struct VectorParams : CubeParams {
 };
 constexpr SoftmaxConfig FIA_SOFTMAX_FLASHV2_CFG_WITHOUT_BRC = {false, 0, 0, SoftmaxMode::SOFTMAX_OUTPUT_WITHOUT_BRC};
 
-template <typename InputT>
+template <typename InputT, bool IsTnd = false>
 class MlaVector {
   public:
     using T = float;
@@ -105,8 +106,8 @@ class MlaVector {
     LocalTensor<T> nValueUb, cofValueUb, aMlaSumUb, softmaxMaxUb, softmaxExpUb, softmaxSumUb;
     LocalTensor<T> softmaxMaxDefaultUb, softmaxSumDefaultUb;
 };
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::InitBuffers(TPipe* pipe)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::InitBuffers(TPipe* pipe)
 {
     // queue
     pipe->InitBuffer(inputBuff1, VectorParams::BUFFER_SIZE_BYTE_32K * 2); // 2:pingpong
@@ -149,26 +150,26 @@ __aicore__ inline void MlaVector<InputT>::InitBuffers(TPipe* pipe)
     Duplicate(softmaxSumDefaultUb, FLOAT_ZERO, SOFTMAX_TMP_BUFFER_OFFSET / sizeof(T));
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm,
-                                                               GlobalTensor<KV_T> vec1ResGm,
-                                                               GlobalTensor<int32_t> mm2ResInt32Gm)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm,
+                                                                      GlobalTensor<KV_T> vec1ResGm,
+                                                                      GlobalTensor<int32_t> mm2ResInt32Gm)
 {
     this->mm1ResGm = mm1ResGm;
     this->vec1ResGm = vec1ResGm;
     this->mm2ResInt32Gm = mm2ResInt32Gm;
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::InitVec2GlobalTensor(GlobalTensor<UPDATE_T> vec2ResGm,
-                                                               GlobalTensor<MM2_OUT_T> mm2ResGm)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::InitVec2GlobalTensor(GlobalTensor<UPDATE_T> vec2ResGm,
+                                                                      GlobalTensor<MM2_OUT_T> mm2ResGm)
 {
     this->vec2ResGm = vec2ResGm;
     this->mm2ResGm = mm2ResGm;
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::AllocEventID()
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::AllocEventID()
 {
     SetFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG);
     SetFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_PONG_FLAG);
@@ -178,8 +179,8 @@ __aicore__ inline void MlaVector<InputT>::AllocEventID()
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::FreeEventID()
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::FreeEventID()
 {
     CrossCoreWaitFlag(constInfo.syncC2V1);
     WaitFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG);
@@ -190,11 +191,10 @@ __aicore__ inline void MlaVector<InputT>::FreeEventID()
     WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
-template <typename InputT>
-__aicore__ inline void
-MlaVector<InputT>::SoftmaxFlashV2Compute(const RunInfo& info, const MSplitInfo& mSplitInfo, LocalTensor<T>& mmResUb,
-                                         LocalTensor<uint8_t>& softmaxTmpUb, uint32_t startRow, uint32_t dealRowCount,
-                                         uint32_t columnCount, uint32_t actualColumnCount)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::SoftmaxFlashV2Compute(
+    const RunInfo& info, const MSplitInfo& mSplitInfo, LocalTensor<T>& mmResUb, LocalTensor<uint8_t>& softmaxTmpUb,
+    uint32_t startRow, uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount)
 {
     SoftMaxShapeInfo srcShape{dealRowCount, columnCount, dealRowCount, actualColumnCount};
     SoftMaxTiling newTiling =
@@ -218,11 +218,11 @@ MlaVector<InputT>::SoftmaxFlashV2Compute(const RunInfo& info, const MSplitInfo& 
         softmaxExpUb[softmaxOutOffset], inSumTensor, inMaxTensor, softmaxTmpUb, newTiling, srcShape);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::AmlaVecCompute(const RunInfo& info, const MSplitInfo& mSplitInfo,
-                                                         LocalTensor<T>& mmResUb, LocalTensor<uint8_t>& softmaxTmpUb,
-                                                         uint32_t startRow, uint32_t dealRowCount, uint32_t columnCount,
-                                                         uint32_t actualColumnCount)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void
+MlaVector<InputT, IsTnd>::AmlaVecCompute(const RunInfo& info, const MSplitInfo& mSplitInfo, LocalTensor<T>& mmResUb,
+                                         LocalTensor<uint8_t>& softmaxTmpUb, uint32_t startRow, uint32_t dealRowCount,
+                                         uint32_t columnCount, uint32_t actualColumnCount)
 {
     uint32_t baseOffset = mSplitInfo.nBufferStartM / 2 + startRow;
     uint32_t calCount = dealRowCount;
@@ -312,10 +312,10 @@ __aicore__ inline void MlaVector<InputT>::AmlaVecCompute(const RunInfo& info, co
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::DealBmm1ResBaseBlock(const RunInfo& info, const MSplitInfo& mSplitInfo,
-                                                               uint32_t startRow, uint32_t dealRowCount,
-                                                               uint32_t columnCount, uint32_t actualColumnCount)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::DealBmm1ResBaseBlock(const RunInfo& info, const MSplitInfo& mSplitInfo,
+                                                                      uint32_t startRow, uint32_t dealRowCount,
+                                                                      uint32_t columnCount, uint32_t actualColumnCount)
 {
     uint32_t computeSize = dealRowCount * columnCount;
     uint64_t inOutGmOffset = (info.loop % constInfo.preLoadNum) * constInfo.mmResUbSize +
@@ -352,8 +352,8 @@ __aicore__ inline void MlaVector<InputT>::DealBmm1ResBaseBlock(const RunInfo& in
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::ProcessAmlaNupdate(const RunInfo& info, const MSplitInfo& mSplitInfo)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::ProcessAmlaNupdate(const RunInfo& info, const MSplitInfo& mSplitInfo)
 {
     if (mSplitInfo.vecDealM == 0) {
         return;
@@ -416,8 +416,8 @@ __aicore__ inline void MlaVector<InputT>::ProcessAmlaNupdate(const RunInfo& info
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::ProcessVec1SingleBuf(const RunInfo& info, const MSplitInfo& mSplitInfo)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::ProcessVec1SingleBuf(const RunInfo& info, const MSplitInfo& mSplitInfo)
 {
     if (mSplitInfo.vecDealM == 0) {
         return;
@@ -446,8 +446,8 @@ __aicore__ inline void MlaVector<InputT>::ProcessVec1SingleBuf(const RunInfo& in
     }
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::ProcessVec1L(const RunInfo& info)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::ProcessVec1L(const RunInfo& info)
 {
     uint32_t nBufferLoopTimes = (info.actMBaseSize + constInfo.nBufferMBaseSize - 1) / constInfo.nBufferMBaseSize;
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -519,8 +519,8 @@ __aicore__ inline void MlaVector<InputT>::ProcessVec1L(const RunInfo& info)
     }
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::ProcessVec2SingleBuf(const RunInfo& info, const MSplitInfo& mSplitInfo)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::ProcessVec2SingleBuf(const RunInfo& info, const MSplitInfo& mSplitInfo)
 {
     if (!info.isLastS2Loop) {
         return;
@@ -532,8 +532,8 @@ __aicore__ inline void MlaVector<InputT>::ProcessVec2SingleBuf(const RunInfo& in
     ProcessVec2Inner(info, mSplitInfo, 0, mSplitInfo.vecDealM);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::ProcessVec2L(const RunInfo& info)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::ProcessVec2L(const RunInfo& info)
 {
     uint32_t nBufferLoopTimes = (info.actMBaseSize + constInfo.nBufferMBaseSize - 1) / constInfo.nBufferMBaseSize;
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -557,9 +557,9 @@ __aicore__ inline void MlaVector<InputT>::ProcessVec2L(const RunInfo& info)
     }
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::ProcessVec2Inner(const RunInfo& info, const MSplitInfo& mSplitInfo,
-                                                           uint32_t mStartRow, uint32_t mDealSize)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::ProcessVec2Inner(const RunInfo& info, const MSplitInfo& mSplitInfo,
+                                                                  uint32_t mStartRow, uint32_t mDealSize)
 {
     uint32_t mSplitSize = BASE_BLOCK_MAX_ELEMENT_NUM / headDimAlign;
     if (mSplitSize > mDealSize) {
@@ -577,11 +577,11 @@ __aicore__ inline void MlaVector<InputT>::ProcessVec2Inner(const RunInfo& info, 
     }
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::Bmm2CastAndCopyOut(const RunInfo& info, const MSplitInfo& mSplitInfo,
-                                                             LocalTensor<T>& bmm2ResUb, uint32_t wsMStart,
-                                                             uint32_t startRow, uint32_t dealRowCount,
-                                                             uint32_t columnCount, uint32_t actualColumnCount)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::Bmm2CastAndCopyOut(const RunInfo& info, const MSplitInfo& mSplitInfo,
+                                                                    LocalTensor<T>& bmm2ResUb, uint32_t wsMStart,
+                                                                    uint32_t startRow, uint32_t dealRowCount,
+                                                                    uint32_t columnCount, uint32_t actualColumnCount)
 {
     AscendC::PipeBarrier<PIPE_V>();
     LocalTensor<OUT_T> tmpBmm2ResCastTensor = outputBuff1.Get<OUT_T>();
@@ -598,10 +598,10 @@ __aicore__ inline void MlaVector<InputT>::Bmm2CastAndCopyOut(const RunInfo& info
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::DealBmm2ResBaseBlock(const RunInfo& info, const MSplitInfo& mSplitInfo,
-                                                               uint32_t startRow, uint32_t dealRowCount,
-                                                               uint32_t columnCount, uint32_t actualColumnCount)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::DealBmm2ResBaseBlock(const RunInfo& info, const MSplitInfo& mSplitInfo,
+                                                                      uint32_t startRow, uint32_t dealRowCount,
+                                                                      uint32_t columnCount, uint32_t actualColumnCount)
 {
     uint32_t vec2ComputeSize = dealRowCount * columnCount;
     uint32_t mStart = mSplitInfo.nBufferStartM + mSplitInfo.vecStartM + startRow;
@@ -639,10 +639,10 @@ __aicore__ inline void MlaVector<InputT>::DealBmm2ResBaseBlock(const RunInfo& in
     Bmm2CastAndCopyOut(info, mSplitInfo, bmm2ResUb, mStart, startRow, dealRowCount, columnCount, actualColumnCount);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::Bmm2DataCopyOutTrans(const RunInfo& info, LocalTensor<OUT_T>& attenOutUb,
-                                                               uint32_t wsMStart, uint32_t dealRowCount,
-                                                               uint32_t columnCount, uint32_t actualColumnCount)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void
+MlaVector<InputT, IsTnd>::Bmm2DataCopyOutTrans(const RunInfo& info, LocalTensor<OUT_T>& attenOutUb, uint32_t wsMStart,
+                                               uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount)
 {
     // Source CopyAttenOutUbToGm<InputT, BSNGD, S1G>, ROW_PAD=true.
     // Preserve the per-query head/middle/tail copies even with Hkv=1.
@@ -650,7 +650,8 @@ __aicore__ inline void MlaVector<InputT>::Bmm2DataCopyOutTrans(const RunInfo& in
     uint32_t sBegin = begin / constInfo.gSize, gBegin = begin % constInfo.gSize;
     uint32_t sEnd = (begin + dealRowCount) / constInfo.gSize;
     uint32_t gEnd = (begin + dealRowCount) % constInfo.gSize;
-    uint64_t base = (uint64_t(info.bIdx) * constInfo.qSeqSize + sBegin) * constInfo.gSize * headDim;
+    const uint64_t tokenStart = IsTnd ? info.queryStart : uint64_t(info.bIdx) * constInfo.qSeqSize;
+    uint64_t base = (tokenStart + sBegin) * constInfo.gSize * headDim;
     uint32_t headSize = sBegin == sEnd ? gEnd - gBegin : constInfo.gSize - gBegin;
     uint64_t gmOffset = base + gBegin * headDim, ubOffset = 0;
     DataCopyExtParams params;
@@ -675,15 +676,16 @@ __aicore__ inline void MlaVector<InputT>::Bmm2DataCopyOutTrans(const RunInfo& in
     }
 }
 
-template <typename InputT>
-__aicore__ inline void MlaVector<InputT>::CopySoftmaxLseToGmByLayout(const RunInfo& info, LocalTensor<T>& lseSrc,
-                                                                     uint32_t mOffset, const MSplitInfo& mSplitInfo)
+template <typename InputT, bool IsTnd>
+__aicore__ inline void MlaVector<InputT, IsTnd>::CopySoftmaxLseToGmByLayout(const RunInfo& info, LocalTensor<T>& lseSrc,
+                                                                            uint32_t mOffset,
+                                                                            const MSplitInfo& mSplitInfo)
 {
     if (mSplitInfo.vecDealM == 0) {
         return;
     }
     uint32_t dealCount = mSplitInfo.vecDealM;
-    uint64_t bN2Offset = uint64_t(info.bIdx) * constInfo.gSize * constInfo.qSeqSize;
+    uint64_t bN2Offset = IsTnd ? info.queryStart : uint64_t(info.bIdx) * constInfo.gSize * constInfo.qSeqSize;
     uint32_t startS1Idx = mOffset / constInfo.gSize;
     uint32_t startGIdx = mOffset % constInfo.gSize;
     uint32_t endS1Idx = (mOffset + dealCount - 1) / constInfo.gSize;
@@ -694,7 +696,7 @@ __aicore__ inline void MlaVector<InputT>::CopySoftmaxLseToGmByLayout(const RunIn
     uint64_t s1LeftPaddingSize = 0;
 
     for (uint32_t s1Idx = startS1Idx; s1Idx <= endS1Idx; s1Idx++) {
-        outOffset = bN2Offset + startGIdx * constInfo.qSeqSize + s1Idx + s1LeftPaddingSize;
+        outOffset = bN2Offset + uint64_t(startGIdx) * constInfo.qSeqSize + s1Idx + s1LeftPaddingSize;
         if (s1Idx != endS1Idx) {
             curDealRowCount = constInfo.gSize - startGIdx;
         } else {
@@ -704,8 +706,20 @@ __aicore__ inline void MlaVector<InputT>::CopySoftmaxLseToGmByLayout(const RunIn
         dataCopyParams.blockCount = curDealRowCount;
         dataCopyParams.blockLen = sizeof(float);
         dataCopyParams.srcStride = 0;
-        dataCopyParams.dstStride = (constInfo.qSeqSize - 1) * sizeof(float);
-        DataCopyPad(softmaxLseGm[outOffset], lseSrc[ubOffset], dataCopyParams);
+        const uint64_t headGapBytes = uint64_t(constInfo.qSeqSize - 1) * sizeof(float);
+        if (IsTnd && headGapBytes > UINT32_MAX) {
+            // Tq may reach INT32_MAX; FA3's [Hq,Tq] head stride can exceed
+            // the DMA field even though all tensor offsets fit uint64.
+            dataCopyParams.blockCount = 1;
+            dataCopyParams.dstStride = 0;
+            for (uint32_t head = 0; head < curDealRowCount; ++head) {
+                DataCopyPad(softmaxLseGm[outOffset + uint64_t(head) * constInfo.qSeqSize], lseSrc[ubOffset + head * 8U],
+                            dataCopyParams);
+            }
+        } else {
+            dataCopyParams.dstStride = headGapBytes;
+            DataCopyPad(softmaxLseGm[outOffset], lseSrc[ubOffset], dataCopyParams);
+        }
         startGIdx = 0;
         ubOffset += curDealRowCount * 8U;
     }

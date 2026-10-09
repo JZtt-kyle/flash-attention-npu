@@ -16,6 +16,8 @@
 // Specialization: nonempty contiguous BSND capacity, Hkv=1, no mask/FD,
 // Sq*Hq>0, 1<=Sk<=16384. The caller validates source field/address bounds and
 // supplies the source M-block partition, including cross-core and tail blocks.
+// MlaNonPaged shares the task ring with the typed compact TND wrapper.
+// IsTnd uses validated v3 token starts and per-sample Q/KV lengths.
 // HasKvLengths additionally consumes a validated v2 int32 length snapshot.
 // Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
 // compute endpoints. FA3 requires -inf (source +inf) LSE for these empty rows.
@@ -26,17 +28,18 @@
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
-template <typename InputT, bool HasKvLengths = false>
-class MlaDense {
+template <typename InputT, bool HasKvLengths, bool IsTnd>
+class MlaNonPaged {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
 
-  public:
-    __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
-                                      GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
-                                      TPipe* pipe, GM_ADDR kvLengths = nullptr)
+  protected:
+    __aicore__ inline void Run(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv,
+                               GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace, TPipe* pipe,
+                               GM_ADDR kvLengths, uint32_t totalQuery = 0)
     {
         params = schedule;
+        queryTokens = IsTnd ? totalQuery : params.sq;
         if constexpr (HasKvLengths) {
             lengths.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(kvLengths));
         }
@@ -77,7 +80,7 @@ class MlaDense {
         offset += GetBlockNum() * 2 * r2 * sizeof(float);
         vec2.SetGlobalBuffer((__gm__ float*)(workspace + offset + core * 2 * r2 * sizeof(float)));
 
-        Block::CubeParams cubeParams{params.sq, params.heads, params.sk, params.mm1ResSize, params.mm2ResSize};
+        Block::CubeParams cubeParams{queryTokens, params.heads, params.sk, params.mm1ResSize, params.mm2ResSize};
         if ASCEND_IS_AIC {
             cube.Init(pipe, cubeParams, qc, qr, kv, kr);
             cube.InitMm1GlobalTensor(qk);
@@ -104,11 +107,12 @@ class MlaDense {
   private:
     using RunInfo = Block::RunInfo;
     static constexpr uint32_t kTaskCount = 3;
-    Block::MlaCube<InputT> cube;
-    Block::MlaVector<InputT> vector;
+    Block::MlaCube<InputT, IsTnd> cube;
+    Block::MlaVector<InputT, IsTnd> vector;
     MlaDenseKernelSchedule params;
     GlobalTensor<uint32_t> lengths;
-    uint32_t actualKvLength = 0;
+    uint32_t actualKvLength = 0, actualQueryLength = 0;
+    uint32_t queryTokens = 0, queryStart = 0, kvStart = 0;
     uint32_t core, bStart, mStart, sStart, bEnd, mEnd, sEnd;
     uint32_t bn2IdxInCurCore = 0;
 
@@ -118,11 +122,12 @@ class MlaDense {
         lseGm.SetGlobalBuffer((__gm__ float*)lse);
         uint32_t event = 0;
         SetFlag<HardEvent::MTE3_V>(event);
-        uint64_t total = uint64_t(params.batch) * params.sq * params.heads;
+        uint64_t total =
+            IsTnd ? uint64_t(queryTokens) * params.heads : uint64_t(params.batch) * params.sq * params.heads;
         if constexpr (HasKvLengths) {
             bool needInit = false;
             for (uint32_t b = 0; b < params.batch; ++b) {
-                needInit |= lengths.GetValue(b) == 0;
+                needInit |= lengths.GetValue(IsTnd ? 4 * b + 3 : b) == 0;
             }
             // Like source needInit, cover every output, including zero-KV
             // samples beyond the last compute endpoint. Never read their Q/KV.
@@ -160,7 +165,11 @@ class MlaDense {
         info.bIdx = b;
         info.n2Idx = 0;
         info.gS1Idx = m * params.mBaseSize;
-        uint32_t rows = params.sq * params.heads;
+        uint32_t rows = (IsTnd ? actualQueryLength : params.sq) * params.heads;
+        if constexpr (IsTnd) {
+            info.queryStart = queryStart;
+            info.kvStart = kvStart;
+        }
         info.actMBaseSize = params.mBaseSize;
         if ((m + 1) * params.mBaseSize > rows) {
             info.actMBaseSize = rows - m * params.mBaseSize;
@@ -183,7 +192,8 @@ class MlaDense {
 
     __aicore__ inline void UpdateAxisInfo(uint32_t& b, uint32_t& m, uint32_t& s)
     {
-        uint32_t mLoops = (params.sq * params.heads + params.mBaseSize - 1) / params.mBaseSize;
+        uint32_t mLoops =
+            ((IsTnd ? actualQueryLength : params.sq) * params.heads + params.mBaseSize - 1) / params.mBaseSize;
         uint32_t kvLength = HasKvLengths ? actualKvLength : params.sk;
         uint32_t sLoops = (kvLength + params.s2BaseSize - 1) / params.s2BaseSize;
         if (s + 1 < sLoops) {
@@ -247,10 +257,17 @@ class MlaDense {
             if (dispatch) {
                 if constexpr (HasKvLengths) {
                     if (b != previousBatch) {
-                        actualKvLength = lengths.GetValue(b);
+                        if constexpr (IsTnd) {
+                            queryStart = lengths.GetValue(4 * b);
+                            kvStart = lengths.GetValue(4 * b + 1);
+                            actualQueryLength = lengths.GetValue(4 * b + 2);
+                            actualKvLength = lengths.GetValue(4 * b + 3);
+                        } else {
+                            actualKvLength = lengths.GetValue(b);
+                        }
                         previousBatch = b;
                     }
-                    if (actualKvLength == 0) {
+                    if (actualKvLength == 0 || (IsTnd && actualQueryLength == 0)) {
                         // Preserve the source task-ring counters while skipping
                         // DEAL_ZERO/SKIP_ZERO. Pending tasks drain after dispatch.
                         UpdateAxisInfo(b, m, s);
@@ -266,6 +283,18 @@ class MlaDense {
                 ExecuteTask(executed++, tasks);
             }
         }
+    }
+};
+// Typed BSND entry retains the original interface; the common engine is only
+// accessible through layout-specific wrappers after metadata validation.
+template <typename InputT, bool HasKvLengths = false>
+class MlaDense : private MlaNonPaged<InputT, HasKvLengths, false> {
+  public:
+    __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
+                                      GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
+                                      TPipe* pipe, GM_ADDR kvLengths = nullptr)
+    {
+        this->Run(schedule, scale, qc, qr, kv, kr, output, lse, workspace, pipe, kvLengths);
     }
 };
 } // namespace flash_attn::mla::Kernel

@@ -12,7 +12,7 @@
 // Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0.
 // attention/common/op_kernel/memcopy/attn_copy_gm_to_l1.h:
 // CopySingle/MultiMatrixNDToNZ, CopyQueryGmToL1::ProcessS1G,
-// CopyKvGmToL1::ProcessContinuousOrTensorlist, specialized to dense FP16/BF16 BSND.
+// CopyKvGmToL1::ProcessContinuousOrTensorlist, specialized to contiguous FP16/BF16 tokens (BSND or compact TND).
 #pragma once
 #include "catlass/gemm/tile/atlasa2/copy_l0c_to_gm.hpp"
 
@@ -28,10 +28,12 @@ struct L1Tensor {
     uint32_t rowCount;
 };
 struct QueryCoord {
-    uint32_t bIdx, n2Idx, gS1Idx, dIdx, gS1DealSize, dDealSize;
+    uint64_t tokenStart;
+    uint32_t n2Idx, gS1Idx, dIdx, gS1DealSize, dDealSize;
 };
 struct KvCoord {
-    uint32_t bIdx, n2Idx, s2Idx, dIdx, s2DealSize, dDealSize;
+    uint64_t tokenStart;
+    uint32_t n2Idx, s2Idx, dIdx, s2DealSize, dDealSize;
 };
 template <typename InputT>
 struct DenseTensor {
@@ -98,7 +100,7 @@ class CopyQueryGmToL1 {
         uint32_t sStart = c.gS1Idx / src.heads, gStart = c.gS1Idx % src.heads;
         uint32_t sEnd = (c.gS1Idx + c.gS1DealSize) / src.heads;
         uint32_t gEnd = (c.gS1Idx + c.gS1DealSize) % src.heads;
-        uint64_t base = ((uint64_t(c.bIdx) * src.sequence + sStart) * src.heads) * src.dim + c.dIdx;
+        uint64_t base = ((c.tokenStart + sStart) * src.heads) * src.dim + c.dIdx;
         uint32_t strideS = src.heads * src.dim;
         if (src.heads == 1) {
             CopySingleMatrixNDToNZ(dst.tensor, src.gmTensor[base], sEnd - sStart, c.dDealSize, strideS, dst.rowCount);
@@ -128,7 +130,7 @@ class CopyKvGmToL1 {
   public:
     __aicore__ inline void operator()(L1Tensor<InputT>& dst, DenseTensor<InputT>& src, KvCoord& c)
     {
-        uint64_t offset = (uint64_t(c.bIdx) * src.sequence + c.s2Idx) * src.dim + c.dIdx;
+        uint64_t offset = (c.tokenStart + c.s2Idx) * src.dim + c.dIdx;
         CopySingleMatrixNDToNZ(dst.tensor, src.gmTensor[offset], c.s2DealSize, c.dDealSize, src.dim, dst.rowCount);
     }
 };
