@@ -35,7 +35,7 @@ struct MlaTndBsndSchedule {
 };
 
 // Independent CPU component: compact TND Q, continuous BSND shared 512+64 KV,
-// Hkv=1, no mask, num_splits=1. Not a v3 record or a public/device entry.
+// Hkv=1, no mask, num_splits=1. Shared with the v4 AICPU producer, not v3.
 // Q requires int32[B+1], including [0] for B=0: initial zero, nondecreasing,
 // tail==totalQuery<=INT32_MAX, differences<=maxQueryLength.
 // KV requires exactly B int32 lengths in [0,kvCapacity], with 0<=kvCapacity<=16384.

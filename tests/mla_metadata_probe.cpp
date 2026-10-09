@@ -14,6 +14,11 @@ extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
 #include "mla/mla_tnd_metadata_args.h"
 extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
 #endif
+#ifdef MLA_TND_BSND_METADATA
+#include "mla/mla_tnd_bsnd_metadata.h"
+#include "mla/mla_tnd_bsnd_metadata_args.h"
+extern __global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadata(void* args);
+#endif
 using namespace flash_attn::mla;
 
 extern "C" uint32_t metadata_args_size()
@@ -127,6 +132,39 @@ extern "C" int launch_tnd_metadata(void* current, void* worker, void* ready, voi
         return status;
     MlaTndMetadataArgs launchArgs = *args;
     ComputeMlaTndMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
+    status = aclrtRecordEvent(done, worker);
+    if (status != ACL_SUCCESS)
+        return status;
+    return aclrtStreamWaitEvent(current, done);
+}
+#endif
+
+#ifdef MLA_TND_BSND_METADATA
+extern "C" uint32_t mixed_metadata_args_size()
+{
+    return sizeof(MlaTndBsndMetadataArgs);
+}
+
+extern "C" uint32_t mixed_metadata_host(const MlaTndBsndMetadataArgs* args, uint32_t* output)
+{
+    return BuildTndBsndMetadata(args->shape, args->platform, args->dtype, output, args->outputWords,
+                                reinterpret_cast<const int32_t*>(args->cuQueryAddr), args->queryCount,
+                                reinterpret_cast<const int32_t*>(args->kvLengthsAddr), args->kvCount)
+               ? 0
+               : 1;
+}
+
+extern "C" int launch_mixed_metadata(void* current, void* worker, void* ready, void* done,
+                                     const MlaTndBsndMetadataArgs* args)
+{
+    auto status = aclrtRecordEvent(ready, current);
+    if (status != ACL_SUCCESS)
+        return status;
+    status = aclrtStreamWaitEvent(worker, ready);
+    if (status != ACL_SUCCESS)
+        return status;
+    MlaTndBsndMetadataArgs launchArgs = *args;
+    ComputeMlaTndBsndMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
     status = aclrtRecordEvent(done, worker);
     if (status != ACL_SUCCESS)
         return status;

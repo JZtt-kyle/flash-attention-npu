@@ -17,7 +17,7 @@
 // cumulative tails for the existing SplitCore; whole-M endpoint mapping for
 // num_splits=1 with variable Q lengths. Shared by CPU tests and the v3 AICPU producer.
 // Mixed TND Q/BSND KV additionally preserves physical capacity, noncumulative
-// source KV lengths and 64-bit physical starts; it has no metadata/device entry yet.
+// source KV lengths and 64-bit physical starts, shared with the v4 AICPU producer.
 
 #include "mla_tnd_schedule.h"
 #include "mla_tnd_bsnd_schedule.h"
