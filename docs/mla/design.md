@@ -181,7 +181,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v2](#53-v2bsnd-实际-kv-长度记录与消费者) | 2 / 2 | 401+B | BSND 实际 KV 长度；公开生成与只读 kvcache 复用 |
 | [v3](#54-v3紧凑-tnd-记录与设备消费) | 3 / 3 | 405+4B | 紧凑 TND Q/KV；varlen 内部生成，保存两轴起点和段长 |
 | [v4](#55-v4tnd-q-与-bsnd-kv-混合记录) | 4 / 4 | 406+5B | TND Q + BSND KV；公开生成或内部生成，保存 64 位物理 KV 起点与实际长度 |
-| [v5](#57-v5分配与-used-记录) | 5 / 5 | 410+8B | BSND/TND 分配与可选 Q/KV-used；仅独立 AICPU 生成，尚无消费者或公开接入 |
+| [v5](#57-v5分配与-used-记录) | 5 / 5 | 410+8B | BSND/TND 分配与可选 Q/KV-used；独立 AICPU 生成与设备校验，尚无 attention 或公开接入 |
 
 生成记录、设备校验、独立 attention、公开调用分别验收；当前接入层次见 [status](status.md#当前可调用能力)。v1–v4 均不表达独立 Q-used 或紧凑 TND KV-used；v5 复用的归一与调度见 [6.2.7](#627-分配长度与-used-的-cpu-归一)。
 
@@ -265,7 +265,11 @@ v1–v4 的生产与独立生成路径、v5 的独立生成路径均使用当前
 
 [`UsedMetadataWords` / `BuildUsedMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_used_metadata.cpp) 接收三种已约定布局以及两组分配前缀、两组可选 used。四组描述符与输入/输出区间均在读取前检查，随后调用 `BuildUsedSchedule`。缺省 used 使用整段分配，并保留源数组的累计/非累计语义；显式整段 used 不必与缺省 used 产生相同切块，因此记录同时保存 used 标记。Q/KV 任一轴为空仍完整校验其他轴，非空容量中的全零 used 保留调度与 workspace。
 
-[`mla_used_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_used_metadata.aicpu) 直接读取设备前缀/used，编译同一归一、调度和序列化源码。仅通过独立 [生成 probe](../../tests/mla_metadata_probe.cpp) 发射；虽由 910 FA3 构建链接，尚未被公开入口或 attention 使用。v1–v4 消费者拒绝 v5；v5 消费者、独立 attention 和公开接入分别留在 M06d2b/c、M06d3。
+[`mla_used_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_used_metadata.aicpu) 直接读取设备前缀/used，编译同一归一、调度和序列化源码。仅通过独立 [生成 probe](../../tests/mla_metadata_probe.cpp) 发射；虽由 910 FA3 构建链接，尚未被公开入口或 attention 使用。v1–v4 消费者拒绝 v5；v5 的独立 attention 和公开接入分别留在 M06d2c、M06d3。
+
+[`ReadUsedMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_used_metadata_consumer.h) 使用独立 `MlaUsedMetadataContext`、当次四数组描述符及 `MlaUsedKernelSchedule`。先验证精确字数、v5 头部、生成状态和 dtype，再检查布局、总容量/max 上界、used 标记及全部描述符；值读取留在设备。逐样本对照当前分配前缀、两轴 64 位物理起点、分配长度和 used；缺省 used 必须等于完整分配段，B=0 的显式零长度数组仍须保留存在标记。解码失败保持返回结构不变。
+
+调度校验复用既有平台、空调度、workspace 和局部资源检查，按实际 Q/KV 长度检查变长 M 端点及整个零成本后缀，并检查未用端点、非 FD 记账与总 tile 溢出；`maxCost` 仅作诊断，不验证划分最优性或记录真实性。全零 used 的非空分配仍须具有完整 workspace。设备 [`LoadUsedMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_used_metadata.hpp) 在每个 Cube/Vector 核上校验当次 dtype、发射核数、地址/对齐与上述内容，失败执行 release `Trap`，调用方必须在通过后才分配事件或写输出。当前仅独立校验 probe 使用它，不产生 attention 输出。
 
 ## 6. 代码结构
 
@@ -466,7 +470,7 @@ v2/v3/v4 的非空物理容量按平台全核 blockDim 生成和发射，工作�
 
 CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射使用线程局部作用域给实际 ACL launch 设置源 `BATCH_MODE`，保留其他属性及错误码，普通 FA3 发射原样透传。绕过已验收 ACL 路径或作用域内不恰好发射一次时明确失败。
 
-[`setup.py`](../../setup.py) 的 910 FA3 构建包含六个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v5 的 `mla_metadata.aicpu`、`mla_bsnd_metadata.aicpu`、`mla_tnd_metadata.aicpu`、`mla_tnd_bsnd_metadata.aicpu`、`mla_used_metadata.aicpu`。生产 v4 生成器由 metadata 入口和混合前向共用，v5 暂仅独立生成。编译选项、包含的头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，复现须核对加载路径、哈希和链接对象。
+[`setup.py`](../../setup.py) 的 910 FA3 构建包含六个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v5 的 `mla_metadata.aicpu`、`mla_bsnd_metadata.aicpu`、`mla_tnd_metadata.aicpu`、`mla_tnd_bsnd_metadata.aicpu`、`mla_used_metadata.aicpu`。生产 v4 生成器由 metadata 入口和混合前向共用，v5 暂仅独立生成与校验。编译选项、包含的头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，复现须核对加载路径、哈希和链接对象。
 
 ## 7. 验收口径
 
