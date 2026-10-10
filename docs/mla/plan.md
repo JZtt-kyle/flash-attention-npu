@@ -1,8 +1,8 @@
 # MLA 迭代计划
 
-本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#下一步m07b1) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
+本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#下一步m07b2) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
 
-M06 已完成，M07a 的源边界核对与实施拆分也已完成。唯一下一步为 **[M07b1：PA CPU 地址组件](#下一步m07b1)**；M07 按下表逐项验收，完成后再依次推进 M08..M17。
+M06 已完成，M07a 的源边界核对与实施拆分、M07b1 的独立 PA CPU 地址组件也已完成。唯一下一步为 **[M07b2：PA CPU 调度](#下一步m07b2)**；M07 按下表逐项验收，完成后再依次推进 M08..M17。
 
 ## M06：非分页长度、TND 与 stride
 
@@ -16,9 +16,9 @@ M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[�
 
 本阶段限 FP16/BF16、512+64 共享 KV、Hkv=1、无 mask、`num_splits=1`，接入 BSND/TND query 和内部 Q-used。接口、页大小、长度、物理地址和来源见 [design 6.4.3](design.md#643-nd-paged-cache-契约与来源)，新增记录的职责见 [metadata PA 约束](design.md#51-签名与复用规则)。64 种源页大小、两路 cache 独立 stride、页表行 stride 均在范围内；CANN 原生只支持部分外层 stride 时，测试侧转换计入公开 E2E。
 
-### 下一步：M07b1
+### 下一步：M07b2
 
-先交付不被生产调用的 PA CPU 地址组件：分开描述逻辑 B/页表宽度/容量、物理页池、页大小、页表行距与 K/V 各自 storage；复用已有 BSND/TND 地址检查，校验有效页号并把逻辑复制范围拆成页内段。以固定源 offset/copy helper 和独立标量 oracle 对照地址及分段，覆盖乱序/重复页、-1 padding、尾页、广播/重叠、独立 offset、65535/65536/65537 与 >uint32 地址、空值及溢出，运行 ASan/UBSan 和受影响 CPU 回归。此步不改调度、metadata、Kernel 或公开入口。
+交付不被生产调用的 PA CPU 调度：BSND/TND Q、可选 Q-used、按样本的 KV 长度与逻辑容量分离，复用既有长度归一、SplitCore、无 split 端点和资源预算。按固定源次序接入 PA `CalcInnerSize`，覆盖全部页大小、P=112 的 448 基块和 P=528 的跨页复制范围；对完整分核、FD 候选记账和 workspace 做固定源差分、边界和 sanitizer 检查，并回归旧 CPU 路径。M07b1 地址组件不承担调度容量上限；本步须按 design 校验每样本逻辑容量 0..16384。此步不改 metadata、Kernel 或公开入口。
 
 ### M07 剩余步骤
 
@@ -26,8 +26,7 @@ M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[�
 
 | 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
 | --- | --- | --- | --- |
-| M07b1 | 唯一下一步 | PA CPU 地址、完整 storage 与页内分段组件 | 固定源地址差分、独立 oracle、全部页大小/stride/溢出/空值、ASan/UBSan 与 CPU 回归 |
-| M07b2 | 待开始 | BSND/TND Q、可选 Q-used 的 PA CPU 调度；KV 长度按样本 | 固定源 `CalcInnerSize`、完整分核/FD 字段/workspace 差分；逻辑容量与有效长度分离、P=112/528 等边界、无 split 映射、sanitizer；不改旧路径结果 |
+| M07b2 | 唯一下一步 | BSND/TND Q、可选 Q-used 的 PA CPU 调度；KV 长度按样本 | 固定源 `CalcInnerSize`、完整分核/FD 字段/workspace 差分；逻辑容量与有效长度分离、P=112/528 等边界、无 split 映射、sanitizer；不改旧路径结果 |
 | M07c1 | 待开始 | 新 PA 协议与 CPU 序列化，固化版本、精确字数与调用 context | 独立解码/损坏/溢出/失败清零，Q 分配/used 和 KV 长度快照；不保存页表、物理页数或 stride；v1–v5 互斥与回归 |
 | M07c2 | 待开始 | 独立 PA AICPU 生成器，仍无公开接入 | 910B 对照 CPU/固定源；设备长度、TND 总 Q 推导、空值、失败清零、输出/输入别名检查、异步生命周期与 metadata/普通 FA3 回归 |
 | M07c3 | 待开始 | PA 设备消费者：记录校验及当次页表/物理 cache 校验 | 损坏/过期长度/页大小、有效页越界与 padding 哨兵、Q=0 仍验有效页、空池/空表；写输出前拒绝、release 真实 Trap、流生命周期及旧消费者/普通 FA3 回归 |
@@ -141,3 +140,4 @@ PA01/PA02 的地址、Copy 与精度覆盖全部 16..1024 的 16 倍数；代表
 | 步骤 | 已完成产物与边界 |
 | --- | --- |
 | M07a | 纯文档固定源核对与实施拆分；页大小交集、PA 非累计 KV 长度、逻辑/物理容量、独立 stride、页表动态校验、metadata 复用及空值差异；未开放 PA |
+| M07b1 | 独立 PA CPU 地址组件；复用 BSND 完整 storage 校验，分离逻辑容量/物理页池/页表行距、校验有效页并返回页内段；全部 64 种页大小、固定源 offset/QK/PV Copy trace、标量 oracle、真实视图、溢出/空值、ASan/UBSan 与 BSND/TND CPU 回归；未改调度或开放 PA |
