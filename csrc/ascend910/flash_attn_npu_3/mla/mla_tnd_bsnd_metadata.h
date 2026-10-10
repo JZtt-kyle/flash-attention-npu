@@ -1,5 +1,5 @@
-// Private TND-Q/BSND-KV protocol. Generation only; no device consumer or
-// attention entry yet. Never pass this record to a v1/v2/v3 Kernel.
+// Private TND-Q/BSND-KV protocol with independent generation and validation.
+// No attention entry yet. Never pass this record to a v1/v2/v3 Kernel.
 #pragma once
 #include "mla_metadata.h"
 

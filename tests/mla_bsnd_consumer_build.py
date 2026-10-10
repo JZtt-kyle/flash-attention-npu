@@ -8,11 +8,12 @@ import subprocess
 from tests.mla_metadata_build import MLA, ROOT, sha256
 
 
-def build_consumers(directory, *, tnd=False):
+def build_consumers(directory, *, tnd=False, mixed=False):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     cann = Path(os.environ["ASCEND_HOME_PATH"])
-    layout = "tnd" if tnd else "bsnd"
+    assert not (tnd and mixed)
+    layout = "tnd_bsnd" if mixed else "tnd" if tnd else "bsnd"
     source = ROOT / f"tests/mla_{layout}_metadata_consumer_probe.cpp"
     libraries, sources = {}, {source, Path(__file__)}
     for dtype in ("fp16", "bf16"):
@@ -59,7 +60,7 @@ def build_consumers(directory, *, tnd=False):
         compiler=subprocess.check_output([str(cann / "bin/bisheng"), "--version"], text=True),
         cann=str(cann),
         ndebug=True,
-        scope=f"{'v3 TND' if tnd else 'v2 BSND'} validation only; no attention forward",
+        scope=f"{'v4 mixed' if mixed else 'v3 TND' if tnd else 'v2 BSND'} validation only; no attention forward",
     )
     (directory / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest

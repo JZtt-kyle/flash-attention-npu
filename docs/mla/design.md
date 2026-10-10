@@ -176,7 +176,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v1](#52-v1整容量-dense-记录与消费者) | 1 / 1 | 401 | BSND 整容量，供无长度、无显式记录的内部前向使用 |
 | [v2](#53-v2bsnd-实际-kv-长度记录与消费者) | 2 / 2 | 401+B | BSND 每样本 KV 实际长度快照，公开生成与只读 kvcache 复用 |
 | [v3](#54-v3紧凑-tnd-记录独立生成与设备校验) | 3 / 3 | 405+4B | Q/KV 均为紧凑 TND，保存总容量、max 上界、逐样本起点和段长；独立生成协议 |
-| [v4](#56-v4tnd-q-与-bsnd-kv-混合记录独立生成) | 4 / 4 | 406+5B | TND Q + BSND KV，保存 Q 总量/max 上界、物理 KV 容量、64 位 KV 起点和实际长度；独立生成协议 |
+| [v4](#56-v4tnd-q-与-bsnd-kv-混合记录独立生成与设备校验) | 4 / 4 | 406+5B | TND Q + BSND KV，保存 Q 总量/max 上界、物理 KV 容量、64 位 KV 起点和实际长度；独立生成与设备校验 |
 
 ### 5.1 签名与复用规则
 
@@ -237,7 +237,7 @@ v1/v2 生产路径与 v1/v2/v3/v4 独立驱动均沿用当前 stream / AICPU str
 
 跨 stream 复用由调用方建立正常 stream/event 依赖；前向对本次使用的输入、长度和记录登记 stream。不能在生成或消费未完成时改写记录/长度，也不能共享可变 scratch。新增协议必须更新版本、类型和 wordCount 校验，不能让旧记录被新语义误读。
 
-### 5.6 v4：TND Q 与 BSND KV 混合记录、独立生成
+### 5.6 v4：TND Q 与 BSND KV 混合记录、独立生成与设备校验
 
 [`mla_tnd_bsnd_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_bsnd_metadata.h) 定义 `version=4`、`kind=4`，magic 沿用 v1。记录恰为 `406+5B` 个 int32：前 401 字保留共同头部和调度编码，按 0 起始索引的 401..405 字依次为 `totalQuery、maxQueryLength、kvCapacity、totalKvCapacity.low、totalKvCapacity.high`，其中总物理 KV 容量为 64 位 `B*Sk`。末尾每个样本五字为 `queryStart、kvStart.low、kvStart.high、queryLength、kvLength`，单位均为 token。KV 起点始终为 64 位 `b*Sk`，不能用累计实际长度替代；调度的 `s1Size` 是观测 Q 最大段长，`s2Size` 是物理 `Sk`，KV 实际长度完整保存在快照中。
 
@@ -245,7 +245,13 @@ v1/v2 生产路径与 v1/v2/v3/v4 独立驱动均沿用当前 stream / AICPU str
 
 `BuildTndBsndMetadata` 要求连续 Q 前缀 `int32[B+1]` 和 KV 实际长度 `int32[B]`；B=0 时 Q 仍须为 `[0]`，仅此时允许 KV 为 null/count=0，null 不表示整容量。两组只读输入可相互别名。输出地址、对齐、地址加法、精确字数或与任一输入的区间重叠不安全时，返回错误且不写输出；重叠检查不对输入终点做可能溢出的加法。安全输出中的 dtype 错误写 `UnsupportedDtype=1`，输入描述符错误写 `InvalidLengths=3`，形状/数值/平台/调度错误写 `ScheduleFailure=2` 并保存源调度状态；所有失败清零八字头之后的完整载荷。
 
-[`mla_tnd_bsnd_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_bsnd_metadata.aicpu) 直接编译同一 `BuildTndBsndSchedule` 和序列化源码，成功记录从调度器拥有的快照生成，不二次读取输入。生成期间输入必须保持不变；完成后执行设备屏障。该对象列入 FA3/910 构建，独立驱动无长度 D2H，按 5.5 管理事件与 allocator 生命周期。v1/v2/v3 消费者均在读取载荷前拒绝 v4；混合设备消费者、attention 与公开 TND 接入分别留给后续步骤。
+[`mla_tnd_bsnd_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_bsnd_metadata.aicpu) 直接编译同一 `BuildTndBsndSchedule` 和序列化源码，成功记录从调度器拥有的快照生成，不二次读取输入。生成期间输入必须保持不变；完成后执行设备屏障。该对象列入 FA3/910 构建，独立驱动无长度 D2H，按 5.5 管理事件与 allocator 生命周期。v1/v2/v3 消费者均在读取载荷前拒绝 v4；v4 消费者同样拒绝旧版本，不按载荷猜测布局。
+
+[`mla_tnd_bsnd_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_bsnd_metadata_consumer.h) 使用独立 `MlaTndBsndMetadataContext` 与 `MlaTndBsndKernelSchedule`，核对精确字数、dtype、Q 总量/max 上界、物理 Sk 和 64 位 `B*Sk`。完整 Q 前缀必须与连续 Q 起点/段长一致；每个 KV 长度须与当次输入相等且位于 `[0,Sk]`，每个 64 位 KV 起点须为 `b*Sk`。Q 前缀/描述符失败为 `InvalidPrefixes=12`，KV 长度/物理起点/描述符失败为 `InvalidCacheLengths=11`。B=0 仍读取 Q 的 `[0]`，仅此时接受 null/count=0 的 KV。
+
+变长 M 块、实际 M/S2 总块数、端点和逐样本零成本后缀沿用 6.2.6；平台、空调度、workspace 和本地资源复用既有校验。非空物理容量中的全零 KV 仍校验完整调度与 workspace，不能改成空调度。失败不改写输出调度；和旧协议一样，不认证 split 最优性或未消费的 cost/FD 记账字段。
+
+[`kernel/mla_tnd_bsnd_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd_metadata.hpp) 检查地址、4 字节对齐、地址加法、编译 dtype 和实际 blockDim。每个 Cube/Vector 在 TPipe、attention 事件与输出/workspace 写入前完成只读校验；`LoadTndBsndMetadata` 遇错执行不受 `NDEBUG` 影响的真实 Trap，无长度 D2H 或主机等待。生成与消费期间记录和输入不可修改，跨 stream 与 allocator 依赖遵循 5.5。当前消费者仅通过独立驱动使用；混合 attention 与公开接入仍按计划分别验收。
 
 ## 6. 代码结构
 
@@ -356,7 +362,7 @@ KV token 起点固定为 `uint64(b)*Sk`，短长度和零长度不压缩 cache�
 
 固定源 `CreateSplitInput` 接收数值转换的 int64 Q 累计尾值与非累计 KV 长度，分别设置 `isAccumSeqS1=true`、`isAccumSeqS2=false`。调度 `s1Size` 使用观测 Q 最大值，`s2Size` 保留物理 Sk；观测 KV 最大值单独保存。`ProcessKVActualSeqLoop` 的等长判定比较原 KV 数组值，因此 B=10、Q 每段 2、Hq=128、20 核、Sk=511 且 KV 每段 511 时 M=128，而紧凑 TND 为 M=256。S2 基块按容量取 `min(Sk,512)`，任务成本和总物理执行块数按各样本实际 Q/KV 长度计算；后者须落在 uint32 内。
 
-混合布局与紧凑 TND 共用变长 M 块端点映射、零成本后缀检查和 workspace 计算。总 Q=0、B=0 或 Sk=0 时使用单校验核与零 workspace；非空物理容量中的全零 KV 保留源零成本调度和 workspace。[独立 CPU 对照](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_schedule.py) 的源 oracle 读取固定 CANN Git blob，不调用迁移解析器。CPU 与 [v4 AICPU 生成器](#56-v4tnd-q-与-bsnd-kv-混合记录独立生成) 共用此组件；其 64 位起点不能写入紧凑 v3 的四字 span，消费、attention 和公开接入仍分别验收。
+混合布局与紧凑 TND 共用变长 M 块端点映射、零成本后缀检查和 workspace 计算。总 Q=0、B=0 或 Sk=0 时使用单校验核与零 workspace；非空物理容量中的全零 KV 保留源零成本调度和 workspace。[独立 CPU 对照](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_schedule.py) 的源 oracle 读取固定 CANN Git blob，不调用迁移解析器。CPU 与 [v4 AICPU 生成器](#56-v4tnd-q-与-bsnd-kv-混合记录独立生成与设备校验) 共用此组件；其 64 位起点不能写入紧凑 v3 的四字 span，消费、attention 和公开接入仍分别验收。
 
 ### 6.3 数值路径与资源布局
 
