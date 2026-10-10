@@ -14,9 +14,19 @@ from tests.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_mla_contract import _inputs
 
 
-def run(dtype, fault, directory):
+def run(dtype, fault, directory, layout="contiguous"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     args = _inputs(layout="tnd", dtype={"fp16": torch.float16, "bf16": torch.bfloat16}[dtype])
+    if layout == "strided":
+        for name in ("q", "qv", "k", "v"):
+            original = args[name]
+            storage = torch.empty(
+                (2 * original.shape[0] + 1, *original.shape[1:]),
+                dtype=original.dtype,
+                device=original.device,
+            )
+            args[name] = storage[1 : 1 + 2 * original.shape[0] : 2]
+            args[name].copy_(original)
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
@@ -54,6 +64,7 @@ def run(dtype, fault, directory):
         except RuntimeError as error:
             report = dict(
                 fault=fault,
+                input_layout=layout,
                 dtype=dtype,
                 elapsed_seconds=time.monotonic() - start,
                 error=str(error),

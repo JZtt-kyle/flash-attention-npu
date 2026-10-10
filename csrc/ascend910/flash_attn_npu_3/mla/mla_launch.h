@@ -29,6 +29,8 @@ struct MlaTndLaunchArgs {
     uint8_t *qc, *qr, *kv, *kr, *output, *lse, *workspace, *metadata, *cuQuery, *cuKv;
     MlaTndMetadataContext context;
     float scale;
+    MlaBsndInputLayouts layouts{};
+    bool hasStrides = false;
 };
 aclError LaunchTndFp16(const MlaTndLaunchArgs& args);
 aclError LaunchTndBf16(const MlaTndLaunchArgs& args);

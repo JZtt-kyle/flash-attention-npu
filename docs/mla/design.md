@@ -304,10 +304,10 @@ v2 消费后将快照传给 `MlaDense<InputT, true, HasStrides>` 实际长度特
 | 布局 | 驱动与记录消费 | 计算组件 |
 | --- | --- | --- |
 | BSND Q/KV | `mla_launch_impl.hpp` 消费 v1/v2 | `MlaDense<InputT, HasKvLengths, HasStrides>` → `MlaNonPaged<InputT, HasKvLengths, false, false, false, HasStrides>` |
-| 紧凑 TND Q/KV | [`mla_tnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_launch_impl.hpp) 与 [`mla_tnd_attention_probe.cpp`](../../tests/mla_tnd_attention_probe.cpp) 消费 v3 | `kernel/mla_tnd.hpp::MlaTnd` → `MlaNonPaged<InputT, true, true>`，共用 Cube / Vector / Tile |
+| 紧凑 TND Q/KV | [`mla_tnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_launch_impl.hpp) 与 [`mla_tnd_attention_probe.cpp`](../../tests/mla_tnd_attention_probe.cpp) 消费 v3 | `MlaTnd<InputT, HasStrides>` → `MlaNonPaged<InputT, true, true, false, false, HasStrides>`，共用 Cube / Vector / Tile |
 | TND Q + BSND KV | [`mla_tnd_bsnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_bsnd_launch_impl.hpp) 与 [`mla_tnd_bsnd_attention_probe.cpp`](../../tests/mla_tnd_bsnd_attention_probe.cpp) 消费 v4 | [`kernel/mla_tnd_bsnd.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd.hpp)::`MlaTndBsnd` → `MlaNonPaged<InputT, true, true, true>`，共用 Cube / Vector / Tile |
 | 分配与 used：BSND Q/KV | `mla_bsnd_used_launch_impl.hpp` 消费 v5 | `MlaUsed<InputT, false, HasStrides>` → `MlaNonPaged<InputT, true, false, false, true, HasStrides>` |
-| 分配与 used：TND Q/KV 或 TND Q + BSND KV | `mla_tnd_used_launch_impl.hpp` 消费 v5；独立对照使用 `mla_used_attention_probe.cpp` | 两布局共用 `MlaUsed<InputT, true>` → `MlaNonPaged<InputT, true, true, false, true>`，按 span 分离物理起点与有效长度 |
+| 分配与 used：TND Q/KV 或 TND Q + BSND KV | `mla_tnd_used_launch_impl.hpp` 消费 v5；独立对照使用 `mla_used_attention_probe.cpp` | 两布局共用 `MlaUsed<InputT, true, HasStrides>` → `MlaNonPaged<InputT, true, true, false, true, HasStrides>`；生产混合仍限连续，按 span 分离物理起点与有效长度 |
 
 v3/v4 各自使用独立 context 和 Kernel 调度类型，防止将布局不同的起点快照误传给 BSND 或紧凑 TND。混合 span 的 KV 起点从两个 uint32 字恢复为 uint64，并在任务环 `RunInfo` 与 Tile 坐标中保持 64 位。FD 合并与 192/128 通用路径按计划迁移。
 
@@ -449,6 +449,10 @@ Copy Tile 沿用固定 CANN 源 `attention/common/op_kernel/memcopy/attn_copy_gm
 
 独立 [TND stride attention 验收](../../tests/test_flash_attn_npu_v3_mla_tnd_stride.py) 覆盖 ST01/NTD、四路 offset、T01 与 used poison、混合 cache、空/广播/重叠、65535/65536/65537 和实际读取的 >uint32 stride。固定源接收从原始测试输入独立物化的连续视图；TND 的有效段按 used 压紧，混合 cache 保留分配槽位。物化与压紧在计时前完成，组件结果不能解释为相同物理布局或公开 E2E。
 
+TND Q/KV 的生产 `TndForward` 与 `UsedForward` 在分配输出及发射前调用该地址组件，覆盖 v3/v5 的全部四路输入；连续输入也检查完整 storage。按四路连续性选择原连续实例或 `HasStrides` 实例，stride 不写入 metadata，分配前缀和 used 仍逐次在设备检查。Python/fake 与 C++ 保持相同的 storage 边界；compile 跟踪时由算子 fake 检查、执行时由真实 C++ 检查。混合 TND Q + BSND KV 的非连续输入在独立生产接入前继续拒绝。
+
+[生产 TND stride 验收](../../tests/test_flash_attn_npu_v3_mla_tnd_stride_production.py) 覆盖公开 varlen、内部和原始 C++、真实/fake/compile、前缀/used 更新、完整 storage 拒绝与流生命周期。公开性能双方接收相同的物理视图；原生 FIA 的逐次布局转换，以及 used 适配的 gather/scatter，均计入 R=1/4 E2E。profiler 区分最终 attention 与带相同 FIA API 前缀的转换任务；显式适配器 wall 与全部转换设备耗时分别报告。
+
 ### 6.5 数值路径与资源布局
 
 QK 的 L1 循环顺序为 N→K→M，M/N 子块均为 128。576 维并非先算完整内容再算完整 RoPE：两组 288 依次为 `[content 0:256, rope 0:32]`、`[rope 32:64, content 256:512]`，每组按 K=96 的 L0 片累加到 FP32 L0C。Q 的 64 维 RoPE 一次复制跨越相邻 Q/P 槽，尾 M 用 padding 偏移保持相邻关系；复制前必须同时取得两个槽的释放事件。最终 QK 以 FP32 ND 写入 GM，再乘 scale。
@@ -557,6 +561,8 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | BSND stride `PERFORMANCE_CASES` | 9 | [`mla_bsnd_stride_profile.py`](../../tests/mla_bsnd_stride_profile.py)：连续对照、BNSD、独立布局、U01、任务环/尾块、16384 KV、65536 回退及广播；双 dtype 同逻辑输入/调度，源侧连续物化在计时前完成，分别记录 Kernel 与预分配 probe 调用耗时 |
 | TND/混合 stride `PERFORMANCE_CASES` | 12 | [`mla_tnd_stride_profile.py`](../../tests/mla_tnd_stride_profile.py)：v3/v4/v5、连续对照、NTD、独立布局、T01/used、单核任务环、16384 KV、65536 回退及广播；固定源非 FD、相同逻辑输入/调度，源连续物化及有效段压紧在计时前完成 |
 | 生产 BSND stride `PERFORMANCE_CASES` | 9 | [`mla_bsnd_used_profile.py --layout bsnd-stride`](../../tests/mla_bsnd_used_profile.py)：保持独立 stride 矩阵几何，按生产平台核数对照固定源；单列 AICPU、Kernel 与生产内部 wall，源连续物化在计时前完成 |
+| 生产 TND stride `PERFORMANCE_CASES` | 6 | [`mla_bsnd_used_profile.py --layout tnd-stride`](../../tests/mla_bsnd_used_profile.py)：独立矩阵的 TND Q/KV 子集，保留几何并使用生产全核；源连续物化及 used 压紧在计时前完成 |
+| 公开 TND stride `PUBLIC_CASES` | 11 | [`mla_varlen_used_profile.py --stride`](../../tests/mla_varlen_used_profile.py)：上述六例按源 host 限制 Hq≤128，另含广播、单轴 used、显式整段 used 和全零 KV-used；同物理视图，逐次 v3/v5 生成与原生转换计入 R=1/4 E2E，FD 单列 |
 | 公开 BSND `STRIDE_CASES` | 10 | [`mla_forward_profile.py`](../../tests/mla_forward_profile.py)：连续对照、BNSD、独立布局、零长度、长 KV、65536 回退、广播/重叠；双方相同物理输入，CANN 转换计入公开 metadata 复用、生成加 R=1/4 对照，FD 分派单列 |
 
 源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。前四组共 26 个整容量用例作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E。`BSND_CASES` 另含 11 个实际长度用例，保留全部原生 FD 分派并单列；公开全零实际长度同样计入对应路径的 E2E 验收。

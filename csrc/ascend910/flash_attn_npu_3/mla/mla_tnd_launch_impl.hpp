@@ -10,10 +10,11 @@
 #endif
 
 namespace flash_attn::mla {
+template <bool HasStrides>
 __global__ __aicore__ __mix__(1, 2) void MLA_TND_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
                                                        GM_ADDR output, GM_ADDR lse, GM_ADDR workspace, GM_ADDR metadata,
                                                        GM_ADDR cuQuery, GM_ADDR cuKv, MlaTndMetadataContext context,
-                                                       float scale)
+                                                       float scale, MlaBsndInputLayouts layouts)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     MlaTndKernelSchedule schedule{};
@@ -26,18 +27,24 @@ __global__ __aicore__ __mix__(1, 2) void MLA_TND_ENTRY(uint64_t ffts, GM_ADDR qc
     // including empty total capacity. The TND Kernel implements empty O/LSE.
     AscendC::SetSyncBaseAddr(ffts);
     AscendC::TPipe pipe;
-    Kernel::MlaTnd<MLA_TND_TYPE> op;
+    Kernel::MlaTnd<MLA_TND_TYPE, HasStrides> op;
     op(schedule, scale, qc, qr, kv, kr, output, lse, workspace, &pipe,
-       metadata + kMlaTndMetadataPrefixWords * sizeof(int32_t));
+       metadata + kMlaTndMetadataPrefixWords * sizeof(int32_t), &layouts);
 #endif
 }
 
 aclError MLA_TND_LAUNCH(const MlaTndLaunchArgs& a)
 {
     MlaBatchLaunchScope launch;
-    MLA_TND_ENTRY<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
-                                                             a.workspace, a.metadata, a.cuQuery, a.cuKv, a.context,
-                                                             a.scale);
+    if (a.hasStrides) {
+        MLA_TND_ENTRY<true><<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
+                                                                       a.workspace, a.metadata, a.cuQuery, a.cuKv,
+                                                                       a.context, a.scale, a.layouts);
+    } else {
+        MLA_TND_ENTRY<false><<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
+                                                                        a.workspace, a.metadata, a.cuQuery, a.cuKv,
+                                                                        a.context, a.scale, a.layouts);
+    }
     return launch.Result();
 }
 } // namespace flash_attn::mla

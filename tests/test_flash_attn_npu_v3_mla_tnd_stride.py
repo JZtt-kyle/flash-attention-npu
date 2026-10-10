@@ -1,7 +1,8 @@
 """Independent v3/v4/v5 TND strides; source materialization is outside timing.
 
 The fixed CANN non-FD oracle receives independently packed effective inputs.
-The migrated Kernel reads original allocation views. Public support stays closed.
+The migrated Kernel reads original allocation views. Production entry coverage
+is maintained separately in test_flash_attn_npu_v3_mla_tnd_stride_production.py.
 """
 
 import ctypes as ct
@@ -230,10 +231,13 @@ def stride_attention(tmp_path_factory, request):
     return load_attention(directory)
 
 
-def make_case(probes, producer, config, *, scale=None):
+def make_case(probes, producer, config, *, scale=None, full_launch=False):
     item = dict(config["item"])
     if config["aic"] is not None:
         item["aic"] = config["aic"]
+    if full_launch:
+        item["aic"] = producer["platform"].aic
+        item["block_dim"] = item["aic"] if sum(item["q"]) and sum(item["kv"]) else 0
     case = make_used_case(probes, producer, item, scale=scale)
     item = case["item"]
     case.update(config=config, input_checks=[])
@@ -298,6 +302,8 @@ def make_case(probes, producer, config, *, scale=None):
                 "l0c",
             )
         }
+        if full_launch:
+            shape["block_dim"] = item["block_dim"]
         if config["version"] == 3:
             module = tnd_metadata
             values = tnd_case(item["q"], item["kv"], **shape)

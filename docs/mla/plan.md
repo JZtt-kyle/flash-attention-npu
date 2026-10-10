@@ -2,23 +2,23 @@
 
 本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#m06-剩余步骤) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
 
-唯一下一步为 **[M06e2c：TND stride 生产接入](#下一步m06e2c)**。M06e2b 独立 attention 已完成，其后依次为 M07..M17。
+唯一下一步为 **[M06e2c2：混合 stride 生产接入](#下一步m06e2c2)**。M06e2c1 已完成 TND Q/KV 的生产接入；混合布局完成后依次为 M07..M17。
 
 ## M06：非分页长度、TND 与 stride
 
-本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`。BSND 实际长度、TND/混合连续布局、分配与 used、BSND stride 已完成；剩余 TND/混合 stride。字段、长度和地址规则分别见 design [6.2](design.md#62-调度字段与边界)、[6.3](design.md#63-长度与布局调度)、[6.4](design.md#64-输入-stride-与地址校验)。PA、mask、FD、192/128 与调度选项留在后续步骤。
+本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`。BSND 实际长度、TND/混合连续布局、分配与 used、BSND stride 已完成；TND Q/KV stride 也已接通，剩余混合 stride。字段、长度和地址规则分别见 design [6.2](design.md#62-调度字段与边界)、[6.3](design.md#63-长度与布局调度)、[6.4](design.md#64-输入-stride-与地址校验)。PA、mask、FD、192/128 与调度选项留在后续步骤。
 
 每行单独验收、提交。长度和布局按“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 入口接入”推进；stride 在已有协议上按“CPU 地址校验 → 独立 attention → 入口接入”推进。独立组件完成不代表公开入口开放。
 
-### 下一步：M06e2c
+### 下一步：M06e2c2
 
-前置 M06e1a/b/c 和 M06e2a/b 已完成。将已验收的 TND 地址组件和 v3/v4/v5 stride 实例接入生产：公开 varlen、混合只读 kvcache 和内部 used。接入真实/fake/C++/compile 的完整 storage 校验，保持分配前缀、used、metadata 更新及流生命周期语义。按下表完成生产 Kernel、适用公开 E2E 和普通 FA3 回归；独立组件的源物化对照不能替代公开同物理视图 E2E。
+前置 M06e1a/b/c、M06e2a/b 与 M06e2c1 已完成。本步将已验收的 TND/BSND 地址组件和 v4/v5 stride 实例接入混合只读 kvcache 及内部混合 Q-used。接入真实/fake/C++/compile 的完整 storage 校验，保持分配前缀、used、metadata 更新与跨视图复用及流生命周期语义。完成生产 Kernel、适用公开生成/复用 R=1/4 E2E 和普通 FA3 回归；独立组件的源物化对照不能替代公开同物理视图 E2E。
 
 ### M06 剩余步骤
 
 | 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
 | --- | --- | --- | --- |
-| M06e2c | 唯一下一步 | TND stride 生产接入，完成 M06；公开 varlen、混合只读 kvcache、内部 used | 真实/fake/C++/compile、完整 storage 拒绝、长度/metadata 更新和生命周期；双 dtype 精度、生产 Kernel 对照、适用公开 E2E 及普通 FA3 回归通过 |
+| M06e2c2 | 唯一下一步 | 混合 stride 生产接入，完成 M06；公开只读 kvcache v4 及内部混合 used | 四路独立 TND/BSND stride、完整 storage、metadata 跨视图复用与长度更新；双 dtype 精度、生产 Kernel、公开生成/复用 R=1/4 E2E 及普通 FA3 回归通过 |
 
 M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定性能矩阵与阶段边界)。生成记录、校验记录和执行 attention 分别验收；全部样本实际长度为零也不等于全局空容量。
 
@@ -116,3 +116,4 @@ M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[�
 | M06e1c | BSND stride 生产接入 v1/v2/v5，完成 M06e1；适用公开 metadata E2E 达标 |
 | M06e2a | TND 独立 CPU 地址组件，复用 BSND 校验；四路视图与分配/used/BSND cache 地址组合 |
 | M06e2b | TND/混合独立 v3/v4/v5 stride attention；原分配视图读取、NTD/独立 offset、used poison、65536 与真实大地址边界；固定源组件性能及连续/普通 FA3 回归，生产仍拒绝非连续输入 |
+| M06e2c1 | TND Q/KV stride 生产接入；公开 varlen v3/v5 与内部 TND used、完整 storage、真实/fake/C++/compile/生命周期；双 dtype 源/数学精度、生产 Kernel 对照、适用公开 R=1/4 E2E 及普通 FA3 回归，混合 stride 仍拒绝 |

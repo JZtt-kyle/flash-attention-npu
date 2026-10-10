@@ -17,12 +17,7 @@ import torch_npu
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla_cann_baseline import check_vendor_configuration, environment, file_info
 from tests.mla_varlen_profile import CannTndCall
-from tests.test_flash_attn_npu_v3_mla_varlen_used import (
-    PERFORMANCE_CASES,
-    production_case,
-    forward_args,
-    check_result,
-)
+from tests import test_flash_attn_npu_v3_mla_varlen_used as used_cases
 from tests.test_flash_attn_npu_v3_mla_used_attention import (
     configure_producer,
     effective,
@@ -30,7 +25,6 @@ from tests.test_flash_attn_npu_v3_mla_used_attention import (
     valid_outputs,
     references,
     check_math,
-    launch,
 )
 from tests.test_flash_attn_npu_v3_mla_metadata import load_probe
 from tests.test_flash_attn_npu_v3_mla_tnd_schedule import build_oracle, evaluate, tnd_case
@@ -92,7 +86,9 @@ class CannTndUsedCall:
         return self.restore(self.compact_result)
 
 
-def prepare(dtype_name, platform, output, probes, producer):
+def prepare(dtype_name, platform, output, probes, producer, cases_api):
+    configs = getattr(cases_api, "PUBLIC_CASES", cases_api.PERFORMANCE_CASES)
+    items = [c.get("item", c) for c in configs]
     oracle_dir = output / "source-schedule"
     oracle_dir.mkdir()
     oracle = build_oracle(oracle_dir)
@@ -105,27 +101,26 @@ def prepare(dtype_name, platform, output, probes, producer):
             libapi=platform["libapi"],
             **dict(zip(("l1", "ub", "l0a", "l0b", "l0c"), platform["memory"])),
         )
-        for c in PERFORMANCE_CASES
+        for c in items
     ]
     native_schedules = evaluate(oracle, shapes, native=True)
     (output / "dispatch.json").write_text(
-        json.dumps(dict(cases=PERFORMANCE_CASES, inputs=shapes, native=native_schedules), indent=2)
-        + "\n"
+        json.dumps(dict(cases=configs, inputs=shapes, native=native_schedules), indent=2) + "\n"
     )
     inputs, natives, cases, accuracy = [], [], [], []
-    for index, spec in enumerate(PERFORMANCE_CASES):
-        case = production_case(probes, producer, spec)
+    for index, spec in enumerate(configs):
+        case = cases_api.production_case(probes, producer, spec)
         cases.append(case)
-        args = dict(forward_args(case), num_splits=1, return_attn_probs=True)
+        args = dict(cases_api.forward_args(case), num_splits=1, return_attn_probs=True)
         inputs.append(args)
-        native = CannTndUsedCall(case["devices"]["migrated"], spec, case["scale"])
+        native = CannTndUsedCall(case["devices"]["migrated"], items[index], case["scale"])
         natives.append(native)
         actual = api.flash_attn_varlen_func(**args)
-        launch(probes, case, "oracle")
-        errors = check_result(case, actual, source=True)
+        cases_api.launch(probes, case, "oracle")
+        errors = cases_api.check_result(case, actual, source=True)
         source = valid_outputs(case, [t.cpu() for t in native()])
         refs = references(case)
-        uq, uk = effective(spec)
+        uq, uk = effective(items[index])
         nonempty = torch.tensor([k > 0 for q, k in zip(uq, uk) for _ in range(q)], dtype=torch.bool)
         assert (source[0][~nonempty] == 0).all() and source[1][:, ~nonempty].isposinf().all()
         native_errors = check_math(
@@ -144,14 +139,23 @@ def prepare(dtype_name, platform, output, probes, producer):
     return inputs, natives, cases, native_schedules
 
 
-def profile(output, vendor, platform_path, dtype_name, probes, producer, dispatch_only=False):
+def profile(
+    output,
+    vendor,
+    platform_path,
+    dtype_name,
+    probes,
+    producer,
+    dispatch_only=False,
+    cases_api=used_cases,
+):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     vendor = check_vendor_configuration(vendor)
     assert torch.npu.device_count() == 1 and "910B" in torch.npu.get_device_name(0)
     platform = json.loads(Path(platform_path).read_text())
     inputs, native, cases, native_schedules = prepare(
-        dtype_name, platform, output, probes, producer
+        dtype_name, platform, output, probes, producer, cases_api
     )
     if dispatch_only:
         for index, function in enumerate(native):
@@ -266,10 +270,13 @@ def profile(output, vendor, platform_path, dtype_name, probes, producer, dispatc
     for label in labels:
         begin = pos
         if label["name"] == "fa3":
-            assert "ComputeMlaUsedMetadata" in raw[pos]["Op Name"]
+            version = cases[label["case"]].get("config", {}).get("version", 5)
+            producer_name = "ComputeMlaTndMetadata" if version == 3 else "ComputeMlaUsedMetadata"
+            assert producer_name in raw[pos]["Op Name"]
             label["generation_us"] = float(raw[pos]["Task Duration(us)"])
             pos += 1
-            assert "mla_tnd_used_" + dtype_name in raw[pos]["Op Name"]
+            kernel_name = "mla_tnd_" if version == 3 else "mla_tnd_used_"
+            assert kernel_name + dtype_name in raw[pos]["Op Name"]
             label.update(
                 kernel_us=float(raw[pos]["Task Duration(us)"]),
                 kernel_name=raw[pos]["Op Name"],
@@ -284,16 +291,16 @@ def profile(output, vendor, platform_path, dtype_name, probes, producer, dispatc
             index = label["case"]
             if index not in native_patterns:
                 assert label["round"] == label["iteration"] == 0
-                end = next(
-                    i for i in range(pos, len(raw)) if "ComputeMlaUsedMetadata" in raw[i]["Op Name"]
-                )
+                end = next(i for i in range(pos, len(raw)) if "ComputeMla" in raw[i]["Op Name"])
                 native_patterns[index] = [r["Op Name"] for r in raw[pos:end]]
             pattern = native_patterns[index]
             group = raw[pos : pos + len(pattern)]
             assert [r["Op Name"] for r in group] == pattern
-            kernels = [r for r in group if "FusedInferAttentionScore" in r["Op Name"]]
+            # Layout conversions also carry the enclosing FIA API name.
+            # Identify the final attention task, not its API-name prefix.
+            kernels = [r for r in group if r["Op Name"].endswith("_FusedInferAttentionScore")]
             assert len(kernels) == 1, group
-            assert all("ComputeMlaUsedMetadata" not in r["Op Name"] for r in group)
+            assert all("ComputeMla" not in r["Op Name"] for r in group)
             label.update(
                 kernel_us=float(kernels[0]["Task Duration(us)"]),
                 kernel_name=kernels[0]["Op Name"],
@@ -304,11 +311,25 @@ def profile(output, vendor, platform_path, dtype_name, probes, producer, dispatc
             pos += len(pattern)
         label["tasks"] = raw[begin:pos]
     assert pos == len(raw), (pos, len(raw))
-    producers = [r for r in raw if "ComputeMlaUsedMetadata" in r["Op Name"]]
+    producers = [r for r in raw if "ComputeMla" in r["Op Name"]]
     assert len(producers) == len(labels) // 2
     summary = []
-    for index, spec in enumerate(PERFORMANCE_CASES):
+    for index, case in enumerate(cases):
+        spec = case.get("config", case["item"])
         row = dict(case=index, spec=spec, native_fd=bool(native_schedules[index][5]))
+        row["input_views"] = {
+            name: dict(
+                shape=list(t.shape),
+                stride=list(t.stride()),
+                offset=t.storage_offset(),
+                storage_bytes=t.untyped_storage().size(),
+                data_ptr=t.data_ptr(),
+            )
+            for name, t in case["devices"]["migrated"].items()
+        }
+        assert all(
+            native[index].inputs[name] is t for name, t in case["devices"]["migrated"].items()
+        )
         for repeats in (1, 4):
             values = {
                 name: statistics.median(
@@ -337,7 +358,7 @@ def profile(output, vendor, platform_path, dtype_name, probes, producer, dispatc
         summary.append(row)
     snapshot("npu-after.log")
     report = dict(
-        scope="Public varlen used through allocated O/LSE completion; each of R=1/4 calls includes v5 generation; native gathers and output restoration are included; native FD cases reported separately.",
+        scope="Public varlen through allocated O/LSE completion; each of R=1/4 calls includes v3/v5 generation. Both sides receive the same physical views; native layout conversions, gathers and output restoration are included. Native FD cases reported separately; conversion wall measures the explicit packing/restoration adapter, while conversion kernels include all native non-attention tasks.",
         cpu_affinity=sorted(os.sched_getaffinity(0)),
         warmup=5,
         rounds=5,
@@ -364,7 +385,12 @@ if __name__ == "__main__":
     parser.add_argument("probe_dir")
     parser.add_argument("producer_manifest")
     parser.add_argument("--dispatch-only", action="store_true")
+    parser.add_argument("--stride", action="store_true")
     args = parser.parse_args()
+    cases_api = used_cases
+    if args.stride:
+        from tests import test_flash_attn_npu_v3_mla_tnd_stride_production as cases_api
+        from tests.test_flash_attn_npu_v3_mla_tnd_stride import configure_producer, load_attention
     probes = load_attention(args.probe_dir)
     manifest = json.loads(Path(args.producer_manifest).read_text())
     from tests.mla_dense_build import ROOT, sha256
@@ -384,4 +410,5 @@ if __name__ == "__main__":
             probes,
             producer,
             args.dispatch_only,
+            cases_api,
         )

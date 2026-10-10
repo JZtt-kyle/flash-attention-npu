@@ -316,7 +316,9 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     const uint32_t words = CheckUsedInputs(q, shape.batch, usedQuery, usedKv);
     const int64_t batch = shape.batch, sq = shape.query.maxLength, heads = shape.queryHeads, sk = shape.kv.maxLength;
     const bool tnd = shape.query.layout == MlaSequenceLayout::Tnd;
-    const auto layouts = tnd ? MlaBsndInputLayouts{} : CheckBsndInputLayouts(q, k, v, qv);
+    const auto layouts = !tnd                                        ? CheckBsndInputLayouts(q, k, v, qv)
+                         : shape.kv.layout == MlaSequenceLayout::Tnd ? CheckTndInputLayouts(q, k, v, qv)
+                                                                     : MlaBsndInputLayouts{};
     const bool nonempty = batch != 0 && shape.query.totalTokens != 0 && shape.kv.totalTokens != 0;
     auto p = DensePlatform(nonempty);
     // Static allocation bounds only; source scheduling reads used on AICPU.
@@ -377,7 +379,7 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     }
     MlaUsedLaunchArgs a{};
     a.layouts = layouts;
-    a.hasStrides = !tnd && (!q.is_contiguous() || !k.is_contiguous() || !v.is_contiguous() || !qv.is_contiguous());
+    a.hasStrides = !q.is_contiguous() || !k.is_contiguous() || !v.is_contiguous() || !qv.is_contiguous();
     uint32_t fftsLength = 0;
     TORCH_CHECK(rtGetC2cCtrlAddr(&a.ffts, &fftsLength) == RT_ERROR_NONE,
                 "MLA: failed to obtain cross-core synchronization address");
@@ -446,6 +448,7 @@ std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, con
             {batch, q.size(1), {MlaSequenceLayout::Tnd, q.size(0), maxQ}, {MlaSequenceLayout::Tnd, k.size(0), maxK}},
             cuQ, cuK, usedQuery, usedKv, scale);
     }
+    const auto layouts = CheckTndInputLayouts(q, k, v, qv);
     const bool nonempty = batch != 0 && q.size(0) != 0 && k.size(0) != 0;
     auto p = DensePlatform(nonempty);
     // Allocation/launch bounds use static capacities, never a host prefix read.
@@ -483,6 +486,8 @@ std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, con
         }
     }
     MlaTndLaunchArgs a{};
+    a.layouts = layouts;
+    a.hasStrides = !q.is_contiguous() || !k.is_contiguous() || !v.is_contiguous() || !qv.is_contiguous();
     uint32_t fftsLength = 0;
     TORCH_CHECK(rtGetC2cCtrlAddr(&a.ffts, &fftsLength) == RT_ERROR_NONE,
                 "MLA: failed to obtain cross-core synchronization address");

@@ -1,8 +1,8 @@
 # MLA 当前状态
 
-本轮完成 **M06e2b：TND 与混合布局独立 stride attention**（2026-10-10），基线 `f1d7936`，分支 `feat/mla-cann-migration`。生产开放仍停留在 **M06e1c（BSND stride）**；TND/混合 stride 已完成独立设备验收。唯一下一步为 **[M06e2c：TND stride 生产接入](plan.md#下一步m06e2c)**。
+本轮完成 **M06e2c1：TND Q/KV stride 生产接入**（2026-10-10），基线 `f0dfb1b`，分支 `feat/mla-cann-migration`。公开 varlen 与内部 TND Q/KV 的 v3/v5 已支持合法外层 stride；混合 TND Q + BSND KV 仍限连续。唯一下一步为 **[M06e2c2：混合 stride 生产接入](plan.md#下一步m06e2c2)**。
 
-本页维护当前能力、证据、环境差异和下一步；目标契约与架构见 [design](design.md)，步骤与完成条件见 [plan](plan.md)。当前文档提交可用 `git log -1 -- docs/mla/status.md` 定位，功能闭环提交见下方证据表。
+本页维护当前能力、证据、环境差异和下一步；目标契约与架构见 [design](design.md)，步骤与完成条件见 [plan](plan.md)。当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位，功能闭环提交见下方证据表。
 
 ## 当前可调用能力
 
@@ -13,7 +13,7 @@
 | 输入布局 | 生产支持 | 独立组件边界 |
 | --- | --- | --- |
 | BSND Q/KV | 四路末维连续、外层非负 stride；含 BNSD、切片、广播、重叠、独立 storage offset；完整 storage/字节界限在发射前校验 | CPU 校验、设备 attention 和生产接入均完成，覆盖 v1/v2/v5 |
-| TND Q/KV | Q、qv、K、V 四路均须连续 | CPU 地址校验及独立 v3/v5 stride attention 已完成；生产仍未接入 |
+| TND Q/KV | 四路末维连续、外层非负 stride；含 NTD、切片、广播、重叠、独立 storage offset；完整 storage/字节界限在发射前校验 | CPU、独立 attention 和生产 v3/v5 接入均完成 |
 | TND Q + BSND KV | Q、qv、K、V 四路均须连续，包含 BSND cache | CPU 组合及独立 v4/v5 stride attention 已完成；生产混合非连续输入仍拒绝 |
 
 stride 与 storage offset 不进入 metadata；`data_ptr()` 已包含 offset。CPU 地址成立、metadata 能表达布局、生产入口可调用是不同层次。
@@ -49,58 +49,59 @@ stride 与 storage offset 不进入 metadata；`data_ptr()` 已包含 offset。C
 - **长度与复用：** 长度值在设备检查，不做 D2H。显式 v2/v4 须匹配当次 KV 长度，v4 还匹配 Q 前缀；损坏/过期记录由消费者 Trap 拒绝，空输出仍校验。v5 完整检查两轴分配与 used，即使另一轴 used 为零；缺省 used 使用整段，缩短 used 不移动后续样本起点。生命周期见 [design 5.7](design.md#57-stream-与内存生命周期)。
 - **空值与有效区：** 空 batch/query 保留空 shape；非零容量中的零 KV 样本有效行 `O=0、LSE=-inf`；全局空 KV 初始化整个输出分配区为 `O=0、LSE=+inf`。其他未使用 query 槽位不承诺输出值。
 
-**尚未开放：** TND/混合路径任一输入非连续、PA、causal/window、自动或多 split、192/128 prefill、非零 softcap 与非默认调度选项。KV 追加、内置 rotary 等范围外组合也明确拒绝，完整范围见 [design 第 4 节](design.md#4-功能边界)。fake/compile 已有覆盖，完整 graph replay 留在 M16；910C 尚未开放或实机验收。
+**尚未开放：** 混合 TND Q + BSND KV 路径任一输入非连续、PA、causal/window、自动或多 split、192/128 prefill、非零 softcap 与非默认调度选项。KV 追加、内置 rotary 等范围外组合也明确拒绝，完整范围见 [design 第 4 节](design.md#4-功能边界)。fake/compile 已有覆盖，完整 graph replay 留在 M16；910C 尚未开放或实机验收。
 
 ## 最近闭环与证据
 
-本轮证据位于忽略目录 `build/mla-m06e2b-tnd-stride/`，路径相对仓库根目录；源码快照、构建产物、原始性能数据及哈希保存在该目录，不随 Git 分发。`acceptance.json` 汇总最终验收，当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
+本轮证据位于忽略目录 `build/mla-m06e2c1-tnd-stride-production/`，路径相对仓库根目录；源码快照、构建产物、原始性能数据及哈希保存在该目录，不随 Git 分发。`acceptance.json` 汇总最终验收，当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
 
 | 检查 | 结果 | 证据入口 |
 | --- | --- | --- |
-| TND/混合独立 stride，双 dtype 910B | 320 项通过：v3/v4/v5、ST01/NTD、四路 offset、T01/used poison、广播/重叠、空值、scale/视图复用和发射前拒绝；含 48 项真实 >uint32 stride 与 96 项 65535/65536/65537 边界 | `stride.xml`、`reviewed-probes/*/accuracy.jsonl` |
-| BSND stride 受影响回归 | 110 项通过，v1/v2/v5 双 dtype | `bsnd-stride.xml`、`bsnd-probes/` |
-| 连续 MLA 与生产拒绝边界 | 1092 项通过，包含连续 BSND/TND/混合、used、流与输入生命周期、原始 C++ 和非连续混合拒绝 | `continuous.xml`、`continuous-command.json` |
-| 普通 FA3／接口／metadata／compile | 833 项通过 | `ordinary-regressions.xml`、`ordinary-regressions-command.json` |
-| CPU 地址／used 调度 | 489 项通过：TND 101、BSND 82、used 306 | `cpu.xml`、`cpu-command.json` |
-| 构建与加载来源 | 253 份生产源码依赖、30 个对象；10 个 MLA 实例对象改变，其余对象哈希未变；新 probe 均从当前源码构建，固定 CANN Git blob 独立编译 | `production-build-manifest.json`、`production-dependencies/`、各 probe 的 `build-manifest.json` |
-| 质量、文档与证据核验 | 适用质量钩子、文档链接/锚点/表格、`git diff --check`、构建与证据哈希通过 | `quality-staged.log`、`docs-check.json`、`acceptance.json` |
+| TND stride 生产，双 dtype 910B | 388 项通过：公开/raw C++/内部 op/fake/compile、NTD/四路 offset/广播/重叠、65535/65536/65537、24 项真实 >uint32 地址、scale、前缀/used 更新、空值、storage、流生命周期及 14 项真实 Trap | `production-reviewed.xml`、`production-reviewed-tests/accuracy.jsonl`、`production-reviewed-tests/*/trap-*/` |
+| 连续 TND/混合与 BSND stride 回归 | 2,104 项通过；含混合非连续拒绝、连续 v3/v4/v5、BSND stride 入口/storage/compile；132 项既有进程级 Trap 未选入，由本步相关 Trap 套件另验，不计为通过或跳过 | `affected-final.xml`、`affected-final-command.json` |
+| 普通 FA3／接口／metadata／compile | 833 项通过 | `ordinary-regressions.xml`、`run_regressions.py` |
+| 独立 TND/混合组件回归 | 当前构造器默认路径 320 项通过；前置旧源码最小闭环另复跑 320 项，不重复计数 | `independent-reviewed.xml`、`baseline.xml` |
+| 构建与加载来源 | 255 份生产源码依赖、31 个对象；新增 TND 地址对象，6 个原有对象改变，其余哈希未变；新 probe 从当前源码和固定 CANN Git blob 构建 | `production-build-manifest.json`、`production-dependencies/`、`production-final/`、`probes/*/build-manifest.json` |
+| 原生分派与公开 E2E | 双 dtype 各 11 例；8 例适用、3 例原生 FD 单列；适用 R=1/4 共 32 个调用段逐例达标 | `native-package.json`、`native-dispatch-proof.json`、`performance-acceptance.json` |
+| 质量、文档与证据核验 | 适用质量钩子、链接/锚点/表格、`git diff --check`、源码/对象/运行证据哈希通过 | `quality-staged.log`、`docs-check.json`、`acceptance.json` |
 
-共 **2,844 个去重 pytest 用例通过，无失败或跳过**。精度同时对照固定源和既有双数学 reference；源端空行 LSE 的 `+inf` 与 FA3 的 `-inf` 单列。最大实测视图 storage 为 8,590,072,930 字节，实际有效行越过 uint32 元素地址，压紧地址及截断地址均置 poison。CPU 地址实现未变，本轮未重跑 ASan/UBSan；其最近闭环仍为 M06e2a `2a8cd38` 的 `build/mla-m06e2a-tnd-layout/sanitized/report.json`。
+共 **3,645 个去重 pytest 用例通过，无失败或跳过**。精度同时对照固定源和既有双数学 reference，未改精度阈值。CPU 地址实现未变，未重跑 ASan/UBSan；最近闭环仍为 M06e2a `2a8cd38` 的 `build/mla-m06e2a-tnd-layout/sanitized/report.json`。
 
-首轮 `smoke.xml` 的源适配器在“非空 KV 分配、全零 used”上错误地用迁移端描述校验源端压紧后的空指针，85 项通过后失败；已改为分别描述两端视图并重建，最终 320 项全部通过。沙箱内设备访问失败记录在 `environment-sandbox.json`，成功环境核验和 NPU 运行均在沙箱外完成。初次手动格式化误用了旧缓存中的 clang-format（`formatter-initial.json`），已切换仓库钩子固定的 21.1.8 并通过质量检查。这些初轮失败不计为通过。
+首轮失败均保留：`affected.log` 因旧 metadata probe 的 `setup.py` 哈希过期而拒绝复用，重建后通过；`production.log` 中禁止回读的 mock 干扰 Dynamo 自身跟踪，改为在 eager/生命周期测试禁止回读、compile 测试核对完整图与设备长度更新；`production-final.log` 的 NTD 转置无物理空洞，原截断只移除了尾部填充，改用四路 `row_65536` 视图后真实/fake/C++/compile 全部拒绝；`public-fp16.log` 的报告解析把带 FIA 前缀的 Transpose 误计为 attention，改为匹配最终 attention 任务后重采双 dtype。这些失败不计为通过，生产实现未为这些测试侧问题修改。
 
-### 组件性能与限制
+### 性能与限制
 
-双 dtype 预定 12 例均完成固定 CANN 非 FD 组件对照。每种 dtype 预热 5 次、5 轮交替采样，保留 1,200 个 Kernel 样本与 2,400 个预分配 probe 调用 wall 样本。`performance-comparison.json` 核对逐例中位数及 `kernel_details.csv`／原始 `op_summary` 的名称、开始时间、设备和耗时；原始数据在 `performance-fp16/`、`performance-bf16/`。
+预定生产组件矩阵双 dtype 各 6 例，固定源非 FD、相同逻辑输入/调度及 20 核发射；源物化连续布局并压紧 used 在计时前完成，迁移端直接读原 stride 视图。每 dtype 预热 5 次、5 轮交替采样，保留 600 个 Kernel 样本及 1,200 个 wall 样本；组件 wall 中生产含 metadata 生成，源 probe 预分配，不能作为公开 E2E。
 
-| dtype | 迁移 / 固定源 Kernel 范围 | 慢于源端的用例 | 最大比值对应 |
+公开矩阵双 dtype 各 11 例，双方接收相同物理视图。每次 varlen 内部 v3/v5 生成、原生布局转换及 used gather/scatter 均计入 R=1/4 调用段；CPU 亲和性固定 128–135，预热 5 次、5 轮各 20 个 wall 样本，每 dtype 4,400 个 wall 样本及 1,100 个 profiler 调用样本。精确中位数、AICPU/attention/转换设备耗时与显式适配器 wall 单列；设备 CSV 和原始 CANN `op_summary` 的名称、设备、开始时间、耗时逐项一致。
+
+| dtype | 8 个适用公开用例 R=1/4 的 FA3 / CANN E2E | 6 例生产 / 固定源 Kernel 范围 | Kernel 慢于源端 |
 | --- | --- | --- | --- |
-| FP16 | 0.879–2.687 | 8/12 | 65536 matrix stride 回退 |
-| BF16 | 0.897–2.691 | 8/12 | 65536 matrix stride 回退 |
+| FP16 | 0.468–0.975，逐例均 ≤1.0 | 0.893–2.168 | 5/6 |
+| BF16 | 0.470–0.901，逐例均 ≤1.0 | 0.889–2.357 | 5/6 |
 
-**组件仍有退化，不能宣称全部不劣化。** 源端输入在计时前连续物化并压紧 TND 有效段，迁移端读取原始 stride 分配视图；两端物理布局不同。该比较不含公开 metadata E2E，生产 TND stride 的同物理视图 E2E 留在 M06e2c。profiler 仍报告 host flow／`fwk_api_db` 解析错误；设备 CSV 与原始 CANN 样本逐项一致，未据此声称 host 关联可用。
+公开证据为 `public-reviewed-fp16/`、`public-reviewed-bf16/`，组件为 `component-fp16/`、`component-bf16/`。**组件仍有退化，不能宣称 Kernel 全部不劣化。** 公开原生 FD 三例按固定源调度和实际 tiling key 判定并保留完整数据，长 KV 差距仍留待 M10；没有按耗时筛选或放宽 ≤1.0 门槛。组件 profiler 仍报告 `fwk_api_db` 解析错误；设备样本核验通过，不据此声称 host 关联可用。
 
-共享 Tile 另完成既有 BSND 9 例双 dtype 组件补测，证据为 `bsnd-performance-comparison.json`、`performance-bsnd-fp16/` 与 `performance-bsnd-bf16/`；大 stride／广播仍慢于源端连续物化输入，不据此声明生产 E2E。
-
-最近公开生产 E2E 闭环仍为 M06e1c `4e83d32`，证据在 `build/mla-m06e1c-bsnd-stride/performance-acceptance.json`；本轮未重测公开 E2E。此前原生 FD 长 KV 差距仍未消除，不属于本步已迁移的非 FD 路径。
+BSND 公开 E2E 最近闭环仍为 M06e1c `4e83d32` 的 `build/mla-m06e1c-bsnd-stride/performance-acceptance.json`，本轮未重测该矩阵。混合 stride 公开 E2E 留在 M06e2c2。
 
 ## 环境与构建
 
-`environment.json` 核验 Python `/usr/local/python3.11.15/bin/python3` 3.11.15、torch `2.7.1+cpu`、torch_npu `2.7.1`、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`、bisheng clang 15.0.5、g++ 11.4、8 张健康 Ascend910B3。新 stride／连续回归使用物理 7 号卡，BSND stride 回归使用 5 号卡，普通 FA3 和后续组件性能使用 6 号卡；各命令记录实际 `ASCEND_RT_VISIBLE_DEVICES`，设备状态随环境／性能日志保存。
+`environment.json` 核验 Python `/usr/local/python3.11.15/bin/python3` 3.11.15、torch `2.7.1+cpu`、torch_npu `2.7.1`、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`、bisheng clang 15.0.5、g++ 11.4、8 张健康 Ascend910B3。环境及 NPU 验证在沙箱外执行。生产/Trap 使用物理 7 号卡，受影响与独立回归使用 5 号卡，普通 FA3 和随后性能使用 6 号卡；性能双方固定同卡与 CPU 亲和性。各命令保存实际环境变量，设备状态随环境/性能日志及 `environment-final.json` 保存。
 
-生产构建设置 `FLASH_ATTN_SKIP_SUBMODULE_INIT=1 FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910`。本轮实际加载 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 为 `6f6f43c2d45c11ffb4962cb53d25d3308cf701d33189c858ecea52ca3f9e0f59`；加载库与构建链接产物一致。`mla_tnd_layout.cpp` 仍只链接独立 probe，生产 launcher 仍使用连续 TND 实例，公开/内部入口接受范围不变。
+生产构建设置 `FLASH_ATTN_SKIP_SUBMODULE_INIT=1 FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910`。本轮实际加载 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 为 `fc8e7e52fded99ae85cd59ca500984a5cd72a1e8d16e9a195aac609c204d26ab`；加载库与链接产物一致。`mla_tnd_layout.cpp` 已链接生产，TND v3/v5 按四路连续性选择连续或 stride 实例，metadata 字节协议及 Kernel/Block/Tile 数值与同步流程不变。混合连续 used 继续复用 TND used launcher，混合非连续输入仍拒绝。
 
 CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f` 干净；只读 CANN 源 `ca18aee610729ca5270a44e2d84c751bc687fbf0` 的已有差异、本仓未跟踪 `kernel_meta/` 均保留。910C 尚未实机验收，完整 graph replay 仍留在 M16。
 
 ## 唯一下一步与复现
 
-下一步仅为 **[M06e2c](plan.md#下一步m06e2c)**；本轮提交后停止。执行前重新核查设备健康、占用与扩展来源；以下用 7 号卡作示例，输出放到新目录以保留本轮证据。
+下一步仅为 **[M06e2c2](plan.md#下一步m06e2c2)**：混合 TND Q + BSND KV stride 生产接入及其独立验收；本轮提交后停止。执行前重新核查设备健康、占用与扩展来源，输出放新目录以保留本轮证据。
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=7 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 \
-MLA_TND_STRIDE_DIR=build/mla-m06e2b-recheck/probes \
-MLA_TND_STRIDE_PRODUCER_DIR=build/mla-m06e2b-recheck/producer \
-python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_tnd_stride.py
+MLA_TND_STRIDE_DIR=build/mla-m06e2c1-recheck/probes \
+MLA_TND_STRIDE_PRODUCER_DIR=build/mla-m06e2c1-recheck/producer \
+MLA_TND_PRODUCTION_DIR=build/mla-m06e2c1-recheck/production \
+python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_tnd_stride_production.py
 ```
 
-该命令默认重建独立 probe；仅在源码、库和 manifest 哈希一致时才设置 `MLA_TND_STRIDE_REUSE=1`。性能命令为 `python3 -m tests.mla_tnd_stride_profile PROBES PRODUCER_MANIFEST OUTPUT`，双 dtype 分别执行，CPU affinity、采样和源转换边界见归档 `performance-*-command.json`。生产重建与依赖核验见 `production-build-command.json`、`production-audit-command.json`；其余验收复现使用上表对应命令文件并另设输出目录。
+该命令默认重建 probe；仅在源码、库和 manifest 哈希一致时才设置 `MLA_TND_STRIDE_REUSE=1`。生产构建/依赖核验见 `production-build-command.json`、`production-audit-command.json`。双 dtype 组件及公开性能分别由 `performance.py component`、`performance.py public-reviewed` 归档命令复现；公开驱动为 `python3 -m tests.mla_varlen_used_profile OUTPUT VENDOR PLATFORM DTYPE PROBES PRODUCER_MANIFEST --stride`。其余检查使用上表对应命令文件或 `run_regressions.py`，均另设输出目录。
