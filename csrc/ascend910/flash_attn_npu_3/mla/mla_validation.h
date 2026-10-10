@@ -125,10 +125,9 @@ inline uint32_t CheckBsndMetadataWords(int64_t batch)
     return kMlaBsndKvLengthMetadataPrefixWords + batch;
 }
 
-inline uint32_t CheckBsndUsedInputs(const at::Tensor& q, const at::Tensor& usedQuery,
-                                    const std::optional<at::Tensor>& usedKv)
+inline uint32_t CheckUsedInputs(const at::Tensor& q, int64_t batch, const std::optional<at::Tensor>& usedQuery,
+                                const std::optional<at::Tensor>& usedKv)
 {
-    const int64_t batch = q.size(0);
     TORCH_CHECK(batch <= (UINT32_MAX - kMlaUsedMetadataPrefixWords) / kMlaUsedMetadataSequenceWords,
                 "MLA: used metadata word count overflow");
     const auto check = [&](const at::Tensor& t, const char* name) {
@@ -137,7 +136,9 @@ inline uint32_t CheckBsndUsedInputs(const at::Tensor& q, const at::Tensor& usedQ
         TORCH_CHECK(t.dim() == 1 && t.numel() == batch, "MLA: ", name, " must have shape [batch_size]");
         TORCH_CHECK(t.is_contiguous(), "MLA: ", name, " must be contiguous");
     };
-    check(usedQuery, "seqused_q");
+    if (usedQuery) {
+        check(*usedQuery, "seqused_q");
+    }
     if (usedKv) {
         check(*usedKv, "seqused_k");
     }

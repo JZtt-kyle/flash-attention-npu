@@ -60,7 +60,7 @@ MlaPlatformInfo DensePlatform(bool fullLaunch = false)
 template <typename Args>
 struct MetadataSubmission {
     at::Tensor metadata;
-    std::optional<at::Tensor> lengths, query;
+    std::optional<at::Tensor> lengths, query, usedQuery, usedKv;
     Args args;
     aclrtStream current, worker;
     aclrtEvent inputReady, metadataDone;
@@ -89,7 +89,9 @@ struct MetadataSubmission {
 template <typename Args>
 MetadataSubmission<Args> PrepareSubmission(const at::Tensor& metadata, const Args& args,
                                            const std::optional<at::Tensor>& lengths,
-                                           const std::optional<at::Tensor>& query, bool hasKvLengths)
+                                           const std::optional<at::Tensor>& query, bool hasKvLengths,
+                                           const std::optional<at::Tensor>& usedQuery = std::nullopt,
+                                           const std::optional<at::Tensor>& usedKv = std::nullopt)
 {
     auto stream = c10_npu::getCurrentNPUStream();
     auto worker = c10_npu::getNPUStreamFromPool();
@@ -108,15 +110,16 @@ MetadataSubmission<Args> PrepareSubmission(const at::Tensor& metadata, const Arg
         TORCH_CHECK(aclrtCreateEvent(&events.metadataDone) == ACL_SUCCESS, "MLA: metadata event creation failed");
     }
     c10_npu::NPUCachingAllocator::recordStream(metadata.storage().data_ptr(), worker);
-    if (lengths && lengths->numel() != 0) {
-        c10_npu::NPUCachingAllocator::recordStream(lengths->storage().data_ptr(), worker);
-    }
-    if (query && query->numel() != 0) {
-        c10_npu::NPUCachingAllocator::recordStream(query->storage().data_ptr(), worker);
+    for (const auto* input : {&lengths, &query, &usedQuery, &usedKv}) {
+        if (*input && (*input)->numel() != 0) {
+            c10_npu::NPUCachingAllocator::recordStream((*input)->storage().data_ptr(), worker);
+        }
     }
     return {metadata,
             lengths,
             query,
+            usedQuery,
+            usedKv,
             args,
             stream.stream(false),
             worker.stream(false),
@@ -301,13 +304,16 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     return {out, lse, at::Tensor(), at::Tensor()};
 }
 
-std::vector<at::Tensor> BsndUsedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
-                                        const at::Tensor& qv, const at::Tensor& usedQuery,
-                                        const std::optional<at::Tensor>& usedKv, float scale)
+namespace {
+std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
+                                    const MlaUsedShape& shape, const std::optional<at::Tensor>& cuQ,
+                                    const std::optional<at::Tensor>& cuK, const std::optional<at::Tensor>& usedQuery,
+                                    const std::optional<at::Tensor>& usedKv, float scale)
 {
-    const uint32_t words = CheckBsndUsedInputs(q, usedQuery, usedKv);
-    const int64_t batch = q.size(0), sq = q.size(1), heads = q.size(2), sk = k.size(1);
-    const bool nonempty = batch != 0 && sq != 0 && sk != 0;
+    const uint32_t words = CheckUsedInputs(q, shape.batch, usedQuery, usedKv);
+    const int64_t batch = shape.batch, sq = shape.query.maxLength, heads = shape.queryHeads, sk = shape.kv.maxLength;
+    const bool tnd = shape.query.layout == MlaSequenceLayout::Tnd;
+    const bool nonempty = batch != 0 && shape.query.totalTokens != 0 && shape.kv.totalTokens != 0;
     auto p = DensePlatform(nonempty);
     // Static allocation bounds only; source scheduling reads used on AICPU.
     const uint64_t m = (std::min(uint64_t(sq) * heads, uint64_t(256)) + 15) / 16 * 16;
@@ -315,8 +321,10 @@ std::vector<at::Tensor> BsndUsedForward(const at::Tensor& q, const at::Tensor& k
     const uint64_t userBytes = nonempty ? uint64_t(2) * p.aicNum * (6 * m * n + 8 * m * 512 + 8 * 256) : 0;
     const uint64_t libBytes = nonempty ? p.libApiWorkspaceBytes : 0;
     TORCH_CHECK(libBytes <= uint64_t(INT64_MAX) - userBytes, "MLA: workspace overflow");
-    auto out = at::empty({batch, sq, heads, 512}, q.options());
-    auto lse = at::empty({batch, heads, sq}, q.options().dtype(at::kFloat));
+    auto out = tnd ? at::empty({shape.query.totalTokens, heads, 512}, q.options())
+                   : at::empty({batch, sq, heads, 512}, q.options());
+    auto lse = tnd ? at::empty({heads, shape.query.totalTokens}, q.options().dtype(at::kFloat))
+                   : at::empty({batch, heads, sq}, q.options().dtype(at::kFloat));
     auto workspace = at::empty({static_cast<int64_t>(userBytes + libBytes)}, q.options().dtype(at::kByte));
     auto metadata = at::empty({words}, q.options().dtype(at::kInt));
     const auto checkAddress = [](const at::Tensor& t) {
@@ -324,39 +332,44 @@ std::vector<at::Tensor> BsndUsedForward(const at::Tensor& q, const at::Tensor& k
         TORCH_CHECK((t.numel() == 0 || address != 0) && uint64_t(t.nbytes()) <= UINTPTR_MAX - address,
                     "MLA: tensor address overflow");
     };
-    for (const auto& t : {q, k, v, qv, usedQuery, out, lse, workspace, metadata}) {
+    for (const auto& t : {q, k, v, qv, out, lse, workspace, metadata}) {
         checkAddress(t);
     }
-    if (usedKv) {
-        checkAddress(*usedKv);
+    for (const auto* input : {&cuQ, &cuK, &usedQuery, &usedKv}) {
+        if (*input) {
+            checkAddress(**input);
+        }
     }
     const uint32_t dtype = uint32_t(q.scalar_type() == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16);
-    const auto descriptor = [&](const at::Tensor& t) {
+    const auto descriptor = [&](const std::optional<at::Tensor>& t) {
         // Empty torch tensors may have null data_ptr. A nonnull zero-extent
         // descriptor preserves explicit presence for B=0; it is never read
         // and has no overlap with the metadata output's nonempty extent.
-        return MlaUsedMetadataArray{reinterpret_cast<uint64_t>(t.numel() == 0 ? metadata.data_ptr() : t.data_ptr()),
-                                    uint64_t(t.numel())};
+        return t ? MlaUsedMetadataArray{reinterpret_cast<uint64_t>(t->numel() == 0 ? metadata.data_ptr()
+                                                                                   : t->data_ptr()),
+                                        uint64_t(t->numel())}
+                 : MlaUsedMetadataArray{};
     };
-    MlaUsedMetadataArgs args{
-        reinterpret_cast<uint64_t>(metadata.data_ptr()),
-        words,
-        dtype,
-        {batch, heads, {MlaSequenceLayout::Bsnd, batch * sq, sq}, {MlaSequenceLayout::Bsnd, batch * sk, sk}},
-        p,
-        {},
-        {},
-        descriptor(usedQuery),
-        usedKv ? descriptor(*usedKv) : MlaUsedMetadataArray{}};
-    auto producer = PrepareSubmission(metadata, args, usedKv, usedQuery, true);
+    MlaUsedMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
+                             words,
+                             dtype,
+                             shape,
+                             p,
+                             descriptor(cuQ),
+                             descriptor(cuK),
+                             descriptor(usedQuery),
+                             descriptor(usedKv)};
+    auto producer = PrepareSubmission(metadata, args, cuK, cuQ, true, usedQuery, usedKv);
     auto stream = c10_npu::getCurrentNPUStream();
-    for (const auto& t : {q, k, v, qv, usedQuery, metadata}) {
+    for (const auto& t : {q, k, v, qv, metadata}) {
         if (t.numel() != 0) {
             c10_npu::NPUCachingAllocator::recordStream(t.storage().data_ptr(), stream);
         }
     }
-    if (usedKv && usedKv->numel() != 0) {
-        c10_npu::NPUCachingAllocator::recordStream(usedKv->storage().data_ptr(), stream);
+    for (const auto* input : {&cuQ, &cuK, &usedQuery, &usedKv}) {
+        if (*input && (*input)->numel() != 0) {
+            c10_npu::NPUCachingAllocator::recordStream((*input)->storage().data_ptr(), stream);
+        }
     }
     MlaUsedLaunchArgs a{};
     uint32_t fftsLength = 0;
@@ -379,7 +392,7 @@ std::vector<at::Tensor> BsndUsedForward(const at::Tensor& q, const at::Tensor& k
     a.context = {dtype,
                  uint32_t(batch),
                  uint32_t(heads),
-                 kMlaUsedQueryPresent | (usedKv ? kMlaUsedKvPresent : 0),
+                 (usedQuery ? kMlaUsedQueryPresent : 0) | (usedKv ? kMlaUsedKvPresent : 0),
                  allocation(args.shape.query),
                  allocation(args.shape.kv),
                  p.aicNum,
@@ -391,21 +404,42 @@ std::vector<at::Tensor> BsndUsedForward(const at::Tensor& q, const at::Tensor& k
     a.inputs = {args.cuQuery, args.cuKv, args.usedQuery, args.usedKv};
     a.scale = scale;
     at_npu::native::OpCommand::RunOpApiV2(
-        "ascendc_mla_bsnd_used", [a, producer, q, k, v, qv, out, lse, workspace]() mutable -> int {
+        tnd ? "ascendc_mla_tnd_used" : "ascendc_mla_bsnd_used",
+        [a, producer, q, k, v, qv, out, lse, workspace, tnd]() mutable -> int {
             producer.Enqueue();
-            auto error = q.scalar_type() == at::kBFloat16 ? LaunchBsndUsedBf16(a) : LaunchBsndUsedFp16(a);
-            TORCH_CHECK(error == ACL_SUCCESS, "MLA: BSND used BATCH_MODE kernel launch failed (", error, ")");
+            auto error = tnd ? (q.scalar_type() == at::kBFloat16 ? LaunchTndUsedBf16(a) : LaunchTndUsedFp16(a))
+                             : (q.scalar_type() == at::kBFloat16 ? LaunchBsndUsedBf16(a) : LaunchBsndUsedFp16(a));
+            TORCH_CHECK(error == ACL_SUCCESS, "MLA: used BATCH_MODE kernel launch failed (", error, ")");
             return 0;
         });
     return {out, lse, at::Tensor(), at::Tensor()};
 }
+} // namespace
+
+std::vector<at::Tensor> BsndUsedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                        const at::Tensor& qv, const at::Tensor& usedQuery,
+                                        const std::optional<at::Tensor>& usedKv, float scale)
+{
+    const int64_t batch = q.size(0), sq = q.size(1), heads = q.size(2), sk = k.size(1);
+    return UsedForward(
+        q, k, v, qv,
+        {batch, heads, {MlaSequenceLayout::Bsnd, batch * sq, sq}, {MlaSequenceLayout::Bsnd, batch * sk, sk}},
+        std::nullopt, std::nullopt, usedQuery, usedKv, scale);
+}
 
 std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
                                    const at::Tensor& cuQ, const at::Tensor& cuK, int64_t maxQ, int64_t maxK,
-                                   float scale)
+                                   float scale, const std::optional<at::Tensor>& usedQuery,
+                                   const std::optional<at::Tensor>& usedKv)
 {
     const uint32_t words = CheckTndInputs(q, k, cuQ, cuK, maxQ, maxK);
     const int64_t batch = cuQ.numel() - 1;
+    if (usedQuery || usedKv) {
+        return UsedForward(
+            q, k, v, qv,
+            {batch, q.size(1), {MlaSequenceLayout::Tnd, q.size(0), maxQ}, {MlaSequenceLayout::Tnd, k.size(0), maxK}},
+            cuQ, cuK, usedQuery, usedKv, scale);
+    }
     const bool nonempty = batch != 0 && q.size(0) != 0 && k.size(0) != 0;
     auto p = DensePlatform(nonempty);
     // Allocation/launch bounds use static capacities, never a host prefix read.
@@ -578,15 +612,17 @@ std::tuple<at::Tensor, at::Tensor> TndBsndForwardOp(const at::Tensor& q, const a
 
 std::tuple<at::Tensor, at::Tensor> TndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                                 const at::Tensor& qv, const at::Tensor& cuQ, const at::Tensor& cuK,
-                                                int64_t maxQ, int64_t maxK, std::optional<double> softmaxScale)
+                                                int64_t maxQ, int64_t maxK, std::optional<double> softmaxScale,
+                                                const std::optional<at::Tensor>& usedQuery,
+                                                const std::optional<at::Tensor>& usedKv)
 {
     CheckForwardBoundary(q, k, v, qv, true, true, false);
     TORCH_CHECK(!softmaxScale ||
                     (std::isfinite(*softmaxScale) && std::abs(*softmaxScale) <= std::numeric_limits<float>::max()),
                 "MLA: softmax_scale must be finite in FP32");
     const c10::OptionalDeviceGuard deviceGuard(device_of(q));
-    auto result =
-        TndForward(q, k, v, qv, cuQ, cuK, maxQ, maxK, softmaxScale ? float(*softmaxScale) : 1.0f / std::sqrt(576.0f));
+    auto result = TndForward(q, k, v, qv, cuQ, cuK, maxQ, maxK,
+                             softmaxScale ? float(*softmaxScale) : 1.0f / std::sqrt(576.0f), usedQuery, usedKv);
     return {result[0], result[1]};
 }
 
@@ -623,7 +659,8 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
     m.def("_mla_dense_forward(Tensor q, Tensor k, Tensor v, Tensor qv, float? softmax_scale=None, "
           "Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
     m.def("_mla_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
-          "int max_seqlen_q, int max_seqlen_k, float? softmax_scale=None) -> (Tensor, Tensor)");
+          "int max_seqlen_q, int max_seqlen_k, float? softmax_scale=None, Tensor? seqused_q=None, "
+          "Tensor? seqused_k=None) -> (Tensor, Tensor)");
     m.def(
         "_mla_tnd_bsnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, int max_seqlen_q, "
         "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");

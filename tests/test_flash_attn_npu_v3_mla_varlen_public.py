@@ -161,8 +161,6 @@ def test_static_rejections(entry, fault, match):
 @pytest.mark.parametrize(
     "fault",
     [
-        "used_q",
-        "used_k",
         "causal",
         "window",
         "split0",
@@ -178,9 +176,7 @@ def test_static_rejections(entry, fault, match):
 def test_unconnected_options(entry, fault):
     with FakeTensorMode() if entry == "fake" else nullcontext():
         args = _inputs(layout="tnd")
-        if fault.startswith("used_"):
-            args["seq" + fault] = torch.ones(2, dtype=torch.int32, device="npu")
-        elif fault == "window":
+        if fault == "window":
             args.update({"window_size": (1, -1)} if entry == "public" else {"window_size_left": 1})
         elif fault.startswith("split"):
             args["num_splits"] = int(fault[-1])

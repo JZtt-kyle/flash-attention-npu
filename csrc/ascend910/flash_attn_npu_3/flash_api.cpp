@@ -180,10 +180,11 @@ std::vector<at::Tensor> mha_fwd(
                                                              cu_seqlens_k_.has_value(), page_table_.has_value());
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     if (isMla) {
-        TORCH_CHECK(!k_new_ && !v_new_ && !out_ && !cu_seqlens_k_new_ && !(cu_seqlens_q_ && seqused_q_) &&
-                        (cu_seqlens_q_ || !max_seqlen_q_) && (cu_seqlens_k_ || !max_seqlen_k_) && !kv_batch_idx_ &&
-                        !leftpad_k_ && !rotary_cos_ && !rotary_sin_ && !seqlens_rotary_ && !q_descale_ && !k_descale_ &&
-                        !v_descale_ && is_rotary_interleaved,
+        TORCH_CHECK(!k_new_ && !v_new_ && !out_ && !cu_seqlens_k_new_ &&
+                        !(cu_seqlens_q_ && !cu_seqlens_k_ && seqused_q_) && (cu_seqlens_q_ || !max_seqlen_q_) &&
+                        (cu_seqlens_k_ || !max_seqlen_k_) && !kv_batch_idx_ && !leftpad_k_ && !rotary_cos_ &&
+                        !rotary_sin_ && !seqlens_rotary_ && !q_descale_ && !k_descale_ && !v_descale_ &&
+                        is_rotary_interleaved,
                     "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
         TORCH_CHECK(!is_causal && window_size_left == -1 && window_size_right == -1 && attention_chunk == 0 &&
                         softcap == 0.0f && num_splits == 1 && !pack_gqa_.has_value() && sm_margin == 0,
@@ -196,11 +197,11 @@ std::vector<at::Tensor> mha_fwd(
                 return flash_attn::mla::TndBsndForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_, scale,
                                                        seqused_k_, scheduler_metadata_);
             }
-            TORCH_CHECK(!seqused_k_ && !scheduler_metadata_,
-                        "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata");
+            TORCH_CHECK(!scheduler_metadata_,
+                        "MLA compressed forward is not implemented yet for TND explicit metadata");
             TORCH_CHECK(max_seqlen_q_ && max_seqlen_k_, "MLA: compact TND requires max_seqlen_q/k");
             return flash_attn::mla::TndForward(q, k, v, *q_v_, *cu_seqlens_q_, *cu_seqlens_k_, *max_seqlen_q_,
-                                               *max_seqlen_k_, scale);
+                                               *max_seqlen_k_, scale, seqused_q_, seqused_k_);
         }
         if (seqused_q_) {
             TORCH_CHECK(!scheduler_metadata_,

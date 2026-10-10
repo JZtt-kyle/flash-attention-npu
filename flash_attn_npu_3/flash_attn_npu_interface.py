@@ -307,7 +307,10 @@ def _check_mla_bsnd_used(q, seqused_q, seqused_k, metadata):
         raise RuntimeError(
             "MLA compressed forward is not implemented yet for Q-used with explicit metadata"
         )
-    batch = q.shape[0]
+    _check_mla_used(q, q.shape[0], seqused_q, seqused_k)
+
+
+def _check_mla_used(q, batch, seqused_q, seqused_k):
     if batch > ((1 << 32) - 1 - 410) // 8:
         raise RuntimeError("MLA: used metadata word count overflow")
     for name, tensor in (("seqused_q", seqused_q), ("seqused_k", seqused_k)):
@@ -354,11 +357,23 @@ def _mla_dense_forward_fake(
 
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_tnd_forward")
 def _mla_tnd_forward_fake(
-    q, k, v, qv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale=None
+    q,
+    k,
+    v,
+    qv,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    softmax_scale=None,
+    seqused_q=None,
+    seqused_k=None,
 ):
     _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True)
     _check_mla_dense_options(softmax_scale=softmax_scale)
     _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+    if seqused_q is not None or seqused_k is not None:
+        _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
     return (
         q.new_empty((*q.shape[:-1], v.shape[-1])),
         q.new_empty((q.shape[1], q.shape[0]), dtype=torch.float32),
@@ -449,7 +464,7 @@ def _flash_attn_forward(
                 v_new,
                 out_,
                 cu_seqlens_k_new,
-                seqused_q if cu_seqlens_q is not None else None,
+                seqused_q if cu_seqlens_q is not None and cu_seqlens_k is None else None,
                 max_seqlen_q if cu_seqlens_q is None else None,
                 max_seqlen_k if cu_seqlens_k is None else None,
                 kv_batch_idx,
@@ -468,11 +483,13 @@ def _flash_attn_forward(
                     q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata
                 )
             else:
-                if seqused_k is not None or scheduler_metadata is not None:
+                if scheduler_metadata is not None:
                     raise RuntimeError(
-                        "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
+                        "MLA compressed forward is not implemented yet for TND explicit metadata"
                     )
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+                if seqused_q is not None or seqused_k is not None:
+                    _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
         elif seqused_q is not None:
             _check_mla_bsnd_used(q, seqused_q, seqused_k, scheduler_metadata)
         else:
@@ -599,7 +616,7 @@ def _flash_attn_forward_fake(
                 v_new,
                 out_,
                 cu_seqlens_k_new,
-                seqused_q if cu_seqlens_q is not None else None,
+                seqused_q if cu_seqlens_q is not None and cu_seqlens_k is None else None,
                 max_seqlen_q if cu_seqlens_q is None else None,
                 max_seqlen_k if cu_seqlens_k is None else None,
                 kv_batch_idx,
@@ -618,11 +635,13 @@ def _flash_attn_forward_fake(
                     q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata
                 )
             else:
-                if seqused_k is not None or scheduler_metadata is not None:
+                if scheduler_metadata is not None:
                     raise RuntimeError(
-                        "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
+                        "MLA compressed forward is not implemented yet for TND explicit metadata"
                     )
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+                if seqused_q is not None or seqused_k is not None:
+                    _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
         elif seqused_q is not None:
             _check_mla_bsnd_used(q, seqused_q, seqused_k, scheduler_metadata)
         else:
@@ -1219,11 +1238,23 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
                 num_splits=num_splits,
                 pack_gqa=pack_gqa,
                 sm_margin=sm_margin,
-                optional_tensors=(seqused_q, seqused_k, q_descale, k_descale, v_descale),
+                optional_tensors=(q_descale, k_descale, v_descale),
             )
             _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+            if seqused_q is not None or seqused_k is not None:
+                _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
             out, lse = torch.ops.flash_attn_npu_3._mla_tnd_forward(
-                q, k, v, qv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale
+                q,
+                k,
+                v,
+                qv,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                softmax_scale,
+                seqused_q,
+                seqused_k,
             )
             return (out, lse) if return_softmax else out
         _validate_varlen_query(q, cu_seqlens_q)
