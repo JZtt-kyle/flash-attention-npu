@@ -19,21 +19,33 @@ import torch_npu
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla_dense_build import ROOT, sha256
-from tests.test_flash_attn_npu_v3_mla_used_attention import (
-    configure_producer,
-    launch,
-    load_attention,
-)
 from tests.test_flash_attn_npu_v3_mla_metadata import load_probe
 
 
 def profile(probe_dir, producer_manifest, output, layout="bsnd"):
-    if layout == "mixed":
+    if layout == "bsnd-stride":
+        from tests import test_flash_attn_npu_v3_mla_bsnd_stride_production as cases_api
+        from tests.test_flash_attn_npu_v3_mla_bsnd_stride import (
+            configure_producer,
+            launch,
+            load_attention,
+        )
+
+        production_case = cases_api.make_case
+    elif layout == "mixed":
         from tests import test_flash_attn_npu_v3_mla_mixed_used as cases_api
     else:
         assert layout == "bsnd"
         from tests import test_flash_attn_npu_v3_mla_bsnd_used as cases_api
 
+    if layout != "bsnd-stride":
+        from tests.test_flash_attn_npu_v3_mla_used_attention import (
+            configure_producer,
+            launch,
+            load_attention,
+        )
+
+        production_case = cases_api.production_case
     probes = load_attention(probe_dir)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -43,10 +55,7 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
     assert sha256(Path(manifest["library"])) == manifest["library_sha256"]
     with load_probe(manifest["library"], output / "producer") as producer:
         configure_producer(producer)
-        cases = [
-            cases_api.production_case(probes, producer, spec)
-            for spec in cases_api.PERFORMANCE_CASES
-        ]
+        cases = [production_case(probes, producer, spec) for spec in cases_api.PERFORMANCE_CASES]
         arguments = [cases_api.forward_args(case) for case in cases]
         errors = []
         for case, args in zip(cases, arguments):
@@ -131,14 +140,24 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         pos = 0
         for label in labels:
             if label["name"] == "production":
-                assert "ComputeMlaUsedMetadata" in raw[pos]["Op Name"]
+                version = cases[label["case"]].get("config", {}).get("version", 5)
+                producer_name = {
+                    1: "ComputeMlaDenseMetadata",
+                    2: "ComputeMlaBsndKvLengthMetadata",
+                    5: "ComputeMlaUsedMetadata",
+                }[version]
+                assert producer_name in raw[pos]["Op Name"]
                 label["generation_us"] = float(raw[pos]["Task Duration(us)"])
                 pos += 1
             row = raw[pos]
             expected_name = (
-                "cann_used"
+                ("cann_bsnd_stride" if layout == "bsnd-stride" else "cann_used")
                 if label["name"] == "source"
-                else ("mla_tnd_used" if layout == "mixed" else "mla_bsnd_used")
+                else (
+                    "mla_dense"
+                    if layout == "bsnd-stride" and version != 5
+                    else ("mla_tnd_used" if layout == "mixed" else "mla_bsnd_used")
+                )
             )
             assert expected_name in row["Op Name"]
             label.update(kernel_us=float(row["Task Duration(us)"]), kernel_name=row["Op Name"])
@@ -147,7 +166,16 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         (output / "kernel-samples.json").write_text(json.dumps(labels, indent=2) + "\n")
         results = []
         for index, case in enumerate(cases):
-            result = dict(item=case["item"], errors=errors[index])
+            result = dict(item=case.get("config", case["item"]), errors=errors[index])
+            if layout == "bsnd-stride":
+                result["source_metadata"] = case["expected"]
+                result["launched_blocks"] = (
+                    case["context"] if case["config"]["version"] == 5 else case["dense_context"]
+                ).block_dim
+                result["input_views"] = {
+                    n: dict(shape=list(t.shape), stride=list(t.stride()), offset=t.storage_offset())
+                    for n, t in case["devices"]["migrated"].items()
+                }
             for name in names:
                 samples = [s for s in labels if s["case"] == index and s["name"] == name]
                 result[name] = dict(
@@ -166,7 +194,11 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
             results.append(result)
         extension = Path(api.flash_attn_npu_3.__file__)
         report = dict(
-            scope=__doc__,
+            scope=(
+                "Production BSND v1/v2/v5 versus pinned non-FD source, with identical logical inputs, schedules and launch blocks. Source receives contiguous materializations prepared before timing; physical input layouts differ. Production wall includes internal metadata generation; source probe buffers are preallocated. Not public metadata E2E."
+                if layout == "bsnd-stride"
+                else __doc__
+            ),
             layout=layout,
             seed=20261010,
             warmup=5,
@@ -199,6 +231,6 @@ if __name__ == "__main__":
     parser.add_argument("probe_dir")
     parser.add_argument("producer_manifest")
     parser.add_argument("output")
-    parser.add_argument("--layout", choices=("bsnd", "mixed"), default="bsnd")
+    parser.add_argument("--layout", choices=("bsnd", "mixed", "bsnd-stride"), default="bsnd")
     args = parser.parse_args()
     profile(args.probe_dir, args.producer_manifest, args.output, args.layout)

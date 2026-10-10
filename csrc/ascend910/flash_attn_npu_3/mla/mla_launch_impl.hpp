@@ -11,11 +11,12 @@
 #endif
 
 namespace flash_attn::mla {
+template <bool HasStrides>
 __global__ __aicore__ __mix__(1, 2) void MLA_DENSE_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
                                                          GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
                                                          GM_ADDR metadata, GM_ADDR cacheSeqlens,
                                                          MlaDenseMetadataContext context, float scale,
-                                                         bool hasKvLengths)
+                                                         bool hasKvLengths, MlaBsndInputLayouts layouts)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     MlaDenseKernelSchedule schedule{};
@@ -37,12 +38,12 @@ __global__ __aicore__ __mix__(1, 2) void MLA_DENSE_ENTRY(uint64_t ffts, GM_ADDR 
     AscendC::SetSyncBaseAddr(ffts);
     AscendC::TPipe pipe;
     if (hasKvLengths) {
-        Kernel::MlaDense<MLA_DENSE_TYPE, true> op;
+        Kernel::MlaDense<MLA_DENSE_TYPE, true, HasStrides> op;
         op(schedule, scale, qc, qr, kv, kr, output, lse, workspace, &pipe,
-           metadata + kMlaBsndKvLengthMetadataPrefixWords * sizeof(int32_t));
+           metadata + kMlaBsndKvLengthMetadataPrefixWords * sizeof(int32_t), &layouts);
     } else {
-        Kernel::MlaDense<MLA_DENSE_TYPE> op;
-        op(schedule, scale, qc, qr, kv, kr, output, lse, workspace, &pipe);
+        Kernel::MlaDense<MLA_DENSE_TYPE, false, HasStrides> op;
+        op(schedule, scale, qc, qr, kv, kr, output, lse, workspace, &pipe, nullptr, &layouts);
     }
 #endif
 }
@@ -50,9 +51,15 @@ __global__ __aicore__ __mix__(1, 2) void MLA_DENSE_ENTRY(uint64_t ffts, GM_ADDR 
 aclError MLA_DENSE_LAUNCH(const MlaLaunchArgs& a)
 {
     MlaBatchLaunchScope launch;
-    MLA_DENSE_ENTRY<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
-                                                               a.workspace, a.metadata, a.cacheSeqlens, a.context,
-                                                               a.scale, a.hasKvLengths);
+    if (a.hasStrides) {
+        MLA_DENSE_ENTRY<true><<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output,
+                                                                         a.lse, a.workspace, a.metadata, a.cacheSeqlens,
+                                                                         a.context, a.scale, a.hasKvLengths, a.layouts);
+    } else {
+        MLA_DENSE_ENTRY<false><<<a.context.blockDim, nullptr, a.stream>>>(
+            a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse, a.workspace, a.metadata, a.cacheSeqlens, a.context,
+            a.scale, a.hasKvLengths, a.layouts);
+    }
     return launch.Result();
 }
 } // namespace flash_attn::mla

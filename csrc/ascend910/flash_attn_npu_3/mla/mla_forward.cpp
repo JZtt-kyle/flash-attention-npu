@@ -203,6 +203,7 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
                                      const at::Tensor& qv, float scale, const std::optional<at::Tensor>& cacheSeqlens,
                                      const std::optional<at::Tensor>& schedulerMetadata)
 {
+    const auto layouts = CheckBsndInputLayouts(q, k, v, qv);
     const bool hasKvLengths = cacheSeqlens.has_value() || schedulerMetadata.has_value();
     if (hasKvLengths) {
         CheckBsndMetadataWords(q.size(0));
@@ -244,6 +245,8 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
                     "MLA: tensor address overflow");
     }
     MlaLaunchArgs a{};
+    a.layouts = layouts;
+    a.hasStrides = !q.is_contiguous() || !k.is_contiguous() || !v.is_contiguous() || !qv.is_contiguous();
     uint32_t fftsLength = 0;
     TORCH_CHECK(rtGetC2cCtrlAddr(&a.ffts, &fftsLength) == RT_ERROR_NONE,
                 "MLA: failed to obtain cross-core synchronization address");
@@ -313,6 +316,7 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     const uint32_t words = CheckUsedInputs(q, shape.batch, usedQuery, usedKv);
     const int64_t batch = shape.batch, sq = shape.query.maxLength, heads = shape.queryHeads, sk = shape.kv.maxLength;
     const bool tnd = shape.query.layout == MlaSequenceLayout::Tnd;
+    const auto layouts = tnd ? MlaBsndInputLayouts{} : CheckBsndInputLayouts(q, k, v, qv);
     const bool nonempty = batch != 0 && shape.query.totalTokens != 0 && shape.kv.totalTokens != 0;
     auto p = DensePlatform(nonempty);
     // Static allocation bounds only; source scheduling reads used on AICPU.
@@ -372,6 +376,8 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
         }
     }
     MlaUsedLaunchArgs a{};
+    a.layouts = layouts;
+    a.hasStrides = !tnd && (!q.is_contiguous() || !k.is_contiguous() || !v.is_contiguous() || !qv.is_contiguous());
     uint32_t fftsLength = 0;
     TORCH_CHECK(rtGetC2cCtrlAddr(&a.ffts, &fftsLength) == RT_ERROR_NONE,
                 "MLA: failed to obtain cross-core synchronization address");

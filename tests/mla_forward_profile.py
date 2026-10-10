@@ -23,11 +23,25 @@ from tests.mla_cann_baseline import (
     environment,
     make_inputs,
 )
-from tests.mla_profile_cases import BSND_CASES, CASES, KV_CASES, LONG_KV_CASES, S1G_CASES
+from tests.mla_profile_cases import (
+    BSND_CASES,
+    CASES,
+    KV_CASES,
+    LONG_KV_CASES,
+    S1G_CASES,
+    STRIDE_CASES,
+)
 
 
 def profile(
-    directory, vendor, dtype_name="fp16", metadata_reuse=False, cases=CASES, kv_lengths=None
+    directory,
+    vendor,
+    dtype_name="fp16",
+    metadata_reuse=False,
+    cases=CASES,
+    kv_lengths=None,
+    stride_profiles=None,
+    dispatch_only=False,
 ):
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     timed_cpu_threads = torch.get_num_threads()
@@ -43,6 +57,8 @@ def profile(
         kv_lengths = [None] * len(cases)
     assert len(kv_lengths) == len(cases)
     assert metadata_reuse or not any(x is not None for x in kv_lengths)
+    if stride_profiles is not None:
+        assert len(stride_profiles) == len(cases)
 
     def generate(index):
         q, k = inputs[index]["q"], inputs[index]["k"]
@@ -80,6 +96,17 @@ def profile(
             Case("public", "compressed", batch, sq, sk, heads, 1), dtype, seed=20260929
         )
         device = {name: tensor.npu() for name, tensor in cpu.items()}
+        if stride_profiles is not None:
+            from tests.test_flash_attn_npu_v3_mla_bsnd_stride import NAMES, make_view, strides_for
+
+            profile_name = stride_profiles[index]
+            for name, offset in zip(NAMES, (5, 11, 19, 29)):
+                device[name], cpu[name], _ = make_view(
+                    cpu[name],
+                    strides_for(cpu[name].shape, profile_name, name),
+                    offset,
+                    overlap=profile_name in ("broadcast", "overlap"),
+                )
         inputs.append(device)
         native.append(CannCall(device, scale=scale, kv_lengths=kv_lengths[index]))
         if metadata_reuse:
@@ -96,7 +123,13 @@ def profile(
             actual = api.flash_attn_func(
                 **device, softmax_scale=scale, num_splits=1, return_attn_probs=True
             )
+        if dispatch_only:
+            torch.npu.synchronize()
+            print(f"MLA_STRIDE_NATIVE_BEGIN {dtype_name} {index}", flush=True)
         source = native[-1]()
+        if dispatch_only:
+            torch.npu.synchronize()
+            print(f"MLA_STRIDE_NATIVE_END {dtype_name} {index}", flush=True)
         # The long-KV CPU oracle is outside every timed region. Restore the
         # caller's thread count even on failure, before any warmup or sampling.
         try:
@@ -158,6 +191,8 @@ def profile(
         path=str(extension), sha256=hashlib.sha256(extension.read_bytes()).hexdigest()
     )
     (directory / "environment.json").write_text(json.dumps(env, indent=2) + "\n")
+    if dispatch_only:
+        return
 
     def snapshot(label):
         (directory / label).write_text(subprocess.check_output(["npu-smi", "info"], text=True))
@@ -265,17 +300,59 @@ def profile(
     if metadata_reuse:
         assert not metadata_rows, "explicit reuse unexpectedly regenerated metadata"
     rows = [row for row in rows if not is_metadata(row)]
+    conversion_rows = []
+    if stride_profiles is not None:
+        # Native FIA materializes noncontiguous arguments through its copy
+        # operators. Keep all device tasks in the report/E2E; FA3 must have none.
+        conversion_rows = [
+            row
+            for row in rows
+            if row["Name"].startswith("aclnnFusedInferAttentionScore")
+            and row["Name"].endswith(("_Slice", "_AsStrided", "_BroadcastTo"))
+        ]
+        rows = [row for row in rows if row not in conversion_rows]
     assert len(rows) == len(labels), (len(rows), len(labels))
     fa3_count = sum(label["name"] == "fa3" for label in labels)
     assert len(metadata_rows) in (0, fa3_count), (len(metadata_rows), fa3_count)
     producers = iter(metadata_rows)
     previous_end = Decimal(0)
+    conversion_index = 0
     for row, label in zip(rows, labels):
         expected_name = (
             f"mla_dense_{dtype_name}" if label["name"] == "fa3" else "FusedInferAttentionScore"
         )
         assert expected_name in row["Name"]
         label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
+        if stride_profiles is not None:
+            copies = []
+            begin = Decimal(row["Start Time(us)"].strip())
+            while conversion_index < len(conversion_rows):
+                copy = conversion_rows[conversion_index]
+                copy_begin = Decimal(copy["Start Time(us)"].strip())
+                if copy_begin >= begin:
+                    break
+                assert label["name"] == "native_cann" and previous_end <= copy_begin
+                assert copy_begin + Decimal(copy["Duration(us)"].strip()) <= begin
+                copies.append(copy)
+                conversion_index += 1
+            native_call = native[label["case"]]
+            expected_copies = (
+                sum(
+                    t is not None and not t.is_contiguous()
+                    for t in (
+                        native_call.query,
+                        native_call.key,
+                        native_call.value,
+                        native_call.kwargs["query_rope"],
+                        native_call.kwargs["key_rope"],
+                    )
+                )
+                if label["name"] == "native_cann"
+                else 0
+            )
+            assert len(copies) == expected_copies, (label, copies, expected_copies)
+            label["conversion_us"] = sum(float(c["Duration(us)"]) for c in copies)
+            label["conversion_names"] = [c["Name"] for c in copies]
         if metadata_rows and label["name"] == "fa3":
             producer = next(producers)
             begin = Decimal(producer["Start Time(us)"].strip())
@@ -283,6 +360,7 @@ def profile(
             assert previous_end <= begin < end <= Decimal(row["Start Time(us)"].strip())
             label["metadata_kernel_us"] = float(producer["Duration(us)"])
         previous_end = Decimal(row["Start Time(us)"].strip()) + Decimal(row["Duration(us)"].strip())
+    assert conversion_index == len(conversion_rows)
     results = []
     for index, (shape, scale) in enumerate(cases):
         item = dict(
@@ -290,6 +368,7 @@ def profile(
             scale=scale,
             lengths=kv_lengths[index],
             native_call=native[index].description(),
+            stride_profile=None if stride_profiles is None else stride_profiles[index],
         )
         for name in wall_names:
             kernels = [x for x in labels if x["case"] == index and x["name"] == name]
@@ -308,6 +387,10 @@ def profile(
                         for r in range(5)
                     ],
                 )
+                if stride_profiles is not None:
+                    item[name]["median_conversion_us"] = statistics.median(
+                        x["conversion_us"] for x in kernels
+                    )
         item["e2e_ratio"] = item["fa3"]["median_e2e_us"] / item["native_cann"]["median_e2e_us"]
         if metadata_reuse:
             item["generate_1_ratio"] = (
@@ -320,6 +403,11 @@ def profile(
     snapshot("npu-after.log")
     report = dict(
         dtype=dtype_name,
+        stride_boundary=(
+            None
+            if stride_profiles is None
+            else "Identical physical strided inputs; one-time view creation and H2D excluded symmetrically. Native CANN Slice/AsStrided/BroadcastTo conversions remain inside every timed call; FA3 consumes original views."
+        ),
         scope=(
             "Public read-only dense kvcache metadata reuse vs fixed native CANN"
             if metadata_reuse
@@ -362,9 +450,14 @@ if __name__ == "__main__":
         + (LONG_KV_CASES if os.environ.get("MLA_FORWARD_LONG_KV") == "1" else [])
     )
     lengths = [None] * len(cases)
+    strides = None
     if os.environ.get("MLA_FORWARD_BSND_LENGTHS") == "1":
         cases += [(shape, scale) for shape, scale, _ in BSND_CASES]
         lengths += [values for _, _, values in BSND_CASES]
+    if os.environ.get("MLA_FORWARD_BSND_STRIDES") == "1":
+        cases = [(shape, scale) for shape, scale, _, _ in STRIDE_CASES]
+        lengths = [values for _, _, values, _ in STRIDE_CASES]
+        strides = [profile_name for _, _, _, profile_name in STRIDE_CASES]
     profile(
         os.environ["MLA_FORWARD_ARTIFACT_DIR"],
         os.environ["MLA_CANN_VENDOR"],
@@ -372,4 +465,6 @@ if __name__ == "__main__":
         os.environ.get("MLA_FORWARD_METADATA_REUSE") == "1",
         cases,
         lengths,
+        strides,
+        os.environ.get("MLA_FORWARD_DISPATCH_ONLY") == "1",
     )

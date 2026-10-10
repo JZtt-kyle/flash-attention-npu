@@ -246,11 +246,16 @@ def make_view(data, strides, offset, *, overlap=False):
     return base.as_strided(shape, strides, offset), logical, checks
 
 
-def make_case(probes, producer, config, *, scale=None):
+def make_case(probes, producer, config, *, scale=None, full_launch=False):
     b, sq, heads, sk = config["shape"]
     item = used_case(0, [sq] * b, [sk] * b, config["uq"], config["uk"], heads=heads, sq=sq, sk=sk)
     if config["aic"] is not None:
         item["aic"] = config["aic"]
+    block_dim = 0
+    if full_launch and config["version"] != 1 and b and sq and sk:
+        p = producer["platform"]
+        block_dim = p.block_dims[p.aic - 1]
+        item["block_dim"] = block_dim
     case = make_used_case(probes, producer, item, scale=scale)
     case.update(config=config, dense_context=DenseContext(), input_checks=[])
     case["guards"] = case["guards"][8:]  # Replace all four input storages on both sides.
@@ -290,6 +295,7 @@ def make_case(probes, producer, config, *, scale=None):
             heads=heads,
             sk=sk,
             aic=config["aic"] or p.aic,
+            block_dim=block_dim,
             ratio=2,
             libapi=p.libapi,
             **{n: getattr(p.memory, n) for n in ("l1", "ub", "l0a", "l0b", "l0c")},

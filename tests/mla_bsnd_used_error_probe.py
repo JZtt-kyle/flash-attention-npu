@@ -15,10 +15,16 @@ from tests.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_mla_bsnd_used import inputs
 
 
-def run(kind, fault, directory):
+def run(kind, fault, directory, layout="contiguous"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[kind]
     args = inputs(dtype, sq=0 if fault == "empty_q" else 7, sk=0 if fault == "empty_k" else 33)
+    if layout == "strided":
+        for name in ("q", "qv", "k", "v"):
+            t = args[name]
+            args[name] = torch.zeros(
+                (t.shape[0], 2 * t.shape[1] + 1, *t.shape[2:]), dtype=dtype, device="npu"
+            )[:, 1::2]
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
@@ -41,6 +47,7 @@ def run(kind, fault, directory):
             extension = Path(api.flash_attn_npu_3.__file__)
             report = dict(
                 fault=fault,
+                input_layout=layout,
                 dtype=kind,
                 error=str(error),
                 elapsed_seconds=time.monotonic() - start,

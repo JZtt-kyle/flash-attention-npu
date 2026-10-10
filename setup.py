@@ -660,6 +660,7 @@ src_ascend910_v3 += [
     os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3/mla", name)
     for name in (
         "mla_forward.cpp",
+        "mla_bsnd_layout.cpp",
         "mla_launch.cpp",
         "mla_schedule.cpp",
         "detail/cann_split_core.cpp",

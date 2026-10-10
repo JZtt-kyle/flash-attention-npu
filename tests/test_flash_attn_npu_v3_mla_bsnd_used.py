@@ -222,11 +222,13 @@ def test_tensor_rejections(entry, dtype, name, fault):
     args = inputs(dtype)
     if fault == "stride":
         shape = list(args[name].shape)
-        shape[1] *= 2
-        args[name] = torch.empty(shape, dtype=dtype, device="npu")[:, ::2]
+        shape[-1] *= 2
+        args[name] = torch.empty(shape, dtype=dtype, device="npu")[..., ::2]
     else:
         args[name].requires_grad_(True)
-    with pytest.raises(RuntimeError, match="noncontiguous" if fault == "stride" else "gradients"):
+    with pytest.raises(
+        RuntimeError, match="contiguous last dimension" if fault == "stride" else "gradients"
+    ):
         _forward(entry, args)
 
 

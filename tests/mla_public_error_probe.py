@@ -15,7 +15,7 @@ from tests.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_mla_kvcache import cached, generate
 
 
-def run(dtype_name, fault, directory):
+def run(dtype_name, fault, directory, layout="contiguous"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     directory = Path(directory)
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
@@ -42,6 +42,13 @@ def run(dtype_name, fault, directory):
         )
         for n, d in (("q", 64), ("k", 64), ("v", 512), ("qv", 512))
     }
+    if layout == "strided":
+        device = {
+            name: torch.zeros(
+                (t.shape[0], 2 * t.shape[1] + 1, *t.shape[2:]), dtype=dtype, device="npu"
+            )[:, 1::2]
+            for name, t in device.items()
+        }
     lengths = torch.full((batch,), sk, dtype=torch.int32, device="npu")
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
@@ -99,6 +106,7 @@ def run(dtype_name, fault, directory):
             extension = Path(api.flash_attn_npu_3.__file__).resolve()
             report = dict(
                 fault=fault,
+                input_layout=layout,
                 empty_capacity=empty,
                 dtype=dtype_name,
                 shape=list(device["q"].shape),

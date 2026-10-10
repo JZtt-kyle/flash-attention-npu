@@ -5,12 +5,39 @@
 #include "mla_tnd_metadata.h"
 #include "mla_tnd_bsnd_metadata.h"
 #include "mla_used_metadata.h"
+#include "mla_bsnd_layout.h"
 
 // Host-only boundary for the two representations in docs/mla/design.md.
 // Contract: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
 // hopper/flash_api.cpp::mha_fwd. No CANN kernel or scheduling code is used here.
 // Keep the corresponding Python/fake checks in _check_mla_inputs in sync.
 namespace flash_attn::mla {
+
+inline MlaBsndTensorLayout CheckBsndTensorLayout(const at::Tensor& tensor)
+{
+    MlaBsndTensorView view{};
+    for (int64_t axis = 0; axis < 4; ++axis) {
+        view.sizes[axis] = tensor.size(axis);
+        view.strides[axis] = tensor.stride(axis);
+    }
+    view.storageOffset = tensor.storage_offset();
+    view.storageBytes = tensor.storage().nbytes();
+    MlaBsndTensorLayout layout{};
+    const auto status = BuildBsndTensorLayout(view, layout);
+    TORCH_CHECK(status == MlaLayoutStatus::Success,
+                "MLA: BSND input view exceeds stride, storage or signed byte bounds (status ", int(status), ")");
+    if (layout.spanElements != 0) {
+        const auto address = reinterpret_cast<uintptr_t>(tensor.data_ptr());
+        TORCH_CHECK(address != 0 && layout.spanElements * 2 <= UINTPTR_MAX - address, "MLA: tensor address overflow");
+    }
+    return layout;
+}
+
+inline MlaBsndInputLayouts CheckBsndInputLayouts(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                                 const at::Tensor& qv)
+{
+    return {CheckBsndTensorLayout(q), CheckBsndTensorLayout(qv), CheckBsndTensorLayout(k), CheckBsndTensorLayout(v)};
+}
 
 inline bool FitsDenseShape(int64_t batch, int64_t sq, int64_t heads, int64_t sk)
 {
@@ -66,7 +93,8 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
                     "MLA compressed forward is not implemented yet outside B>=0, nonnegative S1G within address/field "
                     "bounds, 0<=Sk<=16384");
         for (const auto& t : {q, k, v, *qv}) {
-            TORCH_CHECK(t.is_contiguous(), "MLA compressed forward is not implemented yet for noncontiguous BSND/TND");
+            TORCH_CHECK(!varlenQ || t.is_contiguous(),
+                        "MLA compressed forward is not implemented yet for noncontiguous BSND/TND");
             TORCH_CHECK(!t.requires_grad(), "MLA compressed forward is not implemented yet for gradients");
         }
         return true;

@@ -277,7 +277,7 @@ v5 的 `UsedForward` 持有两组分配前缀与两组可选 used，生成和 at
 
 ## 6. 代码结构
 
-接入点为现有 [Python FA3 包](../../flash_attn_npu_3/flash_attn_npu_interface.py) 与 [flash_api.cpp](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp)。MLA 适配位于 `csrc/ascend910/flash_attn_npu_3/mla/`。三种连续布局共用以下分层，公开入口与具体 launcher 见 [6.5](#65-生产接入与构建) 和下表：
+接入点为现有 [Python FA3 包](../../flash_attn_npu_3/flash_attn_npu_interface.py) 与 [flash_api.cpp](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp)。MLA 适配位于 `csrc/ascend910/flash_attn_npu_3/mla/`。BSND、TND 和混合布局共用以下分层，公开入口与具体 launcher 见 [6.5](#65-生产接入与构建) 和下表：
 
 ```text
 Python FA3 入口 / custom op / fake
@@ -416,17 +416,19 @@ KV token 起点固定为 `uint64(b)*Sk`，短长度和零长度不压缩 cache�
 
 #### 6.2.8 BSND 输入 stride 与地址校验
 
-[`BuildBsndTensorLayout`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_layout.h) 是独立 CPU 组件，接收单个 FP16/BF16 BSND 视图的 shape、元素 stride、storage offset 与 storage 字节数。Q、qv、K、V 分别构造描述，不推导另一张量的 stride。它只检查 64/512 维输入的地址，调度形状限制、dtype/device、跨张量匹配仍由前向边界另行检查；组件通过不代表生产入口已支持非连续输入。
+[`BuildBsndTensorLayout`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_layout.h) 是独立 CPU 组件，接收单个 FP16/BF16 BSND 视图的 shape、元素 stride、storage offset 与 storage 字节数。Q、qv、K、V 分别构造描述，不推导另一张量的 stride。它只检查 64/512 维输入的地址，调度形状限制、dtype/device、跨张量匹配仍由前向边界另行检查。生产 BSND 前向在分配输出和发射前复用该组件，并检查 `data_ptr()` 加真实跨度的指针溢出。
 
 描述保存 64 位 `batchStride/rowStride/headStride` 和相对 `data_ptr()` 的 `spanElements`；末维 stride 必须为 1，外层 stride 非负。只读的广播、重叠、外层切片及 BNSD 归一视图均可表达。非空视图的相对地址为 `b*batchStride+s*rowStride+h*headStride+d`；独立校验整个分配视图的末端及 storage offset 相加后的字节范围均不超过 `INT64_MAX`，且不越过 storage。每次乘加前检查溢出，不能用 used 长度缩短校验范围。空 batch/sequence 没有可达元素，`spanElements=0`，允许 offset 超过 storage；空维度/单例维度中未使用的 stride 不作字节窄化，负 stride 和非法末维仍拒绝。失败不修改输出描述。
 
 固定 FA3 的 `set_params_fprop` / `mha_fwd` 分别读取各张量的 `data_ptr()` 和真实 stride。`data_ptr()` 已包含 storage offset，launch 不得再次加 offset；offset 只用于主机侧 storage 边界校验，stride 不写入 metadata。CPU 验收用真实 PyTorch 视图的标量地址与独立 Python 大整数 oracle；不将其记为设备执行验收。
 
-设备组件的 `HasStrides` 模板实例将四路描述从 Kernel 传入 Cube Block / Copy Tile；默认实例继续使用连续布局，TND stride 尚未接入。Q/qv 仍按源 S1G 顺序分成首段 heads、中间矩阵和末段 heads，每一路分别计算 batch/row/head 地址；共享内容 KV 的 QK 和 PV 均使用 V 的真实布局。O/LSE、任务环、切块、数值及同步流程不变，不复制完整 cache。独立驱动在发射前用上述 CPU 组件检查四个完整分配视图，设备分别校验 v1/v2/v5；生产入口仍拒绝非连续输入，接入留在 M06e1c。
+设备组件的 `HasStrides` 模板实例将四路描述从 Kernel 传入 Cube Block / Copy Tile。生产根据四个输入的连续性选择连续或 stride 实例，覆盖 BSND 整容量 v1、只读 cache 实际 KV 长度 v2 和内部 Q-used v5；TND 与混合 query 的非连续输入仍拒绝。Q/qv 仍按源 S1G 顺序分成首段 heads、中间矩阵和末段 heads，每一路分别计算 batch/row/head 地址；共享内容 KV 的 QK 和 PV 均使用 V 的真实布局。O/LSE、任务环、切块、数值及同步流程不变，不复制完整 cache；metadata 不绑定 stride，复用时仍检查当次长度。真实/fake/C++/compile 共用接受范围，完整 storage 与 scale 校验保留在算子的 fake/C++ 边界，公开包装器跟踪时不调用 Dynamo 不支持的 `storage_offset()` 或符号 `math.isfinite()`。
 
 Copy Tile 沿用固定 CANN 源 `attention/common/op_kernel/memcopy/attn_copy_gm_to_l1.h` 的 ND→NZ 搬运和回退，并保留来源声明。固定源单矩阵在 `srcDValue>=65536` 时逐行复制，多矩阵在 `srcNdMatrixStride>65536` 时逐矩阵复制。FA3 适配始终保留 64 位地址运算，并将多矩阵回退边界改为 **`>=65536`**：910B 的实际 `Nd2NzParams::srcNdMatrixStride` 为 uint16，65536 会截断为零，独立实测已发现原边界产生错误输出。零 row/matrix stride 也使用逐行/逐矩阵复制；矩阵 stride 合法但 head stride 超限时必须同时走回退，不能窄化后再判断。
 
 独立 [stride attention 验收](../../tests/test_flash_attn_npu_v3_mla_bsnd_stride.py) 用真实 NPU storage 检查 65535/65536/65537、实际使用的 >uint32 stride、空/单例轴、广播/重叠、BNSD、四路偏移及 used poison。固定源接收计时前独立物化的连续逻辑输入，执行相同非 FD 调度；任意四路 stride 没有等价的源 ABI。因此该源精度/组件性能对照须注明物理布局差异和转换边界，不能记为相同物理布局或公开 E2E 验收。
+
+[生产 stride 验收](../../tests/test_flash_attn_npu_v3_mla_bsnd_stride_production.py) 另检查上述边界的公开与原始 C++ 调用、完整 storage 拒绝、长度/metadata 更新、stride/scale 复用及流生命周期。公开 E2E 双方接收相同的物理视图；一次性视图准备与 H2D 对称排除，原生 CANN 的逐次 Slice/AsStrided/BroadcastTo 转换计入调用耗时并单列设备耗时。内部 Q-used 没有公开等价入口，生产 Kernel 的同调度对照继续单列。
 
 ### 6.3 数值路径与资源布局
 
@@ -544,6 +546,8 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 内部混合 Q-used `PERFORMANCE_CASES` | 9 | [`mla_bsnd_used_profile.py --layout mixed`](../../tests/mla_bsnd_used_profile.py)：混合 T01、分配间隙、非均匀/零长度、M/S2 尾块、16384 KV、KV-used 缺省与显式整段 used；生产 Kernel 对同调度固定源，单列逐次 v5 生成与内部 wall，无公开 E2E 等价入口 |
 | 公开 varlen used `PERFORMANCE_CASES` | 10 | [`mla_varlen_used_profile.py`](../../tests/mla_varlen_used_profile.py)：T01/分配间隙、非均匀/零长度、M/S2 尾块、16384 KV、单轴 used 与显式整段 used；每次内部 v5 生成计入 R=1/4 E2E，原生转换与 FD 分派单列 |
 | BSND stride `PERFORMANCE_CASES` | 9 | [`mla_bsnd_stride_profile.py`](../../tests/mla_bsnd_stride_profile.py)：连续对照、BNSD、独立布局、U01、任务环/尾块、16384 KV、65536 回退及广播；双 dtype 同逻辑输入/调度，源侧连续物化在计时前完成，分别记录 Kernel 与预分配 probe 调用耗时 |
+| 生产 BSND stride `PERFORMANCE_CASES` | 9 | [`mla_bsnd_used_profile.py --layout bsnd-stride`](../../tests/mla_bsnd_used_profile.py)：保持独立 stride 矩阵几何，按生产平台核数对照固定源；单列 AICPU、Kernel 与生产内部 wall，源连续物化在计时前完成 |
+| 公开 BSND `STRIDE_CASES` | 10 | [`mla_forward_profile.py`](../../tests/mla_forward_profile.py)：连续对照、BNSD、独立布局、零长度、长 KV、65536 回退、广播/重叠；双方相同物理输入，CANN 转换计入公开 metadata 复用、生成加 R=1/4 对照，FD 分派单列 |
 
 源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。前四组共 26 个整容量用例作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E。`BSND_CASES` 另含 11 个实际长度用例，保留全部原生 FD 分派并单列；公开全零实际长度同样计入对应路径的 E2E 验收。
 

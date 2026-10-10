@@ -61,3 +61,19 @@ BSND_CASES = [
     ((41, 2, 128, 65), None, [0, 17, 0, 33] * 10 + [0]),
     ((2, 10, 128, 513), None, [17, 513]),
 ]
+
+# M06e1c: same strided views go to both public entries. Native CANN's
+# materialization stays inside the timed call; FD dispatch is never excluded
+# based on timing. Metadata generation, reuse and R=1/4 are all measured.
+STRIDE_CASES = [
+    ((2, 1, 8, 257), None, None, "contiguous"),
+    ((2, 7, 16, 513), None, None, "bnsd"),
+    ((2, 2, 128, 1025), None, [511, 513], "independent"),
+    ((2, 7, 16, 33), None, [17, 0], "independent"),
+    ((2, 3, 8, 16384), None, [16384, 8193], "independent"),
+    ((1, 7, 8, 33), None, None, "matrix_65536"),
+    ((1, 7, 8, 33), None, None, "head_65536"),
+    ((2, 7, 8, 33), None, None, "broadcast"),
+    ((2, 7, 8, 33), 0.23, [17, 0], "overlap"),
+    ((2, 7, 8, 33), None, [0, 0], "bnsd"),
+]

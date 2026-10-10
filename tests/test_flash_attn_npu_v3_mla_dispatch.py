@@ -48,7 +48,6 @@ def test_dispatcher_schema_and_outputs(dtype, reuse):
         ("qv_shape", "qv shape"),
         ("dtype", "same dtype"),
         ("device", "same device"),
-        ("stride", "noncontiguous BSND"),
         ("grad", "gradients"),
         ("shape", "outside B>=0"),
         ("scale", "finite in FP32"),
@@ -72,8 +71,6 @@ def test_dispatcher_rejects_invalid_inputs(dtype, fake, public, fault, message):
             args["v"] = args["v"].float()
         elif fault == "device":
             args["v"] = torch.empty(args["v"].shape, dtype=dtype, device="cpu")
-        elif fault == "stride":
-            args = _inputs(dtype=dtype, strided=True)
         elif fault == "grad":
             args["q"].requires_grad_(True)
         elif fault == "shape":

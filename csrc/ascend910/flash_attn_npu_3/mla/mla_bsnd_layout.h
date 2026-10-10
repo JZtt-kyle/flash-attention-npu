@@ -44,7 +44,7 @@ enum class MlaLayoutStatus {
 // Empty views access no storage; like PyTorch, their offset may exceed storage.
 // Singleton/empty axes do not impose a byte limit on an unused stride.
 // Callers must separately check dtype, device, shape compatibility and schedule
-// limits. No production entry point consumes this descriptor yet.
+// limits. Production BSND and isolated probes validate before device launch.
 // Failure leaves output unchanged.
 MlaLayoutStatus BuildBsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTensorLayout& output);
 

@@ -6,6 +6,7 @@
 #include "mla_tnd_metadata.h"
 #include "mla_tnd_bsnd_metadata.h"
 #include "mla_used_metadata.h"
+#include "mla_bsnd_layout.h"
 
 namespace flash_attn::mla {
 struct MlaLaunchArgs {
@@ -15,6 +16,8 @@ struct MlaLaunchArgs {
     MlaDenseMetadataContext context;
     float scale;
     bool hasKvLengths = false;
+    MlaBsndInputLayouts layouts{};
+    bool hasStrides = false;
 };
 
 aclError LaunchDenseFp16(const MlaLaunchArgs& args);
@@ -47,6 +50,8 @@ struct MlaUsedLaunchArgs {
     MlaUsedMetadataContext context;
     MlaUsedMetadataInputs inputs;
     float scale;
+    MlaBsndInputLayouts layouts{};
+    bool hasStrides = false;
 };
 aclError LaunchBsndUsedFp16(const MlaUsedLaunchArgs& args);
 aclError LaunchBsndUsedBf16(const MlaUsedLaunchArgs& args);

@@ -106,12 +106,30 @@ def round_up_headdim(head_size: int) -> int:
     return round_multiple(head_size, _HEADDIM_BWD_ALIGN)
 
 
+def _check_mla_bsnd_layout(tensor):
+    # Match BuildBsndTensorLayout, including the entire allocation when used
+    # lengths are shorter. Untyped storage size is bytes and works in fake/compile.
+    sizes, strides = tensor.shape, tensor.stride()
+    message = "MLA: BSND input view exceeds stride, storage or signed byte bounds"
+    if any(stride < 0 for stride in strides[:3]) or strides[3] != 1:
+        raise RuntimeError(message)
+    offset = tensor.storage_offset()
+    if offset < 0:
+        raise RuntimeError(message)
+    if sizes[0] == 0 or sizes[1] == 0:
+        return
+    span = sizes[3] + sum((sizes[axis] - 1) * strides[axis] for axis in range(3))
+    end = (offset + span) * 2
+    if end > (1 << 63) - 1 or end > tensor.untyped_storage().size():
+        raise RuntimeError(message)
+
+
 def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged_kv=False):
     """Recognize validated MLA before copies or ordinary FA dispatch.
 
     Uses only tensor metadata, including for fake tensors. Keep in sync with
     ascend910/flash_attn_npu_3/mla/mla_validation.h. Outer strides and storage
-    offsets are legal for contiguous views; no view is materialized here.
+    offsets are legal for BSND views; no view is materialized here.
     """
 
     def check(condition, message):
@@ -164,9 +182,14 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         )
         for tensor in (q, k, v, qv):
             check(
-                tensor.is_contiguous(),
+                not varlen_q or tensor.is_contiguous(),
                 "MLA compressed forward is not implemented yet for noncontiguous BSND/TND",
             )
+            # Dynamo cannot trace storage_offset() in the public wrapper.
+            # Registered fake kernels and the real C++ op validate storage
+            # inside the operator boundary, including compiled execution.
+            if not varlen_q and not torch.compiler.is_compiling():
+                _check_mla_bsnd_layout(tensor)
             check(
                 not tensor.requires_grad,
                 "MLA compressed forward is not implemented yet for gradients",
@@ -241,8 +264,12 @@ def _check_mla_dense_options(
         raise RuntimeError(
             "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options"
         )
-    if softmax_scale is not None and (
-        not math.isfinite(softmax_scale) or abs(softmax_scale) > 3.4028234663852886e38
+    # The fake/real op validates scale inside the dispatcher. A symbolic Python
+    # float cannot be passed to math.isfinite while tracing the public wrapper.
+    if (
+        not torch.compiler.is_compiling()
+        and softmax_scale is not None
+        and (not math.isfinite(softmax_scale) or abs(softmax_scale) > 3.4028234663852886e38)
     ):
         raise RuntimeError("MLA: softmax_scale must be finite in FP32")
 
