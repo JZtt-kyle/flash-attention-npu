@@ -95,6 +95,7 @@ def test_aicpu_sources_by_backend():
             expected.append(f"csrc/{directory}/mla/mla_bsnd_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_tnd_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_tnd_bsnd_metadata.aicpu")
+            expected.append(f"csrc/{directory}/mla/mla_used_metadata.aicpu")
         assert builder._build_aicpu_metadata("unused.so", name) == expected
     assert builder._build_aicpu_metadata("unused.so", "unknown") == []
 
@@ -112,6 +113,10 @@ def test_aicpu_sources_by_backend():
         ("mla_tnd_bsnd_metadata", "mla_used_schedule.h"),
         ("mla_tnd_bsnd_metadata", "mla_tnd_bsnd_metadata.h"),
         ("mla_tnd_bsnd_metadata", "mla_tnd_bsnd_metadata_args.h"),
+        ("mla_used_metadata", "mla_used_schedule.h"),
+        ("mla_used_metadata", "mla_used_metadata.h"),
+        ("mla_used_metadata", "mla_used_metadata_args.h"),
+        ("mla_used_metadata", "mla_tnd_schedule.cpp"),
     ],
 )
 def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, header_name):
@@ -125,7 +130,7 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, hea
     for name in (
         "mla_metadata.h",
         stem + "_args.h"
-        if stem in ("mla_tnd_metadata", "mla_tnd_bsnd_metadata")
+        if stem in ("mla_tnd_metadata", "mla_tnd_bsnd_metadata", "mla_used_metadata")
         else "mla_metadata_args.h",
         "mla_schedule.cpp",
         "cann_split_core.cpp",
@@ -154,6 +159,14 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, hea
             "mla_tnd_bsnd_metadata.h",
             "mla_tnd_bsnd_metadata.cpp",
             "mla_tnd_bsnd_schedule.h",
+            "mla_used_schedule.h",
+            "mla_tnd_schedule.cpp",
+        ):
+            assert name in dependencies
+    if stem == "mla_used_metadata":
+        for name in (
+            "mla_used_metadata.h",
+            "mla_used_metadata.cpp",
             "mla_used_schedule.h",
             "mla_tnd_schedule.cpp",
         ):

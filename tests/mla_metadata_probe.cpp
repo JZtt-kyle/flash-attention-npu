@@ -19,12 +19,49 @@ extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
 #include "mla/mla_tnd_bsnd_metadata_args.h"
 extern __global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadata(void* args);
 #endif
+#ifdef MLA_USED_METADATA
+#include "mla/mla_used_metadata.h"
+#include "mla/mla_used_metadata_args.h"
+extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
+#endif
 using namespace flash_attn::mla;
 
 extern "C" uint32_t metadata_args_size()
 {
     return sizeof(MlaMetadataArgs);
 }
+
+#ifdef MLA_USED_METADATA
+extern "C" uint32_t used_metadata_args_size()
+{
+    return sizeof(MlaUsedMetadataArgs);
+}
+
+extern "C" uint32_t used_metadata_host(const MlaUsedMetadataArgs* args, uint32_t* output)
+{
+    return BuildUsedMetadata(args->shape, args->platform, args->dtype, output, args->outputWords,
+                             UsedMetadataInputs(*args))
+               ? 0
+               : 1;
+}
+
+extern "C" int launch_used_metadata(void* current, void* worker, void* ready, void* done,
+                                    const MlaUsedMetadataArgs* args)
+{
+    auto status = aclrtRecordEvent(ready, current);
+    if (status != ACL_SUCCESS)
+        return status;
+    status = aclrtStreamWaitEvent(worker, ready);
+    if (status != ACL_SUCCESS)
+        return status;
+    MlaUsedMetadataArgs launchArgs = *args;
+    ComputeMlaUsedMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
+    status = aclrtRecordEvent(done, worker);
+    if (status != ACL_SUCCESS)
+        return status;
+    return aclrtStreamWaitEvent(current, done);
+}
+#endif
 extern "C" uint32_t metadata_words()
 {
     return kMlaDenseMetadataWords;

@@ -1,6 +1,6 @@
 # MLA 当前状态
 
-本次为 **2026-10-10 文档核验**，基于 `feat/mla-cann-migration` 的 `59c6f72`；功能进度保持 **M06d1：实际 Q/KV 使用长度 CPU 归一与调度**。唯一下一步为 **[M06d2a：used 记录协议与独立 AICPU 生成](plan.md#下一步m06d2a)**，尚未开始。当前文档提交用 `git log -1 -- docs/mla/status.md` 定位，上一功能闭环为 `59c6f72`。
+当前闭环为 **M06d2a：used 记录协议与独立 AICPU 生成**，2026-10-10 基于 `feat/mla-cann-migration` 的 `78d6284` 完成。唯一下一步为 **[M06d2b：used 记录设备校验消费者](plan.md#下一步m06d2b)**，尚未开始。本步提交用 `git log -1 -- docs/mla/status.md` 定位。
 
 目标契约与实现结构见 [design](design.md)，步骤及完成条件见 [plan](plan.md)。下表只描述当前可调用能力，不把独立 CPU 组件或未来目标计作公开支持。
 
@@ -25,65 +25,60 @@
 
 以上入口与拒绝边界对应 [Python 包装/fake](../../flash_attn_npu_3/flash_attn_npu_interface.py)、[C++ 通用入口](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp)、[专用前向](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 及 [静态校验](../../csrc/ascend910/flash_attn_npu_3/mla/mla_validation.h)；完整生产分派表见 [design 6.5](design.md#65-生产接入与构建)。
 
-## 独立 used 组件
+## 独立 used 生成
 
-M06d1 的 [`ParseUsedLengths` / `BuildUsedSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_used_schedule.h) 仅为 CPU 组件，实现位于 [`mla_tnd_schedule.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_schedule.cpp)。支持 BSND Q/KV、紧凑 TND Q/KV、TND Q + BSND KV；独立保存两轴的 64 位物理起点、分配长度与实际 used，缩短 used 不移动后续样本，缺省使用完整分配段。
+M06d1 的 [`ParseUsedLengths` / `BuildUsedSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_used_schedule.h) 现由 [v5 生成器](../../csrc/ascend910/flash_attn_npu_3/mla/mla_used_metadata.cpp) 在 CPU/AICPU 共用。覆盖 BSND Q/KV、紧凑 TND Q/KV、TND Q + BSND KV；缩短 used 不移动后续样本，缺省使用完整分配段。
 
-分配、used、计数、字段、地址和资源分别完整校验；失败不改写输出，不保留输入指针。基本块/workspace 依据分配几何，任务/成本/执行块上界依据实际长度；显式 used 与缺省 TND 累计尾值保留不同的源数组语义，详见 [design 6.2.7](design.md#627-分配长度与-used-的-cpu-归一)。**尚无 used metadata 协议、AICPU 发射、设备消费者或 attention 输出**；共享源码被 v3/v4 AICPU 编译不等于 used 已接入设备。
+新记录为 **`int32[410+8B]`、version/kind=5/5**，保存完整调度、两轴布局/总容量/max 上界、显式 used 标记，以及每样本的 64 位物理起点、分配长度和实际长度。分配与 used 的源数组语义分别保留，详见 [design 5.7](design.md#57-v5分配与-used-记录) 和 [6.2.7](design.md#627-分配长度与-used-的-cpu-归一)。
+
+[`ComputeMlaUsedMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_used_metadata.aicpu) 直接读取设备前缀/used，无长度 D2H。安全输出上的生成失败清零八字头后的全部载荷；输出尺寸/地址不安全或输入与输出重叠则直接拒绝写入。四组只读输入可相互别名，空 batch 的显式零长度数组仍保留 used 标记。旧 v1–v4 消费者拒绝 v5，且不改写解码输出。
+
+**目前仅独立生成 probe 发射 v5。尚无 used 设备消费者、attention 输出或公开接入**；扩展链接新对象不代表公开能力已开放。现有公共入口和拒绝边界保持上表所述。
 
 ## 最近闭环证据
 
-### 本次文档核验
+归档目录为 **`build/mla-m06d2a-used-metadata/`**，总索引 `acceptance.json`；`*-command.json` / `*-exit.json` 保存命令、环境和退出码，`source-snapshots/` 与 `production-final/` 保存本步源码和构建产物。验收共 **1,378 项去重 pytest 通过**，没有跳过项：
 
-归档目录为 `build/mla-docs-review-20261010/`，静态检查结果与命令见 `doc-checks.json`，证据复核见 `evidence-check.json`，质量检查见 `quality-staged.log` / `quality-staged-exit.json`。
-
-本次对照入口/校验、v1–v4 头文件、调度/used、构建、测试清单和固定官方源码快照，修正 v2/v4 分派、混合前向、记录克隆/scale 和返回值说明；合并共同协议规则，压缩历史验收过程，保持范围与步骤状态不变。修改前核对上一索引的 **6,074 个归档文件、238 个源码依赖、24 个对象及扩展哈希**，均匹配。修改后 237 个依赖不变，Python 包装文件仅 docstring 改变，去除 docstring 后 AST 一致；归档、对象和扩展哈希仍匹配。
-
-静态检查通过：140 个本地链接/锚点、25 张表、60 个步骤的顺序与完成分组、4 个固定官方签名及性能矩阵数量一致。**未重建、未加载扩展、未运行 CPU/NPU 功能或性能测试**。下列功能结果沿用已核实归档，不作为本次重跑结果。
-
-### 上一功能验收：M06d1
-
-2026-10-10 的归档为 **`build/mla-m06d1-used/`**，总索引 `acceptance.json`；`*-command.json` / `*-exit.json` 保存命令、环境和退出码。最终 **2,813 项去重 pytest 通过**，分布如下：
-
-| 验收面 | 归档结果 | 证据（相对归档目录） |
+| 验收面 | 本次结果 | 证据（相对归档目录） |
 | --- | --- | --- |
-| used CPU 归一/调度 | 306 项；U01/T01、可选 used、零容量/零 used、越界/溢出、64 位物理起点 | `used-verified.xml`、`used-verified/` |
-| 独立固定源差分 | 6,187 组；原生非 FD 3,579，FA3 禁止 split 映射 2,608；另 288 组旧布局字段一致 | `used-differential-summary.json` |
-| 既有调度/metadata | 861 项；dense/BSND/TND/混合、v1..v4、v3/v4 消费；另两项重复边界启用消费者 sanitizer | `cpu-regression-acceptance.json`、`cpu-verified.xml`、`consumer-sanitized.xml` |
-| 普通 FA3/接口边界 | 839 项；普通 metadata、compile、官方签名、MLA 契约和拒绝边界 | `ordinary-regressions.xml`、`ordinary-nodes.json` |
-| 910B 已有 TND/混合链路 | 792 项；双 dtype、前缀更新、stream/allocator/别名/compile，未开放的 used 仍拒绝 | `device-regressions.xml`、`device-nodes.json` |
-| 构建/产物 | 15 项；传递依赖失效、实例/隔离/缓冲；链接对象与扩展核验 | `build-tests.xml`、`production-build-manifest.json` |
+| 上一步最小复查 | 4 项 used CPU 检查，ASan/UBSan；上一文档静态命令通过，原结果哈希未变 | `baseline-used.xml`、`precheck.json` |
+| v5 CPU 与 sanitizer | 182 项；U01/T01、三布局、缺省/显式 used、零容量/零 used、错误/溢出、缓冲重叠、奇数 offset、旧协议隔离、64 位跨度 | `cpu-verified.xml`、`cpu-verified/`、`cpu-verified-driver-exits.json` |
+| v5 910B 生成 | 35 项；四数组更新、失败清零与重用、空 batch、别名、跨 stream/allocator、64 位容量 | `device-smoke.xml`（7 项）、`device-verified.xml`（28 项）及同名目录 |
+| 固定源差分 | CPU 6,474 条记录：原生非 FD 5,327，FA3 禁止 split 映射 1,147；AICPU 3,168 条：2,622 / 546；完整字段/跨度/任务一致 | `differential-summary.json`、`cpu-verified/`、`device-verified/`、`source-verified/`、`device-source/` |
+| v1–v4 AICPU 回归 | 129 项；字段/源对照、错误状态、空值、更新、生命周期 | `legacy-metadata.xml`、`legacy-metadata-tmp/` |
+| 普通 FA3 / 接口边界 | 839 项；普通 metadata、compile、固定官方签名、MLA 契约与未开放 used 拒绝 | `ordinary-regressions.xml`、`ordinary-nodes.json` |
+| 910B 混合公开链路 | 170 项；双 dtype 源精度、None/整数长度、空值/返回、stream/allocator/别名 | `legacy-public.xml`、`legacy-public-attention/` |
+| 构建 / 质量 | 19 项；含 v5 header/args/schedule.cpp 的增量失效；只新增一个链接对象；质量钩子与 diff 检查通过 | `build-tests.xml`、`production-build-manifest.json`、`quality-staged.log` |
 
-CPU 回归原轮次虽有 861 项断言通过，但两个驱动因 fork 子进程继承 stdin 管道而等待 EOF 超时，总退出码为 1；不能将该轮直接记为通过。归档持续进程工具修复子进程管道关闭后，完整补跑受影响 dense/环境检查 94 项和共用源 oracle 的 v1 metadata 22 项，四个驱动正常退出，无 sanitizer 报告；节点、请求数及输入/输出摘要核对一致，故汇总为 `passed_after_focused_exit_rechecks`。重复用例不增加总计；早期中断/失败轮次保留在归档，不计作通过。完整诊断见 `cpu-exit-diagnosis.json`。
+CPU 验收使用归档 `pytest_persistent.py`，七个持续驱动正常退出，ASan/UBSan/LSan 无报告。首轮 CPU smoke 中，测试把“非空地址加巨大 count 导致输出区间重叠”误期望为可写失败记录；已按协议拆开重叠拒写与空指针错误计数，并完整补跑。该失败轮次保留在 `cpu-smoke.*`，不计作通过；本次没有遗留失败。
 
-M06d1 未修改 attention Kernel / Block / Tile，未重跑性能。最近公开混合 E2E 仍为 `build/mla-m06c3c-kvcache/performance-acceptance.json`：双 dtype 各 12 例，保留原生 FD/空 KV 分类，适用七例的复用、生成加 R=1/4、逐次内部生成均达标；不作为 used 能力证据。
+最终哈希核验发现 CPU 测试文件在验收后被 formatter 添加了一行空行；保留了与原 manifest 哈希完全匹配的测试源码，确认前后 AST 一致，见 `test-format-audit.json` / `tested-sources/`。生产源码、对象和扩展哈希均匹配；该差异未被记作功能重跑。
+
+独立生成耗时为双 dtype 各七例，5 次预热、20 次测量：FP16 各例中位数 **261.70–282.98 μs**，BF16 **261.92–269.62 μs**。包含 ctypes、双事件和逐次同步，输入/输出 buffer 预先分配；原始数据见 `device-verified/timing-1.json` / `timing-2.json`。这不是 attention 或公开 E2E。未修改 attention Kernel / Block / Tile，未重跑其性能；最近公开混合 E2E 仍为 `build/mla-m06c3c-kvcache/performance-acceptance.json`，不作为 used 输出能力证据。
 
 ## 环境与构建
 
-以下为 **上一功能验收环境**。本次仅核对磁盘产物和固定版本，不宣称当前设备空闲或运行环境已重新验收；下次开发/实测前须重新检查。
+开发前核对上一功能归档的 **6,074 个文件、237 个未改源码依赖、24 个对象和扩展哈希**；其余一个 Python 依赖仅上一文档提交的 docstring 变化，已由该步静态检查复核。CATLASS 与只读 CANN 源工作区在本次前后保持一致。
 
-| 项目 | 记录 |
+| 项目 | 本次实测记录 |
 | --- | --- |
 | Python / PyTorch | `/usr/local/python3.11.15/bin/python3` 3.11.15；torch `2.7.1+cpu`、torch_npu `2.7.1` |
 | CANN / 编译器 | `/usr/local/Ascend/cann-9.0.0-beta.2`；bisheng clang 15.0.5 |
-| 芯片与执行环境 | 八张 Ascend910B3；上一轮设备/构建/完整 sanitizer 在沙箱外执行，沙箱内驱动初始化失败 |
+| 芯片与执行环境 | 八张 Ascend910B3；选择健康空闲卡：v5 用 7，普通 FA3 用 4，旧 metadata 用 5，混合前向用 3；构建/设备/完整 sanitizer 在沙箱外运行 |
 | CATLASS / 只读 CANN 源 | `769cd40a8716b28650b6bebb08db4834eea4462f` / `ca18aee610729ca5270a44e2d84c751bc687fbf0`；CATLASS 干净，CANN 原有 67 条删除/未跟踪记录保留 |
-| 生产重建 | M06d1 仅改变 `mla_tnd_metadata.o`、`mla_tnd_bsnd_metadata.o`；其余 22 个对象不变，238 个源码依赖已归档 |
-| 上次实际加载扩展 | `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`；SHA256 `3fca88dd5acbda6317fe019721a9f2fc3a5bf1f7733360e6ca5581a80bce2f43` |
+| 生产重建 | 新增 `mla_used_metadata.o`；原有 24 个对象哈希不变；25 个对象、242 个源码依赖归档 |
+| 实际加载扩展 | `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`；SHA256 `380d5f9e7188ddeb792ca0a13c159a0765a1ae5c56baa2316821ec12eeba18fb` |
 
 ## 最小复现与交接
 
-文档检查可运行 `python3 build/mla-docs-review-20261010/check_docs.py`。下列为上一功能闭环的最小 CPU/设备复查命令，使用新的输出目录；完整 sanitizer 矩阵按 `used-verified-command.json` 和 `cpu-verified-command.json` 使用归档修正后的 `pytest_persistent.py`，EOF 问题的补查命令见 `cpu-exit-recheck-command.json` / `metadata-exit-recheck-command.json`。
+完整命令见归档的 `cpu-verified-command.json`、`device-smoke-command.json`、`device-verified-command.json`、`legacy-metadata-command.json`、`ordinary-regressions-command.json` 和 `legacy-public-command.json`。下列最小 CPU/设备复查使用新的输出目录；实机前先检查健康空闲卡并设置 `MLA_DEVICE`：
 
 ```bash
-MLA_SCHEDULE_SANITIZE=1 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_used_schedule.py -k 'u01_t01_physical_spans or source_array_semantics_and_capacity_geometry or per_sample_bounds_and_required_prefixes or wide_addresses_and_active_tile_bound' --basetemp=build/mla-used-cpu-recheck
+MLA_SCHEDULE_SANITIZE=1 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 MLA_USED_METADATA_CPU_DIR=build/mla-m06d2a-used-metadata/recheck-cpu MLA_USED_SCHEDULE_ARTIFACT_DIR=build/mla-m06d2a-used-metadata/recheck-source MLA_PERSISTENT_LABEL=recheck-cpu python3 build/mla-m06d2a-used-metadata/pytest_persistent.py -x -q tests/test_flash_attn_npu_v3_mla_used_metadata.py -k 'buffers_guards or u01_t01 or empty or dtype_static' --basetemp=build/mla-m06d2a-used-metadata/recheck-cpu-tmp
+
+ASCEND_RT_VISIBLE_DEVICES=${MLA_DEVICE:?set MLA_DEVICE} OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 MLA_USED_METADATA_DEVICE_DIR=build/mla-m06d2a-used-metadata/recheck-device python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_used_metadata_aicpu.py -k 'failures_empty or four_input or each_array or alias_cross' --basetemp=build/mla-m06d2a-used-metadata/recheck-device-tmp
 ```
 
-源码/构建变化时重建扩展；已有设备链路的最小复查如下，先检查健康空闲卡并设置 `MLA_DEVICE`：
+源码/构建变化时先重建：`FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910 python3 setup.py build_ext --inplace`。质量命令为 `PYTHONPATH=/tmp/mla-m01-precommit:$PYTHONPATH PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache ci/code_quality.sh --staged`，保留 CANN PYTHONPATH。只暂存本步文件，保留 `kernel_meta/` 未跟踪产物。
 
-```bash
-FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910 python3 setup.py build_ext --inplace
-ASCEND_RT_VISIBLE_DEVICES=${MLA_DEVICE:?set MLA_DEVICE} OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 MLA_TND_BSND_METADATA_DEVICE_DIR=build/mla-used-legacy-producer-recheck MLA_TND_BSND_ATTENTION_DIR=build/mla-used-legacy-attention-recheck python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_mixed_public.py -k 'entries_empty_and_returns or none_integer_lengths or updates_streams_allocator_and_aliases or (source_accuracy and None and spec0)' --basetemp=build/mla-used-legacy-public-recheck
-```
-
-质量命令为 `PYTHONPATH=/tmp/mla-m01-precommit:$PYTHONPATH PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache ci/code_quality.sh --staged`，保留 CANN PYTHONPATH。只暂存本步文件，保留 `kernel_meta/` 未跟踪产物。下次先核验源码、构建和运行环境，按受影响范围重跑最小检查，再推进 M06d2a；生成、消费和独立 attention 仍分属 M06d2a/b/c。
+下次先核验源码、构建和运行环境，按受影响范围复查后推进 M06d2b；不要把 v5 独立生成视为 used 已可执行 attention。910C 和完整 graph replay 仍未实机验收。

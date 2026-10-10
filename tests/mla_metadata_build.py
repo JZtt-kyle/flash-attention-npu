@@ -45,7 +45,7 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def build_probe(directory, *, bsnd=False, tnd=False, mixed=False):
+def build_probe(directory, *, bsnd=False, tnd=False, mixed=False, used=False):
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     output = directory / "metadata.so"
@@ -72,6 +72,12 @@ def build_probe(directory, *, bsnd=False, tnd=False, mixed=False):
                     str(output), str(MLA / "mla_tnd_bsnd_metadata.aicpu")
                 )
             )
+        if used:
+            objects.append(
+                metadata_builder(force=True)._build_aicpu_object(
+                    str(output), str(MLA / "mla_used_metadata.aicpu")
+                )
+            )
     cann = Path(os.environ["ASCEND_HOME_PATH"])
     command = [
         str(cann / "bin/bisheng"),
@@ -85,6 +91,7 @@ def build_probe(directory, *, bsnd=False, tnd=False, mixed=False):
         *(["-DMLA_BSND_METADATA"] if bsnd else []),
         *(["-DMLA_TND_METADATA"] if tnd else []),
         *(["-DMLA_TND_BSND_METADATA"] if mixed else []),
+        *(["-DMLA_USED_METADATA"] if used else []),
         f"-I{MLA.parent}",
         f"-I{cann}/include",
         f"-L{cann}/lib64",
@@ -95,7 +102,8 @@ def build_probe(directory, *, bsnd=False, tnd=False, mixed=False):
         *([str(MLA / "mla_bsnd_metadata.cpp"), str(MLA / "mla_bsnd_schedule.cpp")] if bsnd else []),
         *([str(MLA / "mla_tnd_metadata.cpp")] if tnd else []),
         *([str(MLA / "mla_tnd_bsnd_metadata.cpp")] if mixed else []),
-        *([str(MLA / "mla_tnd_schedule.cpp")] if tnd or mixed else []),
+        *([str(MLA / "mla_used_metadata.cpp")] if used else []),
+        *([str(MLA / "mla_tnd_schedule.cpp")] if tnd or mixed or used else []),
         "-x",
         "none",
         *objects,
@@ -163,6 +171,23 @@ def build_probe(directory, *, bsnd=False, tnd=False, mixed=False):
             "mla_tnd_bsnd_metadata_args.h",
             "mla_tnd_bsnd_metadata.cpp",
             "mla_tnd_bsnd_schedule.h",
+            "mla_tnd_schedule.cpp",
+        ):
+            assert str(MLA / name) in extra_dependencies
+        dependencies += extra_dependencies
+    if used:
+        extra_dependencies = (
+            (directory / "mla_used_metadata.o.d")
+            .read_text()
+            .replace("\\\n", " ")
+            .split(":", 1)[1]
+            .split()
+        )
+        for name in (
+            "mla_used_metadata.h",
+            "mla_used_metadata_args.h",
+            "mla_used_metadata.cpp",
+            "mla_used_schedule.h",
             "mla_tnd_schedule.cpp",
         ):
             assert str(MLA / name) in extra_dependencies
