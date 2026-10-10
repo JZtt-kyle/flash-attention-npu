@@ -1,0 +1,48 @@
+// TND-Q/BSND-KV specialization of the migrated CANN nonquant MLA task ring.
+// Source and license: mla_dense.hpp and ../LICENSE.cann. Token starts follow
+// CANN ca18aee610729ca5270a44e2d84c751bc687fbf0 ActualSeqLensParser;
+// the validated v4 snapshot supplies compact Q starts and 64-bit b*Sk KV starts.
+#pragma once
+#include "mla_dense.hpp"
+#include "../mla_tnd_bsnd_metadata_consumer.h"
+
+namespace flash_attn::mla::Kernel {
+template <typename InputT>
+class MlaTndBsnd : private MlaNonPaged<InputT, true, true, true> {
+  public:
+    // Caller must validate v4 and current Q prefixes/KV lengths on every core before TPipe,
+    // synchronization or writes. Empty capacity still passes that validation.
+    __aicore__ inline void operator()(const MlaTndBsndKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
+                                      GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
+                                      TPipe* pipe, GM_ADDR spans)
+    {
+        if (schedule.totalQuery == 0) {
+            return;
+        }
+        if (schedule.totalKvCapacity == 0) {
+            if ASCEND_IS_AIV {
+                // FA3 global-empty capacity uses +inf; empty samples within a
+                // nonempty capacity use -inf in the common initialization.
+                const uint64_t rows = uint64_t(schedule.totalQuery) * schedule.tiling.heads;
+                const uint64_t single = (rows + GetSubBlockNum() - 1) / GetSubBlockNum();
+                const uint64_t start = GetBlockIdx() * single;
+                if (start < rows) {
+                    const uint64_t count = rows - start < single ? rows - start : single;
+                    GlobalTensor<InputT> outGm;
+                    GlobalTensor<float> lseGm;
+                    outGm.SetGlobalBuffer(reinterpret_cast<__gm__ InputT*>(output));
+                    lseGm.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(lse));
+                    matmul::InitOutput<InputT>(outGm[start * 512], count * 512, 0);
+                    SetFlag<HardEvent::MTE3_V>(0);
+                    WaitFlag<HardEvent::MTE3_V>(0);
+                    matmul::InitOutput<float>(lseGm[start], count, float(1.0 / 0.0));
+                    SetFlag<HardEvent::MTE3_V>(0);
+                    WaitFlag<HardEvent::MTE3_V>(0);
+                }
+            }
+            return;
+        }
+        this->Run(schedule.tiling, scale, qc, qr, kv, kr, output, lse, workspace, pipe, spans, schedule.totalQuery);
+    }
+};
+} // namespace flash_attn::mla::Kernel

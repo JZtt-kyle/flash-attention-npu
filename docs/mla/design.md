@@ -243,7 +243,7 @@ v1/v2/v3 共用协议头、平台、空调度、workspace 与本地内存校验�
 
 变长 M 块、实际 M/S2 总块数、端点和逐样本零成本后缀沿用 6.2.6；平台、空调度、workspace 和本地资源复用既有校验。非空物理容量中的全零 KV 仍校验完整调度与 workspace，不能改成空调度。失败不改写输出调度；和旧协议一样，不认证 split 最优性或未消费的 cost/FD 记账字段。
 
-[`kernel/mla_tnd_bsnd_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd_metadata.hpp) 检查地址、4 字节对齐、地址加法、编译 dtype 和实际 blockDim。每个 Cube/Vector 在 TPipe、attention 事件与输出/workspace 写入前完成只读校验；`LoadTndBsndMetadata` 遇错执行不受 `NDEBUG` 影响的真实 Trap，无长度 D2H 或主机等待。生成与消费期间记录和输入不可修改，跨 stream 与 allocator 依赖遵循 [5.6](#56-stream-与内存生命周期)。混合 attention 与公开接入按计划分别验收。
+[`kernel/mla_tnd_bsnd_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd_metadata.hpp) 检查地址、4 字节对齐、地址加法、编译 dtype 和实际 blockDim。每个 Cube/Vector 在 TPipe、attention 事件与输出/workspace 写入前完成只读校验；`LoadTndBsndMetadata` 遇错执行不受 `NDEBUG` 影响的真实 Trap，无长度 D2H 或主机等待。生成与消费期间记录和输入不可修改，跨 stream 与 allocator 依赖遵循 [5.6](#56-stream-与内存生命周期)。独立混合 attention 在校验成功后将五字 span 交给 `MlaTndBsnd`；公开接入仍按计划另行验收。
 
 ### 5.6 stream 与内存生命周期
 
@@ -278,9 +278,9 @@ v2 消费后将快照传给 `MlaDense<InputT, true>` 实际长度特化。独立
 | --- | --- | --- |
 | BSND Q/KV | `mla_launch_impl.hpp` 消费 v1/v2 | `MlaDense` → `MlaNonPaged<InputT, HasKvLengths, false>` |
 | 紧凑 TND Q/KV | [`mla_tnd_attention_probe.cpp`](../../tests/mla_tnd_attention_probe.cpp) 消费 v3 | `kernel/mla_tnd.hpp::MlaTnd` → `MlaNonPaged<InputT, true, true>`，共用 Cube / Vector / Tile |
-| TND Q + BSND KV | [`mla_tnd_bsnd_metadata_consumer_probe.cpp`](../../tests/mla_tnd_bsnd_metadata_consumer_probe.cpp) 消费 v4 | 仅校验及诊断写入；尚无混合 attention 调用 |
+| TND Q + BSND KV | [`mla_tnd_bsnd_attention_probe.cpp`](../../tests/mla_tnd_bsnd_attention_probe.cpp) 消费 v4 | [`kernel/mla_tnd_bsnd.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd.hpp)::`MlaTndBsnd` → `MlaNonPaged<InputT, true, true, true>`，共用 Cube / Vector / Tile |
 
-v3/v4 各自使用独立 context 和 Kernel 调度类型，防止将布局不同的起点快照误传给 BSND 或紧凑 TND。混合计算、FD 合并与 192/128 通用路径按计划迁移。
+v3/v4 各自使用独立 context 和 Kernel 调度类型，防止将布局不同的起点快照误传给 BSND 或紧凑 TND。混合 span 的 KV 起点从两个 uint32 字恢复为 uint64，并在任务环 `RunInfo` 与 Tile 坐标中保持 64 位。FD 合并与 192/128 通用路径按计划迁移。
 
 - 以固定 CANN 源码为起点，保留来源及版权；许可证位于 [`LICENSE.cann`](../../csrc/ascend910/flash_attn_npu_3/mla/LICENSE.cann)。CATLASS 示例用于理解分层，不能替代源执行流程。
 - 允许文件拆分、命名、类/模板组织、参数封装、构建接入和 gert/optiling 解耦。复用已有组件须保证运算、布局、精度、资源与同步契约等价；无法等价时在本仓封装源逻辑，不修改 CATLASS 子模块来容纳常规迭代。
@@ -371,7 +371,7 @@ KV token 起点固定为 `uint64(b)*Sk`，短长度和零长度不压缩 cache�
 
 固定源 `CreateSplitInput` 接收数值转换的 int64 Q 累计尾值与非累计 KV 长度，分别设置 `isAccumSeqS1=true`、`isAccumSeqS2=false`。调度 `s1Size` 使用观测 Q 最大值，`s2Size` 保留物理 Sk；观测 KV 最大值单独保存。`ProcessKVActualSeqLoop` 的等长判定比较原 KV 数组值，因此 B=10、Q 每段 2、Hq=128、20 核、Sk=511 且 KV 每段 511 时 M=128，而紧凑 TND 为 M=256。S2 基块按容量取 `min(Sk,512)`，任务成本和总物理执行块数按各样本实际 Q/KV 长度计算；后者须落在 uint32 内。
 
-混合布局与紧凑 TND 共用变长 M 块端点映射、零成本后缀检查和 workspace 计算。总 Q=0、B=0 或 Sk=0 时使用单校验核与零 workspace；非空物理容量中的全零 KV 保留源零成本调度和 workspace。[独立 CPU 对照](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_schedule.py) 的源 oracle 读取固定 CANN Git blob，不调用迁移解析器。CPU 与 [v4 AICPU 生成器](#55-v4tnd-q-与-bsnd-kv-混合记录) 共用此组件；其 64 位起点不能写入紧凑 v3 的四字 span，消费、attention 和公开接入分别验收。
+混合布局与紧凑 TND 共用变长 M 块端点映射、零成本后缀检查和 workspace 计算。总 Q=0、B=0 或 Sk=0 时使用单校验核与零 workspace；非空物理容量中的全零 KV 保留源零成本调度和 workspace。[独立 CPU 对照](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_schedule.py) 的源 oracle 读取固定 CANN Git blob，不调用迁移解析器。CPU 与 [v4 AICPU 生成器](#55-v4tnd-q-与-bsnd-kv-混合记录) 共用此组件；其 64 位起点不能写入紧凑 v3 的四字 span。独立 attention 消费完整 v4 后，Q 使用紧凑起点、KV 使用物理起点，按当次样本 Q/KV 长度推进任务；O 为 `[Tq,Hq,512]`，LSE 为 `[Hq,Tq]`。非空物理容量中全零实际 KV 仍为 `O=0、LSE=-inf`，物理 Sk=0 则为 `O=0、LSE=+inf`；两者都先校验记录。公开接入另行验收。
 
 ### 6.3 数值路径与资源布局
 
@@ -454,7 +454,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 ### 7.1 固定性能矩阵与阶段边界
 
-性能形状在采样前固定，双 dtype 使用同一矩阵。公开 BSND E2E 与整容量组件矩阵以 [`mla_profile_cases.py`](../../tests/mla_profile_cases.py) 为准；独立实际长度 BSND 和紧凑 TND 矩阵分别取自 [`BSND attention 套件`](../../tests/test_flash_attn_npu_v3_mla_bsnd_attention.py) 和 [`TND attention 套件`](../../tests/test_flash_attn_npu_v3_mla_tnd_attention.py) 的 `PERFORMANCE_CASES`。原生 CANN 自动 FD 的用例继续保留并单列，不按耗时删选。
+性能形状在采样前固定，双 dtype 使用同一矩阵。公开 BSND E2E 与整容量组件矩阵以 [`mla_profile_cases.py`](../../tests/mla_profile_cases.py) 为准；独立实际长度 BSND 和紧凑 TND 矩阵分别取自 [`BSND attention 套件`](../../tests/test_flash_attn_npu_v3_mla_bsnd_attention.py) 和 [`TND attention 套件`](../../tests/test_flash_attn_npu_v3_mla_tnd_attention.py) 的 `PERFORMANCE_CASES`；混合布局矩阵取自 [`TND Q + BSND KV attention 套件`](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_attention.py) 的同名清单，由 [`mla_tnd_bsnd_profile.py`](../../tests/mla_tnd_bsnd_profile.py) 采样。原生 CANN 自动 FD 的用例继续保留并单列，不按耗时删选。
 
 | 清单 | 用例数 | 引入目的 |
 | --- | --- | --- |
@@ -465,6 +465,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | `BSND_CASES` | 11 | 实际 KV 长度：短/非均匀/零尾部/全零/跨块/长 KV 及 M 基块变化 |
 | BSND `PERFORMANCE_CASES` | 12 | 实际长度独立 attention 与整容量回归；仅同调度非 FD 组件对照，由 `mla_bsnd_profile.py` 采样 |
 | TND `PERFORMANCE_CASES` | 10 | 紧凑 TND 独立 attention：非均匀 Q/KV、跨块、零成本尾部、总 KV 超过 16384；仅同调度非 FD 组件对照 |
+| 混合布局 `PERFORMANCE_CASES` | 12 | TND Q + BSND KV：物理容量/有效长度分离、非均匀与跨块、零成本尾部、全零实际 KV、混合布局 M 基块；仅同调度非 FD 组件对照 |
 
 源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。前四组共 26 个整容量用例作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E。`BSND_CASES` 另含 11 个实际长度用例，保留全部原生 FD 分派并单列；公开全零实际长度同样计入对应路径的 E2E 验收。
 
@@ -472,7 +473,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 功能检查另覆盖 M 的 16/128/256 边界、非整齐 M=129/255、KV 对齐两侧及长 KV、内容/RoPE 各半独立扰动、非零 offset、scale 默认/零/负/显式值、跨块最大值变化（含 aMLA `-30` 截断）、双缓冲/任务环、重复执行和多流复用。固定源同调度非 FD Kernel 的 O 和非空行 LSE 要逐元素一致，再通过独立双 reference；零 KV 行单独检查源 LSE=`+inf`、迁移 LSE=`-inf` 的 FA3 适配，不把它判为数值误差。全局空容量另按 3.3 验收。原生自动 FD 数值顺序不同时分别检查数学精度，不强求非 FD 与 FD 逐元素一致。
 
-公开性能采样采用双 dtype、预热 5 次、五轮各 20 个 wall 样本、R=1/4，同一进程对双方固定相同 CPU 亲和性；单列 metadata 生成、Kernel 和分派证据。噪声不确定时保留原数据并补测。全局空容量在固定 dense CANN 基线之外，耗时只作诊断；独立 ctypes 生成器或记录校验驱动的调用耗时也不代表 attention 或公开 E2E。独立 TND 的同调度 Kernel 与 probe 调用时间分别报告；公开 TND 接通时仍须补公开调用段验收。
+公开性能采样采用双 dtype、预热 5 次、五轮各 20 个 wall 样本、R=1/4，同一进程对双方固定相同 CPU 亲和性；单列 metadata 生成、Kernel 和分派证据。噪声不确定时保留原数据并补测。全局空容量在固定 dense CANN 基线之外，耗时只作诊断；独立 ctypes 生成器或记录校验驱动的调用耗时也不代表 attention 或公开 E2E。独立 TND 与混合布局的同调度 Kernel 与 probe 调用时间分别报告；公开入口接通时仍须补公开调用段验收。
 
 M06 起的长度/布局检查必须区分分配位置与有效范围：FA3 带起始 0 的 `cu_seqlens` 决定样本起点，`seqused` 限定使用范围，不能按缩短后的累计和重排后续样本。对未使用 query 槽位只断言固定官方定义的输出区域。独立 oracle 不得与待测端共享长度/页表解析；全零实际长度、尾部零样本及 poison padding 单独覆盖。新增公开能力按本节同一路径 E2E 口径验收，TND varlen 的内部生成计入完整调用段。
 
@@ -481,6 +482,8 @@ M06 起的长度/布局检查必须区分分配位置与有效范围：FA3 带�
 [独立 CPU reference](../../tests/common/mla_ref.py) 当前只接受规范 BSND 逻辑张量。高精度用 FP64，低精度对照用输入 dtype 点积与 FP32 softmax，最终 O 为输入 dtype、LSE 为 FP32；两者都不调用 FA3/CANN 或现仓普通 attention golden。`fa3_to_cann_inputs` 显式传同一 scale，prefill 可返回 stride 保真的 split 视图或 combined 表示；反向映射要求 512 维 K/V 为同一 storage view，拒绝数值暂时相等的独立 buffer。
 
 [CPU 数学验收](../../tests/test_flash_attn_npu_v3_mla_reference.py) 用独立标量求和/指数 oracle 和手写可见列矩阵核对 D/P 数学、共享边界、scale、GQA、stride、mask、softcap 与全局空张量；不共用 reference 的 mask 或张量收缩。该 reference 不解析 TND/PA，也不验证 metadata、split accumulator 或图。BSND 实际长度由 [逐样本对照](../../tests/test_flash_attn_npu_v3_mla_bsnd_attention.py) 按有效区切片，并单独构造非零容量中零 KV 的 LSE=`-inf`；TND 另有 [前缀和与调度](../../tests/test_flash_attn_npu_v3_mla_tnd_schedule.py)、[v3 序列化](../../tests/test_flash_attn_npu_v3_mla_tnd_metadata.py) 和 [AICPU 生成](../../tests/test_flash_attn_npu_v3_mla_tnd_metadata_aicpu.py) 套件。[TND attention 对照](../../tests/test_flash_attn_npu_v3_mla_tnd_attention.py) 从独立逻辑段长切片调用双 reference，并与固定源 TND Kernel 比较 O 和转为 `[Hq,Tq]` 的 LSE；固定源使用数值构造的 int64 累计尾值，不读取 v3 起点快照。全局空容量仅验数学契约，非零容量的零 KV 行单独验源 `+inf` / FA3 `-inf`，组件性能不替代公开 E2E。
+
+[混合 attention 对照](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_attention.py) 按独立逻辑段长与 `b*Sk` 切片双 reference，KV padding/空 Q 对应 cache 使用 NaN poison。固定源 probe 实例化 TND Q 与 BSH（物理 BSND）KV；arch22 的 `GetKvActSeqMode` 按 Q 布局选择 ACCUM，因此仅在测试侧将原始逻辑 KV 长度转换为 int64 累计尾值，而源 KV offset calculator 仍按 `b*Sk` 寻址。CPU 调度 oracle 仍使用非累计 KV 长度；两端不读取 v4 起点快照。原始源 header 不变，该独立实例不代表 CANN 公开混合分派或公开 E2E。
 
 [CANN 执行器](../../tests/mla_cann_baseline.py) 的 `CASES` 与 [910B 基线测试](../../tests/test_flash_attn_npu_v3_mla_cann.py) 覆盖无 mask 的 BSND D01/D02/P01/P02、FD01 和长 prefill，采用 CANN 原生自动 split。`CannCall(..., kv_lengths=...)` 还支持按样本实际 KV 长度，由 [公开性能驱动](../../tests/mla_forward_profile.py) 用于 BSND 长度对照；这是源执行器能力，不表示对应 FA3 功能均已迁移。执行器不覆盖 TND、PA、mask 或全局空容量。
 

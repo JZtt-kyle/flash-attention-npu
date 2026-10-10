@@ -19,9 +19,9 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False, tnd=False):
+def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False, tnd=False, mixed=False):
     assert dtype in ("fp16", "bf16")
-    assert sum((metadata, bsnd, tnd)) <= 1
+    assert sum((metadata, bsnd, tnd, mixed)) <= 1
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
@@ -103,10 +103,18 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False, tnd=Fal
         common.append("-DMLA_DENSE_BF16")
     if bsnd:
         common += ["-DMLA_BSND_ATTENTION", "-DNDEBUG"]
-    if tnd:
+    if tnd or mixed:
         common += ["-DNDEBUG"]
-    probe_source = ROOT / (
-        "tests/mla_tnd_attention_probe.cpp" if tnd else "tests/mla_dense_probe.cpp"
+    probe_source = (
+        ROOT
+        / "tests"
+        / (
+            "mla_tnd_bsnd_attention_probe.cpp"
+            if mixed
+            else "mla_tnd_attention_probe.cpp"
+            if tnd
+            else "mla_dense_probe.cpp"
+        )
     )
 
     def compile_probe(name):
@@ -168,6 +176,10 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False, tnd=Fal
             assert "mla_metadata_consumer.h" in dependencies and "mla_metadata.hpp" in dependencies
         if tnd and name == "migrated":
             assert "mla_tnd.hpp" in dependencies and "mla_tnd_metadata.hpp" in dependencies
+        if mixed and name == "migrated":
+            assert (
+                "mla_tnd_bsnd.hpp" in dependencies and "mla_tnd_bsnd_metadata.hpp" in dependencies
+            )
         if bsnd and name == "migrated":
             assert "mla_bsnd_metadata.hpp" in dependencies
         assert ("oracle-source" in dependencies) == (name == "oracle")
@@ -223,7 +235,8 @@ def build_probes(artifacts, dtype="fp16", *, metadata=False, bsnd=False, tnd=Fal
         "dtype": dtype,
         "bsnd": bsnd,
         "tnd": tnd,
-        "ndebug": bsnd or tnd,
+        "mixed": mixed,
+        "ndebug": bsnd or tnd or mixed,
         "oracle_tiling_sha256": sha256(artifacts / "oracle_tiling.h"),
         "libraries": {
             name: {"path": path, "sha256": sha256(Path(path))} for name, path in libraries.items()

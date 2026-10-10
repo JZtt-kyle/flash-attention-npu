@@ -39,7 +39,8 @@ struct RunInfo {
     uint32_t actMBaseSize = 0, actualSingleProcessSInnerSize = 0;
     uint32_t actualSingleProcessSInnerSizeAlign = 0;
     uint32_t bn2IdxInCurCore = 0, s2BatchOffset = 0;
-    uint32_t queryStart = 0, kvStart = 0; // Compact TND token offsets, captured per task.
+    uint32_t queryStart = 0; // Compact query token offset, captured per task.
+    uint64_t kvStart = 0;    // Compact TND or physical BSND token offset; never truncate b*Sk.
     bool isFirstSInnerLoop = true;
     bool isLastS2Loop = true, isValid = false;
 };

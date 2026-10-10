@@ -2,30 +2,28 @@
 
 本文件只记录迭代顺序、每步产物与完成条件。当前公开能力、最近一次闭环和复现命令见 [status](status.md)，目标范围、协议与验收口径见 [design](design.md)。步骤编号沿用历史，M04c 在 M05 闭环后执行；不按编号重新排序。
 
-唯一下一步为 **M06c2b2d：混合布局设备寻址与独立 attention 驱动**，完成条件见下。未完成工作按 M06 → M07..M17 排列，[已完成步骤](#已完成步骤) 集中放在末尾，保留原编号以便追溯提交。文档核验不推进功能步骤；独立组件完成不代表公开入口开放。
+唯一下一步为 **M06c3：公开 varlen 及 TND query 只读 kvcache / metadata**，完成条件见下。未完成工作按 M06 → M07..M17 排列，[已完成步骤](#已完成步骤) 集中放在末尾，保留原编号以便追溯提交。文档核验不推进功能步骤；独立组件完成不代表公开入口开放。
 
 ## M06：非分页长度、TND 与 stride
 
 本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`；各入口默认值及调用要求见 [status](status.md#当前可调用能力)。BSND 每样本 KV 容量 `Sk` 与 TND 每段长度上界 `maxKvLength` 均为 0..16384；紧凑 TND 总 Q/KV 容量各自不超过 `INT32_MAX`，混合布局的 BSND 总容量为 64 位 `B*Sk`，均受 [字段、地址及资源边界](design.md#62-调度字段与边界) 约束。先 BSND 实际 KV 长度，再紧凑 TND 与混合布局，再区分 used 与分配长度，最后外层 stride。PA、mask、FD、192/128 与调度选项仍按后续步骤推进。
 
-每行单独验收、提交。长度和布局沿用“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 公开接入”的顺序；混合布局的调度、生成、校验已完成，计算和公开接入仍需各自验收。
+每行单独验收、提交。长度和布局沿用“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 公开接入”的顺序；混合布局的调度、生成、校验和独立 attention 已完成，公开接入仍需另行验收。
 
-### 下一步：M06c2b2d
+### 下一步：M06c3
 
-输入为已验收的混合布局 CPU 调度、v4 AICPU 生成器与设备校验消费者，以及紧凑 TND/BSND 共用的 `MlaNonPaged` Kernel / Block / Tile 数值路径。公开接入留给 c3，used 留给 d1..d3。
+输入为已验收的 BSND v2、紧凑 TND v3、混合布局 v4 的生成、校验和独立 attention 链路。公开接入进入下一阶段；实施前先按每提交一个独立验收闭环拆分，保持固定官方 FA3 签名。
 
-- 使用独立混合 context / 调度类型接通独立 attention；先校验完整 v4 记录与当次 Q 前缀/KV 长度，再创建 TPipe、attention 事件或写输出/workspace。
-- Q 使用紧凑 TND 起点，KV 使用 64 位物理 `b*Sk`；按样本实际 Q/KV 长度推进任务，短 KV 不移动后续 cache，复用既有数值组件与来源声明。
-- O 为 `[Tq,Hq,512]`，LSE 为 `[Hq,Tq]`；覆盖变长 M 块、跨 S2 块、空 Q、短/混合/全零 KV、空物理容量和端点外零成本尾部，遵循既有空行语义。
-- 双 dtype 910B 固定源/数学精度、offset/poison padding、记录更新/复用/跨流/生命周期与计算前真实 Trap 通过；保留代表性源组件性能原始采样与边界说明。
-- 运行已有 TND/BSND、metadata、普通 FA3 回归，核验实际构建依赖与加载产物。本步独立驱动不开放公开 TND 或混合入口。
+- 接通当前 M06 范围的公开 varlen 内部生成、TND query 只读 kvcache 及显式 metadata 生成/复用；Q/KV 起点与输出/LSE 布局沿用对应协议。
+- 对齐真实/fake/C++ 校验，包含空总容量、损坏或过期记录与未接通选项的明确拒绝；used 仍留给 d1..d3。
+- 复用已验收的双事件和 allocator stream 生命周期，覆盖长度更新、记录复用与跨 stream，无长度 D2H。
+- 完成双 dtype 910B 精度、普通 FA3 回归及适用的公开调用段 E2E；varlen 的内部生成计入完整调用段，不能用独立组件时间替代。
 
 ### M06 剩余步骤
 
 | 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
 | --- | --- | --- | --- |
-| M06c2b2d | 唯一下一步 | 混合布局设备寻址与独立 attention 驱动 | 双 dtype 非均匀 Q、短/混合/零 KV、跨块、空容量、poison padding/offset；源/数学精度、组件性能与已有布局回归通过 |
-| M06c3 | 待开始 | 公开 varlen 及 TND query 只读 kvcache / metadata | varlen 内部生成、kvcache 按原签名复用；真实/fake/C++、空总容量、生命周期、普通 FA3 与适用 E2E 达标 |
+| M06c3 | 唯一下一步，实施前拆分 | 公开 varlen 及 TND query 只读 kvcache / metadata | varlen 内部生成、kvcache 按原签名复用；真实/fake/C++、空总容量、生命周期、普通 FA3 与适用 E2E 达标 |
 | M06d1 | 待开始 | BSND/TND 实际 Q/KV 使用长度 CPU 归一与调度 | U01/T01 used 小于分配长度；起点不随 used 重排；源对照与 sanitizer 通过 |
 | M06d2 | 待开始 | used 的 AICPU、设备消费与独立 Kernel 链路 | 有效行/零 Q/KV/poison padding/长度更新/Trap；仅检查官方定义输出区，组件性能与 metadata/普通 FA3 回归通过 |
 | M06d3 | 待开始 | varlen `seqused_q/k` 与内部 BSND Q-used 接入 | 不增加公共参数，签名/真实/fake/C++/有效输出/普通 FA3 与适用 E2E 通过；无公开等价的 BSND Q-used 只验收内部入口 |
@@ -112,3 +110,4 @@ M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[�
 | M06c2b2a | TND Q + BSND KV 的 CPU 长度解析与调度 | 64 位物理 KV 起点、容量/实际长度分离、固定源差分、边界及 sanitizer、已有调度/metadata 回归通过 |
 | M06c2b2b | 混合布局独立 metadata 协议与 AICPU 生成 | 布局/物理容量/起点/长度完整保存；CPU/AICPU/固定源一致，失败清零、缓冲边界、生命周期、构建和普通 FA3 回归通过 |
 | M06c2b2c | 混合布局记录设备校验消费者 | 记录、当前 Q 前缀/KV 长度、容量、端点和资源校验；真实 Trap、拒绝不写输出、生命周期与已有布局/普通 FA3 回归通过 |
+| M06c2b2d | 混合布局设备寻址与独立 attention 驱动 | v4 先校验、64 位物理 KV 起点与变长任务环；双 dtype 源/数学精度、空容量/零尾部/poison/offset、记录更新/复用/生命周期/真实 Trap 通过；组件性能对照归档，已有布局/普通 FA3 回归通过 |

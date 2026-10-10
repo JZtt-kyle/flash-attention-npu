@@ -16,8 +16,9 @@
 // Specialization: nonempty contiguous BSND capacity, Hkv=1, no mask/FD,
 // Sq*Hq>0, 1<=Sk<=16384. The caller validates source field/address bounds and
 // supplies the source M-block partition, including cross-core and tail blocks.
-// MlaNonPaged shares the task ring with the typed compact TND wrapper.
-// IsTnd uses validated v3 token starts and per-sample Q/KV lengths.
+// MlaNonPaged shares the task ring with typed TND and mixed-layout wrappers.
+// IsTnd uses compact Q token starts and per-sample Q/KV lengths. MixedKv
+// selects v4 five-word spans with a 64-bit physical KV start instead of v3.
 // HasKvLengths additionally consumes a validated v2 int32 length snapshot.
 // Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
 // compute endpoints. FA3 requires -inf (source +inf) LSE for these empty rows.
@@ -28,10 +29,12 @@
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
-template <typename InputT, bool HasKvLengths, bool IsTnd>
+template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false>
 class MlaNonPaged {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
+    static_assert(!MixedKv || (IsTnd && HasKvLengths));
+    static constexpr uint32_t kSpanWords = MixedKv ? 5 : 4;
 
   protected:
     __aicore__ inline void Run(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv,
@@ -112,7 +115,8 @@ class MlaNonPaged {
     MlaDenseKernelSchedule params;
     GlobalTensor<uint32_t> lengths;
     uint32_t actualKvLength = 0, actualQueryLength = 0;
-    uint32_t queryTokens = 0, queryStart = 0, kvStart = 0;
+    uint32_t queryTokens = 0, queryStart = 0;
+    uint64_t kvStart = 0;
     uint32_t core, bStart, mStart, sStart, bEnd, mEnd, sEnd;
     uint32_t bn2IdxInCurCore = 0;
 
@@ -127,7 +131,7 @@ class MlaNonPaged {
         if constexpr (HasKvLengths) {
             bool needInit = false;
             for (uint32_t b = 0; b < params.batch; ++b) {
-                needInit |= lengths.GetValue(IsTnd ? 4 * b + 3 : b) == 0;
+                needInit |= lengths.GetValue(IsTnd ? kSpanWords * b + kSpanWords - 1 : b) == 0;
             }
             // Like source needInit, cover every output, including zero-KV
             // samples beyond the last compute endpoint. Never read their Q/KV.
@@ -258,10 +262,14 @@ class MlaNonPaged {
                 if constexpr (HasKvLengths) {
                     if (b != previousBatch) {
                         if constexpr (IsTnd) {
-                            queryStart = lengths.GetValue(4 * b);
-                            kvStart = lengths.GetValue(4 * b + 1);
-                            actualQueryLength = lengths.GetValue(4 * b + 2);
-                            actualKvLength = lengths.GetValue(4 * b + 3);
+                            const uint32_t start = kSpanWords * b;
+                            queryStart = lengths.GetValue(start);
+                            kvStart = lengths.GetValue(start + 1);
+                            if constexpr (MixedKv) {
+                                kvStart |= uint64_t(lengths.GetValue(start + 2)) << 32;
+                            }
+                            actualQueryLength = lengths.GetValue(start + kSpanWords - 2);
+                            actualKvLength = lengths.GetValue(start + kSpanWords - 1);
                         } else {
                             actualKvLength = lengths.GetValue(b);
                         }
