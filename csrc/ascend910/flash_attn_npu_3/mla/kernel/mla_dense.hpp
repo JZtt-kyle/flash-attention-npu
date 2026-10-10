@@ -20,6 +20,8 @@
 // IsTnd uses compact Q token starts and per-sample Q/KV lengths. MixedKv
 // selects v4 five-word spans with a 64-bit physical KV start instead of v3.
 // HasKvLengths additionally consumes a validated v2 int32 length snapshot.
+// HasUsed selects v5 eight-word spans: physical starts, capacities and used.
+// BSND addressing remains uint64(b)*capacity; TND uses the validated starts.
 // Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
 // compute endpoints. FA3 requires -inf (source +inf) LSE for these empty rows.
 #pragma once
@@ -29,12 +31,13 @@
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
-template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false>
+template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false, bool HasUsed = false>
 class MlaNonPaged {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
     static_assert(!MixedKv || (IsTnd && HasKvLengths));
-    static constexpr uint32_t kSpanWords = MixedKv ? 5 : 4;
+    static_assert(!HasUsed || HasKvLengths);
+    static constexpr uint32_t kSpanWords = HasUsed ? 8 : MixedKv ? 5 : 4;
 
   protected:
     __aicore__ inline void Run(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv,
@@ -131,7 +134,7 @@ class MlaNonPaged {
         if constexpr (HasKvLengths) {
             bool needInit = false;
             for (uint32_t b = 0; b < params.batch; ++b) {
-                needInit |= lengths.GetValue(IsTnd ? kSpanWords * b + kSpanWords - 1 : b) == 0;
+                needInit |= lengths.GetValue((IsTnd || HasUsed) ? kSpanWords * b + kSpanWords - 1 : b) == 0;
             }
             // Like source needInit, cover every output, including zero-KV
             // samples beyond the last compute endpoint. Never read their Q/KV.
@@ -169,7 +172,7 @@ class MlaNonPaged {
         info.bIdx = b;
         info.n2Idx = 0;
         info.gS1Idx = m * params.mBaseSize;
-        uint32_t rows = (IsTnd ? actualQueryLength : params.sq) * params.heads;
+        uint32_t rows = ((IsTnd || HasUsed) ? actualQueryLength : params.sq) * params.heads;
         if constexpr (IsTnd) {
             info.queryStart = queryStart;
             info.kvStart = kvStart;
@@ -196,8 +199,8 @@ class MlaNonPaged {
 
     __aicore__ inline void UpdateAxisInfo(uint32_t& b, uint32_t& m, uint32_t& s)
     {
-        uint32_t mLoops =
-            ((IsTnd ? actualQueryLength : params.sq) * params.heads + params.mBaseSize - 1) / params.mBaseSize;
+        uint32_t mLoops = (((IsTnd || HasUsed) ? actualQueryLength : params.sq) * params.heads + params.mBaseSize - 1) /
+                          params.mBaseSize;
         uint32_t kvLength = HasKvLengths ? actualKvLength : params.sk;
         uint32_t sLoops = (kvLength + params.s2BaseSize - 1) / params.s2BaseSize;
         if (s + 1 < sLoops) {
@@ -261,7 +264,16 @@ class MlaNonPaged {
             if (dispatch) {
                 if constexpr (HasKvLengths) {
                     if (b != previousBatch) {
-                        if constexpr (IsTnd) {
+                        if constexpr (HasUsed) {
+                            const uint32_t start = kSpanWords * b;
+                            // TND query totals fit int32. BSND uses the existing
+                            // 64-bit b*Sq address in Block, equal to this span.
+                            queryStart = lengths.GetValue(start);
+                            kvStart =
+                                uint64_t(lengths.GetValue(start + 2)) | (uint64_t(lengths.GetValue(start + 3)) << 32);
+                            actualQueryLength = lengths.GetValue(start + 6);
+                            actualKvLength = lengths.GetValue(start + 7);
+                        } else if constexpr (IsTnd) {
                             const uint32_t start = kSpanWords * b;
                             queryStart = lengths.GetValue(start);
                             kvStart = lengths.GetValue(start + 1);
@@ -275,7 +287,7 @@ class MlaNonPaged {
                         }
                         previousBatch = b;
                     }
-                    if (actualKvLength == 0 || (IsTnd && actualQueryLength == 0)) {
+                    if (actualKvLength == 0 || ((IsTnd || HasUsed) && actualQueryLength == 0)) {
                         // Preserve the source task-ring counters while skipping
                         // DEAL_ZERO/SKIP_ZERO. Pending tasks drain after dispatch.
                         UpdateAxisInfo(b, m, s);
