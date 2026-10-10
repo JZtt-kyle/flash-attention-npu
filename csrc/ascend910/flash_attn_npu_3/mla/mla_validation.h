@@ -66,6 +66,12 @@ inline MlaBsndInputLayouts CheckTndInputLayouts(const at::Tensor& q, const at::T
     return {CheckTndTensorLayout(q), CheckTndTensorLayout(qv), CheckTndTensorLayout(k), CheckTndTensorLayout(v)};
 }
 
+inline MlaBsndInputLayouts CheckTndBsndInputLayouts(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                                    const at::Tensor& qv)
+{
+    return {CheckTndTensorLayout(q), CheckTndTensorLayout(qv), CheckBsndTensorLayout(k), CheckBsndTensorLayout(v)};
+}
+
 inline bool FitsDenseShape(int64_t batch, int64_t sq, int64_t heads, int64_t sk)
 {
     return batch >= 0 && batch <= UINT32_MAX && sq >= 0 && sq <= kMlaMaxQueryLength && heads > 0 &&
@@ -120,8 +126,6 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
                     "MLA compressed forward is not implemented yet outside B>=0, nonnegative S1G within address/field "
                     "bounds, 0<=Sk<=16384");
         for (const auto& t : {q, k, v, *qv}) {
-            TORCH_CHECK(!varlenQ || varlenK || t.is_contiguous(),
-                        "MLA compressed forward is not implemented yet for noncontiguous BSND/TND");
             TORCH_CHECK(!t.requires_grad(), "MLA compressed forward is not implemented yet for gradients");
         }
         return true;

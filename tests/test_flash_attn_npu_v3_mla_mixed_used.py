@@ -208,7 +208,7 @@ def test_unconnected_combinations(entry, dtype, fault):
     elif fault == "max_k":
         args["max_seqlen_k"] = 33
     elif fault == "stride":
-        args["k"] = torch.empty((2, 66, 1, 64), dtype=dtype, device="npu")[:, ::2]
+        args["k"] = torch.empty((2, 33, 1, 128), dtype=dtype, device="npu")[..., ::2]
     elif fault == "mask":
         args["causal"] = True
     elif fault == "split":
@@ -217,7 +217,9 @@ def test_unconnected_combinations(entry, dtype, fault):
         args["out_"] = torch.empty((10, 8, 512), dtype=dtype, device="npu")
     else:
         args["qv"].requires_grad_(True)
-    with pytest.raises(RuntimeError, match="max_seqlen_q|not implemented yet|gradient"):
+    with pytest.raises(
+        RuntimeError, match="max_seqlen_q|not implemented yet|gradient|contiguous last dimension"
+    ):
         _forward(entry, args)
 
 

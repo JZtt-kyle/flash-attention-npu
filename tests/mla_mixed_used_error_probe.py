@@ -15,7 +15,7 @@ from tests.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_mla_mixed_used import inputs
 
 
-def run(kind, fault, directory):
+def run(kind, fault, directory, layout="contiguous"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[kind]
     args = inputs(
@@ -27,6 +27,17 @@ def run(kind, fault, directory):
         else (7, 3),
         capacity=0 if fault.startswith("empty_k") else 33,
     )
+    if layout == "strided":
+        from tests.test_flash_attn_npu_v3_mla_bsnd_stride import strides_for
+
+        for name in ("q", "qv", "k", "v"):
+            t = args[name]
+            shape = (1, *t.shape) if t.ndim == 3 else t.shape
+            strides = strides_for(shape, "independent", name)
+            span = 0 if 0 in shape else 1 + sum((n - 1) * s for n, s in zip(shape, strides))
+            base = torch.zeros(span + 32, dtype=dtype, device="npu")
+            view = base.as_strided(shape, strides, 7)
+            args[name] = view[0] if t.ndim == 3 else view
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
@@ -58,6 +69,7 @@ def run(kind, fault, directory):
         except RuntimeError as error:
             extension = Path(api.flash_attn_npu_3.__file__)
             report = dict(
+                input_layout=layout,
                 fault=fault,
                 dtype=kind,
                 error=str(error),

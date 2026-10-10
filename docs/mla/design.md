@@ -449,7 +449,7 @@ Copy Tile 沿用固定 CANN 源 `attention/common/op_kernel/memcopy/attn_copy_gm
 
 独立 [TND stride attention 验收](../../tests/test_flash_attn_npu_v3_mla_tnd_stride.py) 覆盖 ST01/NTD、四路 offset、T01 与 used poison、混合 cache、空/广播/重叠、65535/65536/65537 和实际读取的 >uint32 stride。固定源接收从原始测试输入独立物化的连续视图；TND 的有效段按 used 压紧，混合 cache 保留分配槽位。物化与压紧在计时前完成，组件结果不能解释为相同物理布局或公开 E2E。
 
-TND Q/KV 的生产 `TndForward` 与 `UsedForward` 在分配输出及发射前调用该地址组件，覆盖 v3/v5 的全部四路输入；连续输入也检查完整 storage。按四路连续性选择原连续实例或 `HasStrides` 实例，stride 不写入 metadata，分配前缀和 used 仍逐次在设备检查。Python/fake 与 C++ 保持相同的 storage 边界；compile 跟踪时由算子 fake 检查、执行时由真实 C++ 检查。混合 TND Q + BSND KV 的非连续输入在独立生产接入前继续拒绝。
+生产 `TndForward`、`TndBsndForward` 与 `UsedForward` 在分配输出及发射前调用地址组件，覆盖 TND Q/KV v3/v5 和混合 TND Q + BSND KV v4/v5 的全部四路输入；连续输入也检查完整 storage。混合 Q/qv 使用 TND 描述，K/V 使用独立 BSND 描述，内部混合 Q-used 继续复用 TND used launcher。按四路连续性选择原连续实例或 `HasStrides` 实例，stride 不写入 metadata，分配前缀和 used 仍逐次在设备检查。Python/fake 与 C++ 保持相同的 storage 边界；compile 跟踪时由算子 fake 检查、执行时由真实 C++ 检查。公开混合 v4 的 metadata 可跨合法视图复用，但仍须匹配当次 Q 前缀、KV 长度及静态几何。
 
 [生产 TND stride 验收](../../tests/test_flash_attn_npu_v3_mla_tnd_stride_production.py) 覆盖公开 varlen、内部和原始 C++、真实/fake/compile、前缀/used 更新、完整 storage 拒绝与流生命周期。公开性能双方接收相同的物理视图；原生 FIA 的逐次布局转换，以及 used 适配的 gather/scatter，均计入 R=1/4 E2E。profiler 区分最终 attention 与带相同 FIA API 前缀的转换任务；显式适配器 wall 与全部转换设备耗时分别报告。
 
@@ -562,6 +562,8 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | TND/混合 stride `PERFORMANCE_CASES` | 12 | [`mla_tnd_stride_profile.py`](../../tests/mla_tnd_stride_profile.py)：v3/v4/v5、连续对照、NTD、独立布局、T01/used、单核任务环、16384 KV、65536 回退及广播；固定源非 FD、相同逻辑输入/调度，源连续物化及有效段压紧在计时前完成 |
 | 生产 BSND stride `PERFORMANCE_CASES` | 9 | [`mla_bsnd_used_profile.py --layout bsnd-stride`](../../tests/mla_bsnd_used_profile.py)：保持独立 stride 矩阵几何，按生产平台核数对照固定源；单列 AICPU、Kernel 与生产内部 wall，源连续物化在计时前完成 |
 | 生产 TND stride `PERFORMANCE_CASES` | 6 | [`mla_bsnd_used_profile.py --layout tnd-stride`](../../tests/mla_bsnd_used_profile.py)：独立矩阵的 TND Q/KV 子集，保留几何并使用生产全核；源连续物化及 used 压紧在计时前完成 |
+| 生产混合 stride `PERFORMANCE_CASES` | 6 | [`mla_bsnd_used_profile.py --layout mixed-stride`](../../tests/mla_bsnd_used_profile.py)：独立矩阵的混合 v4/v5 子集，保留几何并使用生产全核；源连续物化及 Q-used 压紧在计时前完成 |
+| 公开混合 stride `PUBLIC_CASES` | 11 | [`mla_mixed_profile.py --stride-probes/--stride-producer`](../../tests/mla_mixed_profile.py)：上述六例使用完整 Q 分配段、Hq≤128 的 v4，另含连续、65536、重叠与全零 KV 长度；同物理视图，显式复用、生成加 R=1/4、内部生成与原生转换分别计量，FD 单列 |
 | 公开 TND stride `PUBLIC_CASES` | 11 | [`mla_varlen_used_profile.py --stride`](../../tests/mla_varlen_used_profile.py)：上述六例按源 host 限制 Hq≤128，另含广播、单轴 used、显式整段 used 和全零 KV-used；同物理视图，逐次 v3/v5 生成与原生转换计入 R=1/4 E2E，FD 单列 |
 | 公开 BSND `STRIDE_CASES` | 10 | [`mla_forward_profile.py`](../../tests/mla_forward_profile.py)：连续对照、BNSD、独立布局、零长度、长 KV、65536 回退、广播/重叠；双方相同物理输入，CANN 转换计入公开 metadata 复用、生成加 R=1/4 对照，FD 分派单列 |
 
@@ -596,3 +598,5 @@ M06 起的长度/布局检查必须区分分配位置与有效范围：FA3 带�
 该执行器记录安装版本、进程实际加载的算子库及 SHA256、输入 shape/stride/offset、每轮 event span 和逐调用同步端到端时间。输入 H2D 与一次性视图创建不计时，输出分配及包装器内转换计时；event span 可能含 host 发射间隙，不当作纯 kernel 时间。安装包与固定源码的二进制对应关系未经验证时，结果仅验收执行器；性能验收须使用已建立的固定源码隔离构建及 profiler 分派证据，不能只凭安装版本归因。相关工具为 [来源核验](../../tests/test_flash_attn_npu_v3_mla_provenance.py) 和 [profiler 核验](../../tests/test_flash_attn_npu_v3_mla_profile.py)。
 
 [公开混合对照](../../tests/mla_mixed_profile.py) 的 `CannMixedCall` 适配固定源连续布局限制：`FiaInfoParser::GetKvLayout` 令 KV 跟随 Q，`FiaTilingCheck::CheckFeatureLayout` 也要求二者一致，故原生入口不能直接接收 TND Q + BSND KV。测试按独立逻辑 KV 长度构造设备索引，每次原生调用都从物理 BSND cache gather 出紧凑 TND K/V，再提交原生 FIA；两次 gather、输出分配及原生长度参数提交均计入 E2E，并单列转换耗时。H2D、索引和零拷贝视图准备在双方采样外。全零实际 KV 转为原生空容量分派，保留该用例与固定源空张量 kernel 的证据；非 FD、FD 和空容量分派按实际 tiling key 标记，不按耗时筛选。该测试适配不进入生产前向，也不将独立混合 probe 称为原生调用。
+
+混合 stride 对照沿用该调用边界：K/V 的 batch/token 轴能零拷贝合并时使用扁平索引，否则按原物理视图作两轴 gather；准备阶段不物化完整 cache。原生 Q/qv 的布局转换也计入 CANN 调用。双方接收相同 tensor 对象并记录 shape、stride、offset 和 storage；完整任务序列与原始 profiler CSV 交叉核对，分别报告 attention 和转换设备耗时。[混合生产验收](../../tests/test_flash_attn_npu_v3_mla_mixed_stride_production.py) 另覆盖四路完整 storage、metadata 跨视图复用、前缀/used 更新、流生命周期与真实 Trap。

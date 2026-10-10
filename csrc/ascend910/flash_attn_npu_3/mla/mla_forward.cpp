@@ -318,7 +318,7 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     const bool tnd = shape.query.layout == MlaSequenceLayout::Tnd;
     const auto layouts = !tnd                                        ? CheckBsndInputLayouts(q, k, v, qv)
                          : shape.kv.layout == MlaSequenceLayout::Tnd ? CheckTndInputLayouts(q, k, v, qv)
-                                                                     : MlaBsndInputLayouts{};
+                                                                     : CheckTndBsndInputLayouts(q, k, v, qv);
     const bool nonempty = batch != 0 && shape.query.totalTokens != 0 && shape.kv.totalTokens != 0;
     auto p = DensePlatform(nonempty);
     // Static allocation bounds only; source scheduling reads used on AICPU.
@@ -547,6 +547,7 @@ std::vector<at::Tensor> TndBsndForward(const at::Tensor& q, const at::Tensor& k,
                                        const std::optional<at::Tensor>& schedulerMetadata)
 {
     const auto words = CheckTndBsndForwardInputs(q, k, cuQ, maxQ, cacheSeqlens, schedulerMetadata);
+    const auto layouts = CheckTndBsndInputLayouts(q, k, v, qv);
     const int64_t batch = k.size(0), sk = k.size(1);
     const bool nonempty = batch != 0 && q.size(0) != 0 && sk != 0;
     auto p = DensePlatform();
@@ -580,6 +581,8 @@ std::vector<at::Tensor> TndBsndForward(const at::Tensor& q, const at::Tensor& k,
         }
     }
     MlaTndBsndLaunchArgs a{};
+    a.layouts = layouts;
+    a.hasStrides = !q.is_contiguous() || !k.is_contiguous() || !v.is_contiguous() || !qv.is_contiguous();
     uint32_t fftsLength = 0;
     TORCH_CHECK(rtGetC2cCtrlAddr(&a.ffts, &fftsLength) == RT_ERROR_NONE,
                 "MLA: failed to obtain cross-core synchronization address");

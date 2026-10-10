@@ -130,7 +130,7 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
 
     Uses only tensor metadata, including for fake tensors. Keep in sync with
     ascend910/flash_attn_npu_3/mla/mla_validation.h. Outer strides and storage
-    offsets are legal for BSND and TND Q/KV views; no view is materialized here.
+    offsets are legal for BSND, TND and mixed views; no view is materialized here.
     """
 
     def check(condition, message):
@@ -182,14 +182,10 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
             "address/field bounds, 0<=Sk<=16384",
         )
         for tensor in (q, k, v, qv):
-            check(
-                not varlen_q or varlen_k or tensor.is_contiguous(),
-                "MLA compressed forward is not implemented yet for noncontiguous BSND/TND",
-            )
             # Dynamo cannot trace storage_offset() in the public wrapper.
             # Registered fake kernels and the real C++ op validate storage
             # inside the operator boundary, including compiled execution.
-            if (not varlen_q or varlen_k) and not torch.compiler.is_compiling():
+            if not torch.compiler.is_compiling():
                 _check_mla_layout(tensor)
             check(
                 not tensor.requires_grad,

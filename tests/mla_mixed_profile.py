@@ -17,7 +17,9 @@ import torch_npu
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.common.compare import assert_fa_close
 from tests.mla_cann_baseline import check_vendor_configuration, environment, file_info
+from tests.mla_dense_build import ROOT, sha256
 from tests.mla_varlen_profile import CannTndCall
+from tests.test_flash_attn_npu_v3_mla_metadata import load_probe
 from tests.test_flash_attn_npu_v3_mla_mixed_public import metadata, public
 from tests.test_flash_attn_npu_v3_mla_tnd_bsnd_attention import references
 from tests.test_flash_attn_npu_v3_mla_tnd_schedule import build_oracle, evaluate, tnd_case
@@ -55,11 +57,33 @@ class CannMixedCall:
         capacity = inputs["k"].shape[1]
         positions = [b * capacity + j for b, length in enumerate(ks) for j in range(length)]
         self.index = torch.tensor(positions, dtype=torch.int32, device=inputs["q"].device)
-        self.cache = {n: inputs[n].view(-1, 1, inputs[n].shape[-1]) for n in ("k", "v")}
+        self.batch_index = torch.tensor(
+            [b for b, length in enumerate(ks) for _ in range(length)],
+            dtype=torch.int64,
+            device=inputs["q"].device,
+        )
+        self.token_index = torch.tensor(
+            [j for length in ks for j in range(length)],
+            dtype=torch.int64,
+            device=inputs["q"].device,
+        )
+        self.cache = {}
+        for name in ("k", "v"):
+            try:
+                self.cache[name] = inputs[name].view(-1, 1, inputs[name].shape[-1])
+            except RuntimeError:
+                # Only create zero-copy views before timing. Arbitrary BSND
+                # strides need a two-axis gather on each native invocation.
+                self.cache[name] = None
         self.native = CannTndCall(inputs, qs, ks, scale)
 
     def pack(self):
-        return {n: tensor.index_select(0, self.index) for n, tensor in self.cache.items()}
+        return {
+            n: tensor.index_select(0, self.index)
+            if tensor is not None
+            else self.inputs[n][self.batch_index, self.token_index]
+            for n, tensor in self.cache.items()
+        }
 
     def __call__(self):
         packed = self.pack()
@@ -139,7 +163,90 @@ def prepare(dtype, platform, output):
     return args, natives, records, native_schedules
 
 
-def profile(output, vendor, platform_path, dtype_name, dispatch_only=False):
+def prepare_stride(platform, output, probe_dir, producer_manifest):
+    from tests import test_flash_attn_npu_v3_mla_mixed_stride_production as cases_api
+    from tests.test_flash_attn_npu_v3_mla_tnd_stride import configure_producer, load_attention
+    from tests.test_flash_attn_npu_v3_mla_used_attention import (
+        check_math,
+        effective,
+        references,
+        valid_outputs,
+    )
+
+    probes = load_attention(probe_dir)
+    manifest = json.loads(Path(producer_manifest).read_text())
+    assert sha256(Path(manifest["library"])) == manifest["library_sha256"]
+    for name, digest in manifest["sources"].items():
+        assert sha256(ROOT / name) == digest, name
+    configs = cases_api.PUBLIC_CASES
+    oracle_dir = output / "source-schedule"
+    oracle_dir.mkdir()
+    oracle = build_oracle(oracle_dir)
+    shapes = [
+        tnd_case(
+            *effective(c["item"]),
+            heads=c["item"]["heads"],
+            aic=platform["aic"],
+            ratio=2,
+            libapi=platform["libapi"],
+            **dict(zip(("l1", "ub", "l0a", "l0b", "l0c"), platform["memory"])),
+        )
+        for c in configs
+    ]
+    schedules = evaluate(oracle, shapes, native=True)
+    (output / "dispatch.json").write_text(
+        json.dumps(dict(cases=configs, inputs=shapes, native=schedules), indent=2) + "\n"
+    )
+    args, natives, records, accuracy, specs = [], [], [], [], []
+    with load_probe(manifest["library"], output / "producer") as producer:
+        configure_producer(producer)
+        for index, config in enumerate(configs):
+            case = cases_api.production_case(probes, producer, config)
+            item = case["item"]
+            qs, ks = effective(item)
+            specs.append((qs, ks, item["sk"], item["heads"]))
+            arg = cases_api.public_args(cases_api.forward_args(case))
+            args.append(arg)
+            record = metadata(arg)
+            records.append(record)
+            native = CannMixedCall(case["devices"]["migrated"], qs, ks, case["scale"])
+            natives.append(native)
+            assert all(native.inputs[n] is arg[n] for n in ("q", "qv", "k", "v"))
+            cases_api.launch(probes, case, "oracle")
+            errors = cases_api.check_result(
+                case, public(dict(arg, scheduler_metadata=record)), source=True
+            )
+            source = valid_outputs(case, [t.cpu() for t in native()])
+            refs = references(case)
+            nonempty = torch.tensor(
+                [k > 0 for q, k in zip(qs, ks) for _ in range(q)], dtype=torch.bool
+            )
+            assert (source[0][~nonempty] == 0).all() and source[1][:, ~nonempty].isposinf().all()
+            native_errors = check_math(
+                [source[0][nonempty], source[1][:, nonempty]],
+                [r[nonempty] if i % 2 == 0 else r[:, nonempty] for i, r in enumerate(refs)],
+            )
+            accuracy.append(
+                dict(
+                    case=index,
+                    errors=errors,
+                    native_errors=native_errors,
+                    native_fd=bool(schedules[index][5]),
+                )
+            )
+    (output / "accuracy.json").write_text(json.dumps(accuracy, indent=2) + "\n")
+    return args, natives, records, schedules, specs
+
+
+def profile(
+    output,
+    vendor,
+    platform_path,
+    dtype_name,
+    dispatch_only=False,
+    probe_dir=None,
+    producer_manifest=None,
+):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     vendor = check_vendor_configuration(vendor)
@@ -147,7 +254,15 @@ def profile(output, vendor, platform_path, dtype_name, dispatch_only=False):
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     platform = json.loads(Path(platform_path).read_text())
     torch.set_num_threads(8)
-    args, natives, records, schedules = prepare(dtype, platform, output)
+    if probe_dir is None:
+        args, natives, records, schedules = prepare(dtype, platform, output)
+        specs = PERFORMANCE_CASES
+    else:
+        assert producer_manifest is not None
+        args, natives, records, schedules, specs = prepare_stride(
+            platform, output, probe_dir, producer_manifest
+        )
+        assert all(a["q"].dtype == dtype for a in args)
     if dispatch_only:
         for index, native in enumerate(natives):
             os.write(1, f"MLA_MIXED_NATIVE_BEGIN {dtype_name} {index}\n".encode())
@@ -261,12 +376,25 @@ def profile(output, vendor, platform_path, dtype_name, dispatch_only=False):
         assert Decimal(r["Start Time(us)"].strip()) == Decimal(s["Task Start Time(us)"].strip())
         assert float(r["Duration(us)"]) == float(s["Task Duration(us)"])
     cursor = 0
+    native_patterns = {}
     for label in labels:
         # torch_npu may leave Step Id empty for an external launcher after an
         # AICPU step. Every call above completes before the next starts, so
         # chronological order is unambiguous; verify the full kernel sequence.
-        packed = label["name"] == "cann" and sum(PERFORMANCE_CASES[label["case"]][1]) != 0
-        count = 3 if packed else 1
+        if label["name"] == "cann":
+            index = label["case"]
+            if index not in native_patterns:
+                assert label["round"] == label["iteration"] == 0
+                end = next(
+                    i
+                    for i in range(cursor, len(rows))
+                    if "mla_tnd_bsnd_" in rows[i]["Name"] or "ComputeMla" in rows[i]["Name"]
+                )
+                native_patterns[index] = [r["Name"] for r in rows[cursor:end]]
+            pattern = native_patterns[index]
+            count = len(pattern)
+        else:
+            count = 1
         samples = rows[cursor : cursor + count]
         assert len(samples) == count, label
         cursor += count
@@ -276,24 +404,42 @@ def profile(output, vendor, platform_path, dtype_name, dispatch_only=False):
             "cann": "FusedInferAttentionScore",
         }[label["name"]]
         # The pinned native global-empty branch has its own FIA kernel/key.
-        assert expected in samples[-1]["Name"], (label, samples)
-        assert all("aclnnIndexSelect" in r["Name"] for r in samples[:-1]), (label, samples)
+        if label["name"] == "cann":
+            assert [r["Name"] for r in samples] == pattern
+            attention = [r for r in samples if r["Name"].endswith("_FusedInferAttentionScore")]
+            assert len(attention) == 1, (label, samples)
+            kernel = attention[0]
+        else:
+            assert expected in samples[0]["Name"], (label, samples)
+            kernel = samples[0]
         assert all(r["Step Id"] in ("", str(label["step"])) for r in samples), (label, samples)
         label.update(
-            kernel_us=float(samples[-1]["Duration(us)"]),
-            kernel_names=[samples[-1]["Name"]],
-            other_kernel_us=sum(float(r["Duration(us)"]) for r in samples[:-1]),
+            kernel_us=float(kernel["Duration(us)"]),
+            kernel_names=[kernel["Name"]],
+            other_kernel_us=sum(float(r["Duration(us)"]) for r in samples if r is not kernel),
             reported_step_ids=[r["Step Id"] for r in samples],
+            tasks=samples,
         )
     assert cursor == len(rows), (cursor, len(rows))
     summary = []
-    for index, spec in enumerate(PERFORMANCE_CASES):
+    for index, spec in enumerate(specs):
         row = dict(
             case=index,
             spec=spec,
             native_fd=bool(schedules[index][5]),
             native_empty=sum(spec[1]) == 0,
         )
+        row["input_views"] = {
+            n: dict(
+                shape=list(t.shape),
+                stride=list(t.stride()),
+                offset=t.storage_offset(),
+                storage_bytes=t.untyped_storage().size(),
+                data_ptr=t.data_ptr(),
+            )
+            for n, t in natives[index].inputs.items()
+        }
+        assert all(natives[index].inputs[n] is args[index][n] for n in ("q", "qv", "k", "v"))
         for repeats in (1, 4):
             values = {
                 name: statistics.median(
@@ -319,10 +465,17 @@ def profile(output, vendor, platform_path, dtype_name, dispatch_only=False):
             )
             for name in ("reuse", "generation", "cann")
         }
+        row["native_conversion_device_us"] = statistics.median(
+            r["other_kernel_us"] for r in labels if r["case"] == index and r["name"] == "cann"
+        )
         summary.append(row)
     snapshot("npu-after.log")
     report = dict(
         scope="Public mixed FA3 versus pinned native TND with per-call physical BSND KV packing. R=1/4 includes O/LSE completion; generated includes one public metadata generation. Native FD and empty paths identified separately.",
+        dtype=dtype_name,
+        seed=20261010,
+        stride_probes=probe_dir,
+        stride_producer=producer_manifest,
         cpu_affinity=sorted(os.sched_getaffinity(0)),
         warmup=5,
         rounds=5,
@@ -344,5 +497,9 @@ if __name__ == "__main__":
     parser.add_argument("platform")
     parser.add_argument("dtype", choices=("fp16", "bf16"))
     parser.add_argument("--dispatch-only", action="store_true")
+    parser.add_argument("--stride-probes")
+    parser.add_argument("--stride-producer")
     a = parser.parse_args()
-    profile(a.output, a.vendor, a.platform, a.dtype, a.dispatch_only)
+    profile(
+        a.output, a.vendor, a.platform, a.dtype, a.dispatch_only, a.stride_probes, a.stride_producer
+    )

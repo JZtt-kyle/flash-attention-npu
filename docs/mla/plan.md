@@ -1,34 +1,28 @@
 # MLA 迭代计划
 
-本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#m06-剩余步骤) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
+本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#下一步m07) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
 
-唯一下一步为 **[M06e2c2：混合 stride 生产接入](#下一步m06e2c2)**。M06e2c1 已完成 TND Q/KV 的生产接入；混合布局完成后依次为 M07..M17。
+M06 已完成。唯一下一步为 **[M07：ND paged cache](#下一步m07)**，先核对固定源边界并拆小，再依次推进 M08..M17。
 
 ## M06：非分页长度、TND 与 stride
 
-本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`。BSND 实际长度、TND/混合连续布局、分配与 used、BSND stride 已完成；TND Q/KV stride 也已接通，剩余混合 stride。字段、长度和地址规则分别见 design [6.2](design.md#62-调度字段与边界)、[6.3](design.md#63-长度与布局调度)、[6.4](design.md#64-输入-stride-与地址校验)。PA、mask、FD、192/128 与调度选项留在后续步骤。
+本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`。BSND 实际长度、TND/混合布局、分配与 used，以及三种布局的 stride 均已完成生产接入。字段、长度和地址规则分别见 design [6.2](design.md#62-调度字段与边界)、[6.3](design.md#63-长度与布局调度)、[6.4](design.md#64-输入-stride-与地址校验)。PA、mask、FD、192/128 与调度选项留在后续步骤。
 
 每行单独验收、提交。长度和布局按“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 入口接入”推进；stride 在已有协议上按“CPU 地址校验 → 独立 attention → 入口接入”推进。独立组件完成不代表公开入口开放。
 
-### 下一步：M06e2c2
-
-前置 M06e1a/b/c、M06e2a/b 与 M06e2c1 已完成。本步将已验收的 TND/BSND 地址组件和 v4/v5 stride 实例接入混合只读 kvcache 及内部混合 Q-used。接入真实/fake/C++/compile 的完整 storage 校验，保持分配前缀、used、metadata 更新与跨视图复用及流生命周期语义。完成生产 Kernel、适用公开生成/复用 R=1/4 E2E 和普通 FA3 回归；独立组件的源物化对照不能替代公开同物理视图 E2E。
-
-### M06 剩余步骤
-
-| 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
-| --- | --- | --- | --- |
-| M06e2c2 | 唯一下一步 | 混合 stride 生产接入，完成 M06；公开只读 kvcache v4 及内部混合 used | 四路独立 TND/BSND stride、完整 storage、metadata 跨视图复用与长度更新；双 dtype 精度、生产 Kernel、公开生成/复用 R=1/4 E2E 及普通 FA3 回归通过 |
-
 M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定性能矩阵与阶段边界)。生成记录、校验记录和执行 attention 分别验收；全部样本实际长度为零也不等于全局空容量。
 
-## M07 之后
+## 下一步：M07
+
+迁移 512+64 ND paged cache。先核对固定 CANN 的页表、有效页大小、物理地址与 K/V 独立首维 stride，结合官方 FA3 的 BSND/TND query 和 metadata 契约，将 M07 拆成有独立产物与验收条件的提交；拆分前不一次性开放整个 PA 路径。
+
+## M07 及后续步骤
 
 以下为顺序和完成边界；进入每项前将过大的步骤拆为可独立验收的提交，不提前开放未验收组合。
 
 | 步骤 | 状态 | 产物 | 完成条件 |
 | --- | --- | --- | --- |
-| M07 | 待开始 | 512+64 ND paged cache | BSND/TND query、乱序页表、尾页、源有效页大小、K/V 独立首维 stride；精度及 PA E2E 通过 |
+| M07 | 唯一下一步 | 512+64 ND paged cache | BSND/TND query、乱序页表、尾页、源有效页大小、K/V 独立首维 stride；精度及 PA E2E 通过 |
 | M08 | 待开始 | 512+64 右下 causal | Sq<Sk/Sq>Sk、多 query、空行、PA/TND/metadata；精度及 E2E 通过 |
 | M09 | 待开始 | 512+64 局部窗口 | 有限/单侧窗口、causal 叠加、FA3 归一化和页边界；精度及 E2E 通过 |
 | M10 | 待开始 | 512+64 split-KV 与合并 | 源分割/合并流程，自动/1/显式 split、dense/TND/PA/空 split、O/LSE/accumulator/metadata；长 KV E2E 通过 |
@@ -117,3 +111,4 @@ M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[�
 | M06e2a | TND 独立 CPU 地址组件，复用 BSND 校验；四路视图与分配/used/BSND cache 地址组合 |
 | M06e2b | TND/混合独立 v3/v4/v5 stride attention；原分配视图读取、NTD/独立 offset、used poison、65536 与真实大地址边界；固定源组件性能及连续/普通 FA3 回归，生产仍拒绝非连续输入 |
 | M06e2c1 | TND Q/KV stride 生产接入；公开 varlen v3/v5 与内部 TND used、完整 storage、真实/fake/C++/compile/生命周期；双 dtype 源/数学精度、生产 Kernel 对照、适用公开 R=1/4 E2E 及普通 FA3 回归，混合 stride 仍拒绝 |
+| M06e2c2 | 混合 TND Q + BSND KV stride 生产接入，完成 M06；公开只读 kvcache v4、内部混合 Q-used v5、完整 storage、跨视图 metadata 与长度更新；双 dtype 源/数学精度、真实/fake/C++/compile/生命周期、生产 Kernel、适用公开生成/复用 R=1/4 E2E 及普通 FA3 回归 |

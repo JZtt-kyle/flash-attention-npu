@@ -213,12 +213,12 @@ def test_direct_none_lengths(entry, dtype):
 
 
 @pytest.mark.parametrize("name", ["q", "k", "v", "qv"])
-def test_noncontiguous_inputs_rejected(entry, dtype, name):
+def test_noncontiguous_last_dimension_rejected(entry, dtype, name):
     args = inputs(dtype)
     shape = list(args[name].shape)
-    shape[0] *= 2
-    args[name] = torch.zeros(shape, dtype=dtype, device="npu")[::2]
-    with pytest.raises(RuntimeError, match="noncontiguous BSND/TND"):
+    shape[-1] *= 2
+    args[name] = torch.zeros(shape, dtype=dtype, device="npu")[..., ::2]
+    with pytest.raises(RuntimeError, match="contiguous last dimension"):
         invoke(entry, args)
 
 

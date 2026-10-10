@@ -1,6 +1,6 @@
-"""Internal BSND/mixed Q-used Kernel versus pinned, identically scheduled CANN.
+"""Production BSND/TND/mixed Kernel versus pinned, identically scheduled CANN.
 
-The production wall includes internal v5 generation; the source probe has
+The production wall includes internal metadata generation; the source probe has
 preallocated buffers. Neither wall is a public FA3/CANN E2E comparison.
 """
 
@@ -23,8 +23,11 @@ from tests.test_flash_attn_npu_v3_mla_metadata import load_probe
 
 
 def profile(probe_dir, producer_manifest, output, layout="bsnd"):
-    if layout == "tnd-stride":
-        from tests import test_flash_attn_npu_v3_mla_tnd_stride_production as cases_api
+    if layout in ("tnd-stride", "mixed-stride"):
+        if layout == "tnd-stride":
+            from tests import test_flash_attn_npu_v3_mla_tnd_stride_production as cases_api
+        else:
+            from tests import test_flash_attn_npu_v3_mla_mixed_stride_production as cases_api
         from tests.test_flash_attn_npu_v3_mla_tnd_stride import (
             configure_producer,
             launch,
@@ -47,7 +50,7 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         assert layout == "bsnd"
         from tests import test_flash_attn_npu_v3_mla_bsnd_used as cases_api
 
-    if layout not in ("bsnd-stride", "tnd-stride"):
+    if layout not in ("bsnd-stride", "tnd-stride", "mixed-stride"):
         from tests.test_flash_attn_npu_v3_mla_used_attention import (
             configure_producer,
             launch,
@@ -154,6 +157,7 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
                     1: "ComputeMlaDenseMetadata",
                     2: "ComputeMlaBsndKvLengthMetadata",
                     3: "ComputeMlaTndMetadata",
+                    4: "ComputeMlaTndBsndMetadataFromPrefix",
                     5: "ComputeMlaUsedMetadata",
                 }[version]
                 assert producer_name in raw[pos]["Op Name"]
@@ -163,7 +167,7 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
             expected_name = (
                 (
                     "cann_tnd_stride"
-                    if layout == "tnd-stride"
+                    if layout in ("tnd-stride", "mixed-stride")
                     else "cann_bsnd_stride"
                     if layout == "bsnd-stride"
                     else "cann_used"
@@ -172,6 +176,8 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
                 else (
                     ("mla_tnd_used" if version == 5 else "mla_tnd")
                     if layout == "tnd-stride"
+                    else ("mla_tnd_used" if version == 5 else "mla_tnd_bsnd")
+                    if layout == "mixed-stride"
                     else "mla_dense"
                     if layout == "bsnd-stride" and version != 5
                     else ("mla_tnd_used" if layout == "mixed" else "mla_bsnd_used")
@@ -185,11 +191,11 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         results = []
         for index, case in enumerate(cases):
             result = dict(item=case.get("config", case["item"]), errors=errors[index])
-            if layout in ("bsnd-stride", "tnd-stride"):
+            if layout in ("bsnd-stride", "tnd-stride", "mixed-stride"):
                 result["source_metadata"] = case["expected"]
                 result["launched_blocks"] = (
                     case["context"]
-                    if layout == "tnd-stride" or case["config"]["version"] == 5
+                    if layout in ("tnd-stride", "mixed-stride") or case["config"]["version"] == 5
                     else case["dense_context"]
                 ).block_dim
                 result["input_views"] = {
@@ -215,8 +221,8 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         extension = Path(api.flash_attn_npu_3.__file__)
         report = dict(
             scope=(
-                "Production BSND/TND stride versus pinned non-FD source, with identical logical inputs, schedules and launch blocks. Source receives contiguous materializations and packed effective TND segments prepared before timing; physical input layouts differ. Production wall includes internal metadata generation; source probe buffers are preallocated. Not public metadata E2E."
-                if layout in ("bsnd-stride", "tnd-stride")
+                "Production BSND/TND/mixed stride versus pinned non-FD source, with identical logical inputs, schedules and launch blocks. Source receives contiguous materializations and packed effective TND segments prepared before timing; physical input layouts differ. Production wall includes internal metadata generation; source probe buffers are preallocated. Not public metadata E2E."
+                if layout in ("bsnd-stride", "tnd-stride", "mixed-stride")
                 else __doc__
             ),
             layout=layout,
@@ -252,7 +258,9 @@ if __name__ == "__main__":
     parser.add_argument("producer_manifest")
     parser.add_argument("output")
     parser.add_argument(
-        "--layout", choices=("bsnd", "mixed", "bsnd-stride", "tnd-stride"), default="bsnd"
+        "--layout",
+        choices=("bsnd", "mixed", "bsnd-stride", "tnd-stride", "mixed-stride"),
+        default="bsnd",
     )
     args = parser.parse_args()
     profile(args.probe_dir, args.producer_manifest, args.output, args.layout)

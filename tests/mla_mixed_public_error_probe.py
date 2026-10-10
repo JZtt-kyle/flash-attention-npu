@@ -15,7 +15,7 @@ from tests.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_mla_mixed_public import inputs, metadata, public
 
 
-def run(dtype, fault, directory):
+def run(dtype, fault, directory, layout="contiguous"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     kind = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype]
     args = inputs(kind)
@@ -30,6 +30,17 @@ def run(dtype, fault, directory):
             args = inputs(kind, [0, 0], [1, 3], 64)
         elif fault == "empty_k":
             args = inputs(kind, [3, 0, 1], [0, 0, 0], 0)
+        if layout == "strided":
+            from tests.test_flash_attn_npu_v3_mla_bsnd_stride import strides_for
+
+            for name in ("q", "qv", "k", "v"):
+                t = args[name]
+                shape = (1, *t.shape) if t.ndim == 3 else t.shape
+                strides = strides_for(shape, "independent", name)
+                span = 0 if 0 in shape else 1 + sum((n - 1) * s for n, s in zip(shape, strides))
+                base = torch.zeros(span + 32, dtype=kind, device="npu")
+                view = base.as_strided(shape, strides, 7)
+                args[name] = view[0] if t.ndim == 3 else view
         if fault.startswith("stale") or fault in (
             "magic",
             "version",
@@ -82,6 +93,7 @@ def run(dtype, fault, directory):
             done.synchronize()
         except RuntimeError as error:
             report = dict(
+                input_layout=layout,
                 fault=fault,
                 dtype=dtype,
                 elapsed_seconds=time.monotonic() - start,
