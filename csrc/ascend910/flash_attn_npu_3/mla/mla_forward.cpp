@@ -2,6 +2,7 @@
 #include "mla_launch.h"
 #include "mla_schedule.h"
 #include "mla_metadata_args.h"
+#include "mla_tnd_metadata_args.h"
 #include "mla_validation.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
@@ -18,6 +19,7 @@
 
 extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
 
 namespace flash_attn::mla {
 namespace {
@@ -51,10 +53,11 @@ MlaPlatformInfo DensePlatform(bool fullLaunch = false)
     return p;
 }
 
+template <typename Args>
 struct MetadataSubmission {
     at::Tensor metadata;
-    std::optional<at::Tensor> lengths;
-    MlaMetadataArgs args;
+    std::optional<at::Tensor> lengths, query;
+    Args args;
     aclrtStream current, worker;
     aclrtEvent inputReady, metadataDone;
     bool hasKvLengths;
@@ -63,7 +66,9 @@ struct MetadataSubmission {
     {
         TORCH_CHECK(aclrtRecordEvent(inputReady, current) == ACL_SUCCESS, "MLA: input event recording failed");
         TORCH_CHECK(aclrtStreamWaitEvent(worker, inputReady) == ACL_SUCCESS, "MLA: input event wait failed");
-        if (hasKvLengths) {
+        if constexpr (std::is_same_v<Args, MlaTndMetadataArgs>) {
+            ComputeMlaTndMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
+        } else if (hasKvLengths) {
             ComputeMlaBsndKvLengthMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else {
             ComputeMlaDenseMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
@@ -73,12 +78,11 @@ struct MetadataSubmission {
     }
 };
 
-MetadataSubmission PrepareMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platform, at::ScalarType dtype,
-                                   const at::TensorOptions& options, const std::optional<at::Tensor>& lengths,
-                                   bool hasKvLengths)
+template <typename Args>
+MetadataSubmission<Args> PrepareSubmission(const at::Tensor& metadata, const Args& args,
+                                           const std::optional<at::Tensor>& lengths,
+                                           const std::optional<at::Tensor>& query, bool hasKvLengths)
 {
-    const uint32_t words = hasKvLengths ? CheckBsndMetadataWords(shape.batch) : kMlaDenseMetadataWords;
-    auto metadata = at::empty({words}, options.dtype(at::kInt));
     auto stream = c10_npu::getCurrentNPUStream();
     auto worker = c10_npu::getNPUStreamFromPool();
     // The two record/wait pairs are submitted together before these per-host-
@@ -99,6 +103,26 @@ MetadataSubmission PrepareMetadata(const MlaDenseShape& shape, const MlaPlatform
     if (lengths && lengths->numel() != 0) {
         c10_npu::NPUCachingAllocator::recordStream(lengths->storage().data_ptr(), worker);
     }
+    if (query) {
+        c10_npu::NPUCachingAllocator::recordStream(query->storage().data_ptr(), worker);
+    }
+    return {metadata,
+            lengths,
+            query,
+            args,
+            stream.stream(false),
+            worker.stream(false),
+            events.inputReady,
+            events.metadataDone,
+            hasKvLengths};
+}
+
+MetadataSubmission<MlaMetadataArgs> PrepareMetadata(const MlaDenseShape& shape, const MlaPlatformInfo& platform,
+                                                    at::ScalarType dtype, const at::TensorOptions& options,
+                                                    const std::optional<at::Tensor>& lengths, bool hasKvLengths)
+{
+    const uint32_t words = hasKvLengths ? CheckBsndMetadataWords(shape.batch) : kMlaDenseMetadataWords;
+    auto metadata = at::empty({words}, options.dtype(at::kInt));
     MlaMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
                          words,
                          uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),
@@ -106,9 +130,7 @@ MetadataSubmission PrepareMetadata(const MlaDenseShape& shape, const MlaPlatform
                          platform,
                          lengths ? reinterpret_cast<uint64_t>(lengths->data_ptr()) : 0,
                          lengths ? uint64_t(lengths->numel()) : 0};
-    return {
-        metadata,    lengths, args, stream.stream(false), worker.stream(false), events.inputReady, events.metadataDone,
-        hasKvLengths};
+    return PrepareSubmission(metadata, args, lengths, std::nullopt, hasKvLengths);
 }
 } // namespace
 
@@ -167,7 +189,7 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     auto out = at::empty({q.size(0), q.size(1), q.size(2), v.size(3)}, q.options());
     auto lse = at::empty({q.size(0), q.size(2), q.size(1)}, q.options().dtype(at::kFloat));
     auto workspace = at::empty({static_cast<int64_t>(s.workspace.totalBytes)}, q.options().dtype(at::kByte));
-    std::optional<MetadataSubmission> producer;
+    std::optional<MetadataSubmission<MlaMetadataArgs>> producer;
     if (!schedulerMetadata) {
         producer = PrepareMetadata({q.size(0), q.size(1), q.size(2), k.size(1)}, p, q.scalar_type(), q.options(),
                                    cacheSeqlens, hasKvLengths);
@@ -240,6 +262,101 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
     return {out, lse, at::Tensor(), at::Tensor()};
 }
 
+std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
+                                   const at::Tensor& cuQ, const at::Tensor& cuK, int64_t maxQ, int64_t maxK,
+                                   float scale)
+{
+    const uint32_t words = CheckTndInputs(q, k, cuQ, cuK, maxQ, maxK);
+    const int64_t batch = cuQ.numel() - 1;
+    const bool nonempty = batch != 0 && q.size(0) != 0 && k.size(0) != 0;
+    auto p = DensePlatform(nonempty);
+    // Allocation/launch bounds use static capacities, never a host prefix read.
+    // The generator supplies observed maxima and the complete source schedule.
+    const uint64_t rows = std::min(uint64_t(maxQ) * q.size(1), uint64_t(256));
+    const uint64_t m = (rows + 15) / 16 * 16;
+    const uint64_t n = (std::min(uint64_t(maxK), uint64_t(512)) + 31) / 32 * 32;
+    const uint64_t userBytes = nonempty ? uint64_t(2) * p.aicNum * (6 * m * n + 8 * m * 512 + 8 * 256) : 0;
+    const uint64_t libBytes = nonempty ? p.libApiWorkspaceBytes : 0;
+    TORCH_CHECK(libBytes <= uint64_t(INT64_MAX) - userBytes, "MLA: workspace overflow");
+    auto out = at::empty({q.size(0), q.size(1), 512}, q.options());
+    auto lse = at::empty({q.size(1), q.size(0)}, q.options().dtype(at::kFloat));
+    auto workspace = at::empty({static_cast<int64_t>(userBytes + libBytes)}, q.options().dtype(at::kByte));
+    auto metadata = at::empty({words}, q.options().dtype(at::kInt));
+    for (const auto& t : {q, k, v, qv, cuQ, cuK, out, lse, workspace, metadata}) {
+        const auto address = reinterpret_cast<uintptr_t>(t.data_ptr());
+        TORCH_CHECK((t.numel() == 0 || address != 0) && uint64_t(t.nbytes()) <= UINTPTR_MAX - address,
+                    "MLA: tensor address overflow");
+    }
+    const uint32_t dtype = uint32_t(q.scalar_type() == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16);
+    MlaTndMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
+                            words,
+                            dtype,
+                            {batch, q.size(0), k.size(0), q.size(1), maxQ, maxK},
+                            p,
+                            reinterpret_cast<uint64_t>(cuQ.data_ptr()),
+                            uint64_t(cuQ.numel()),
+                            reinterpret_cast<uint64_t>(cuK.data_ptr()),
+                            uint64_t(cuK.numel())};
+    auto producer = PrepareSubmission(metadata, args, cuK, cuQ, true);
+    auto stream = c10_npu::getCurrentNPUStream();
+    for (const auto& t : {q, k, v, qv, cuQ, cuK, metadata}) {
+        if (t.numel() != 0) {
+            c10_npu::NPUCachingAllocator::recordStream(t.storage().data_ptr(), stream);
+        }
+    }
+    MlaTndLaunchArgs a{};
+    uint32_t fftsLength = 0;
+    TORCH_CHECK(rtGetC2cCtrlAddr(&a.ffts, &fftsLength) == RT_ERROR_NONE,
+                "MLA: failed to obtain cross-core synchronization address");
+    a.stream = stream.stream(false);
+    a.qc = static_cast<uint8_t*>(qv.data_ptr());
+    a.qr = static_cast<uint8_t*>(q.data_ptr());
+    a.kv = static_cast<uint8_t*>(v.data_ptr());
+    a.kr = static_cast<uint8_t*>(k.data_ptr());
+    a.output = static_cast<uint8_t*>(out.data_ptr());
+    a.lse = static_cast<uint8_t*>(lse.data_ptr());
+    a.workspace = workspace.numel() == 0 ? nullptr : static_cast<uint8_t*>(workspace.data_ptr()) + libBytes;
+    a.metadata = static_cast<uint8_t*>(metadata.data_ptr());
+    a.cuQuery = static_cast<uint8_t*>(cuQ.data_ptr());
+    a.cuKv = static_cast<uint8_t*>(cuK.data_ptr());
+    a.context = {dtype,
+                 uint32_t(batch),
+                 uint32_t(q.size(0)),
+                 uint32_t(k.size(0)),
+                 uint32_t(q.size(1)),
+                 uint32_t(maxQ),
+                 uint32_t(maxK),
+                 p.aicNum,
+                 p.aivNum,
+                 p.blockDims[nonempty ? p.aicNum - 1 : 0],
+                 userBytes,
+                 libBytes,
+                 p.localMemory};
+    a.scale = scale;
+    at_npu::native::OpCommand::RunOpApiV2(
+        "ascendc_mla_tnd", [a, producer, q, k, v, qv, cuQ, cuK, out, lse, workspace]() mutable -> int {
+            producer.Enqueue();
+            auto error = q.scalar_type() == at::kBFloat16 ? LaunchTndBf16(a) : LaunchTndFp16(a);
+            TORCH_CHECK(error == ACL_SUCCESS, "MLA: TND BATCH_MODE kernel launch failed (", error, ")");
+            return 0;
+        });
+    return {out, lse, at::Tensor(), at::Tensor()};
+}
+
+std::tuple<at::Tensor, at::Tensor> TndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                                const at::Tensor& qv, const at::Tensor& cuQ, const at::Tensor& cuK,
+                                                int64_t maxQ, int64_t maxK, std::optional<double> softmaxScale)
+{
+    CheckForwardBoundary(q, k, v, qv, true, true, false);
+    TORCH_CHECK(!softmaxScale ||
+                    (std::isfinite(*softmaxScale) && std::abs(*softmaxScale) <= std::numeric_limits<float>::max()),
+                "MLA: softmax_scale must be finite in FP32");
+    const c10::OptionalDeviceGuard deviceGuard(device_of(q));
+    auto result =
+        TndForward(q, k, v, qv, cuQ, cuK, maxQ, maxK, softmaxScale ? float(*softmaxScale) : 1.0f / std::sqrt(576.0f));
+    return {result[0], result[1]};
+}
+
 // The public read-only cache path has already rejected unsupported options.
 // Keep tensor/scale checks here as well: the dispatcher is independently callable.
 std::tuple<at::Tensor, at::Tensor> DenseForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -270,6 +387,8 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
           "ScalarType qkv_dtype, Tensor cache_seqlens) -> Tensor");
     m.def("_mla_dense_forward(Tensor q, Tensor k, Tensor v, Tensor qv, float? softmax_scale=None, "
           "Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
+    m.def("_mla_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
+          "int max_seqlen_q, int max_seqlen_k, float? softmax_scale=None) -> (Tensor, Tensor)");
 }
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
@@ -289,6 +408,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
 {
     m.impl("_mla_dense_forward", &flash_attn::mla::DenseForwardOp);
+    m.impl("_mla_tnd_forward", &flash_attn::mla::TndForwardOp);
 }
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, AutogradPrivateUse1, m)
@@ -296,4 +416,5 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, AutogradPrivateUse1, m)
     // Preserve FakeTensor dispatch below Autograd. The real/fake kernels both
     // reject requires_grad before allocating or submitting forward-only MLA.
     m.impl("_mla_dense_forward", torch::CppFunction::makeFallthrough());
+    m.impl("_mla_tnd_forward", torch::CppFunction::makeFallthrough());
 }

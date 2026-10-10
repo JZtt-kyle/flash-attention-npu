@@ -80,13 +80,20 @@ def test_mla_supported_subset_and_rejections(entry, representation, layout, dtyp
             assert args[name].stride(-1) == 1
             assert not args[name].is_contiguous()
             assert args[name].storage_offset() > 0
-    if representation == "compressed" and layout == "dense" and not strided:
+    if representation == "compressed" and layout in ("dense", "tnd") and not strided:
         out, lse, *_ = _forward(entry, args)
-        assert out.shape == (2, 3, 4, 512) and out.dtype == dtype
-        assert lse.shape == (2, 4, 3) and lse.dtype == torch.float32
+        assert out.shape == (*args["q"].shape[:-1], 512) and out.dtype == dtype
+        assert (
+            lse.shape == ((4, 4) if layout == "tnd" else (2, 4, 3)) and lse.dtype == torch.float32
+        )
         if entry != "fake":
             torch.testing.assert_close(out.cpu(), torch.zeros(out.shape, dtype=out.dtype))
-            torch.testing.assert_close(lse.cpu(), torch.full(lse.shape, 17.0).log())
+            expected = (
+                torch.tensor([9.0, 9.0, 9.0, 8.0]).expand(4, -1)
+                if layout == "tnd"
+                else torch.full(lse.shape, 17.0)
+            )
+            torch.testing.assert_close(lse.cpu(), expected.log())
     else:
         with pytest.raises(
             RuntimeError, match=f"MLA {representation} forward is not implemented yet"
@@ -193,7 +200,7 @@ def test_public_rejects_before_metadata_or_dispatch(
         pytest.fail("MLA reached ordinary metadata/kernel dispatch")
 
     monkeypatch.setattr(api, "get_scheduler_metadata", unexpected)
-    supported = representation == "compressed" and public_entry in ("dense", "kvcache")
+    supported = representation == "compressed"
     if not supported:
         monkeypatch.setattr(api, "_flash_attn_forward", unexpected)
     with FakeTensorMode() if fake else nullcontext():
@@ -201,12 +208,15 @@ def test_public_rejects_before_metadata_or_dispatch(
         if supported:
             if public_entry == "dense":
                 out, lse = api.flash_attn_func(**args, return_attn_probs=True)
+            elif public_entry == "varlen":
+                out, lse = api.flash_attn_varlen_func(**args, return_attn_probs=True)
             else:
                 args["k_cache"], args["v_cache"] = args.pop("k"), args.pop("v")
                 out, lse, *_ = api.flash_attn_with_kvcache(
                     **args, num_splits=1, return_softmax_lse=True
                 )
-            assert out.shape == (2, 3, 4, 512) and lse.shape == (2, 4, 3)
+            assert out.shape == ((4, 4, 512) if public_entry == "varlen" else (2, 3, 4, 512))
+            assert lse.shape == ((4, 4) if public_entry == "varlen" else (2, 4, 3))
             return
         with pytest.raises(RuntimeError, match="forward is not implemented yet"):
             if public_entry == "dense":

@@ -107,7 +107,7 @@ def round_up_headdim(head_size: int) -> int:
 
 
 def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged_kv=False):
-    """Recognize validated dense MLA before copies or ordinary FA dispatch.
+    """Recognize validated MLA before copies or ordinary FA dispatch.
 
     Uses only tensor metadata, including for fake tensors. Keep in sync with
     ascend910/flash_attn_npu_3/mla/mla_validation.h. Outer strides and storage
@@ -153,19 +153,19 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         )
         check(heads_kv == 1, "MLA: compressed representation requires one KV head")
         check(
-            not varlen_q and not varlen_k and not paged_kv,
-            "MLA compressed forward is not implemented yet for TND or paged KV",
+            varlen_q == varlen_k and not paged_kv,
+            "MLA compressed forward is not implemented yet for mixed TND/BSND or paged KV",
         )
-        check(q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
+        check(varlen_q or q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
         check(
-            _fits_mla_dense_shape(q.shape[0], q.shape[1], heads_q, k.shape[1]),
+            varlen_q or _fits_mla_dense_shape(q.shape[0], q.shape[1], heads_q, k.shape[1]),
             "MLA compressed forward is not implemented yet outside B>=0, nonnegative S1G within "
             "address/field bounds, 0<=Sk<=16384",
         )
         for tensor in (q, k, v, qv):
             check(
                 tensor.is_contiguous(),
-                "MLA compressed forward is not implemented yet for noncontiguous BSND",
+                "MLA compressed forward is not implemented yet for noncontiguous BSND/TND",
             )
             check(
                 not tensor.requires_grad,
@@ -177,6 +177,39 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         "MLA: supported representation without qv requires Dq=192 and Dv=128",
     )
     raise RuntimeError("NPU FlashAttention MLA prefill forward is not implemented yet")
+
+
+def _check_mla_tnd_inputs(q, k, cu_q, cu_k, max_q, max_k):
+    if max_q is None or max_k is None:
+        raise RuntimeError("MLA: compact TND requires max_seqlen_q/k")
+    if (
+        cu_q is None
+        or cu_k is None
+        or cu_q.ndim != 1
+        or cu_q.numel() < 1
+        or cu_k.ndim != 1
+        or cu_k.numel() != cu_q.numel()
+    ):
+        raise RuntimeError("MLA: cu_seqlens_q/k must have matching shape [batch_size + 1]")
+    for tensor in (cu_q, cu_k):
+        if tensor.dtype != torch.int32:
+            raise RuntimeError("MLA: cu_seqlens_q/k must have dtype int32")
+        if tensor.device != q.device:
+            raise RuntimeError("MLA: cu_seqlens_q/k must be on the same NPU device")
+        if not tensor.is_contiguous():
+            raise RuntimeError("MLA: cu_seqlens_q/k must be contiguous")
+    if cu_q.numel() - 1 > ((1 << 32) - 1 - 405) // 4:
+        raise RuntimeError("MLA: TND metadata word count overflow")
+    if not (
+        q.shape[0] <= (1 << 31) - 1
+        and k.shape[0] <= (1 << 31) - 1
+        and q.shape[1] <= ((1 << 32) - 1) // 512
+        and 0 <= max_q <= (1 << 30)
+        and 0 <= max_k <= 16384
+        and max_q * q.shape[1] <= (1 << 32) - 256
+        and q.shape[0] * q.shape[1] <= ((1 << 63) - 1) // 1024
+    ):
+        raise RuntimeError("MLA: compact TND shape or max_seqlen bounds exceeded")
 
 
 def _check_mla_dense_options(
@@ -265,6 +298,19 @@ def _mla_dense_forward_fake(
     )
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_tnd_forward")
+def _mla_tnd_forward_fake(
+    q, k, v, qv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale=None
+):
+    _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True)
+    _check_mla_dense_options(softmax_scale=softmax_scale)
+    _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+    return (
+        q.new_empty((*q.shape[:-1], v.shape[-1])),
+        q.new_empty((q.shape[1], q.shape[0]), dtype=torch.float32),
+    )
+
+
 @_torch_custom_op_wrapper(
     "flash_attn_npu_3::_flash_attn_forward", mutates_args=(), device_types="npu"
 )
@@ -329,8 +375,8 @@ def _flash_attn_forward(
                 out_,
                 cu_seqlens_k_new,
                 seqused_q,
-                max_seqlen_q,
-                max_seqlen_k,
+                max_seqlen_q if cu_seqlens_q is None else None,
+                max_seqlen_k if cu_seqlens_q is None else None,
                 kv_batch_idx,
                 leftpad_k,
                 rotary_cos,
@@ -341,7 +387,14 @@ def _flash_attn_forward(
                 v_descale,
             ),
         )
-        _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
+        if cu_seqlens_q is not None:
+            if seqused_k is not None or scheduler_metadata is not None:
+                raise RuntimeError(
+                    "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
+                )
+            _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+        else:
+            _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
     q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
     v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
     cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new = [
@@ -465,8 +518,8 @@ def _flash_attn_forward_fake(
                 out_,
                 cu_seqlens_k_new,
                 seqused_q,
-                max_seqlen_q,
-                max_seqlen_k,
+                max_seqlen_q if cu_seqlens_q is None else None,
+                max_seqlen_k if cu_seqlens_q is None else None,
                 kv_batch_idx,
                 leftpad_k,
                 rotary_cos,
@@ -477,7 +530,14 @@ def _flash_attn_forward_fake(
                 v_descale,
             ),
         )
-        _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
+        if cu_seqlens_q is not None:
+            if seqused_k is not None or scheduler_metadata is not None:
+                raise RuntimeError(
+                    "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
+                )
+            _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+        else:
+            _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
 
     # Determine if we're in varlen mode
     is_varlen_q = cu_seqlens_q is not None
@@ -1060,8 +1120,24 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         sm_margin=0,
         return_softmax=False,
     ):
+        if _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True):
+            _check_mla_dense_options(
+                softmax_scale=softmax_scale,
+                causal=causal,
+                window_size=window_size,
+                attention_chunk=attention_chunk,
+                softcap=softcap,
+                num_splits=num_splits,
+                pack_gqa=pack_gqa,
+                sm_margin=sm_margin,
+                optional_tensors=(seqused_q, seqused_k, q_descale, k_descale, v_descale),
+            )
+            _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+            out, lse = torch.ops.flash_attn_npu_3._mla_tnd_forward(
+                q, k, v, qv, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, softmax_scale
+            )
+            return (out, lse) if return_softmax else out
         _validate_varlen_query(q, cu_seqlens_q)
-        _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True)
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
         # Training interfaces do not expose scheduler_metadata (aligned with

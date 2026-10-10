@@ -24,13 +24,6 @@
 
 namespace flash_attn::mla {
 
-struct MlaTndMetadataContext {
-    uint32_t dtype, batch, totalQuery, totalKv, heads, maxQueryLength, maxKvLength;
-    uint32_t aicNum, aivNum, blockDim;
-    uint64_t workspaceBytes, libApiBytes;
-    MlaLocalMemory localMemory;
-};
-
 // A distinct type prevents passing TND batch coordinates to a BSND Kernel.
 // tiling.sq/sk are observed maxima, never per-sample lengths or tensor strides.
 struct MlaTndKernelSchedule {

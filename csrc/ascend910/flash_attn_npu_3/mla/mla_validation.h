@@ -2,6 +2,7 @@
 
 #include <torch/extension.h>
 #include "mla_bsnd_metadata.h"
+#include "mla_tnd_metadata.h"
 
 // Host-only boundary for the two representations in docs/mla/design.md.
 // Contract: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
@@ -56,14 +57,14 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
         TORCH_CHECK(q.size(-1) == 64 && v.size(-1) == 512,
                     "MLA: supported qv representation requires Dq=64 and Dv=512");
         TORCH_CHECK(headsKV == 1, "MLA: compressed representation requires one KV head");
-        TORCH_CHECK(!varlenQ && !varlenK && !pagedKV,
-                    "MLA compressed forward is not implemented yet for TND or paged KV");
-        TORCH_CHECK(q.size(0) == k.size(0), "MLA: dense batch sizes must match");
-        TORCH_CHECK(FitsDenseShape(q.size(0), q.size(1), headsQ, k.size(1)),
+        TORCH_CHECK(varlenQ == varlenK && !pagedKV,
+                    "MLA compressed forward is not implemented yet for mixed TND/BSND or paged KV");
+        TORCH_CHECK(varlenQ || q.size(0) == k.size(0), "MLA: dense batch sizes must match");
+        TORCH_CHECK(varlenQ || FitsDenseShape(q.size(0), q.size(1), headsQ, k.size(1)),
                     "MLA compressed forward is not implemented yet outside B>=0, nonnegative S1G within address/field "
                     "bounds, 0<=Sk<=16384");
         for (const auto& t : {q, k, v, *qv}) {
-            TORCH_CHECK(t.is_contiguous(), "MLA compressed forward is not implemented yet for noncontiguous BSND");
+            TORCH_CHECK(t.is_contiguous(), "MLA compressed forward is not implemented yet for noncontiguous BSND/TND");
             TORCH_CHECK(!t.requires_grad(), "MLA compressed forward is not implemented yet for gradients");
         }
         return true;
@@ -71,6 +72,27 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
     TORCH_CHECK(q.size(-1) == 192 && v.size(-1) == 128,
                 "MLA: supported representation without qv requires Dq=192 and Dv=128");
     TORCH_CHECK(false, "NPU FlashAttention MLA prefill forward is not implemented yet");
+}
+
+inline uint32_t CheckTndInputs(const at::Tensor& q, const at::Tensor& k, const at::Tensor& cuQ, const at::Tensor& cuK,
+                               int64_t maxQ, int64_t maxK)
+{
+    TORCH_CHECK(cuQ.dim() == 1 && cuQ.numel() >= 1 && cuK.dim() == 1 && cuK.numel() == cuQ.numel(),
+                "MLA: cu_seqlens_q/k must have matching shape [batch_size + 1]");
+    for (const auto& t : {cuQ, cuK}) {
+        TORCH_CHECK(t.scalar_type() == at::kInt, "MLA: cu_seqlens_q/k must have dtype int32");
+        TORCH_CHECK(t.device() == q.device(), "MLA: cu_seqlens_q/k must be on the same NPU device");
+        TORCH_CHECK(t.is_contiguous(), "MLA: cu_seqlens_q/k must be contiguous");
+    }
+    const int64_t batch = cuQ.numel() - 1;
+    TORCH_CHECK(batch <= (UINT32_MAX - kMlaTndMetadataPrefixWords) / kMlaTndMetadataSequenceWords,
+                "MLA: TND metadata word count overflow");
+    TORCH_CHECK(q.size(0) <= INT32_MAX && k.size(0) <= INT32_MAX && q.size(1) <= kMlaMaxQueryHeads && maxQ >= 0 &&
+                    maxQ <= kMlaMaxQueryLength && maxK >= 0 && maxK <= kMlaMaxKvLength &&
+                    uint64_t(maxQ) * q.size(1) <= kMlaMaxDenseRows &&
+                    uint64_t(q.size(0)) * q.size(1) <= kMlaMaxBatchRows,
+                "MLA: compact TND shape or max_seqlen bounds exceeded");
+    return kMlaTndMetadataPrefixWords + kMlaTndMetadataSequenceWords * batch;
 }
 
 inline bool CheckMetadataBoundary(int64_t headDim, int64_t headDimV)

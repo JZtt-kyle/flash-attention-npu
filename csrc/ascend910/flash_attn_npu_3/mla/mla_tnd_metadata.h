@@ -9,6 +9,14 @@ struct MlaTndShape;
 constexpr uint32_t kMlaTndMetadataVersion = 3;
 constexpr uint32_t kMlaMetadataCompactTnd = 3;
 
+// Static context shared by the production host launcher and device consumer.
+struct MlaTndMetadataContext {
+    uint32_t dtype, batch, totalQuery, totalKv, heads, maxQueryLength, maxKvLength;
+    uint32_t aicNum, aivNum, blockDim;
+    uint64_t workspaceBytes, libApiBytes;
+    MlaLocalMemory localMemory;
+};
+
 enum class MlaTndMetadataStatus : uint32_t {
     Success = 0,
     UnsupportedDtype = 1,
