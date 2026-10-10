@@ -1,6 +1,6 @@
 # MLA 当前状态
 
-本轮完成 **M06e2c2：混合 stride 生产接入**（2026-10-10），基线 `1e46ff5`，分支 `feat/mla-cann-migration`。公开混合只读 kvcache v4 与内部混合 Q-used v5 已支持合法外层 stride，M06 完成。唯一下一步为 **[M07：ND paged cache](plan.md#下一步m07)**，先核对固定源 PA 边界并拆为可独立验收的小步。
+本轮完成 **M07a：ND paged cache 固定源核对与实施拆分（纯文档）**（2026-10-10），基线 `538b8e5`，分支 `feat/mla-cann-migration`。M06 已完成，PA 仍明确拒绝；M07 的目标契约见 [design 6.4.3](design.md#643-nd-paged-cache-契约与来源)。唯一下一步为 **[M07b1：PA CPU 地址组件](plan.md#下一步m07b1)**。
 
 本页维护当前能力、证据、环境差异和下一步；目标契约与架构见 [design](design.md)，步骤与完成条件见 [plan](plan.md)。当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位，功能闭环提交见下方证据表。
 
@@ -53,55 +53,57 @@ stride 与 storage offset 不进入 metadata；`data_ptr()` 已包含 offset。C
 
 ## 最近闭环与证据
 
-本轮证据位于忽略目录 `build/mla-m06e2c2-mixed-stride-production/`，路径相对仓库根目录；源码快照、构建产物、原始性能数据和哈希保存在该目录，不随 Git 分发。`acceptance.json` 汇总验收，当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
+本轮只修改 design、plan、status。证据位于忽略目录 `build/mla-m07a-paged-plan/`，路径相对仓库根目录；包含固定源快照、来源/哈希核对、文档检查脚本与结果，不随 Git 分发。没有实现或运行 PA，没有重建或重新加载扩展，也没有运行 NPU 精度/性能测试。
 
-| 检查 | 结果 | 证据入口 |
-| --- | --- | --- |
-| 混合 stride 生产，双 dtype 910B | 448 项通过：公开 v4／内部 v5／raw C++／op／fake／compile，NTD／四路 offset／广播／重叠，65535/65536/65537、24 项真实 >uint32 地址、scale、完整 storage、跨视图 metadata、长度更新、空值、流生命周期及 20 项真实 Trap | `production.xml`、`production-tests/accuracy.jsonl`、`production-tests/*/trap-*/` |
-| 连续 TND／混合、混合 metadata 与 BSND stride 回归 | 2,684 项通过；132 项既有进程级 Trap 未选入，本步相关混合 Trap 另验，不计为通过或跳过 | `affected-final.xml`、`affected-final-command.json`、`run_affected.py` |
-| 普通 FA3／接口／metadata／compile | 833 项通过 | `ordinary-regressions.xml`、`run_regressions.py` |
-| 已开放 TND stride 与独立 TND／混合组件 | 当前构建 694 项通过，其中生产 374、独立 320；14 项 TND Trap 未重复选入。前置原扩展完整最小闭环另复跑 388 项，不重复计数 | `stride-regressions.xml`、`baseline.xml` |
-| 构建与加载来源 | 255 份源码依赖、31 个对象；仅混合 FP16/BF16 launcher、MLA 前向与公共 C++ 分派共 4 个对象改变，其余 27 个哈希未变；新 probe 从当前源码和固定 CANN Git blob 构建 | `production-build-manifest.json`、`production-dependencies/`、`production-final/`、`probes/*/build-manifest.json` |
-| 原生分派与公开 E2E | 双 dtype 各 11 例；8 例适用、3 例原生 FD 单列；复用、生成一次加 R=1/4、内部生成，共 96 个适用调用段逐例达标 | `native-package.json`、`native-dispatch-proof.json`、`performance-acceptance.json` |
-| 质量、文档与证据核验 | 适用质量钩子、链接/锚点/表格、`git diff --check`、源码/对象/库/运行证据哈希通过 | `quality-staged.log`、`docs-check.json`、`environment-final.json`、`acceptance.json` |
+| 检查 | 结果与证据 |
+| --- | --- |
+| 固定 CANN 来源 | 16 份源文件/许可证逐一从固定 Git blob 提取，工作树内容一致；`cann-source/`、`source-audit.json`。源仓原有 67 项差异保留，核对前后相同 |
+| 固定官方 FA3 | Python/C++ 两份归档与既有固定提交 manifest 哈希一致；`official/`。本轮使用已验证归档，未从网络刷新 |
+| 上一步最小闭环复核 | M06e2c2 的 acceptance、生产命令/448 项 XML、性能与环境证据哈希一致；269 份非文档源码及当前扩展哈希未变；`source-audit.json`。历史 4,659 项通过不是本轮测试数 |
+| 文档与范围 | 本地链接/锚点、表格、步骤唯一性、官方签名、固定源函数/分支、当前 PA 拒绝条件与三文档一致性通过；`docs-check.json` |
+| 提交质量 | `git diff --check` 与适用仓库质量钩子通过；`quality-staged.log`、`acceptance.json` |
 
-共 **4,659 个去重 pytest 用例通过，无失败或跳过**；前置复跑与未选入的 Trap 不计入该数字。精度同时对照固定源和既有双数学 reference，未改精度阈值。CPU 地址实现、Kernel/Block/Tile 数值与同步流程未改；未重跑 ASan/UBSan，最近地址组件闭环仍为 M06e2a `2a8cd38` 的 `build/mla-m06e2a-tnd-layout/sanitized/report.json`。
+核对确定：页大小交集是 16..1024 的全部 64 个 16 倍数；P=112 会改变源 S2 基块，P=528 仍需块内跨页。PA 的 KV 长度始终按样本，TND Q 不使其变为累计长度。metadata 生成器没有页表/物理 cache 参数，故页号与物理 storage 校验属于当次消费者，记录可跨合法页表映射复用。PA 的空值须按官方 `total_k=B*P` 分支核对，不能按物理 cache 的空 shape 套用非分页 `+inf`。这些是源码/契约结论，实机验收分别列入 M07c–e。
 
-### 性能与限制
+### 最近功能闭环与限制
 
-生产组件矩阵双 dtype 各 6 例，固定源非 FD、相同逻辑输入/调度及 20 核发射。源连续物化和 Q-used 压紧在计时前完成，迁移端直接读原 stride 视图；生产内部 wall 含 metadata 生成，源 probe 预分配，不能作为公开 E2E。每 dtype 预热 5 次、5 轮交替采样，保留 600 个 Kernel 样本及 1,200 个 wall 样本。
+最近功能提交为 **M06e2c2 `538b8e5`**，证据仍在 `build/mla-m06e2c2-mixed-stride-production/`：
 
-公开矩阵双 dtype 各 11 例，双方接收相同物理 tensor；原生每次从 BSND cache gather 紧凑 KV，Q/qv 的原生布局转换也计入 CANN E2E。分别采集 metadata 生成、显式复用、生成一次加 R=1/4、逐次内部生成及转换调用；两端包含 O/LSE 完成同步。CPU 亲和性固定 128–135，预热 5 次、5 轮各 20 个 wall 样本，每 dtype 保留 11,000 个 wall 样本和 1,650 个 profiler 调用样本。设备 CSV 与原始 CANN `op_summary` 的名称、设备、开始时间、耗时逐项一致；attention 与转换设备耗时单列。
-
-| dtype | 8 个适用公开用例各调用段的 FA3 / CANN E2E | 6 例生产 / 固定源 Kernel 范围 | Kernel 慢于源端 |
-| --- | --- | --- | --- |
-| FP16 | 0.284–0.623，逐例均 ≤1.0 | 0.898–1.888 | 4/6 |
-| BF16 | 0.284–0.675，逐例均 ≤1.0 | 0.901–2.458 | 4/6 |
-
-公开证据为 `public-fp16/`、`public-bf16/`，组件为 `component-fp16/`、`component-bf16/`。**组件仍有退化，不能宣称 Kernel 全部不劣化。** 原生 FD 三例按固定源调度和实际 tiling key 判定，完整数据保留；其差距留待 M10，没有按耗时筛选或放宽门槛。组件 profiler 仍报告 `fwk_api_db` 解析错误；设备样本核验通过，不据此声称 host 关联可用。
-
-BSND 公开 E2E 最近闭环仍为 M06e1c `4e83d32` 的 `build/mla-m06e1c-bsnd-stride/performance-acceptance.json`；TND Q/KV 公开 E2E 为 M06e2c1 `1e46ff5` 的 `build/mla-m06e2c1-tnd-stride-production/performance-acceptance.json`。本轮没有重复采样这两套矩阵。
+- `acceptance.json` 汇总 4,659 个去重 pytest 通过、无失败或跳过；生产混合 stride 448、受影响回归 2,684、普通 FA3 833、TND/独立 stride 回归 694。前置复跑与未选入的进程级 Trap 不计入。
+- `performance-acceptance.json`：双 dtype 各 8 个适用公开用例，metadata 复用、生成加 R=1/4、逐次内部生成共 96 段逐例达标；FA3/CANN E2E 为 FP16 0.284–0.623、BF16 0.284–0.675。各 3 个原生 FD 用例完整保留并单列，待 M10。
+- 组件 Kernel 比值仍为 FP16 0.898–1.888、BF16 0.901–2.458，各有 4/6 例慢于固定源；**不能宣称 Kernel 全部不劣化**。组件 profiler 的 `fwk_api_db` 解析错误保留，设备 CSV 已核验，不据此声称 host 关联可用。
+- BSND 与 TND stride 的公开 E2E 证据分别在 `build/mla-m06e1c-bsnd-stride/` 与 `build/mla-m06e2c1-tnd-stride-production/`；最近 CPU 地址 sanitizer 为 `build/mla-m06e2a-tnd-layout/sanitized/report.json`，本轮未重跑。
 
 ## 环境与构建
 
-`environment.json` 核验 Python `/usr/local/python3.11.15/bin/python3` 3.11.15、torch `2.7.1+cpu`、torch_npu `2.7.1`、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`、bisheng clang 15.0.5、g++ 11.4、8 张健康 Ascend910B3。构建与 NPU 验证在沙箱外执行。前置/生产/Trap 使用物理 7 号卡，受影响回归使用 5 号卡与 CPU 0–15，普通 FA3、TND/独立回归及随后性能使用 6 号卡；性能双方同卡、同亲和性。各命令保存实际环境变量，设备健康与占用由初始环境及性能前后快照记录。
+本轮通过静态来源核验 Python `/usr/local/python3.11.15/bin/python3` 3.11.15、已安装 torch/torch_npu distribution 均为 2.7.1、CANN 路径 `/usr/local/Ascend/cann-9.0.0-beta.2`，CATLASS 为 `769cd40a8716b28650b6bebb08db4834eea4462f` 且干净。此前成功进程的实际 torch 版本为 `2.7.1+cpu`，不能把 distribution 的字符串差别写成环境升级。
 
-生产构建设置 `FLASH_ATTN_SKIP_SUBMODULE_INIT=1 FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910`。实际加载 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 为 `38582e6e4deb2eed122a38e5c1da06cd6d5386b4d00bc405f21e1cf469a4a00e`；加载库与链接产物一致。混合 v4 按四路连续性选择连续或 stride 实例，混合 v5 复用既有 TND used launcher；metadata 字节协议不变。
+磁盘扩展为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `38582e6e4deb2eed122a38e5c1da06cd6d5386b4d00bc405f21e1cf469a4a00e`，与上一步实际加载路径及构建记录一致。这里只复核磁盘文件与源码，**本轮未重新加载扩展、未查询芯片健康/占用**。此前实机环境为 8 张 Ascend910B3、bisheng clang 15.0.5、g++ 11.4；进入 M07b1 开发前重新核查当前环境，设备步骤须在实际验证进程中确认加载来源和可用卡。
 
-额外进程查询及独立环境重载的自动审批超时，均未执行；沙箱内额外 `npu-smi` 查询也以 187 退出（dcmi 初始化 -8005），不记为通过。最终 `environment-final.json` 采用已成功完成的双 dtype 公开采样进程环境和末次设备快照，另在沙箱内复核当前源码、对象、扩展及源仓状态；这不是单独再加载 NPU 扩展。全部必要实机验收已有对应成功进程的证据。
-
-CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f` 干净；只读 CANN 源 `ca18aee610729ca5270a44e2d84c751bc687fbf0` 的已有差异及本仓未跟踪 `kernel_meta/` 均保留。910C 尚未实机验收，完整 graph replay 仍留在 M16。
+只读 CANN 源仍为 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，原有差异和本仓未跟踪 `kernel_meta/` 保留。文档检查使用非 login shell 和已有 `/tmp/mla-m01-precommit`、`/tmp/mla-m01-precommit-cache`；默认 Python 环境没有安装 pre-commit，无需改动系统安装。910C 尚未开放或实机验收，完整 graph replay 留在 M16。
 
 ## 唯一下一步与复现
 
-下一步仅为 **[M07](plan.md#下一步m07)**：固定源 ND paged cache 边界核对与实施拆分；本轮提交后停止，不开始 PA 实现。再次开发前重新核查设备健康、占用与扩展来源，输出使用新目录保留本轮证据。
+下一步仅为 **[M07b1](plan.md#下一步m07b1)**：独立 PA CPU 地址/页内分段组件及固定源差分、ASan/UBSan；本轮提交后停止，不开始实现。
+
+本轮最小闭环为以下文档检查，第二条同时复核来源、上一步证据和未变源码/扩展；质量检查在只暂存本轮三份文档后运行：
+
+```bash
+python3 build/mla-m07a-paged-plan/audit_sources.py
+python3 build/mla-m07a-paged-plan/check_docs.py
+PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache \
+bash ci/code_quality.sh --staged
+git diff --cached --check
+```
+
+上一功能步的最小实机命令保留如下，**本轮未运行**；后续修改源码/构建时，按影响范围重跑，使用新输出目录，probe 默认重建：
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=7 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 \
-MLA_TND_STRIDE_DIR=build/mla-m06e2c2-recheck/probes \
-MLA_TND_STRIDE_PRODUCER_DIR=build/mla-m06e2c2-recheck/producer \
-MLA_MIXED_STRIDE_DIR=build/mla-m06e2c2-recheck/production \
+MLA_TND_STRIDE_DIR=build/mla-m07-recheck/probes \
+MLA_TND_STRIDE_PRODUCER_DIR=build/mla-m07-recheck/producer \
+MLA_MIXED_STRIDE_DIR=build/mla-m07-recheck/production \
 python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_mixed_stride_production.py
 ```
 
-该命令默认重建 probe；仅在源码、库和 manifest 哈希一致时才设置 `MLA_TND_STRIDE_REUSE=1`。构建和加载核验见 `production-build-command.json`、`production-audit-command.json`。双 dtype 组件与公开性能由 `performance.py component`、`performance.py public` 归档命令复现；公开驱动为 `python3 -m tests.mla_mixed_profile OUTPUT VENDOR PLATFORM DTYPE --stride-probes PROBES --stride-producer PRODUCER_MANIFEST`。其余检查使用上表对应命令文件，均另设输出目录。
+设备编号须根据当次健康/占用重新选择。`MLA_TND_STRIDE_REUSE=1` 仅在源码、库和 manifest 哈希一致时使用；生产构建、加载与性能复现继续参考上一步目录的 `production-build-command.json`、`production-audit-command.json`、`performance.py` 及原始 command JSON。

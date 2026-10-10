@@ -1,8 +1,8 @@
 # MLA 迭代计划
 
-本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#下一步m07) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
+本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#下一步m07b1) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
 
-M06 已完成。唯一下一步为 **[M07：ND paged cache](#下一步m07)**，先核对固定源边界并拆小，再依次推进 M08..M17。
+M06 已完成，M07a 的源边界核对与实施拆分也已完成。唯一下一步为 **[M07b1：PA CPU 地址组件](#下一步m07b1)**；M07 按下表逐项验收，完成后再依次推进 M08..M17。
 
 ## M06：非分页长度、TND 与 stride
 
@@ -12,17 +12,40 @@ M06 已完成。唯一下一步为 **[M07：ND paged cache](#下一步m07)**，�
 
 M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定性能矩阵与阶段边界)。生成记录、校验记录和执行 attention 分别验收；全部样本实际长度为零也不等于全局空容量。
 
-## 下一步：M07
+## M07：ND paged cache
 
-迁移 512+64 ND paged cache。先核对固定 CANN 的页表、有效页大小、物理地址与 K/V 独立首维 stride，结合官方 FA3 的 BSND/TND query 和 metadata 契约，将 M07 拆成有独立产物与验收条件的提交；拆分前不一次性开放整个 PA 路径。
+本阶段限 FP16/BF16、512+64 共享 KV、Hkv=1、无 mask、`num_splits=1`，接入 BSND/TND query 和内部 Q-used。接口、页大小、长度、物理地址和来源见 [design 6.4.3](design.md#643-nd-paged-cache-契约与来源)，新增记录的职责见 [metadata PA 约束](design.md#51-签名与复用规则)。64 种源页大小、两路 cache 独立 stride、页表行 stride 均在范围内；CANN 原生只支持部分外层 stride 时，测试侧转换计入公开 E2E。
 
-## M07 及后续步骤
+### 下一步：M07b1
+
+先交付不被生产调用的 PA CPU 地址组件：分开描述逻辑 B/页表宽度/容量、物理页池、页大小、页表行距与 K/V 各自 storage；复用已有 BSND/TND 地址检查，校验有效页号并把逻辑复制范围拆成页内段。以固定源 offset/copy helper 和独立标量 oracle 对照地址及分段，覆盖乱序/重复页、-1 padding、尾页、广播/重叠、独立 offset、65535/65536/65537 与 >uint32 地址、空值及溢出，运行 ASan/UBSan 和受影响 CPU 回归。此步不改调度、metadata、Kernel 或公开入口。
+
+### M07 剩余步骤
+
+每行是一次独立提交；只有对应生产接入验收后才开放该组合。CPU、生成器、设备消费者和 attention probe 均不代表公开能力。
+
+| 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
+| --- | --- | --- | --- |
+| M07b1 | 唯一下一步 | PA CPU 地址、完整 storage 与页内分段组件 | 固定源地址差分、独立 oracle、全部页大小/stride/溢出/空值、ASan/UBSan 与 CPU 回归 |
+| M07b2 | 待开始 | BSND/TND Q、可选 Q-used 的 PA CPU 调度；KV 长度按样本 | 固定源 `CalcInnerSize`、完整分核/FD 字段/workspace 差分；逻辑容量与有效长度分离、P=112/528 等边界、无 split 映射、sanitizer；不改旧路径结果 |
+| M07c1 | 待开始 | 新 PA 协议与 CPU 序列化，固化版本、精确字数与调用 context | 独立解码/损坏/溢出/失败清零，Q 分配/used 和 KV 长度快照；不保存页表、物理页数或 stride；v1–v5 互斥与回归 |
+| M07c2 | 待开始 | 独立 PA AICPU 生成器，仍无公开接入 | 910B 对照 CPU/固定源；设备长度、TND 总 Q 推导、空值、失败清零、输出/输入别名检查、异步生命周期与 metadata/普通 FA3 回归 |
+| M07c3 | 待开始 | PA 设备消费者：记录校验及当次页表/物理 cache 校验 | 损坏/过期长度/页大小、有效页越界与 padding 哨兵、Q=0 仍验有效页、空池/空表；写输出前拒绝、release 真实 Trap、流生命周期及旧消费者/普通 FA3 回归 |
+| M07d1 | 待开始 | 独立 PA Copy Tile，源 QK 内容/RoPE 联合搬运与 PV 搬运 | 910B 双 dtype 搬运逐元素一致、L1 布局/页边界/真实 stride/65536 回退/大地址；固定源代表性 Copy 组件性能，保留同步依赖 |
+| M07d2 | 待开始 | BSND Q 的独立 PA attention，含内部 Q-used 所需组合 | 双 dtype 对固定源 PA Kernel 与双数学 reference 的 O/LSE；64 种 P、PA01/PA02、空行/空池、poison、metadata、任务环；同调度非 FD Kernel 性能 |
+| M07d3 | 待开始 | TND Q 的独立 PA attention，含分配与 Q-used | Q 前缀/used 不移动起点、KV 非累计、非均匀/零尾部、所有 stride；910B 双 dtype 源/数学精度、同调度 PA Kernel 性能及 BSND PA 回归 |
+| M07e1 | 待开始 | 公开 `get_scheduler_metadata(page_size=P)`，BSND/TND Q | 只读逻辑几何/长度，真实/fake/C++/compile、旧记录互斥、长度更新/流生命周期与普通 FA3 回归；前向仍明确拒绝 PA |
+| M07e2 | 待开始 | BSND Q 只读 PA kvcache 与内部 PA Q-used 接入 | 完整 storage、全部页大小/合法 stride、有效页/空值/真实 Trap；metadata 跨页表/物理池复用；生产 Kernel、公开生成/复用/内部生成 R=1/4 E2E、普通 FA3 回归 |
+| M07e3 | 待开始 | TND Q 只读 PA kvcache 与内部 PA Q-used 接入，完成 M07 | 在 M07e2 条件上覆盖 Q 前缀、分配/used、逻辑 B 的整数长度物化、TND fake/compile/生命周期；双 dtype 精度、生产 Kernel、公开 PA E2E 与既有全布局/普通 FA3 回归 |
+
+PA01/PA02 的地址、Copy 与精度覆盖全部 16..1024 的 16 倍数；代表性性能保留 P=16/128/256/1024，并加入 P=112 的基本块变化和 P=528 的跨页块。矩阵在采样前固化，含 BSND/TND、短/长 KV、单/多 query、乱序页/尾页、K/V 独立首维 padding 和零长度。固定源原生非 FD、FD 与不接受的空表等情况按分派/约束单列，不按耗时筛选；独立 probe 不能替代原生 PA E2E。
+
+## M07 之后
 
 以下为顺序和完成边界；进入每项前将过大的步骤拆为可独立验收的提交，不提前开放未验收组合。
 
 | 步骤 | 状态 | 产物 | 完成条件 |
 | --- | --- | --- | --- |
-| M07 | 唯一下一步 | 512+64 ND paged cache | BSND/TND query、乱序页表、尾页、源有效页大小、K/V 独立首维 stride；精度及 PA E2E 通过 |
 | M08 | 待开始 | 512+64 右下 causal | Sq<Sk/Sq>Sk、多 query、空行、PA/TND/metadata；精度及 E2E 通过 |
 | M09 | 待开始 | 512+64 局部窗口 | 有限/单侧窗口、causal 叠加、FA3 归一化和页边界；精度及 E2E 通过 |
 | M10 | 待开始 | 512+64 split-KV 与合并 | 源分割/合并流程，自动/1/显式 split、dense/TND/PA/空 split、O/LSE/accumulator/metadata；长 KV E2E 通过 |
@@ -112,3 +135,9 @@ M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[�
 | M06e2b | TND/混合独立 v3/v4/v5 stride attention；原分配视图读取、NTD/独立 offset、used poison、65536 与真实大地址边界；固定源组件性能及连续/普通 FA3 回归，生产仍拒绝非连续输入 |
 | M06e2c1 | TND Q/KV stride 生产接入；公开 varlen v3/v5 与内部 TND used、完整 storage、真实/fake/C++/compile/生命周期；双 dtype 源/数学精度、生产 Kernel 对照、适用公开 R=1/4 E2E 及普通 FA3 回归，混合 stride 仍拒绝 |
 | M06e2c2 | 混合 TND Q + BSND KV stride 生产接入，完成 M06；公开只读 kvcache v4、内部混合 Q-used v5、完整 storage、跨视图 metadata 与长度更新；双 dtype 源/数学精度、真实/fake/C++/compile/生命周期、生产 Kernel、适用公开生成/复用 R=1/4 E2E 及普通 FA3 回归 |
+
+### M07 已完成子步骤
+
+| 步骤 | 已完成产物与边界 |
+| --- | --- |
+| M07a | 纯文档固定源核对与实施拆分；页大小交集、PA 非累计 KV 长度、逻辑/物理容量、独立 stride、页表动态校验、metadata 复用及空值差异；未开放 PA |
