@@ -3,6 +3,7 @@
 #include "mla_schedule.h"
 #include "mla_metadata_args.h"
 #include "mla_tnd_metadata_args.h"
+#include "mla_tnd_bsnd_metadata_args.h"
 #include "mla_validation.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
@@ -20,6 +21,7 @@
 extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadataFromPrefix(void* args);
 
 namespace flash_attn::mla {
 namespace {
@@ -68,6 +70,8 @@ struct MetadataSubmission {
         TORCH_CHECK(aclrtStreamWaitEvent(worker, inputReady) == ACL_SUCCESS, "MLA: input event wait failed");
         if constexpr (std::is_same_v<Args, MlaTndMetadataArgs>) {
             ComputeMlaTndMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
+        } else if constexpr (std::is_same_v<Args, MlaTndBsndMetadataArgs>) {
+            ComputeMlaTndBsndMetadataFromPrefix<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else if (hasKvLengths) {
             ComputeMlaBsndKvLengthMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else {
@@ -155,6 +159,29 @@ at::Tensor DenseMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads,
     CheckCacheLengths(cacheSeqlens, batch, cacheSeqlens.device());
     const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
     return DenseMetadata(batch, sq, heads, sk, dtype, cacheSeqlens);
+}
+
+at::Tensor TndBsndMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,
+                             const at::Tensor& cacheSeqlens, const at::Tensor& cuQ)
+{
+    const auto words = CheckTndBsndMetadataInputs(batch, maxQ, sk, heads, dtype, cacheSeqlens, cuQ);
+    const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
+    auto metadata = at::empty({words}, cacheSeqlens.options().dtype(at::kInt));
+    MlaTndBsndMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
+                                words,
+                                uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),
+                                {batch, 0, heads, maxQ, sk},
+                                DensePlatform(),
+                                reinterpret_cast<uint64_t>(cuQ.data_ptr()),
+                                uint64_t(cuQ.numel()),
+                                reinterpret_cast<uint64_t>(cacheSeqlens.data_ptr()),
+                                uint64_t(cacheSeqlens.numel())};
+    auto submission = PrepareSubmission(metadata, args, cacheSeqlens, cuQ, true);
+    at_npu::native::OpCommand::RunOpApiV2("ascendc_mla_tnd_bsnd_metadata", [submission]() mutable -> int {
+        submission.Enqueue();
+        return 0;
+    });
+    return metadata;
 }
 
 std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -385,6 +412,8 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 {
     m.def("_mla_dense_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
           "ScalarType qkv_dtype, Tensor cache_seqlens) -> Tensor");
+    m.def("_mla_tnd_bsnd_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
+          "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q) -> Tensor");
     m.def("_mla_dense_forward(Tensor q, Tensor k, Tensor v, Tensor qv, float? softmax_scale=None, "
           "Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
     m.def("_mla_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
@@ -396,6 +425,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
     // Validate the sole tensor's device before selecting the NPU generator,
     // including when a direct caller supplies CPU lengths.
     m.impl("_mla_dense_metadata", &flash_attn::mla::DenseMetadataOp);
+    m.impl("_mla_tnd_bsnd_metadata", &flash_attn::mla::TndBsndMetadataOp);
 }
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
@@ -403,6 +433,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
     // Lengths and metadata are int32. Let real/fake kernels validate their
     // dtype, including malformed floating tensors that require gradients.
     m.impl("_mla_dense_metadata", torch::CppFunction::makeFallthrough());
+    m.impl("_mla_tnd_bsnd_metadata", torch::CppFunction::makeFallthrough());
 }
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)

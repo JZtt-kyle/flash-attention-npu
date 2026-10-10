@@ -1899,6 +1899,28 @@ def _mla_dense_metadata_fake(
     )
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_tnd_bsnd_metadata")
+def _mla_tnd_bsnd_metadata_fake(
+    batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens, cu_seqlens_q
+):
+    if not 0 <= batch_size <= (2**32 - 1 - 406) // 5:
+        raise RuntimeError("MLA: mixed metadata word count overflow")
+    if not _fits_mla_dense_shape(0, max_seqlen_q, num_heads_q, max_seqlen_k):
+        raise RuntimeError("MLA: mixed metadata shape or max_seqlen bounds exceeded")
+    if qkv_dtype not in (torch.float16, torch.bfloat16):
+        raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
+    _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
+    if cu_seqlens_q.dtype != torch.int32:
+        raise RuntimeError("MLA: cu_seqlens_q must have dtype int32")
+    if cu_seqlens_q.device != cache_seqlens.device:
+        raise RuntimeError("MLA: cu_seqlens_q must be on the same NPU device")
+    if cu_seqlens_q.ndim != 1 or cu_seqlens_q.numel() != batch_size + 1:
+        raise RuntimeError("MLA: cu_seqlens_q must have shape [batch_size + 1]")
+    if not cu_seqlens_q.is_contiguous():
+        raise RuntimeError("MLA: cu_seqlens_q must be contiguous")
+    return torch.empty((406 + 5 * batch_size,), dtype=torch.int32, device=cache_seqlens.device)
+
+
 @torch.library.custom_op(
     "flash_attn_npu_3::_get_scheduler_metadata",
     mutates_args=(),
@@ -2023,7 +2045,6 @@ def _get_scheduler_metadata_fake(
             num_splits,
             sm_margin,
             (
-                cu_seqlens_q,
                 cu_seqlens_k,
                 cu_seqlens_k_new,
                 seqused_q,
@@ -2034,6 +2055,16 @@ def _get_scheduler_metadata_fake(
                 softmax_scale,
             ),
         )
+        if cu_seqlens_q is not None:
+            return _mla_tnd_bsnd_metadata_fake(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                qkv_dtype,
+                cache_seqlens,
+                cu_seqlens_q,
+            )
         return _mla_dense_metadata_fake(
             batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
         )
@@ -2078,7 +2109,10 @@ def get_scheduler_metadata(
     positive legacy softcap enables softcapping even when has_softcap is omitted.
     ``has_softcap=True`` requires a positive legacy softcap for this protocol.
     MLA returns int32 metadata with per-sample BSND KV length snapshots and
-    num_splits=1. Its scale is supplied only to forward; legacy numerical
+    num_splits=1. With cu_seqlens_q it generates a v4 TND-query/BSND-cache record;
+    max_seqlen_q is a per-query-segment bound, max_seqlen_k is cache capacity.
+    Public mixed-layout forward is not implemented yet.
+    Its scale is supplied only to forward; legacy numerical
     keywords are not supported. Length values are checked on device.
     """
     if headdim_v is None:
@@ -2094,7 +2128,6 @@ def get_scheduler_metadata(
             num_splits,
             sm_margin,
             (
-                cu_seqlens_q,
                 cu_seqlens_k_new,
                 cache_leftpad,
                 page_size,
@@ -2103,6 +2136,16 @@ def get_scheduler_metadata(
                 softmax_scale,
             ),
         )
+        if cu_seqlens_q is not None:
+            return torch.ops.flash_attn_npu_3._mla_tnd_bsnd_metadata(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                qkv_dtype,
+                cache_seqlens,
+                cu_seqlens_q,
+            )
         return torch.ops.flash_attn_npu_3._mla_dense_metadata(
             batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
         )

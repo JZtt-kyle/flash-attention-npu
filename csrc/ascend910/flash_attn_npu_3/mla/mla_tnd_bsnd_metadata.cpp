@@ -17,10 +17,12 @@ bool TndBsndMetadataWords(int64_t batch, uint32_t& words)
     return true;
 }
 
-bool BuildTndBsndMetadata(const MlaTndBsndShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+bool BuildTndBsndMetadata(const MlaTndBsndShape& inputShape, const MlaPlatformInfo& inputPlatform, uint32_t dtype,
                           uint32_t* output, uint32_t outputWords, const int32_t* cuQuery, uint64_t queryCount,
-                          const int32_t* kvLengths, uint64_t kvCount)
+                          const int32_t* kvLengths, uint64_t kvCount, bool fromQueryPrefix)
 {
+    auto shape = inputShape;
+    auto platform = inputPlatform;
     uint32_t expectedWords;
     const uintptr_t outAddress = reinterpret_cast<uintptr_t>(output);
     constexpr auto maxAddress = std::numeric_limits<uintptr_t>::max();
@@ -56,6 +58,15 @@ bool BuildTndBsndMetadata(const MlaTndBsndShape& shape, const MlaPlatformInfo& p
                !validDescriptor(kvLengths, kvCount, uint64_t(shape.batch))) {
         prefix.status = uint32_t(MlaTndBsndMetadataStatus::InvalidLengths);
     } else {
+        if (fromQueryPrefix) {
+            // Only AICPU reads device values. The parser still checks initial
+            // zero, monotonicity, max/total address bounds and all KV lengths.
+            shape.totalQuery = cuQuery[shape.batch];
+            if (shape.batch != 0 && shape.totalQuery > 0 && shape.kvCapacity > 0 && platform.aicNum > 0 &&
+                platform.aicNum <= kMlaMaxAic) {
+                platform.blockDims.fill(platform.blockDims[platform.aicNum - 1]);
+            }
+        }
         const auto status = BuildTndBsndSchedule(shape, platform, cuQuery, queryCount, kvLengths, kvCount, result);
         prefix.scheduleStatus = uint32_t(status);
         if (status == MlaScheduleStatus::Success) {

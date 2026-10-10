@@ -166,7 +166,6 @@ def test_public_record_matches_host(bsnd_probe, dtype, shape):
         ("softcap", 0.0),
         ("softcap", 15.0),
         ("softmax_scale", 0.23),
-        ("cu_seqlens_q", "tensor"),
         ("cu_seqlens_k_new", "tensor"),
         ("cache_leftpad", "tensor"),
     ],

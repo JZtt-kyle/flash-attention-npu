@@ -14,6 +14,7 @@
 
 using namespace flash_attn::mla;
 extern uint32_t ComputeMlaTndBsndMetadata(void*);
+extern uint32_t ComputeMlaTndBsndMetadataFromPrefix(void*);
 constexpr uint32_t guard = 0x12345678;
 
 void CheckBuffers()
@@ -46,6 +47,31 @@ void CheckBuffers()
     args.kvCount = 2;
     assert(ComputeMlaTndBsndMetadata(&args) == 0 && storage[6] == 0);
     auto good = storage;
+    // The official generator has no total-Q parameter. Its device-only mode
+    // derives that value and uses all cores without changing the explicit ABI.
+    auto inferred = args;
+    inferred.shape.totalQuery = INT64_MAX;
+    auto full = args;
+    full.platform.blockDims.fill(full.platform.blockDims[full.platform.aicNum - 1]);
+    assert(ComputeMlaTndBsndMetadata(&full) == 0);
+    auto publicGood = storage;
+    assert(ComputeMlaTndBsndMetadataFromPrefix(&inferred) == 0 && storage == publicGood);
+    assert(ComputeMlaTndBsndMetadataFromPrefix(nullptr) == 1);
+    for (bool query : {false, true}) {
+        auto bad = inferred;
+        (query ? bad.cuQueryAddr : bad.kvLengthsAddr) = 0;
+        assert(ComputeMlaTndBsndMetadataFromPrefix(&bad) == 0 && storage[6] == 3);
+        for (uint32_t i = 9; i <= words; ++i)
+            assert(storage[i] == 0);
+        bad = inferred;
+        (query ? bad.queryCount : bad.kvCount) = 0;
+        assert(ComputeMlaTndBsndMetadataFromPrefix(&bad) == 0 && storage[6] == 3);
+        assert(ComputeMlaTndBsndMetadataFromPrefix(&inferred) == 0 && storage == publicGood);
+        bad = inferred;
+        (query ? bad.cuQueryAddr : bad.kvLengthsAddr) = args.outputAddr;
+        assert(ComputeMlaTndBsndMetadataFromPrefix(&bad) == 1 && storage == publicGood);
+    }
+    assert(ComputeMlaTndBsndMetadata(&args) == 0 && storage == good);
     MlaDenseMetadataContext context{};
     context.batch = 2;
     MlaDenseKernelSchedule decoded;
@@ -157,7 +183,8 @@ int main(int argc, char** argv)
         CheckBuffers();
         return 0;
     }
-    const uint32_t dtype = argc == 2 ? std::stoul(argv[1]) : 1;
+    const uint32_t dtype = argc >= 2 ? std::stoul(argv[1]) : 1;
+    const bool fromQueryPrefix = argc == 3 && std::string(argv[2]) == "--from-prefix";
     MlaTndBsndMetadataArgs args{};
     auto& s = args.shape;
     auto& p = args.platform;
@@ -187,7 +214,7 @@ int main(int argc, char** argv)
         args.kvLengthsAddr = hasK ? reinterpret_cast<uint64_t>(k.data() + 1) : 0;
         std::vector<uint32_t> storage(args.outputWords + 2, guard);
         args.outputAddr = reinterpret_cast<uint64_t>(storage.data() + 1);
-        assert(ComputeMlaTndBsndMetadata(&args) == 0);
+        assert((fromQueryPrefix ? ComputeMlaTndBsndMetadataFromPrefix(&args) : ComputeMlaTndBsndMetadata(&args)) == 0);
         assert(storage.front() == guard && storage.back() == guard && q == qBefore && k == kBefore);
         std::cout << '[';
         for (uint32_t i = 1; i <= args.outputWords; ++i)

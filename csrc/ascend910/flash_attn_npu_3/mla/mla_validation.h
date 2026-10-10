@@ -3,6 +3,7 @@
 #include <torch/extension.h>
 #include "mla_bsnd_metadata.h"
 #include "mla_tnd_metadata.h"
+#include "mla_tnd_bsnd_metadata.h"
 
 // Host-only boundary for the two representations in docs/mla/design.md.
 // Contract: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
@@ -121,6 +122,22 @@ inline uint32_t CheckBsndMetadataWords(int64_t batch)
     TORCH_CHECK(batch >= 0 && batch <= UINT32_MAX - kMlaBsndKvLengthMetadataPrefixWords,
                 "MLA: BSND metadata word count overflow");
     return kMlaBsndKvLengthMetadataPrefixWords + batch;
+}
+
+inline uint32_t CheckTndBsndMetadataInputs(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,
+                                           const at::Tensor& cacheSeqlens, const at::Tensor& cuQ)
+{
+    TORCH_CHECK(batch >= 0 && batch <= (UINT32_MAX - kMlaTndBsndMetadataPrefixWords) / kMlaTndBsndMetadataSequenceWords,
+                "MLA: mixed metadata word count overflow");
+    // Total Q is device-resident. Do not impose a rectangular B*maxQ bound.
+    TORCH_CHECK(FitsDenseShape(0, maxQ, heads, sk), "MLA: mixed metadata shape or max_seqlen bounds exceeded");
+    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
+    CheckCacheLengths(cacheSeqlens, batch, cacheSeqlens.device());
+    TORCH_CHECK(cuQ.scalar_type() == at::kInt, "MLA: cu_seqlens_q must have dtype int32");
+    TORCH_CHECK(cuQ.device() == cacheSeqlens.device(), "MLA: cu_seqlens_q must be on the same NPU device");
+    TORCH_CHECK(cuQ.dim() == 1 && cuQ.numel() == batch + 1, "MLA: cu_seqlens_q must have shape [batch_size + 1]");
+    TORCH_CHECK(cuQ.is_contiguous(), "MLA: cu_seqlens_q must be contiguous");
+    return kMlaTndBsndMetadataPrefixWords + kMlaTndBsndMetadataSequenceWords * batch;
 }
 
 inline void CheckDenseMetadataTensor(const at::Tensor& metadata, const at::Device& device, int64_t batch)

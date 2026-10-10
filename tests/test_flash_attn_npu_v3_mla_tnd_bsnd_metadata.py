@@ -100,9 +100,9 @@ def mixed_builder(tmp_path_factory):
     return binary, directory
 
 
-def build(builder, cases, dtype=1):
+def build(builder, cases, dtype=1, *, from_prefix=False):
     result = subprocess.run(
-        [str(builder[0]), str(dtype)],
+        [str(builder[0]), str(dtype), *(["--from-prefix"] if from_prefix else [])],
         input="".join(" ".join(map(str, c)) + "\n" for c in cases),
         capture_output=True,
         text=True,
@@ -253,6 +253,25 @@ def test_global_empty(mixed_builder, dtype, q, k, capacity):
     assert projection(row) == [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1] + [0] * 338
     assert row[401:PREFIX] == [sum(q), 17, capacity, *wide_words(len(q) * capacity)]
     assert row[PREFIX:] == wire_spans(item)
+
+
+@pytest.mark.parametrize("dtype", (1, 2))
+def test_total_from_prefix_matches_explicit_and_source(mixed_builder, mixed_oracle, dtype):
+    cases = metadata_cases(20, 2)
+    for c in cases:
+        c[12] = 20  # Public nonempty records bind a full-core launch.
+    rows = build(mixed_builder, cases, dtype, from_prefix=True)
+    assert rows == build(mixed_builder, cases, dtype)
+    check_records(rows, cases, mixed_oracle, mixed_builder[1], f"inferred-{dtype}", dtype)
+    empty = [mixed_case(q, k, sq=17, capacity=sk) for q, k, sk in EMPTY_CASES]
+    assert build(mixed_builder, empty, dtype, from_prefix=True) == build(
+        mixed_builder, empty, dtype
+    )
+    # totalQuery in the private ABI is unused only by the new public producer.
+    c = mixed_case(total_q=-1)
+    assert build(mixed_builder, [c], dtype, from_prefix=True) == build(
+        mixed_builder, [mixed_case(block_dim=20)], dtype
+    )
 
 
 FAILURES = [

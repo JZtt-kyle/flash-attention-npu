@@ -1,5 +1,5 @@
 // Private TND-Q/BSND-KV protocol with independent generation and validation.
-// No attention entry yet. Never pass this record to a v1/v2/v3 Kernel.
+// Never pass this record to a v1/v2/v3 Kernel.
 #pragma once
 #include "mla_metadata.h"
 
@@ -48,8 +48,11 @@ bool TndBsndMetadataWords(int64_t batch, uint32_t& words);
 // the eight-word header, including capacity, upper bound and token spans.
 // Read-only inputs may alias each other, must be readable on CPU/AICPU and
 // remain immutable until generation ends. Neither may overlap the output.
+// The public generator has no total-Q argument: fromQueryPrefix derives it
+// after descriptor checks and selects full-core launch for nonempty capacity.
+// Explicit-total callers retain the supplied shape and block-dimension table.
 bool BuildTndBsndMetadata(const MlaTndBsndShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                           uint32_t* output, uint32_t outputWords, const int32_t* cuQuery, uint64_t queryCount,
-                          const int32_t* kvLengths, uint64_t kvCount);
+                          const int32_t* kvLengths, uint64_t kvCount, bool fromQueryPrefix = false);
 
 } // namespace flash_attn::mla
