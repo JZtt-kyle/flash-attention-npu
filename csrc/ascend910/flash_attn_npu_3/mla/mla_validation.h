@@ -58,8 +58,8 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
         TORCH_CHECK(q.size(-1) == 64 && v.size(-1) == 512,
                     "MLA: supported qv representation requires Dq=64 and Dv=512");
         TORCH_CHECK(headsKV == 1, "MLA: compressed representation requires one KV head");
-        TORCH_CHECK(varlenQ == varlenK && !pagedKV,
-                    "MLA compressed forward is not implemented yet for mixed TND/BSND or paged KV");
+        TORCH_CHECK((varlenQ || !varlenK) && !pagedKV,
+                    "MLA compressed forward is not implemented yet for BSND Q with TND KV or paged KV");
         TORCH_CHECK(varlenQ || q.size(0) == k.size(0), "MLA: dense batch sizes must match");
         TORCH_CHECK(varlenQ || FitsDenseShape(q.size(0), q.size(1), headsQ, k.size(1)),
                     "MLA compressed forward is not implemented yet outside B>=0, nonnegative S1G within address/field "
@@ -147,6 +147,34 @@ inline void CheckDenseMetadataTensor(const at::Tensor& metadata, const at::Devic
     TORCH_CHECK(metadata.dim() == 1 && metadata.size(0) == CheckBsndMetadataWords(batch),
                 "MLA: scheduler_metadata must have shape [401 + batch_size]");
     TORCH_CHECK(metadata.is_contiguous(), "MLA: scheduler_metadata must be contiguous");
+}
+
+inline uint32_t CheckTndBsndForwardInputs(const at::Tensor& q, const at::Tensor& k, const at::Tensor& cuQ, int64_t maxQ,
+                                          const std::optional<at::Tensor>& cacheSeqlens,
+                                          const std::optional<at::Tensor>& metadata)
+{
+    const int64_t batch = k.size(0);
+    TORCH_CHECK(batch <= (UINT32_MAX - kMlaTndBsndMetadataPrefixWords) / kMlaTndBsndMetadataSequenceWords,
+                "MLA: mixed metadata word count overflow");
+    const uint32_t words = kMlaTndBsndMetadataPrefixWords + kMlaTndBsndMetadataSequenceWords * batch;
+    TORCH_CHECK(FitsDenseShape(0, maxQ, q.size(1), k.size(1)) && q.size(0) <= INT32_MAX &&
+                    uint64_t(q.size(0)) * q.size(1) <= kMlaMaxBatchRows,
+                "MLA: mixed shape or max_seqlen bounds exceeded");
+    TORCH_CHECK(cuQ.scalar_type() == at::kInt, "MLA: cu_seqlens_q must have dtype int32");
+    TORCH_CHECK(cuQ.device() == q.device(), "MLA: cu_seqlens_q must be on the same NPU device");
+    TORCH_CHECK(cuQ.dim() == 1 && cuQ.numel() == batch + 1, "MLA: cu_seqlens_q must have shape [batch_size + 1]");
+    TORCH_CHECK(cuQ.is_contiguous(), "MLA: cu_seqlens_q must be contiguous");
+    if (cacheSeqlens) {
+        CheckCacheLengths(*cacheSeqlens, batch, q.device());
+    }
+    if (metadata) {
+        TORCH_CHECK(metadata->scalar_type() == at::kInt, "MLA: scheduler_metadata must have dtype int32");
+        TORCH_CHECK(metadata->device() == q.device(), "MLA: scheduler_metadata must be on the same NPU device");
+        TORCH_CHECK(metadata->dim() == 1 && metadata->numel() == words,
+                    "MLA: scheduler_metadata must have shape [406 + 5 * batch_size]");
+        TORCH_CHECK(metadata->is_contiguous(), "MLA: scheduler_metadata must be contiguous");
+    }
+    return words;
 }
 
 } // namespace flash_attn::mla

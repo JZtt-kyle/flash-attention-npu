@@ -2,30 +2,28 @@
 
 本文件只记录迭代顺序、每步产物与完成条件。当前公开能力、最近一次闭环和复现命令见 [status](status.md)，目标范围、协议与验收口径见 [design](design.md)。步骤编号沿用历史，M04c 在 M05 闭环后执行；不按编号重新排序。
 
-唯一下一步为 **M06c3c：公开只读混合布局 kvcache**，完成条件见下。未完成工作按 M06 → M07..M17 排列，[已完成步骤](#已完成步骤) 集中放在末尾，保留原编号以便追溯提交。文档核验不推进功能步骤；独立组件完成不代表公开入口开放。
+唯一下一步为 **M06d1：实际 Q/KV 使用长度 CPU 归一与调度**，完成条件见下。未完成工作按 M06 → M07..M17 排列，[已完成步骤](#已完成步骤) 集中放在末尾，保留原编号以便追溯提交。文档核验不推进功能步骤；独立组件完成不代表公开入口开放。
 
 ## M06：非分页长度、TND 与 stride
 
 本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`；各入口默认值及调用要求见 [status](status.md#当前可调用能力)。BSND 每样本 KV 容量 `Sk` 与 TND 每段长度上界 `maxKvLength` 均为 0..16384；紧凑 TND 总 Q/KV 容量各自不超过 `INT32_MAX`，混合布局的 BSND 总容量为 64 位 `B*Sk`，均受 [字段、地址及资源边界](design.md#62-调度字段与边界) 约束。先 BSND 实际 KV 长度，再紧凑 TND 与混合布局，再区分 used 与分配长度，最后外层 stride。PA、mask、FD、192/128 与调度选项仍按后续步骤推进。
 
-每行单独验收、提交。长度和布局沿用“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 公开接入”的顺序；混合布局的调度、生成、校验和独立 attention 已完成，公开接入仍需另行验收。
+每行单独验收、提交。长度和布局沿用“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 公开接入”的顺序；混合布局已接通公开只读 kvcache，used 继续按同一顺序推进。
 
-### 下一步：M06c3c
+### 下一步：M06d1
 
-M06c3 拆为三个独立提交，保持固定官方 FA3 签名。a 已完成紧凑 TND varlen 与内部 v3，b 已接通 TND query 的公开 v4 metadata 生成；本步接通混合布局前向和显式 v4 复用。
+M06c3 的紧凑 TND varlen、公开 v4 生成及混合 kvcache 均已完成。下一步只完成 BSND/TND 实际 Q/KV 使用长度的独立 CPU 归一与调度，不提前开放 used 的设备或公开入口。
 
-- 接通 TND Q + BSND KV 的公开只读 `flash_attn_with_kvcache`，复用已验收的 v4 消费者和混合 Kernel / Block / Tile。
-- `cache_seqlens` 接受 None、整数或 tensor；无显式记录时内部生成 v4，有记录时直接消费并逐项核对当次 Q 前缀和 KV 长度。
-- 真实/fake/C++ 对齐静态边界、O/LSE 与返回外形；非法长度及损坏/过期记录在设备真实 Trap，不读取长度到主机。
-- 双 dtype 源/数学精度、空容量/零尾部/poison/offset、长度更新、跨流与 allocator 生命周期、普通 FA3 回归通过。
-- 固定代表矩阵完成显式复用和生成加 R=1/4 的完整 E2E 对照，原生 FD 等未迁移分派单列；不扩展 mask、used、PA、stride 或 split 范围。
+- 区分分配长度、样本起点与实际使用长度；未提供 used 时保持既有整段语义。BSND 起点由物理容量确定，TND 起点由分配前缀确定，缩短 used 不重排后续样本。
+- 覆盖 U01/T01 的 used 小于分配长度、零 Q/KV、混合 TND Q + BSND cache 及越界/计数/溢出；Q/KV 的有效范围分别校验。
+- 固定 CANN 源差分验证调度及端点，并独立枚举有效任务；不与待测端共用长度解析。
+- CPU sanitizer、旧 BSND/TND/混合调度与 metadata 回归通过；AICPU、设备输出和公开签名留在 M06d2/d3 验收。
 
 ### M06 剩余步骤
 
 | 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
 | --- | --- | --- | --- |
-| M06c3c | 唯一下一步 | TND query + BSND KV 的公开只读 kvcache，内部 v4 与显式复用 | None/整数/tensor 长度、过期/损坏记录真实 Trap、双 dtype 精度、空容量、生命周期、普通 FA3、复用及生成加 R=1/4 E2E 达标 |
-| M06d1 | 待开始 | BSND/TND 实际 Q/KV 使用长度 CPU 归一与调度 | U01/T01 used 小于分配长度；起点不随 used 重排；源对照与 sanitizer 通过 |
+| M06d1 | 唯一下一步 | BSND/TND 实际 Q/KV 使用长度 CPU 归一与调度 | U01/T01 used 小于分配长度；起点不随 used 重排；源对照与 sanitizer 通过 |
 | M06d2 | 待开始 | used 的 AICPU、设备消费与独立 Kernel 链路 | 有效行/零 Q/KV/poison padding/长度更新/Trap；仅检查官方定义输出区，组件性能与 metadata/普通 FA3 回归通过 |
 | M06d3 | 待开始 | varlen `seqused_q/k` 与内部 BSND Q-used 接入 | 不增加公共参数，签名/真实/fake/C++/有效输出/普通 FA3 与适用 E2E 通过；无公开等价的 BSND Q-used 只验收内部入口 |
 | M06e1 | 待开始 | BSND 最后一维连续的合法外层 stride | Q/qv/K/V 独立 batch/row/head stride/offset、BNSD 视图与 U01；无完整 cache 复制，精度/性能/普通 FA3 通过 |
@@ -114,3 +112,4 @@ M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[�
 | M06c2b2d | 混合布局设备寻址与独立 attention 驱动 | v4 先校验、64 位物理 KV 起点与变长任务环；双 dtype 源/数学精度、空容量/零尾部/poison/offset、记录更新/复用/生命周期/真实 Trap 通过；组件性能对照归档，已有布局/普通 FA3 回归通过 |
 | M06c3a | 公开紧凑 TND varlen 与内部 v3 生成 | 真实/fake/C++、双 dtype 源/数学精度、空总容量、非法前缀真实 Trap、前缀更新/跨流/allocator/compile、普通 FA3 回归通过；固定矩阵保留原生 FD 分类，同路径包含逐次生成的 R=1/4 E2E 达标 |
 | M06c3b | 官方 metadata 入口按 TND query 生成混合 v4；公开混合前向仍拒绝 | AICPU 从 Q 前缀推导总量，CPU/固定源一致；真实/fake/C++、失败记录、空容量/64 位物理起点/offset、长度更新/跨流/allocator/compile、普通 FA3 与生成耗时诊断通过 |
+| M06c3c | 公开只读 TND Q + BSND KV kvcache，内部 v4 与显式复用 | None/整数/tensor、真实/fake/C++、损坏/过期记录真实 Trap、双 dtype 源/数学精度、空容量/poison/offset、生命周期及普通 FA3 回归通过；固定矩阵保留原生 FD/空 KV 分类，适用七例复用、生成加 R=1/4 及逐次内部生成 E2E 逐例达标 |

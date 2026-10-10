@@ -1,4 +1,4 @@
-"""Official TND-query metadata generation; mixed public forward remains gated."""
+"""Official TND-query metadata generation and its device-only v4 protocol."""
 
 from contextlib import nullcontext
 import inspect

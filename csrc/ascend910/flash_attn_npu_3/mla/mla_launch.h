@@ -4,6 +4,7 @@
 #include "mla_dense_params.h"
 #include "mla_metadata.h"
 #include "mla_tnd_metadata.h"
+#include "mla_tnd_bsnd_metadata.h"
 
 namespace flash_attn::mla {
 struct MlaLaunchArgs {
@@ -27,6 +28,16 @@ struct MlaTndLaunchArgs {
 };
 aclError LaunchTndFp16(const MlaTndLaunchArgs& args);
 aclError LaunchTndBf16(const MlaTndLaunchArgs& args);
+
+struct MlaTndBsndLaunchArgs {
+    aclrtStream stream;
+    uint64_t ffts;
+    uint8_t *qc, *qr, *kv, *kr, *output, *lse, *workspace, *metadata, *cuQuery, *cacheSeqlens;
+    MlaTndBsndMetadataContext context;
+    float scale;
+};
+aclError LaunchTndBsndFp16(const MlaTndBsndLaunchArgs& args);
+aclError LaunchTndBsndBf16(const MlaTndBsndLaunchArgs& args);
 
 // Bisheng 9.0's ASC launcher does not expose a scheduling-mode argument.
 // The link wrapper changes only the launch inside this thread-local scope.

@@ -169,7 +169,7 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 
 metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链。兼容公开调用语义，NPU 记录布局由本后端管理，不与 CUDA buffer 互换。
 
-四种协议按布局和长度语义区分，不能仅凭同一 magic 或 tensor dtype 互换。B 表示 batch，字数单位均为 int32。生成器编入扩展、设备能校验记录、独立驱动能执行 attention、公开入口能调用是四个不同的接入层次；实际接通情况见 [status](status.md#独立组件边界)。
+四种协议按布局和长度语义区分，不能仅凭同一 magic 或 tensor dtype 互换。B 表示 batch，字数单位均为 int32。生成器编入扩展、设备能校验记录、独立驱动能执行 attention、公开入口能调用是四个不同的接入层次；实际接通情况见 [status](status.md#本步实现边界)。
 
 | 协议 | version / kind | 精确字数 | 长度语义与用途 |
 | --- | --- | --- | --- |
@@ -182,7 +182,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 - 保留官方参数名、顺序与默认值。`get_scheduler_metadata` 没有 `qv`、`cu_seqlens_k` 或 `seqused_q` 参数；`flash_attn_func` / `flash_attn_varlen_func` 没有显式 metadata 参数，MLA 接入这两者时采用内部生成。公开显式复用通过只读 kvcache 路径接入，不为迁移增加公共参数。
 - `get_scheduler_metadata` 的 `cache_seqlens` 是必需的设备 tensor；BSND MLA 要求同设备连续 `int32[B]`。`None` 和整数便利输入属于 `flash_attn_with_kvcache`，不扩展到生成器。生成器的 `max_seqlen_q/k` 对应 BSND 分配容量；实际 KV 长度由 tensor 提供。
-- 提供 `cu_seqlens_q` 时，MLA 生成器接收同设备连续 `int32[B+1]` Q 前缀与 `int32[B]` KV 长度，生成混合 v4；`max_seqlen_q` 为每段 Q 上界，`max_seqlen_k` 为 BSND cache 的物理容量。官方入口没有总 Q 参数，由 AICPU 从前缀尾值推导并校验，不做长度 D2H。公开混合前向及显式 v4 复用仍待 M06c3c。
+- 提供 `cu_seqlens_q` 时，MLA 生成器接收同设备连续 `int32[B+1]` Q 前缀与 `int32[B]` KV 长度，生成混合 v4；`max_seqlen_q` 为每段 Q 上界，`max_seqlen_k` 为 BSND cache 的物理容量。官方入口没有总 Q 参数，由 AICPU 从前缀尾值推导并校验，不做长度 D2H。只读 kvcache 的 TND query 分支消费同一 v4，要求相同的 Q 上界、物理 KV 容量及当次前缀/长度。
 - metadata 保存形状、dtype、调度特征、切块、分核及长度信息；当次前向提供 scale、softcap 数值、张量地址和 stride。生成器只选择调度族，前向仍独立校验真实 qv 与 Q/K/V。记录不含可变 scratch，不依据 head dimension 固化缺省 scale。
 - 不传 metadata 时内部生成；显式复用时不再次发射生成器。有/无记录共用源调度函数，不维护另一套 tiling 公式。host 只读 shape/dtype/stride 等静态信息，AICPU/设备读取长度值，steady-state 不增加长度 D2H、`.item()` 或主机同步。
 - 同设备、同调度条件和长度下可跨层复用；长度变化后重新生成。记录可克隆或用连续偏移视图复用，正确性不依赖 Python 私有属性。消费期间记录及长度保持只读，各调用拥有独立 O/LSE/workspace。
@@ -246,7 +246,7 @@ v1/v2/v3 共用协议头、平台、空调度、workspace 与本地内存校验�
 
 变长 M 块、实际 M/S2 总块数、端点和逐样本零成本后缀沿用 6.2.6；平台、空调度、workspace 和本地资源复用既有校验。非空物理容量中的全零 KV 仍校验完整调度与 workspace，不能改成空调度。失败不改写输出调度；和旧协议一样，不认证 split 最优性或未消费的 cost/FD 记账字段。
 
-[`kernel/mla_tnd_bsnd_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd_metadata.hpp) 检查地址、4 字节对齐、地址加法、编译 dtype 和实际 blockDim。每个 Cube/Vector 在 TPipe、attention 事件与输出/workspace 写入前完成只读校验；`LoadTndBsndMetadata` 遇错执行不受 `NDEBUG` 影响的真实 Trap，无长度 D2H 或主机等待。生成与消费期间记录和输入不可修改，跨 stream 与 allocator 依赖遵循 [5.6](#56-stream-与内存生命周期)。独立混合 attention 在校验成功后将五字 span 交给 `MlaTndBsnd`；公开混合前向接入仍按计划另行验收。
+[`kernel/mla_tnd_bsnd_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd_metadata.hpp) 检查地址、4 字节对齐、地址加法、编译 dtype 和实际 blockDim。每个 Cube/Vector 在 TPipe、attention 事件与输出/workspace 写入前完成只读校验；`LoadTndBsndMetadata` 遇错执行不受 `NDEBUG` 影响的真实 Trap，无长度 D2H 或主机等待。生成与消费期间记录和输入不可修改，跨 stream 与 allocator 依赖遵循 [5.6](#56-stream-与内存生命周期)。独立驱动与生产 [`mla_tnd_bsnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_bsnd_launch_impl.hpp) 均在校验成功后将五字 span 交给 `MlaTndBsnd`，保留 64 位物理 KV 起点。只读混合 kvcache 的 None/整数长度先物化为设备 `int32[B]`，再沿用同一 v4 生成/消费语义；None 表示物理整容量，显式记录也须逐项复核该长度。
 
 ### 5.6 stream 与内存生命周期
 
@@ -281,7 +281,7 @@ v2 消费后将快照传给 `MlaDense<InputT, true>` 实际长度特化。独立
 | --- | --- | --- |
 | BSND Q/KV | `mla_launch_impl.hpp` 消费 v1/v2 | `MlaDense` → `MlaNonPaged<InputT, HasKvLengths, false>` |
 | 紧凑 TND Q/KV | [`mla_tnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_launch_impl.hpp) 与 [`mla_tnd_attention_probe.cpp`](../../tests/mla_tnd_attention_probe.cpp) 消费 v3 | `kernel/mla_tnd.hpp::MlaTnd` → `MlaNonPaged<InputT, true, true>`，共用 Cube / Vector / Tile |
-| TND Q + BSND KV | [`mla_tnd_bsnd_attention_probe.cpp`](../../tests/mla_tnd_bsnd_attention_probe.cpp) 消费 v4 | [`kernel/mla_tnd_bsnd.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd.hpp)::`MlaTndBsnd` → `MlaNonPaged<InputT, true, true, true>`，共用 Cube / Vector / Tile |
+| TND Q + BSND KV | [`mla_tnd_bsnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_bsnd_launch_impl.hpp) 与 [`mla_tnd_bsnd_attention_probe.cpp`](../../tests/mla_tnd_bsnd_attention_probe.cpp) 消费 v4 | [`kernel/mla_tnd_bsnd.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd.hpp)::`MlaTndBsnd` → `MlaNonPaged<InputT, true, true, true>`，共用 Cube / Vector / Tile |
 
 v3/v4 各自使用独立 context 和 Kernel 调度类型，防止将布局不同的起点快照误传给 BSND 或紧凑 TND。混合 span 的 KV 起点从两个 uint32 字恢复为 uint64，并在任务环 `RunInfo` 与 Tile 坐标中保持 64 位。FD 合并与 192/128 通用路径按计划迁移。
 
@@ -374,7 +374,7 @@ KV token 起点固定为 `uint64(b)*Sk`，短长度和零长度不压缩 cache�
 
 固定源 `CreateSplitInput` 接收数值转换的 int64 Q 累计尾值与非累计 KV 长度，分别设置 `isAccumSeqS1=true`、`isAccumSeqS2=false`。调度 `s1Size` 使用观测 Q 最大值，`s2Size` 保留物理 Sk；观测 KV 最大值单独保存。`ProcessKVActualSeqLoop` 的等长判定比较原 KV 数组值，因此 B=10、Q 每段 2、Hq=128、20 核、Sk=511 且 KV 每段 511 时 M=128，而紧凑 TND 为 M=256。S2 基块按容量取 `min(Sk,512)`，任务成本和总物理执行块数按各样本实际 Q/KV 长度计算；后者须落在 uint32 内。
 
-混合布局与紧凑 TND 共用变长 M 块端点映射、零成本后缀检查和 workspace 计算。总 Q=0、B=0 或 Sk=0 时使用单校验核与零 workspace；非空物理容量中的全零 KV 保留源零成本调度和 workspace。[独立 CPU 对照](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_schedule.py) 的源 oracle 读取固定 CANN Git blob，不调用迁移解析器。CPU 与 [v4 AICPU 生成器](#55-v4tnd-q-与-bsnd-kv-混合记录) 共用此组件；其 64 位起点不能写入紧凑 v3 的四字 span。独立 attention 消费完整 v4 后，Q 使用紧凑起点、KV 使用物理起点，按当次样本 Q/KV 长度推进任务；O 为 `[Tq,Hq,512]`，LSE 为 `[Hq,Tq]`。非空物理容量中全零实际 KV 仍为 `O=0、LSE=-inf`，物理 Sk=0 则为 `O=0、LSE=+inf`；两者都先校验记录。公开混合前向接入另行验收。
+混合布局与紧凑 TND 共用变长 M 块端点映射、零成本后缀检查和 workspace 计算。总 Q=0、B=0 或 Sk=0 时使用单校验核与零 workspace；非空物理容量中的全零 KV 保留源零成本调度和 workspace。[独立 CPU 对照](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_schedule.py) 的源 oracle 读取固定 CANN Git blob，不调用迁移解析器。CPU 与 [v4 AICPU 生成器](#55-v4tnd-q-与-bsnd-kv-混合记录) 共用此组件；其 64 位起点不能写入紧凑 v3 的四字 span。独立 attention 消费完整 v4 后，Q 使用紧凑起点、KV 使用物理起点，按当次样本 Q/KV 长度推进任务；O 为 `[Tq,Hq,512]`，LSE 为 `[Hq,Tq]`。非空物理容量中全零实际 KV 仍为 `O=0、LSE=-inf`，物理 Sk=0 则为 `O=0、LSE=+inf`；两者都先校验记录。公开混合前向复用这条链路，其调用段按第 7 节验收。
 
 ### 6.3 数值路径与资源布局
 
@@ -423,15 +423,17 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 
 只读 kvcache 的 `_mla_dense_forward` 精简 dispatcher 接收 q/k/v/qv、scale、长度与记录，`_mla_dense_metadata` 接收静态几何、dtype 和设备长度。公开包装拒绝未支持选项，真实 C++ 与 fake 各自保留完整张量/scale/记录外形检查；Autograd 层透传，两者都拒绝梯度。`flash_attn_func` 内部生成 v1，不增加显式 metadata 参数；长度/显式记录存在时内部前向切至 v2，公开生成器始终返回 `int32[401+B]`。内部预分配 `out_` 仍拒绝，避免破坏 functional custom op 的 alias 契约。
 
-公开 `flash_attn_varlen_func` 的压缩 MLA 分支通过 `_mla_tnd_forward` 调用 `TndForward`，传入两组前缀和 max 上界，每次内部生成并消费 v3。O 为 `[Tq,Hq,512]`，LSE 为 `[Hq,Tq]`；请求 LSE 返回二项。host 只按静态总容量和 max 上界分配，非空总容量按平台全核发射并按最大 M 基块 256 预算 workspace，实际切块来自设备记录。全局空容量仍发射一个校验核，无 workspace；空 KV 的 `O=0、LSE=+inf` 由通过校验后的 Kernel 写入。真实/fake/C++ 同步拒绝 used、混合布局、显式记录及其他未接通选项，保持官方签名不变。
+公开 `flash_attn_varlen_func` 的压缩 MLA 分支通过 `_mla_tnd_forward` 调用 `TndForward`，传入两组前缀和 max 上界，每次内部生成并消费 v3。O 为 `[Tq,Hq,512]`，LSE 为 `[Hq,Tq]`；请求 LSE 返回二项。host 只按静态总容量和 max 上界分配，非空总容量按平台全核发射并按最大 M 基块 256 预算 workspace，实际切块来自设备记录。全局空容量仍发射一个校验核，无 workspace；空 KV 的 `O=0、LSE=+inf` 由通过校验后的 Kernel 写入。varlen 的真实/fake/C++ 同步拒绝 used、显式记录及其他未接通选项，保持官方签名不变。
+
+只读混合 kvcache 通过 `_mla_tnd_bsnd_forward` 调用 `TndBsndForward`，要求 TND Q/qv、BSND K/V、Q 前缀和 `max_seqlen_q`。batch 来自物理 cache，Q 总量来自 Q shape；不按矩形 `B*maxQ*Hq` 限制紧凑 Q。None/整数/tensor KV 长度均按 5.5 处理，无记录时内部生成 v4，显式复用不再启动生成器。非空容量按平台全核发射并预算最大 M=256 的 workspace；空 batch/query/KV 仍用单核校验和零 workspace。O/LSE 为 `[Tq,Hq,512]` / `[Hq,Tq]`，真实/fake/C++ 保持相同静态校验；内部通用入口的 `max_seqlen_k` 不用于 BSND cache，明确拒绝传入该未接通选项。
 
 只读 kvcache 请求 LSE 时包装为四项返回值；未 split 时两个 accumulator 为同设备空 tensor，dtype 随 PyTorch 默认浮点 dtype（通常 FP32）。不依赖普通 FA3 的 Python metadata 属性。fake/compile 与真实路径的返回形状一致。
 
-[`generate_kernels.py`](../../csrc/ascend910/flash_attn_npu_3/autogen/generate_kernels.py) 生成 FP16/BF16 C1V2 实例，BSND/TND 分别通过 `mla_launch_impl.hpp` / `mla_tnd_launch_impl.hpp` 共用 Kernel/Block/Tile；两种 dtype 均为 2 字节，调度与 workspace 一致，数值舍入遵循 6.3。修改实例集合应改生成器，不仅手改 autogen。
+[`generate_kernels.py`](../../csrc/ascend910/flash_attn_npu_3/autogen/generate_kernels.py) 生成 FP16/BF16 C1V2 实例，BSND、紧凑 TND、TND Q + BSND KV 分别通过 `mla_launch_impl.hpp`、`mla_tnd_launch_impl.hpp`、`mla_tnd_bsnd_launch_impl.hpp` 共用 Kernel/Block/Tile；两种 dtype 均为 2 字节，调度与 workspace 一致，数值舍入遵循 6.3。修改实例集合应改生成器，不仅手改 autogen。
 
 CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射期间使用线程局部作用域给实际 ACL launch 设置源 `BATCH_MODE`，保留其他属性及错误码。普通 FA3 发射原样透传；绕过已验收 ACL 路径或作用域内不恰好发射一次时明确失败。
 
-[`setup.py`](../../setup.py) 的 910 FA3 构建显式包含五个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v4 的 `mla/mla_metadata.aicpu`、`mla/mla_bsnd_metadata.aicpu`、`mla/mla_tnd_metadata.aicpu`、`mla/mla_tnd_bsnd_metadata.aicpu`。`mla_forward.cpp` 的生产分派调用 v1/v2/v3/v4 生成器；公开 v4 目前仅接通 metadata，混合前向仍拒绝。编译选项、包含的头文件与 `.cpp` 都参与依赖检查；MLA 设备预处理依赖另外生成，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 或对象不证明源码已生效，复现时核对实际加载路径、哈希与链接对象。
+[`setup.py`](../../setup.py) 的 910 FA3 构建显式包含五个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v4 的 `mla/mla_metadata.aicpu`、`mla/mla_bsnd_metadata.aicpu`、`mla/mla_tnd_metadata.aicpu`、`mla/mla_tnd_bsnd_metadata.aicpu`。`mla_forward.cpp` 的生产分派调用 v1/v2/v3/v4 生成器；公开 v4 由混合 metadata 生成器和只读混合 kvcache 共用。编译选项、包含的头文件与 `.cpp` 都参与依赖检查；MLA 设备预处理依赖另外生成，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 或对象不证明源码已生效，复现时核对实际加载路径、哈希与链接对象。
 
 ## 7. 验收口径
 
@@ -472,6 +474,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | TND `PERFORMANCE_CASES` | 10 | 紧凑 TND 独立 attention：非均匀 Q/KV、跨块、零成本尾部、总 KV 超过 16384；仅同调度非 FD 组件对照 |
 | 公开 varlen `PERFORMANCE_CASES` | 10 | [`mla_varlen_profile.py`](../../tests/mla_varlen_profile.py)：紧凑 TND 的非均匀/跨块/长 KV/零成本尾部，Hq 限于源 host 的 1..128；每次内部 v3 生成计入 R=1/4 E2E，原生 FD 分派单列 |
 | 混合布局 `PERFORMANCE_CASES` | 12 | TND Q + BSND KV：物理容量/有效长度分离、非均匀与跨块、零成本尾部、全零实际 KV、混合布局 M 基块；仅同调度非 FD 组件对照 |
+| 公开混合 `PERFORMANCE_CASES` | 12 | [`mla_mixed_profile.py`](../../tests/mla_mixed_profile.py)：保留混合矩阵几何，Hq 限于源 host 的 1..128；显式复用、生成加 R=1/4、内部生成、原生布局转换分别计量 |
 
 源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。前四组共 26 个整容量用例作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E。`BSND_CASES` 另含 11 个实际长度用例，保留全部原生 FD 分派并单列；公开全零实际长度同样计入对应路径的 E2E 验收。
 
@@ -498,3 +501,5 @@ M06 起的长度/布局检查必须区分分配位置与有效范围：FA3 带�
 执行器显式传入相同 scale 并保留 prefill split 视图的 192 行 stride。使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv 维输出，避免 torch_npu 2.7.1 默认包装器将 combined 192/128 的输出错分配为 192。O/LSE 的有限值调用原仓 `assert_fa_close`，无 softcap 时阈值固定为 `max(2 * max|pt-ref| + 2 * ULP(ref), 1e-5)`；inf 符号按契约单独检查，不因基线误差修改阈值。
 
 该执行器记录安装版本、进程实际加载的算子库及 SHA256、输入 shape/stride/offset、每轮 event span 和逐调用同步端到端时间。输入 H2D 与一次性视图创建不计时，输出分配及包装器内转换计时；event span 可能含 host 发射间隙，不当作纯 kernel 时间。安装包与固定源码的二进制对应关系未经验证时，结果仅验收执行器；性能验收须使用已建立的固定源码隔离构建及 profiler 分派证据，不能只凭安装版本归因。相关工具为 [来源核验](../../tests/test_flash_attn_npu_v3_mla_provenance.py) 和 [profiler 核验](../../tests/test_flash_attn_npu_v3_mla_profile.py)。
+
+[公开混合对照](../../tests/mla_mixed_profile.py) 的 `CannMixedCall` 适配固定源连续布局限制：`FiaInfoParser::GetKvLayout` 令 KV 跟随 Q，`FiaTilingCheck::CheckFeatureLayout` 也要求二者一致，故原生入口不能直接接收 TND Q + BSND KV。测试按独立逻辑 KV 长度构造设备索引，每次原生调用都从物理 BSND cache gather 出紧凑 TND K/V，再提交原生 FIA；两次 gather、输出分配及原生长度参数提交均计入 E2E，并单列转换耗时。H2D、索引和零拷贝视图准备在双方采样外。全零实际 KV 转为原生空容量分派，保留该用例与固定源空张量 kernel 的证据；非 FD、FD 和空容量分派按实际 tiling key 标记，不按耗时筛选。该测试适配不进入生产前向，也不将独立混合 probe 称为原生调用。

@@ -23,13 +23,6 @@
 
 namespace flash_attn::mla {
 
-struct MlaTndBsndMetadataContext {
-    uint32_t dtype, batch, totalQuery, heads, maxQueryLength, kvCapacity;
-    uint32_t aicNum, aivNum, blockDim;
-    uint64_t workspaceBytes, libApiBytes;
-    MlaLocalMemory localMemory;
-};
-
 // Distinct from compact TND and BSND schedules. sq is the observed Q maximum;
 // sk is physical KV capacity, never the observed maximum or a used length.
 struct MlaTndBsndKernelSchedule {

@@ -9,6 +9,14 @@ struct MlaTndBsndShape;
 constexpr uint32_t kMlaTndBsndMetadataVersion = 4;
 constexpr uint32_t kMlaMetadataTndBsnd = 4;
 
+// Plain launch context shared by host and device, without consumer code.
+struct MlaTndBsndMetadataContext {
+    uint32_t dtype, batch, totalQuery, heads, maxQueryLength, kvCapacity;
+    uint32_t aicNum, aivNum, blockDim;
+    uint64_t workspaceBytes, libApiBytes;
+    MlaLocalMemory localMemory;
+};
+
 enum class MlaTndBsndMetadataStatus : uint32_t {
     Success = 0,
     UnsupportedDtype = 1,

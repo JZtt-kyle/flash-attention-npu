@@ -153,8 +153,8 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         )
         check(heads_kv == 1, "MLA: compressed representation requires one KV head")
         check(
-            varlen_q == varlen_k and not paged_kv,
-            "MLA compressed forward is not implemented yet for mixed TND/BSND or paged KV",
+            (varlen_q or not varlen_k) and not paged_kv,
+            "MLA compressed forward is not implemented yet for BSND Q with TND KV or paged KV",
         )
         check(varlen_q or q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
         check(
@@ -247,6 +247,39 @@ def _check_mla_dense_options(
         raise RuntimeError("MLA: softmax_scale must be finite in FP32")
 
 
+def _check_mla_mixed_inputs(q, k, cu_q, max_q, cache_seqlens, metadata):
+    if max_q is None:
+        raise RuntimeError("MLA: mixed TND/BSND requires max_seqlen_q")
+    batch = k.shape[0]
+    if batch > ((1 << 32) - 1 - 406) // 5:
+        raise RuntimeError("MLA: mixed metadata word count overflow")
+    if not (
+        _fits_mla_dense_shape(0, max_q, q.shape[1], k.shape[1])
+        and q.shape[0] <= (1 << 31) - 1
+        and q.shape[0] * q.shape[1] <= ((1 << 63) - 1) // 1024
+    ):
+        raise RuntimeError("MLA: mixed shape or max_seqlen bounds exceeded")
+    if cu_q.dtype != torch.int32:
+        raise RuntimeError("MLA: cu_seqlens_q must have dtype int32")
+    if cu_q.device != q.device:
+        raise RuntimeError("MLA: cu_seqlens_q must be on the same NPU device")
+    if cu_q.ndim != 1 or cu_q.numel() != batch + 1:
+        raise RuntimeError("MLA: cu_seqlens_q must have shape [batch_size + 1]")
+    if not cu_q.is_contiguous():
+        raise RuntimeError("MLA: cu_seqlens_q must be contiguous")
+    if cache_seqlens is not None:
+        _check_mla_cache_lengths(cache_seqlens, batch, q.device)
+    if metadata is not None:
+        if metadata.dtype != torch.int32:
+            raise RuntimeError("MLA: scheduler_metadata must have dtype int32")
+        if metadata.device != q.device:
+            raise RuntimeError("MLA: scheduler_metadata must be on the same NPU device")
+        if metadata.ndim != 1 or metadata.numel() != 406 + 5 * batch:
+            raise RuntimeError("MLA: scheduler_metadata must have shape [406 + 5 * batch_size]")
+        if not metadata.is_contiguous():
+            raise RuntimeError("MLA: scheduler_metadata must be contiguous")
+
+
 def _check_mla_metadata(headdim, headdim_v):
     if headdim == headdim_v:
         return False
@@ -305,6 +338,27 @@ def _mla_tnd_forward_fake(
     _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True)
     _check_mla_dense_options(softmax_scale=softmax_scale)
     _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+    return (
+        q.new_empty((*q.shape[:-1], v.shape[-1])),
+        q.new_empty((q.shape[1], q.shape[0]), dtype=torch.float32),
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_tnd_bsnd_forward")
+def _mla_tnd_bsnd_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    cu_seqlens_q,
+    max_seqlen_q,
+    softmax_scale=None,
+    cache_seqlens=None,
+    scheduler_metadata=None,
+):
+    _check_mla_inputs(q, k, v, qv, varlen_q=True)
+    _check_mla_dense_options(softmax_scale=softmax_scale)
+    _check_mla_mixed_inputs(q, k, cu_seqlens_q, max_seqlen_q, cache_seqlens, scheduler_metadata)
     return (
         q.new_empty((*q.shape[:-1], v.shape[-1])),
         q.new_empty((q.shape[1], q.shape[0]), dtype=torch.float32),
@@ -376,7 +430,7 @@ def _flash_attn_forward(
                 cu_seqlens_k_new,
                 seqused_q,
                 max_seqlen_q if cu_seqlens_q is None else None,
-                max_seqlen_k if cu_seqlens_q is None else None,
+                max_seqlen_k if cu_seqlens_k is None else None,
                 kv_batch_idx,
                 leftpad_k,
                 rotary_cos,
@@ -388,11 +442,16 @@ def _flash_attn_forward(
             ),
         )
         if cu_seqlens_q is not None:
-            if seqused_k is not None or scheduler_metadata is not None:
-                raise RuntimeError(
-                    "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
+            if cu_seqlens_k is None:
+                _check_mla_mixed_inputs(
+                    q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata
                 )
-            _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+            else:
+                if seqused_k is not None or scheduler_metadata is not None:
+                    raise RuntimeError(
+                        "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
+                    )
+                _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
         else:
             _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
     q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
@@ -519,7 +578,7 @@ def _flash_attn_forward_fake(
                 cu_seqlens_k_new,
                 seqused_q,
                 max_seqlen_q if cu_seqlens_q is None else None,
-                max_seqlen_k if cu_seqlens_q is None else None,
+                max_seqlen_k if cu_seqlens_k is None else None,
                 kv_batch_idx,
                 leftpad_k,
                 rotary_cos,
@@ -531,11 +590,16 @@ def _flash_attn_forward_fake(
             ),
         )
         if cu_seqlens_q is not None:
-            if seqused_k is not None or scheduler_metadata is not None:
-                raise RuntimeError(
-                    "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
+            if cu_seqlens_k is None:
+                _check_mla_mixed_inputs(
+                    q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata
                 )
-            _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+            else:
+                if seqused_k is not None or scheduler_metadata is not None:
+                    raise RuntimeError(
+                        "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
+                    )
+                _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
         else:
             _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
 
@@ -1625,12 +1689,10 @@ def flash_attn_with_kvcache(
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
     """
-    # The dense qv dispatcher validates tensors independently in real/fake
+    # The qv dispatchers validate tensors independently in real/fake
     # execution. Route before repeating those checks in Python; other forms
     # retain the common recognition/rejection path.
-    is_mla = (
-        qv is not None and cu_seqlens_q is None and page_table is None and q.device.type == "npu"
-    )
+    is_mla = qv is not None and page_table is None and q.device.type == "npu"
     if not is_mla:
         is_mla = _check_mla_inputs(
             q,
@@ -1656,7 +1718,7 @@ def flash_attn_with_kvcache(
                 k,
                 v,
                 cu_seqlens_k_new,
-                max_seqlen_q,
+                max_seqlen_q if cu_seqlens_q is None else None,
                 cache_batch_idx,
                 cache_leftpad,
                 rotary_cos,
@@ -1670,15 +1732,30 @@ def flash_attn_with_kvcache(
         if isinstance(cache_seqlens, int):
             # Integer convenience input needs valid geometry before creating
             # its device tensor. Tensor/None lengths go straight to the op.
-            _check_mla_inputs(q, k_cache, v_cache, qv)
+            _check_mla_inputs(q, k_cache, v_cache, qv, varlen_q=cu_seqlens_q is not None)
             if not 0 <= cache_seqlens <= k_cache.shape[1]:
                 raise RuntimeError("MLA: cache_seqlens must be between zero and KV capacity")
             cache_seqlens = torch.full(
-                (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
+                (k_cache.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
             )
-        out, softmax_lse = torch.ops.flash_attn_npu_3._mla_dense_forward(
-            q, k_cache, v_cache, qv, softmax_scale, cache_seqlens, scheduler_metadata
-        )
+        if cu_seqlens_q is not None:
+            if max_seqlen_q is None:
+                raise RuntimeError("MLA: mixed TND/BSND requires max_seqlen_q")
+            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_tnd_bsnd_forward(
+                q,
+                k_cache,
+                v_cache,
+                qv,
+                cu_seqlens_q,
+                max_seqlen_q,
+                softmax_scale,
+                cache_seqlens,
+                scheduler_metadata,
+            )
+        else:
+            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_dense_forward(
+                q, k_cache, v_cache, qv, softmax_scale, cache_seqlens, scheduler_metadata
+            )
         if return_softmax_lse:
             return (
                 out,

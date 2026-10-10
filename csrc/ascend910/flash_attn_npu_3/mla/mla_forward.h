@@ -14,4 +14,8 @@ at::Tensor TndBsndMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t he
 std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
                                    const at::Tensor& cuQ, const at::Tensor& cuK, int64_t maxQ, int64_t maxK,
                                    float scale);
+std::vector<at::Tensor> TndBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                       const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ, float scale,
+                                       const std::optional<at::Tensor>& cacheSeqlens,
+                                       const std::optional<at::Tensor>& schedulerMetadata);
 } // namespace flash_attn::mla
