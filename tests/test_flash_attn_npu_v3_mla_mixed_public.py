@@ -291,7 +291,6 @@ def test_static_rejections(entry, dtype, fault, match):
     "fault",
     [
         "max_missing",
-        "used_q",
         "max_k",
         "causal",
         "window",
@@ -312,8 +311,6 @@ def test_unconnected_options(entry, fault):
         args = inputs()
         if fault == "max_missing":
             args["max_seqlen_q"] = None
-        elif fault == "used_q":
-            args["seqused_q"] = args["cache_seqlens"]
         elif fault == "max_k":
             args["max_seqlen_k"] = 64
         elif fault == "window":
@@ -350,12 +347,8 @@ def test_unconnected_options(entry, fault):
                 "rotary": ("rotary_interleaved", False),
             }[fault]
             args[key] = value
-        # Public kvcache intentionally has neither seqused_q nor max_seqlen_k.
-        error = (
-            TypeError
-            if entry.startswith("public") and fault in ("used_q", "max_k")
-            else RuntimeError
-        )
+        # Public kvcache intentionally has no max_seqlen_k.
+        error = TypeError if entry.startswith("public") and fault == "max_k" else RuntimeError
         with pytest.raises(error, match="max_seqlen_q|not implemented yet|unexpected keyword"):
             invoke(entry, args)
 

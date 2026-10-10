@@ -22,4 +22,8 @@ std::vector<at::Tensor> TndBsndForward(const at::Tensor& q, const at::Tensor& k,
 std::vector<at::Tensor> BsndUsedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                         const at::Tensor& qv, const at::Tensor& usedQuery,
                                         const std::optional<at::Tensor>& usedKv, float scale);
+std::vector<at::Tensor> TndBsndUsedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                           const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ,
+                                           const at::Tensor& usedQuery, const std::optional<at::Tensor>& usedKv,
+                                           float scale);
 } // namespace flash_attn::mla

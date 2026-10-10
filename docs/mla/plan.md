@@ -2,7 +2,7 @@
 
 本文件只记录迭代顺序、每步产物与完成条件。当前可调用能力、最近一次闭环和复现命令见 [status](status.md)，目标范围、协议与验收口径见 [design](design.md)。步骤编号沿用历史，M04c 在 M05 闭环后执行；不按编号重新排序。
 
-唯一下一步为 **M06d3b2：内部混合 Q-used 接入**，完成条件见下。未完成工作按 M06 → M07..M17 排列，[已完成步骤](#已完成步骤) 集中放在末尾，保留原编号以便追溯提交。独立组件完成不代表公开入口开放。
+唯一下一步为 **M06e1：BSND 合法外层 stride**，完成条件见下。未完成工作按 M06 → M07..M17 排列，[已完成步骤](#已完成步骤) 集中放在末尾，保留原编号以便追溯提交。独立组件完成不代表公开入口开放。
 
 ## M06：非分页长度、TND 与 stride
 
@@ -10,21 +10,20 @@
 
 每行单独验收、提交。长度和布局沿用“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 公开接入”的顺序；混合布局已接通公开只读 kvcache，used 继续按同一顺序推进。
 
-### 下一步：M06d3b2
+### 下一步：M06e1
 
-前置产物为 M06d2a/b/c 的 v5 生成、设备校验和三布局独立 attention，以及 M06d3a、M06d3b1 的 BSND/TND used 生产接入。M06d3b2 只接通内部混合 Q-used，沿用既有组件；独立组件结果不替代入口验收。
+前置产物为 BSND/TND/混合三布局的分配与 used 生产接入。M06e1 只开放 BSND 最后一维连续的合法外层 stride；TND 与混合 query 的外层 stride 留在 M06e2。
 
-- 接通内部 TND Q + BSND KV 的 Q-used，复用已有 v5 生成器、消费者和 Kernel；Q 分配前缀与 KV cache 容量保持独立，used 不重排物理起点。
-- 不增加公共参数或 v5 显式复用入口；明确拒绝未接通组合，保持现有公开 kvcache 契约。
-- 完成双 dtype 有效行、poison padding、空容量/零 used、前缀/used 更新、跨流与 allocator 生命周期、真实/fake/C++/compile、设备拒绝、构建及普通 FA3 回归。
-- 无公开等价入口时单列内部验收，比较同调度固定源 Kernel，记录逐次 v5 生成及内部调用耗时；沿用 design 第 7 节口径，不将组件耗时当作公开 E2E。
+- Q/qv/K/V 分别传递真实 batch/row/head stride 与 storage offset，覆盖 BNSD 视图及独立偏移；复用现有 Kernel / Block / Tile，不复制完整 cache。
+- 保持现有公开参数与 metadata 语义，支持 BSND 整容量、实际 KV 长度及内部 Q-used；尚未接通的布局或 stride 组合明确拒绝。
+- 完成 U01、独立 Q/qv/K/V stride/offset、双 dtype 有效行与 poison padding、长度更新、真实/fake/C++/compile、地址边界与生命周期检查。
+- 完成相关 910B 双 dtype 源/数学精度、同调度组件性能、适用公开 metadata E2E、构建及普通 FA3 回归，沿用 design 第 7 节口径。
 
 ### M06 剩余步骤
 
 | 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
 | --- | --- | --- | --- |
-| M06d3b2 | 唯一下一步 | 内部混合 Q-used | 见[上述独立完成条件](#下一步m06d3b2) |
-| M06e1 | 待开始 | BSND 最后一维连续的合法外层 stride | Q/qv/K/V 独立 batch/row/head stride/offset、BNSD 视图与 U01；无完整 cache 复制，精度/性能/普通 FA3 通过 |
+| M06e1 | 唯一下一步 | BSND 最后一维连续的合法外层 stride | Q/qv/K/V 独立 batch/row/head stride/offset、BNSD 视图与 U01；无完整 cache 复制，精度/性能/普通 FA3 通过 |
 | M06e2 | 待开始 | TND 合法外层 stride，完成 M06 | ST01 token/head stride、NTD 视图、独立 offset、T01/used/BSND cache 组合；精度/性能/普通 FA3 通过 |
 
 M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[源调度与零尾部](design.md#62-调度字段与边界)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定性能矩阵与阶段边界)。生成记录、校验记录和执行 attention 分别验收；全部样本实际长度为零也不等于全局空容量。
@@ -117,3 +116,4 @@ M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[�
 | M06d2c | v5 三布局独立 attention；按分配起点和 used 执行，共用源数值路径并验收组件性能 |
 | M06d3a | 内部 BSND Q-used 与可选 KV-used；每次生成/消费 v5，完成入口验收及生产 Kernel 对照；无公开等价入口 |
 | M06d3b1 | 公开 varlen 与内部 TND Q/KV 可选 `seqused_q/k`；任一 used 存在时使用 v5，完成入口、四数组更新/生命周期、组件性能与适用公开 R=1/4 E2E 验收 |
+| M06d3b2 | 内部 TND Q + BSND KV 的 Q-used 与可选 KV-used；每次内部生成/消费 v5，复用 TND used launcher，完成入口、前缀/used 更新与生命周期、设备拒绝、双 dtype 同调度源 Kernel 对照及普通 FA3 回归；公开混合 kvcache 仍为 v4 |

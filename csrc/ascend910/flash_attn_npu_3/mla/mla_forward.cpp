@@ -515,6 +515,21 @@ std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, con
     return {out, lse, at::Tensor(), at::Tensor()};
 }
 
+std::vector<at::Tensor> TndBsndUsedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                           const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ,
+                                           const at::Tensor& usedQuery, const std::optional<at::Tensor>& usedKv,
+                                           float scale)
+{
+    CheckTndBsndForwardInputs(q, k, cuQ, maxQ, usedKv, std::nullopt);
+    const int64_t batch = k.size(0), sk = k.size(1);
+    // Q prefixes describe allocation; cache slots remain b*Sk regardless of
+    // either used length. The TND used launcher reads both v5 physical starts.
+    return UsedForward(
+        q, k, v, qv,
+        {batch, q.size(1), {MlaSequenceLayout::Tnd, q.size(0), maxQ}, {MlaSequenceLayout::Bsnd, batch * sk, sk}}, cuQ,
+        std::nullopt, usedQuery, usedKv, scale);
+}
+
 std::vector<at::Tensor> TndBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                        const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ, float scale,
                                        const std::optional<at::Tensor>& cacheSeqlens,

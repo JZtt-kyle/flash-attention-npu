@@ -1,4 +1,4 @@
-"""Production BSND Q-used Kernel versus pinned, identically scheduled CANN.
+"""Internal BSND/mixed Q-used Kernel versus pinned, identically scheduled CANN.
 
 The production wall includes internal v5 generation; the source probe has
 preallocated buffers. Neither wall is a public FA3/CANN E2E comparison.
@@ -19,12 +19,6 @@ import torch_npu
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla_dense_build import ROOT, sha256
-from tests.test_flash_attn_npu_v3_mla_bsnd_used import (
-    PERFORMANCE_CASES,
-    check_result,
-    forward_args,
-    production_case,
-)
 from tests.test_flash_attn_npu_v3_mla_used_attention import (
     configure_producer,
     launch,
@@ -33,7 +27,13 @@ from tests.test_flash_attn_npu_v3_mla_used_attention import (
 from tests.test_flash_attn_npu_v3_mla_metadata import load_probe
 
 
-def profile(probe_dir, producer_manifest, output):
+def profile(probe_dir, producer_manifest, output, layout="bsnd"):
+    if layout == "mixed":
+        from tests import test_flash_attn_npu_v3_mla_mixed_used as cases_api
+    else:
+        assert layout == "bsnd"
+        from tests import test_flash_attn_npu_v3_mla_bsnd_used as cases_api
+
     probes = load_attention(probe_dir)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -43,12 +43,17 @@ def profile(probe_dir, producer_manifest, output):
     assert sha256(Path(manifest["library"])) == manifest["library_sha256"]
     with load_probe(manifest["library"], output / "producer") as producer:
         configure_producer(producer)
-        cases = [production_case(probes, producer, spec) for spec in PERFORMANCE_CASES]
-        arguments = [forward_args(case) for case in cases]
+        cases = [
+            cases_api.production_case(probes, producer, spec)
+            for spec in cases_api.PERFORMANCE_CASES
+        ]
+        arguments = [cases_api.forward_args(case) for case in cases]
         errors = []
         for case, args in zip(cases, arguments):
             launch(probes, case, "oracle")
-            errors.append(check_result(case, api._flash_attn_forward(**args), source=True))
+            errors.append(
+                cases_api.check_result(case, api._flash_attn_forward(**args), source=True)
+            )
 
         def call(index, name):
             if name == "source":
@@ -130,7 +135,12 @@ def profile(probe_dir, producer_manifest, output):
                 label["generation_us"] = float(raw[pos]["Task Duration(us)"])
                 pos += 1
             row = raw[pos]
-            assert ("cann_used" if label["name"] == "source" else "mla_bsnd_used") in row["Op Name"]
+            expected_name = (
+                "cann_used"
+                if label["name"] == "source"
+                else ("mla_tnd_used" if layout == "mixed" else "mla_bsnd_used")
+            )
+            assert expected_name in row["Op Name"]
             label.update(kernel_us=float(row["Task Duration(us)"]), kernel_name=row["Op Name"])
             pos += 1
         assert pos == len(raw)
@@ -157,6 +167,7 @@ def profile(probe_dir, producer_manifest, output):
         extension = Path(api.flash_attn_npu_3.__file__)
         report = dict(
             scope=__doc__,
+            layout=layout,
             seed=20261010,
             warmup=5,
             rounds=5,
@@ -188,5 +199,6 @@ if __name__ == "__main__":
     parser.add_argument("probe_dir")
     parser.add_argument("producer_manifest")
     parser.add_argument("output")
+    parser.add_argument("--layout", choices=("bsnd", "mixed"), default="bsnd")
     args = parser.parse_args()
-    profile(args.probe_dir, args.producer_manifest, args.output)
+    profile(args.probe_dir, args.producer_manifest, args.output, args.layout)

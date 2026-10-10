@@ -465,6 +465,7 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 | 内部通用前向 / BSND，给出 `seqused_q` | `BsndUsedForward` → `UsedForward` | 每次内部 v5，可选 KV-used；拒绝显式记录 |
 | `flash_attn_varlen_func` / TND Q/KV | `_mla_tnd_forward` → `TndForward` → 无 used 路径或 `UsedForward` | 任一 used 存在时每次内部 v5，否则内部 v3；无显式复用参数 |
 | 内部通用前向 / TND Q/KV | `fwd` → `TndForward`，与公开 varlen 共用后续路径 | v3/v5 选择相同；拒绝显式记录 |
+| 内部通用前向 / TND Q + BSND KV，给出 `seqused_q` | `TndBsndUsedForward` → `UsedForward` | 每次内部 v5，可选 KV-used；拒绝显式记录 |
 | `flash_attn_with_kvcache` / BSND Q | `_mla_dense_forward` → `DenseForward` | 无长度且无记录时内部 v1；否则内部 v2 或显式 v2 |
 | `flash_attn_with_kvcache` / TND Q + BSND KV | `_mla_tnd_bsnd_forward` → `TndBsndForward` | 内部 v4 或显式 v4 |
 | `get_scheduler_metadata` / 无 Q 前缀 | `_mla_dense_metadata` → `DenseMetadata` | v2：`int32[401+B]` |
@@ -472,17 +473,17 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 
 混合前向的 B/Sk 来自物理 cache，总 Q 来自 Q shape，`max_seqlen_q` 仅作每段上界；内部通用混合入口拒绝无用途的 `max_seqlen_k`。kvcache 的返回数量和输出布局遵循 [3.3](#33-共同契约)；未 split 的两个 accumulator 为同设备空 tensor，dtype 随 PyTorch 默认浮点 dtype（通常 FP32），真实/fake 一致。
 
-BSND 的内部 Q-used 与 TND Q/KV 的 used 分支共用 `UsedForward`，只按静态分配容量预算 launch/workspace。used 为同设备连续 `int32[B]`，值留在设备校验；TND 的两组 `int32[B+1]` 前缀和 max 参数仍描述分配。O/LSE 保留分配区 shape，输出承诺见 [5.6](#56-v5分配与-used-记录)。公共签名没有 BSND Q-used 或混合 Q-used 的等价参数，也没有 v5 显式生成/复用参数；内部入口的接通范围见 status。
+BSND/混合的内部 Q-used 与 TND Q/KV 的 used 分支共用 `UsedForward`，只按静态分配容量预算 launch/workspace。used 为同设备连续 `int32[B]`，值留在设备校验；TND 的 `int32[B+1]` 前缀和 max 参数仍描述本轴分配。混合布局的 Q 起点来自 Q 分配前缀，KV 起点为 64 位 `b*Sk`；KV-used 缺省时使用整个 cache 槽位，无 Q-used 时沿用 v4。O/LSE 保留分配区 shape，输出承诺见 [5.6](#56-v5分配与-used-记录)。公共签名没有 BSND Q-used 或混合 Q-used 的等价参数，也没有 v5 显式生成/复用参数；内部入口的接通范围见 status。
 
 各前向查询平台，为每次调用分配 O/LSE 和独立 workspace。`DenseForward` **仍在 host 调用 `BuildDenseSchedule`**，用于 launch、分配预算及独立校验 context；计算切块与端点来自设备记录。显式复用省去 AICPU 生成，不表示消除了全部 host 调度。
 
 v2/v3/v4/v5 的非空物理容量按平台全核 blockDim 生成和发射，工作核数取设备记录；按源 `CalcNormalWorkspaceSize` 的最大 M=256 预算 workspace。TND 按静态总容量和 max 上界分配，不按矩形 `B*maxQ*Hq` 拒绝紧凑 Q。该预算不决定实际切块或数值路径。空 batch/query/KV 容量使用单校验核、零 workspace；空 KV 的 O/LSE 由通过校验的 Kernel 写入，非空容量中的全零实际长度仍保留完整资源校验。
 
-[`generate_kernels.py`](../../csrc/ascend910/flash_attn_npu_3/autogen/generate_kernels.py) 生成 FP16/BF16 C1V2 实例，BSND、TND、混合布局及 BSND/TND used 各用对应 launcher，共用 Kernel / Block / Tile。两种 dtype 均为 2 字节，调度/workspace 相同，数值舍入按 [6.3](#63-数值路径与资源布局)。修改实例集合应改生成器，不仅手改 autogen。
+[`generate_kernels.py`](../../csrc/ascend910/flash_attn_npu_3/autogen/generate_kernels.py) 生成 FP16/BF16 C1V2 实例，BSND、TND、混合布局及 BSND/TND used 各用对应 launcher，混合 Q-used 复用 TND used launcher，共用 Kernel / Block / Tile。两种 dtype 均为 2 字节，调度/workspace 相同，数值舍入按 [6.3](#63-数值路径与资源布局)。修改实例集合应改生成器，不仅手改 autogen。
 
 CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射使用线程局部作用域给实际 ACL launch 设置源 `BATCH_MODE`，保留其他属性及错误码，普通 FA3 发射原样透传。绕过已验收 ACL 路径或作用域内不恰好发射一次时明确失败。
 
-[`setup.py`](../../setup.py) 的 910 FA3 构建包含六个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v5 的 `mla_metadata.aicpu`、`mla_bsnd_metadata.aicpu`、`mla_tnd_metadata.aicpu`、`mla_tnd_bsnd_metadata.aicpu`、`mla_used_metadata.aicpu`。生产 v4 生成器由 metadata 入口和混合前向共用，v5 由内部 BSND Q-used 和公开 varlen used 前向共用，混合 Q-used 暂限独立 probe。编译选项、包含的头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，复现须核对加载路径、哈希和链接对象。
+[`setup.py`](../../setup.py) 的 910 FA3 构建包含六个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v5 的 `mla_metadata.aicpu`、`mla_bsnd_metadata.aicpu`、`mla_tnd_metadata.aicpu`、`mla_tnd_bsnd_metadata.aicpu`、`mla_used_metadata.aicpu`。生产 v4 生成器由 metadata 入口和混合前向共用，v5 由内部 BSND/混合 Q-used 和公开 varlen used 前向共用。编译选项、包含的头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，复现须核对加载路径、哈希和链接对象。
 
 ## 7. 验收口径
 
@@ -526,6 +527,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 公开混合 `PERFORMANCE_CASES` | 12 | [`mla_mixed_profile.py`](../../tests/mla_mixed_profile.py)：保留混合矩阵几何，Hq 限于源 host 的 1..128；显式复用、生成加 R=1/4、内部生成、原生布局转换分别计量 |
 | 三布局 used `PERFORMANCE_CASES` | 14 | [`mla_used_profile.py`](../../tests/mla_used_profile.py)：两轴分配/used 分离、分配间隙、零长度、长 KV 与任务边界；仅同调度固定源组件对照 |
 | 内部 BSND Q-used `PERFORMANCE_CASES` | 7 | [`mla_bsnd_used_profile.py`](../../tests/mla_bsnd_used_profile.py)：U01、非均匀/零长度、M/S2 尾块、16384 KV、KV-used 缺省；生产 Kernel 对同调度固定源，单列 AICPU 与内部 wall，无公开 E2E 等价入口 |
+| 内部混合 Q-used `PERFORMANCE_CASES` | 9 | [`mla_bsnd_used_profile.py --layout mixed`](../../tests/mla_bsnd_used_profile.py)：混合 T01、分配间隙、非均匀/零长度、M/S2 尾块、16384 KV、KV-used 缺省与显式整段 used；生产 Kernel 对同调度固定源，单列逐次 v5 生成与内部 wall，无公开 E2E 等价入口 |
 | 公开 varlen used `PERFORMANCE_CASES` | 10 | [`mla_varlen_used_profile.py`](../../tests/mla_varlen_used_profile.py)：T01/分配间隙、非均匀/零长度、M/S2 尾块、16384 KV、单轴 used 与显式整段 used；每次内部 v5 生成计入 R=1/4 E2E，原生转换与 FD 分派单列 |
 
 源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。前四组共 26 个整容量用例作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E。`BSND_CASES` 另含 11 个实际长度用例，保留全部原生 FD 分派并单列；公开全零实际长度同样计入对应路径的 E2E 验收。

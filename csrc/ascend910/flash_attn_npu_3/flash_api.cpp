@@ -180,8 +180,7 @@ std::vector<at::Tensor> mha_fwd(
                                                              cu_seqlens_k_.has_value(), page_table_.has_value());
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     if (isMla) {
-        TORCH_CHECK(!k_new_ && !v_new_ && !out_ && !cu_seqlens_k_new_ &&
-                        !(cu_seqlens_q_ && !cu_seqlens_k_ && seqused_q_) && (cu_seqlens_q_ || !max_seqlen_q_) &&
+        TORCH_CHECK(!k_new_ && !v_new_ && !out_ && !cu_seqlens_k_new_ && (cu_seqlens_q_ || !max_seqlen_q_) &&
                         (cu_seqlens_k_ || !max_seqlen_k_) && !kv_batch_idx_ && !leftpad_k_ && !rotary_cos_ &&
                         !rotary_sin_ && !seqlens_rotary_ && !q_descale_ && !k_descale_ && !v_descale_ &&
                         is_rotary_interleaved,
@@ -194,6 +193,12 @@ std::vector<at::Tensor> mha_fwd(
         if (cu_seqlens_q_) {
             if (!cu_seqlens_k_) {
                 TORCH_CHECK(max_seqlen_q_, "MLA: mixed TND/BSND requires max_seqlen_q");
+                if (seqused_q_) {
+                    TORCH_CHECK(!scheduler_metadata_,
+                                "MLA compressed forward is not implemented yet for Q-used with explicit metadata");
+                    return flash_attn::mla::TndBsndUsedForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_,
+                                                               *seqused_q_, seqused_k_, scale);
+                }
                 return flash_attn::mla::TndBsndForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_, scale,
                                                        seqused_k_, scheduler_metadata_);
             }

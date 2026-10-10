@@ -247,9 +247,13 @@ def _check_mla_dense_options(
         raise RuntimeError("MLA: softmax_scale must be finite in FP32")
 
 
-def _check_mla_mixed_inputs(q, k, cu_q, max_q, cache_seqlens, metadata):
+def _check_mla_mixed_inputs(q, k, cu_q, max_q, cache_seqlens, metadata, seqused_q=None):
     if max_q is None:
         raise RuntimeError("MLA: mixed TND/BSND requires max_seqlen_q")
+    if seqused_q is not None and metadata is not None:
+        raise RuntimeError(
+            "MLA compressed forward is not implemented yet for Q-used with explicit metadata"
+        )
     batch = k.shape[0]
     if batch > ((1 << 32) - 1 - 406) // 5:
         raise RuntimeError("MLA: mixed metadata word count overflow")
@@ -269,6 +273,8 @@ def _check_mla_mixed_inputs(q, k, cu_q, max_q, cache_seqlens, metadata):
         raise RuntimeError("MLA: cu_seqlens_q must be contiguous")
     if cache_seqlens is not None:
         _check_mla_cache_lengths(cache_seqlens, batch, q.device)
+    if seqused_q is not None:
+        _check_mla_used(q, batch, seqused_q, cache_seqlens)
     if metadata is not None:
         if metadata.dtype != torch.int32:
             raise RuntimeError("MLA: scheduler_metadata must have dtype int32")
@@ -464,7 +470,6 @@ def _flash_attn_forward(
                 v_new,
                 out_,
                 cu_seqlens_k_new,
-                seqused_q if cu_seqlens_q is not None and cu_seqlens_k is None else None,
                 max_seqlen_q if cu_seqlens_q is None else None,
                 max_seqlen_k if cu_seqlens_k is None else None,
                 kv_batch_idx,
@@ -480,7 +485,7 @@ def _flash_attn_forward(
         if cu_seqlens_q is not None:
             if cu_seqlens_k is None:
                 _check_mla_mixed_inputs(
-                    q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata
+                    q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata, seqused_q
                 )
             else:
                 if scheduler_metadata is not None:
@@ -616,7 +621,6 @@ def _flash_attn_forward_fake(
                 v_new,
                 out_,
                 cu_seqlens_k_new,
-                seqused_q if cu_seqlens_q is not None and cu_seqlens_k is None else None,
                 max_seqlen_q if cu_seqlens_q is None else None,
                 max_seqlen_k if cu_seqlens_k is None else None,
                 kv_batch_idx,
@@ -632,7 +636,7 @@ def _flash_attn_forward_fake(
         if cu_seqlens_q is not None:
             if cu_seqlens_k is None:
                 _check_mla_mixed_inputs(
-                    q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata
+                    q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata, seqused_q
                 )
             else:
                 if scheduler_metadata is not None:
