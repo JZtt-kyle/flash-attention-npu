@@ -49,8 +49,6 @@ struct FAMetadataArgs {
     uint32_t isVarlenKv;
     uint32_t pagedKV;
     uint32_t numSplits;
-    float scaleValue;
-    float softcapValue;
     int64_t windowSizeLeft;
     int64_t windowSizeRight;
     // Append-KV tiling fields (0 = append disabled), mirrored by ComputeFAMetadata.

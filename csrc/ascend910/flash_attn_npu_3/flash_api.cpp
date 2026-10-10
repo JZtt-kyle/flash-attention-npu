@@ -192,7 +192,7 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
 
     at::Tensor cu_seqlens_q, cu_seqlens_k;
     at::Tensor out_accum, softmax_lse_accum;
-    float softmax_scale;
+    const float softmax_scale = softmax_scale_.value_or(1.0f / std::sqrt(static_cast<float>(q.size(-1))));
 
     const bool paged_KV = page_table_.has_value();
     const bool is_varlen_q = cu_seqlens_q_.has_value();
@@ -257,9 +257,6 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
     }
     if (paged_KV) {
         block_table = page_table_.value();
-    }
-    if (softmax_scale_.has_value()) {
-        softmax_scale = softmax_scale_.value();
     }
     if (out_.has_value()) {
         out = out_.value();
@@ -375,7 +372,8 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         // way get_scheduler_metadata did when producing the buffer, so that the
         // template selection and the tiling offset match the AICPU-written
         // tiling. The metadata must have been created with matching causal /
-        // window_size / softcap / softmax_scale / seqlen-bound arguments.
+        // window_size / has_softcap / seqlen-bound arguments. Numerical
+        // scale and softcap are supplied by this forward through tiling.
         int64_t kvSeqlenBound = 0;
         if (is_varlen_kv) {
             kvSeqlenBound = max_seqlen_k_.has_value() ? max_seqlen_k_.value() : 0;
@@ -439,12 +437,6 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
         tiling_cpu_ptr->set_numBlocks(static_cast<uint32_t>(num_blocks));
         tiling_cpu_ptr->set_blockSize(static_cast<uint32_t>(page_block_size));
         tiling_cpu_ptr->set_maxNumBlocksPerBatch(static_cast<uint32_t>(max_num_blocks_per_seq));
-        if (has_softcap) {
-            tiling_cpu_ptr->set_scaleValue(softmax_scale / softcap);
-        } else {
-            tiling_cpu_ptr->set_scaleValue(softmax_scale);
-        }
-        tiling_cpu_ptr->set_softcapValue(softcap);
         tiling_cpu_ptr->set_maxQSeqlen(seqlen_q);
         // Append-KV: total S per batch = old (cached) + new.
         int32_t max_kv_seqlen = 0;
@@ -678,7 +670,8 @@ mha_fwd(at::Tensor q,   // (b, s_q, h, d) or (total_q, h, d) if there is cu_seql
     fwd_args.qSeqDevice = qSeqDevice;
     fwd_args.kvSeqDevice = kvSeqDevice;
     fwd_args.workspaceDevice = workspaceDevice;
-    fwd_args.tilingDevice = tilingDevice;
+    fwd_args.tiling = {reinterpret_cast<uint64_t>(tilingDevice),
+                       has_softcap ? softmax_scale / softcap : softmax_scale, softcap};
     auto launch_fa_infer = [fwd_args, is_varlen_q]() -> int {
         if (is_varlen_q) {
             launch_fwd<true>(fwd_args);
@@ -711,11 +704,10 @@ at::Tensor get_scheduler_metadata(
         int64_t window_size_left,
         int64_t window_size_right,
         int64_t attention_chunk,
-        double softcap,
+        bool has_softcap,
         int64_t num_splits,
         std::optional<bool> pack_gqa,
-        int64_t sm_margin,
-        std::optional<double> softmax_scale)
+        int64_t sm_margin)
 {
     const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
     const bool is_varlen_q = seqlens_q.has_value();
@@ -734,17 +726,11 @@ at::Tensor get_scheduler_metadata(
                 "] (0 = auto; upper bound = number of AI cores). ");
     TORCH_CHECK(num_splits <= 1 || (page_size.has_value() && is_varlen_q),
                 "NPU FlashAttention num_splits>1 currently requires paged KV cache and varlen-q (TND) layout");
-    TORCH_CHECK(softcap >= 0.0, "softcap must be non-negative (0.0 disables softcap)");
     // Mask *layout* (buffer size / kernel template) is derived on host from
     // the declared seqlen bounds / cache capacity (no D2H). AICPU re-derives
     // tiling maskType / windows against the actual max KV length.
     FwdMaskDerivation maskDer = DeriveFwdMask(causal, window_size_left, window_size_right,
                                               max_seqlen_q, max_seqlen_k);
-    float scaleValue = softmax_scale.has_value() ? static_cast<float>(softmax_scale.value())
-        : 1.0f / std::sqrt(static_cast<float>(headdim));
-    if (softcap > 0.0) {
-        scaleValue /= static_cast<float>(softcap);
-    }
     FAMetadataArgs args{};
     args.seqlensQAddr = is_varlen_q ? reinterpret_cast<uint64_t>(seqlensQDev) : 0ULL;
     args.cacheSeqlensAddr = reinterpret_cast<uint64_t>(cache_seqlens.data_ptr());
@@ -767,8 +753,7 @@ at::Tensor get_scheduler_metadata(
     args.isVarlenKv = is_varlen_kv ? 1U : 0U;
     args.pagedKV = page_size.has_value() ? 1U : 0U;
     args.numSplits = static_cast<uint32_t>(num_splits);
-    args.scaleValue = scaleValue;
-    args.softcapValue = static_cast<float>(softcap);
+    // The 910 schedule is independent of has_softcap; the forward selects its kernel specialization.
     // Append-KV tiling fields: kvNewSeqlen = new length (uniform), kvCacheSeqlen = cache capacity.
     args.kvNewSeqlen = (max_seqlen_k_new > 0) ? static_cast<uint32_t>(max_seqlen_k_new) : 0U;
     args.kvCacheSeqlen = static_cast<uint32_t>(max_seqlen_k);

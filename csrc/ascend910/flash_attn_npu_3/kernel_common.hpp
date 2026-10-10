@@ -7,6 +7,8 @@
 #ifndef KERNEL_COMMON
 #define KERNEL_COMMON
 
+#include "tilingdata.h"
+
 
 namespace KernelCommon {
     constexpr uint32_t QK_READY_ID = 1;
@@ -72,7 +74,7 @@ namespace KernelCommon {
         GM_ADDR o;
         GM_ADDR lse;
         GM_ADDR workSpace;
-        GM_ADDR tiling;
+        FAInferTilingParams tiling;
         GM_ADDR kNew;
         GM_ADDR vNew;
         GM_ADDR seqUsedQ;
@@ -82,7 +84,7 @@ namespace KernelCommon {
 
         __aicore__ inline FAIKernelParams(GM_ADDR q_, GM_ADDR k_, GM_ADDR v_, GM_ADDR mask_, GM_ADDR blockTables_,
                 GM_ADDR actualQseqlen_, GM_ADDR actualKvseqlen_, GM_ADDR o_, GM_ADDR lse_, GM_ADDR workSpace_,
-                    GM_ADDR tiling_, GM_ADDR kNew_ = nullptr, GM_ADDR vNew_ = nullptr,
+                    FAInferTilingParams tiling_, GM_ADDR kNew_ = nullptr, GM_ADDR vNew_ = nullptr,
                     GM_ADDR seqUsedQ_ = nullptr, GM_ADDR seqUsedKv_ = nullptr)
             : q(q_), k(k_), v(v_), mask(mask_), blockTables(blockTables_), actualQseqlen(actualQseqlen_),
                 actualKvseqlen(actualKvseqlen_), o(o_), lse(lse_), workSpace(workSpace_), tiling(tiling_),
