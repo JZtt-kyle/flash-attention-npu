@@ -12,7 +12,7 @@
 // Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0.
 // attention/fused_infer_attention_score/op_kernel/arch22/
 // fia_block_cube_nonquant_mla.h::ComputeMm1/2, ProcessMm1/2.
-// Only contiguous BSND/compact TND, Hkv=1, split-RoPE FP16/BF16 specialization is exposed.
+// BSND (optional independent strides) or compact TND, Hkv=1, split-RoPE FP16/BF16.
 // QK/PV retain the source loops, seven L1 slots and synchronization protocol.
 // This is a component, not a forward entry point; its caller validates bounds.
 #pragma once
@@ -49,22 +49,24 @@ struct MSplitInfo {
     uint32_t nBufferIdx, vecStartM, vecDealM;
 };
 
-template <typename InputT, bool IsTnd = false>
+template <typename InputT, bool IsTnd = false, bool HasStrides = false>
 class MlaCube {
+    static_assert(!HasStrides || !IsTnd, "Only BSND strides are supported");
+
   public:
     using Q_T = InputT;
     using KV_T = InputT;
     using MM_OUT_T = float;
     __aicore__ inline void Init(TPipe* pipe_, CubeParams params, GM_ADDR query, GM_ADDR queryRope, GM_ADDR sharedKv,
-                                GM_ADDR keyRope)
+                                GM_ADDR keyRope, const MlaBsndInputLayouts* layouts = nullptr)
     {
         pipe = pipe_;
         constInfo = params;
-        queryGmTensor.Init(query, params.qSeqSize, params.gSize, 512);
-        queryRopeGmTensor.Init(queryRope, params.qSeqSize, params.gSize, 64);
-        keyGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512);
-        keyRopeGmTensor.Init(keyRope, params.kvSeqSize, 1, 64);
-        valueGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512);
+        queryGmTensor.Init(query, params.qSeqSize, params.gSize, 512, HasStrides ? &layouts->qv : nullptr);
+        queryRopeGmTensor.Init(queryRope, params.qSeqSize, params.gSize, 64, HasStrides ? &layouts->q : nullptr);
+        keyGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr);
+        keyRopeGmTensor.Init(keyRope, params.kvSeqSize, 1, 64, HasStrides ? &layouts->k : nullptr);
+        valueGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr);
         pipe->InitBuffer(bufQPL1, L1_BLOCK_SIZE * 4);
         l1QPTensor = bufQPL1.Get<Q_T>();
         pipe->InitBuffer(bufKVL1, L1_BLOCK_SIZE * 3);
@@ -115,9 +117,9 @@ class MlaCube {
     static constexpr uint32_t mte21KVIds[3] = {L1_EVENT4, L1_EVENT5, L1_EVENT6};
     CubeParams constInfo;
     TPipe* pipe;
-    Tile::DenseTensor<InputT> queryGmTensor, queryRopeGmTensor, keyGmTensor, keyRopeGmTensor, valueGmTensor;
-    Tile::CopyQueryGmToL1<InputT> copyQueryGmToL1;
-    Tile::CopyKvGmToL1<InputT> copyKvGmToL1;
+    Tile::DenseTensor<InputT, HasStrides> queryGmTensor, queryRopeGmTensor, keyGmTensor, keyRopeGmTensor, valueGmTensor;
+    Tile::CopyQueryGmToL1<InputT, HasStrides> copyQueryGmToL1;
+    Tile::CopyKvGmToL1<InputT, HasStrides> copyKvGmToL1;
     GlobalTensor<float> mm1ResGm, mm2ResGm;
     GlobalTensor<InputT> vec1ResGm;
     TBuf<TPosition::A1> bufQPL1, bufKVL1;
@@ -129,8 +131,8 @@ class MlaCube {
     uint32_t qpL1BufIter = 0, kvL1BufIter = 0, cL0BufIter = 0;
 };
 
-template <typename InputT, bool IsTnd>
-__aicore__ inline void MlaCube<InputT, IsTnd>::AllocEventID()
+template <typename InputT, bool IsTnd, bool HasStrides>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::AllocEventID()
 {
     CrossCoreSetFlag<CubeParams::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC2V1);
     SetFlag<HardEvent::MTE1_MTE2>(L1_EVENT0);
@@ -142,8 +144,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::AllocEventID()
     SetFlag<HardEvent::MTE1_MTE2>(L1_EVENT6);
 }
 
-template <typename InputT, bool IsTnd>
-__aicore__ inline void MlaCube<InputT, IsTnd>::FreeEventID()
+template <typename InputT, bool IsTnd, bool HasStrides>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::FreeEventID()
 {
     WaitFlag<HardEvent::MTE1_MTE2>(L1_EVENT0);
     WaitFlag<HardEvent::MTE1_MTE2>(L1_EVENT1);
@@ -157,9 +159,10 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::FreeEventID()
     mmL0BBuffers.Uninit(pipe);
 }
 
-template <typename InputT, bool IsTnd>
-__aicore__ inline void MlaCube<InputT, IsTnd>::CopyGmToL1(LocalTensor<KV_T>& l1Tensor, GlobalTensor<KV_T>& gmSrcTensor,
-                                                          uint32_t srcN, uint32_t srcD, uint32_t srcDstride)
+template <typename InputT, bool IsTnd, bool HasStrides>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::CopyGmToL1(LocalTensor<KV_T>& l1Tensor,
+                                                                      GlobalTensor<KV_T>& gmSrcTensor, uint32_t srcN,
+                                                                      uint32_t srcD, uint32_t srcDstride)
 {
     Nd2NzParams nd2nzPara;
     nd2nzPara.ndNum = 1;
@@ -174,10 +177,10 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::CopyGmToL1(LocalTensor<KV_T>& l1T
     DataCopy(l1Tensor, gmSrcTensor, nd2nzPara);
 }
 
-template <typename InputT, bool IsTnd>
-__aicore__ inline void MlaCube<InputT, IsTnd>::CopyInMm2AToL1(LocalTensor<KV_T>& aL1Tensor, const RunInfo& info,
-                                                              uint32_t mSeqIdx, uint32_t subMSizeAct, uint32_t nSize,
-                                                              uint32_t nOffset)
+template <typename InputT, bool IsTnd, bool HasStrides>
+__aicore__ inline void
+MlaCube<InputT, IsTnd, HasStrides>::CopyInMm2AToL1(LocalTensor<KV_T>& aL1Tensor, const RunInfo& info, uint32_t mSeqIdx,
+                                                   uint32_t subMSizeAct, uint32_t nSize, uint32_t nOffset)
 {
     // 全量拷贝 确认是否是紧密排布, actualSingleProcessSInnerSize是否需要32B对齐
     auto srcGm = vec1ResGm[(info.loop % constInfo.preLoadNum) * constInfo.mmResUbSize +
@@ -185,8 +188,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::CopyInMm2AToL1(LocalTensor<KV_T>&
     CopyGmToL1(aL1Tensor, srcGm, subMSizeAct, nSize, info.actualSingleProcessSInnerSizeAlign);
 }
 
-template <typename InputT, bool IsTnd>
-__aicore__ inline void MlaCube<InputT, IsTnd>::ComputeMm1(const RunInfo& info)
+template <typename InputT, bool IsTnd, bool HasStrides>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ComputeMm1(const RunInfo& info)
 {
     uint32_t nBufferLoopTimes = (info.actMBaseSize + constInfo.nBufferMBaseSize - 1) / constInfo.nBufferMBaseSize;
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -199,8 +202,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::ComputeMm1(const RunInfo& info)
     }
 }
 
-template <typename InputT, bool IsTnd>
-__aicore__ inline void MlaCube<InputT, IsTnd>::ComputeMm2(const RunInfo& info)
+template <typename InputT, bool IsTnd, bool HasStrides>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ComputeMm2(const RunInfo& info)
 {
     uint32_t nBufferLoopTimes = (info.actMBaseSize + constInfo.nBufferMBaseSize - 1) / constInfo.nBufferMBaseSize;
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -215,8 +218,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::ComputeMm2(const RunInfo& info)
     }
 }
 
-template <typename InputT, bool IsTnd>
-__aicore__ inline void MlaCube<InputT, IsTnd>::ProcessMm1(const RunInfo& info, const MSplitInfo mSplitInfo)
+template <typename InputT, bool IsTnd, bool HasStrides>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ProcessMm1(const RunInfo& info, const MSplitInfo mSplitInfo)
 {
     // 最外层还需要一层m的循环
     uint32_t mSize = mSplitInfo.nBufferDealM;
@@ -257,47 +260,45 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::ProcessMm1(const RunInfo& info, c
             bL1Tensor = l1KVTensor[kb * L1_BLOCK_OFFSET];
             if (kL1 == 0) {
                 Tile::L1Tensor<InputT> dstTensor{.tensor = bL1Tensor, .rowCount = nL1SizeAlign};
-                Tile::KvCoord gmCoord{
-                    .tokenStart = IsTnd ? info.kvStart : uint64_t(info.bIdx) * constInfo.kvSeqSize,
-                    .n2Idx = info.n2Idx,
-                    .s2Idx = info.s2BatchOffset + nL1 * N_L1_SPLIT_SIZE,
-                    .dIdx = kL1 * 256, // D方向上切256
-                    .s2DealSize = nL1Size,
-                    .dDealSize = 256 // D方向上切256
-                };
+                Tile::KvCoord gmCoord{.tokenStart = IsTnd ? info.kvStart : uint64_t(info.bIdx) * constInfo.kvSeqSize,
+                                      .n2Idx = info.n2Idx,
+                                      .s2Idx = info.s2BatchOffset + nL1 * N_L1_SPLIT_SIZE,
+                                      .dIdx = kL1 * 256, // D方向上切256
+                                      .s2DealSize = nL1Size,
+                                      .dDealSize = 256, // D方向上切256
+                                      .batchIdx = info.bIdx};
                 Tile::L1Tensor<InputT> dstRopeTensor{
                     .tensor = bL1Tensor[nL1SizeAlign * (BlockAlign<KV_T>(constInfo.headDim) >> 1)],
                     .rowCount = nL1SizeAlign};
-                Tile::KvCoord gmCoordKRope{
-                    .tokenStart = IsTnd ? info.kvStart : uint64_t(info.bIdx) * constInfo.kvSeqSize,
-                    .n2Idx = info.n2Idx,
-                    .s2Idx = info.s2BatchOffset + nL1 * N_L1_SPLIT_SIZE,
-                    .dIdx = kL1 * 32U, // D方向上切32
-                    .s2DealSize = nL1Size,
-                    .dDealSize = 32U // D方向上切32
-                };
+                Tile::KvCoord gmCoordKRope{.tokenStart =
+                                               IsTnd ? info.kvStart : uint64_t(info.bIdx) * constInfo.kvSeqSize,
+                                           .n2Idx = info.n2Idx,
+                                           .s2Idx = info.s2BatchOffset + nL1 * N_L1_SPLIT_SIZE,
+                                           .dIdx = kL1 * 32U, // D方向上切32
+                                           .s2DealSize = nL1Size,
+                                           .dDealSize = 32U, // D方向上切32
+                                           .batchIdx = info.bIdx};
                 copyKvGmToL1(dstTensor, keyGmTensor, gmCoord);
                 copyKvGmToL1(dstRopeTensor, keyRopeGmTensor, gmCoordKRope);
 
             } else {
                 Tile::L1Tensor<InputT> dstRopeTensor{.tensor = bL1Tensor, .rowCount = nL1SizeAlign};
-                Tile::KvCoord gmCoordKRope{
-                    .tokenStart = IsTnd ? info.kvStart : uint64_t(info.bIdx) * constInfo.kvSeqSize,
-                    .n2Idx = info.n2Idx,
-                    .s2Idx = info.s2BatchOffset + nL1 * N_L1_SPLIT_SIZE,
-                    .dIdx = kL1 * 32U, // D方向上切32
-                    .s2DealSize = nL1Size,
-                    .dDealSize = 32U // D方向上切32
-                };
+                Tile::KvCoord gmCoordKRope{.tokenStart =
+                                               IsTnd ? info.kvStart : uint64_t(info.bIdx) * constInfo.kvSeqSize,
+                                           .n2Idx = info.n2Idx,
+                                           .s2Idx = info.s2BatchOffset + nL1 * N_L1_SPLIT_SIZE,
+                                           .dIdx = kL1 * 32U, // D方向上切32
+                                           .s2DealSize = nL1Size,
+                                           .dDealSize = 32U, // D方向上切32
+                                           .batchIdx = info.bIdx};
                 Tile::L1Tensor<InputT> dstTensor{.tensor = bL1Tensor[32U * nL1SizeAlign], .rowCount = nL1SizeAlign};
-                Tile::KvCoord gmCoord{
-                    .tokenStart = IsTnd ? info.kvStart : uint64_t(info.bIdx) * constInfo.kvSeqSize,
-                    .n2Idx = info.n2Idx,
-                    .s2Idx = info.s2BatchOffset + nL1 * N_L1_SPLIT_SIZE,
-                    .dIdx = kL1 * 256U, // D方向上切256
-                    .s2DealSize = nL1Size,
-                    .dDealSize = 256U // D方向上切256
-                };
+                Tile::KvCoord gmCoord{.tokenStart = IsTnd ? info.kvStart : uint64_t(info.bIdx) * constInfo.kvSeqSize,
+                                      .n2Idx = info.n2Idx,
+                                      .s2Idx = info.s2BatchOffset + nL1 * N_L1_SPLIT_SIZE,
+                                      .dIdx = kL1 * 256U, // D方向上切256
+                                      .s2DealSize = nL1Size,
+                                      .dDealSize = 256U, // D方向上切256
+                                      .batchIdx = info.bIdx};
                 copyKvGmToL1(dstRopeTensor, keyRopeGmTensor, gmCoordKRope);
                 copyKvGmToL1(dstTensor, keyGmTensor, gmCoord);
             }
@@ -331,7 +332,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::ProcessMm1(const RunInfo& info, c
                             .gS1Idx = info.gS1Idx + mSplitInfo.nBufferStartM + mL1 * M_L1_SPLIT_SIZE,
                             .dIdx = kL1 * 256,
                             .gS1DealSize = mL1Size,
-                            .dDealSize = 256};
+                            .dDealSize = 256,
+                            .batchIdx = info.bIdx};
                         LocalTensor<Q_T> qRopeTensor = aL1Tensor[mL1SizeAlign * 256];
                         Tile::L1Tensor<InputT> dstRopeTensor{.tensor = aL1Tensor[mL1SizeAlign * 256],
                                                              .rowCount = Align(mL1Size, 16U)};
@@ -341,7 +343,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::ProcessMm1(const RunInfo& info, c
                             .gS1Idx = info.gS1Idx + mSplitInfo.nBufferStartM + mL1 * M_L1_SPLIT_SIZE,
                             .dIdx = 0,
                             .gS1DealSize = mL1Size,
-                            .dDealSize = 64};
+                            .dDealSize = 64,
+                            .batchIdx = info.bIdx};
                         WaitFlag<HardEvent::MTE1_MTE2>(mte21QPIds[ka]);
                         WaitFlag<HardEvent::MTE1_MTE2>(mte21QPIds[ka + 1]);
                         copyQueryGmToL1(dstTensor, queryGmTensor, gmCoord);
@@ -357,7 +360,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::ProcessMm1(const RunInfo& info, c
                             .gS1Idx = info.gS1Idx + mSplitInfo.nBufferStartM + mL1 * M_L1_SPLIT_SIZE,
                             .dIdx = kL1 * 256,
                             .gS1DealSize = mL1Size,
-                            .dDealSize = 256};
+                            .dDealSize = 256,
+                            .batchIdx = info.bIdx};
                         copyQueryGmToL1(dstTensor, queryGmTensor, gmCoord);
                     }
                     SetFlag<HardEvent::MTE2_MTE1>(mte21QPIds[ka]);
@@ -408,8 +412,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::ProcessMm1(const RunInfo& info, c
     qpL1BufIter += mL1Loops;
 }
 
-template <typename InputT, bool IsTnd>
-__aicore__ inline void MlaCube<InputT, IsTnd>::ProcessMm2(const RunInfo& info, const MSplitInfo mSplitInfo)
+template <typename InputT, bool IsTnd, bool HasStrides>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ProcessMm2(const RunInfo& info, const MSplitInfo mSplitInfo)
 {
     uint32_t mSize = mSplitInfo.nBufferDealM;
     uint32_t mSizeAlign = (mSize + 16 - 1) / 16;
@@ -473,7 +477,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd>::ProcessMm2(const RunInfo& info, c
                                       .s2Idx = info.s2BatchOffset + (kL1 - kOffset) * 128U + k1 * 256U,
                                       .dIdx = nL1 * N_L1_SPLIT_SIZE,
                                       .s2DealSize = kL0Size,
-                                      .dDealSize = N_L1_SPLIT_SIZE};
+                                      .dDealSize = N_L1_SPLIT_SIZE,
+                                      .batchIdx = info.bIdx};
                 copyKvGmToL1(dstTensor, valueGmTensor, gmCoord);
             }
             SetFlag<HardEvent::MTE2_MTE1>(mte21KVIds[kb]);

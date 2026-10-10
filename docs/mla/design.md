@@ -420,9 +420,13 @@ KV token 起点固定为 `uint64(b)*Sk`，短长度和零长度不压缩 cache�
 
 描述保存 64 位 `batchStride/rowStride/headStride` 和相对 `data_ptr()` 的 `spanElements`；末维 stride 必须为 1，外层 stride 非负。只读的广播、重叠、外层切片及 BNSD 归一视图均可表达。非空视图的相对地址为 `b*batchStride+s*rowStride+h*headStride+d`；独立校验整个分配视图的末端及 storage offset 相加后的字节范围均不超过 `INT64_MAX`，且不越过 storage。每次乘加前检查溢出，不能用 used 长度缩短校验范围。空 batch/sequence 没有可达元素，`spanElements=0`，允许 offset 超过 storage；空维度/单例维度中未使用的 stride 不作字节窄化，负 stride 和非法末维仍拒绝。失败不修改输出描述。
 
-固定 FA3 的 `set_params_fprop` / `mha_fwd` 分别读取各张量的 `data_ptr()` 和真实 stride。`data_ptr()` 已包含 storage offset，未来 launch 不得再次加 offset；offset 只用于主机侧 storage 边界校验，stride 不写入 metadata。CPU 验收用真实 PyTorch 视图的标量地址与独立 Python 大整数 oracle；不将其记为设备执行验收。
+固定 FA3 的 `set_params_fprop` / `mha_fwd` 分别读取各张量的 `data_ptr()` 和真实 stride。`data_ptr()` 已包含 storage offset，launch 不得再次加 offset；offset 只用于主机侧 storage 边界校验，stride 不写入 metadata。CPU 验收用真实 PyTorch 视图的标量地址与独立 Python 大整数 oracle；不将其记为设备执行验收。
 
-设备接入沿用固定 CANN 源 `attention/common/op_kernel/memcopy/attn_copy_gm_to_l1.h` 的 ND→NZ 搬运规则，并保留来源声明。固定源的单矩阵 `srcDValue>=65536` 使用逐行回退，多矩阵 `srcNdMatrixStride>65536` 使用逐矩阵回退；FA3 的 64 位 stride 不能直接窄化进这些字段。回退、零 stride 与组合边界须在 M06e1b 完成 910B 精度和性能验收，公开接入留在 M06e1c。
+设备组件的 `HasStrides` 模板实例将四路描述从 Kernel 传入 Cube Block / Copy Tile；默认实例继续使用连续布局，TND stride 尚未接入。Q/qv 仍按源 S1G 顺序分成首段 heads、中间矩阵和末段 heads，每一路分别计算 batch/row/head 地址；共享内容 KV 的 QK 和 PV 均使用 V 的真实布局。O/LSE、任务环、切块、数值及同步流程不变，不复制完整 cache。独立驱动在发射前用上述 CPU 组件检查四个完整分配视图，设备分别校验 v1/v2/v5；生产入口仍拒绝非连续输入，接入留在 M06e1c。
+
+Copy Tile 沿用固定 CANN 源 `attention/common/op_kernel/memcopy/attn_copy_gm_to_l1.h` 的 ND→NZ 搬运和回退，并保留来源声明。固定源单矩阵在 `srcDValue>=65536` 时逐行复制，多矩阵在 `srcNdMatrixStride>65536` 时逐矩阵复制。FA3 适配始终保留 64 位地址运算，并将多矩阵回退边界改为 **`>=65536`**：910B 的实际 `Nd2NzParams::srcNdMatrixStride` 为 uint16，65536 会截断为零，独立实测已发现原边界产生错误输出。零 row/matrix stride 也使用逐行/逐矩阵复制；矩阵 stride 合法但 head stride 超限时必须同时走回退，不能窄化后再判断。
+
+独立 [stride attention 验收](../../tests/test_flash_attn_npu_v3_mla_bsnd_stride.py) 用真实 NPU storage 检查 65535/65536/65537、实际使用的 >uint32 stride、空/单例轴、广播/重叠、BNSD、四路偏移及 used poison。固定源接收计时前独立物化的连续逻辑输入，执行相同非 FD 调度；任意四路 stride 没有等价的源 ABI。因此该源精度/组件性能对照须注明物理布局差异和转换边界，不能记为相同物理布局或公开 E2E 验收。
 
 ### 6.3 数值路径与资源布局
 
@@ -539,6 +543,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 内部 BSND Q-used `PERFORMANCE_CASES` | 7 | [`mla_bsnd_used_profile.py`](../../tests/mla_bsnd_used_profile.py)：U01、非均匀/零长度、M/S2 尾块、16384 KV、KV-used 缺省；生产 Kernel 对同调度固定源，单列 AICPU 与内部 wall，无公开 E2E 等价入口 |
 | 内部混合 Q-used `PERFORMANCE_CASES` | 9 | [`mla_bsnd_used_profile.py --layout mixed`](../../tests/mla_bsnd_used_profile.py)：混合 T01、分配间隙、非均匀/零长度、M/S2 尾块、16384 KV、KV-used 缺省与显式整段 used；生产 Kernel 对同调度固定源，单列逐次 v5 生成与内部 wall，无公开 E2E 等价入口 |
 | 公开 varlen used `PERFORMANCE_CASES` | 10 | [`mla_varlen_used_profile.py`](../../tests/mla_varlen_used_profile.py)：T01/分配间隙、非均匀/零长度、M/S2 尾块、16384 KV、单轴 used 与显式整段 used；每次内部 v5 生成计入 R=1/4 E2E，原生转换与 FD 分派单列 |
+| BSND stride `PERFORMANCE_CASES` | 9 | [`mla_bsnd_stride_profile.py`](../../tests/mla_bsnd_stride_profile.py)：连续对照、BNSD、独立布局、U01、任务环/尾块、16384 KV、65536 回退及广播；双 dtype 同逻辑输入/调度，源侧连续物化在计时前完成，分别记录 Kernel 与预分配 probe 调用耗时 |
 
 源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。前四组共 26 个整容量用例作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E。`BSND_CASES` 另含 11 个实际长度用例，保留全部原生 FD 分派并单列；公开全零实际长度同样计入对应路径的 E2E 验收。
 

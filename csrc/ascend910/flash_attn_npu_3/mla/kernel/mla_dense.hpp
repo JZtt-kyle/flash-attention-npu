@@ -13,7 +13,7 @@
 // attention/fused_infer_attention_score/op_kernel/arch22/fia_kernel_nonquant_mla.h:
 // Init, InitOutputSingleCore, InitCalcParamsEach, CalcParams, UpdateAxisInfo,
 // FlashAttention, CreateTask, ShouldExecuteTask and ExecuteTask.
-// Specialization: nonempty contiguous BSND capacity, Hkv=1, no mask/FD,
+// Specialization: nonempty BSND capacity, Hkv=1, no mask/FD,
 // Sq*Hq>0, 1<=Sk<=16384. The caller validates source field/address bounds and
 // supplies the source M-block partition, including cross-core and tail blocks.
 // MlaNonPaged shares the task ring with typed TND and mixed-layout wrappers.
@@ -21,7 +21,9 @@
 // selects v4 five-word spans with a 64-bit physical KV start instead of v3.
 // HasKvLengths additionally consumes a validated v2 int32 length snapshot.
 // HasUsed selects v5 eight-word spans: physical starts, capacities and used.
-// BSND addressing remains uint64(b)*capacity; TND uses the validated starts.
+// Default BSND addressing is uint64(b)*capacity; TND uses validated starts.
+// HasStrides selects independent BSND input layouts, without changing the
+// task ring, output layout, metadata or numerical/synchronization order.
 // Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
 // compute endpoints. FA3 requires -inf (source +inf) LSE for these empty rows.
 #pragma once
@@ -31,18 +33,20 @@
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
-template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false, bool HasUsed = false>
+template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false, bool HasUsed = false,
+          bool HasStrides = false>
 class MlaNonPaged {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
     static_assert(!MixedKv || (IsTnd && HasKvLengths));
     static_assert(!HasUsed || HasKvLengths);
+    static_assert(!HasStrides || !IsTnd, "Only BSND strides are supported");
     static constexpr uint32_t kSpanWords = HasUsed ? 8 : MixedKv ? 5 : 4;
 
   protected:
     __aicore__ inline void Run(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv,
                                GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace, TPipe* pipe,
-                               GM_ADDR kvLengths, uint32_t totalQuery = 0)
+                               GM_ADDR kvLengths, uint32_t totalQuery = 0, const MlaBsndInputLayouts* layouts = nullptr)
     {
         params = schedule;
         queryTokens = IsTnd ? totalQuery : params.sq;
@@ -88,7 +92,7 @@ class MlaNonPaged {
 
         Block::CubeParams cubeParams{queryTokens, params.heads, params.sk, params.mm1ResSize, params.mm2ResSize};
         if ASCEND_IS_AIC {
-            cube.Init(pipe, cubeParams, qc, qr, kv, kr);
+            cube.Init(pipe, cubeParams, qc, qr, kv, kr, layouts);
             cube.InitMm1GlobalTensor(qk);
             cube.InitMm2GlobalTensor(p, pv);
             cube.AllocEventID();
@@ -113,7 +117,7 @@ class MlaNonPaged {
   private:
     using RunInfo = Block::RunInfo;
     static constexpr uint32_t kTaskCount = 3;
-    Block::MlaCube<InputT, IsTnd> cube;
+    Block::MlaCube<InputT, IsTnd, HasStrides> cube;
     Block::MlaVector<InputT, IsTnd> vector;
     MlaDenseKernelSchedule params;
     GlobalTensor<uint32_t> lengths;
@@ -307,14 +311,15 @@ class MlaNonPaged {
 };
 // Typed BSND entry retains the original interface; the common engine is only
 // accessible through layout-specific wrappers after metadata validation.
-template <typename InputT, bool HasKvLengths = false>
-class MlaDense : private MlaNonPaged<InputT, HasKvLengths, false> {
+template <typename InputT, bool HasKvLengths = false, bool HasStrides = false>
+class MlaDense : private MlaNonPaged<InputT, HasKvLengths, false, false, false, HasStrides> {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
                                       GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
-                                      TPipe* pipe, GM_ADDR kvLengths = nullptr)
+                                      TPipe* pipe, GM_ADDR kvLengths = nullptr,
+                                      const MlaBsndInputLayouts* layouts = nullptr)
     {
-        this->Run(schedule, scale, qc, qr, kv, kr, output, lse, workspace, pipe, kvLengths);
+        this->Run(schedule, scale, qc, qr, kv, kr, output, lse, workspace, pipe, kvLengths, 0, layouts);
     }
 };
 } // namespace flash_attn::mla::Kernel

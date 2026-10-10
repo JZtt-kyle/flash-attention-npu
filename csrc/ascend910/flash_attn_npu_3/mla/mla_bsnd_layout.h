@@ -25,6 +25,10 @@ struct MlaBsndTensorLayout {
     uint64_t spanElements; // One past the last reachable element, or zero if empty.
 };
 
+struct MlaBsndInputLayouts {
+    MlaBsndTensorLayout q, qv, k, v;
+};
+
 enum class MlaLayoutStatus {
     Success,
     InvalidShape,

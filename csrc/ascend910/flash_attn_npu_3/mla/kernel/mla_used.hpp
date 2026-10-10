@@ -6,14 +6,14 @@
 #include "../mla_used_metadata_consumer.h"
 
 namespace flash_attn::mla::Kernel {
-template <typename InputT, bool IsTnd>
-class MlaUsed : private MlaNonPaged<InputT, true, IsTnd, false, true> {
+template <typename InputT, bool IsTnd, bool HasStrides = false>
+class MlaUsed : private MlaNonPaged<InputT, true, IsTnd, false, true, HasStrides> {
   public:
     // Validate v5 and all four current arrays on every core before TPipe,
     // synchronization or writes. IsTnd must match the validated Q layout.
     __aicore__ inline void operator()(const MlaUsedKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
                                       GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
-                                      TPipe* pipe, GM_ADDR spans)
+                                      TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts* layouts = nullptr)
     {
         const uint64_t totalQuery = UsedMetadataTotal(schedule.query);
         if (totalQuery == 0) {
@@ -43,7 +43,7 @@ class MlaUsed : private MlaNonPaged<InputT, true, IsTnd, false, true> {
             return;
         }
         this->Run(schedule.tiling, scale, qc, qr, kv, kr, output, lse, workspace, pipe, spans,
-                  IsTnd ? uint32_t(totalQuery) : 0);
+                  IsTnd ? uint32_t(totalQuery) : 0, layouts);
     }
 };
 } // namespace flash_attn::mla::Kernel
