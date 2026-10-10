@@ -308,7 +308,6 @@ def test_mla_metadata_rejected(entry, dims, dtype, has_softcap):
         "v_new",
         "out_",
         "cu_seqlens_k_new",
-        "seqused_q",
         "max_seqlen_q",
         "max_seqlen_k",
         "kv_batch_idx",

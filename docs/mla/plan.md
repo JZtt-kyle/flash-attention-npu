@@ -2,7 +2,7 @@
 
 本文件只记录迭代顺序、每步产物与完成条件。当前公开能力、最近一次闭环和复现命令见 [status](status.md)，目标范围、协议与验收口径见 [design](design.md)。步骤编号沿用历史，M04c 在 M05 闭环后执行；不按编号重新排序。
 
-唯一下一步为 **M06d3：used 的公开与内部入口接入**，完成条件见下。未完成工作按 M06 → M07..M17 排列，[已完成步骤](#已完成步骤) 集中放在末尾，保留原编号以便追溯提交。独立组件完成不代表公开入口开放。
+唯一下一步为 **M06d3b：TND used 入口接入**，完成条件见下。未完成工作按 M06 → M07..M17 排列，[已完成步骤](#已完成步骤) 集中放在末尾，保留原编号以便追溯提交。独立组件完成不代表公开入口开放。
 
 ## M06：非分页长度、TND 与 stride
 
@@ -10,20 +10,20 @@
 
 每行单独验收、提交。长度和布局沿用“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 公开接入”的顺序；混合布局已接通公开只读 kvcache，used 继续按同一顺序推进。
 
-### 下一步：M06d3
+### 下一步：M06d3b
 
-M06d2a/b/c 已完成 v5 独立生成、设备校验与三布局 attention。下一步在原有 FA3 参数内接入 used；独立组件结果不替代公开调用段验收。
+M06d2a/b/c 已完成 v5 独立生成、设备校验与三布局 attention，M06d3a 已接通内部 BSND Q-used。M06d3 按内部 BSND 与 TND 的独立验收边界拆分；独立组件结果不替代入口验收。
 
-- 接通 varlen `seqused_q/k` 与内部 BSND Q-used，保留分配起点、有效区、空容量和零 used 语义；无公开等价的 BSND Q-used 只验收内部入口。
-- 复用已验收的 v5 生成器、消费者和 Kernel，不增加公共参数；更新真实/fake/C++ 的校验与能力边界，其余组合继续明确拒绝。
-- 完成双 dtype 有效行、poison padding、长度更新、生命周期、签名/compile 和普通 FA3 回归；按 design 第 7 节验收适用公开 E2E，记录生成与 R=1/4 调用段。
-- M06d2c 的组件数据包含 v5 校验及分配布局开销，不代表公开 E2E 已达标；步骤过大时先按独立验收边界拆分。
+- 接通 varlen `seqused_q/k` 和内部混合 Q-used，复用已有 v5 生成器、消费者和 Kernel，不增加公共参数；保留分配起点、有效区、空容量与零 used 语义，其余组合明确拒绝。
+- 完成双 dtype 有效行、poison padding、长度更新、跨流与 allocator 生命周期、签名/真实/fake/C++/compile、设备拒绝、构建及普通 FA3 回归。
+- 按 design 第 7 节验收适用公开 E2E，记录生成与 R=1/4 调用段；无公开等价的混合 Q-used 单独记录内部验收。若本步仍过大，先按入口验收边界继续拆分。
+- M06d2c / M06d3a 的组件对照含 v5 校验开销，不代表公开 E2E 已达标。
 
 ### M06 剩余步骤
 
 | 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
 | --- | --- | --- | --- |
-| M06d3 | 唯一下一步 | varlen `seqused_q/k` 与内部 BSND Q-used 接入 | 不增加公共参数，签名/真实/fake/C++/有效输出/普通 FA3 与适用 E2E 通过；无公开等价的 BSND Q-used 只验收内部入口 |
+| M06d3b | 唯一下一步 | varlen `seqused_q/k` 与内部混合 Q-used | 不增加公共参数，签名/真实/fake/C++/有效输出/普通 FA3 与适用公开 E2E 通过；内部混合 Q-used 单独记录 |
 | M06e1 | 待开始 | BSND 最后一维连续的合法外层 stride | Q/qv/K/V 独立 batch/row/head stride/offset、BNSD 视图与 U01；无完整 cache 复制，精度/性能/普通 FA3 通过 |
 | M06e2 | 待开始 | TND 合法外层 stride，完成 M06 | ST01 token/head stride、NTD 视图、独立 offset、T01/used/BSND cache 组合；精度/性能/普通 FA3 通过 |
 
@@ -115,3 +115,4 @@ M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[�
 | M06d2a | v5 分配/used 记录与独立 AICPU 生成；CPU/设备/固定源字段、失败清零、64 位跨度、生命周期、构建及旧路径回归；未接 used 消费者、attention 或公开入口 |
 | M06d2b | v5 设备校验消费者；独立 context/返回类型、四数组与 64 位物理跨度、端点/资源、release Trap、生命周期、源差分/sanitizer/构建及旧路径回归；未接 used attention 或公开入口 |
 | M06d2c | v5 三布局独立 attention；按分配起点与 used 执行，双 dtype/空值/poison/更新/生命周期/Trap、固定源与数学精度及组件性能、构建和旧路径回归；未接公开 used |
+| M06d3a | 内部 BSND Q-used 与可选 KV-used，每次生成/消费 v5；真实/fake/C++、双 dtype 源/数学精度、空值/更新/生命周期/Trap、compile、普通 FA3、构建和生产 Kernel 性能对照；无公开等价入口，TND used 仍拒绝 |

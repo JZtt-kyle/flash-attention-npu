@@ -4,6 +4,7 @@
 #include "mla_bsnd_metadata.h"
 #include "mla_tnd_metadata.h"
 #include "mla_tnd_bsnd_metadata.h"
+#include "mla_used_metadata.h"
 
 // Host-only boundary for the two representations in docs/mla/design.md.
 // Contract: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
@@ -122,6 +123,25 @@ inline uint32_t CheckBsndMetadataWords(int64_t batch)
     TORCH_CHECK(batch >= 0 && batch <= UINT32_MAX - kMlaBsndKvLengthMetadataPrefixWords,
                 "MLA: BSND metadata word count overflow");
     return kMlaBsndKvLengthMetadataPrefixWords + batch;
+}
+
+inline uint32_t CheckBsndUsedInputs(const at::Tensor& q, const at::Tensor& usedQuery,
+                                    const std::optional<at::Tensor>& usedKv)
+{
+    const int64_t batch = q.size(0);
+    TORCH_CHECK(batch <= (UINT32_MAX - kMlaUsedMetadataPrefixWords) / kMlaUsedMetadataSequenceWords,
+                "MLA: used metadata word count overflow");
+    const auto check = [&](const at::Tensor& t, const char* name) {
+        TORCH_CHECK(t.scalar_type() == at::kInt, "MLA: ", name, " must have dtype int32");
+        TORCH_CHECK(t.device() == q.device(), "MLA: ", name, " must be on the same NPU device");
+        TORCH_CHECK(t.dim() == 1 && t.numel() == batch, "MLA: ", name, " must have shape [batch_size]");
+        TORCH_CHECK(t.is_contiguous(), "MLA: ", name, " must be contiguous");
+    };
+    check(usedQuery, "seqused_q");
+    if (usedKv) {
+        check(*usedKv, "seqused_k");
+    }
+    return kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * batch;
 }
 
 inline uint32_t CheckTndBsndMetadataInputs(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,

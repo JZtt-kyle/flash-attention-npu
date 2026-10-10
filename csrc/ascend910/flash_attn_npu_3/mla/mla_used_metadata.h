@@ -1,9 +1,10 @@
-// Private used-length protocol. Independent generation only; v1-v4 consumers
-// must reject this record. Scheduling retains its CANN source/license in
+// Private used-length protocol; v1-v4 consumers must reject this record.
+// Scheduling retains its CANN source/license in
 // mla_tnd_schedule.cpp, mla_schedule.cpp and detail/cann_split_core.cpp.
 #pragma once
 #include "mla_metadata.h"
 #include "mla_used_schedule.h"
+#include "mla_used_metadata_args.h"
 
 namespace flash_attn::mla {
 
@@ -25,6 +26,22 @@ struct MlaMetadataAllocation {
     uint32_t layout;
     MlaMetadataWide totalTokens;
     uint32_t maxLength;
+};
+
+// Plain launch ABI shared by host code and the device consumer. Keep the
+// device validation functions in mla_used_metadata_consumer.h.
+struct MlaUsedMetadataContext {
+    uint32_t dtype, batch, heads, usedFlags;
+    MlaMetadataAllocation query, kv;
+    uint32_t aicNum, aivNum, blockDim;
+    uint64_t workspaceBytes, libApiBytes;
+    MlaLocalMemory localMemory;
+};
+
+// Descriptor addresses belong to this invocation, never to the record.
+// Read-only inputs may alias; all inputs must remain stable until completion.
+struct MlaUsedMetadataInputs {
+    MlaUsedMetadataArray cuQuery, cuKv, usedQuery, usedKv;
 };
 
 // Common 401-word schedule, two four-word allocations, then presence flags.

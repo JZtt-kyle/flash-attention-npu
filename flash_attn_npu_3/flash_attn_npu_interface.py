@@ -302,6 +302,27 @@ def _check_mla_cache_lengths(lengths, batch, device):
         raise RuntimeError("MLA: cache_seqlens must be contiguous")
 
 
+def _check_mla_bsnd_used(q, seqused_q, seqused_k, metadata):
+    if metadata is not None:
+        raise RuntimeError(
+            "MLA compressed forward is not implemented yet for Q-used with explicit metadata"
+        )
+    batch = q.shape[0]
+    if batch > ((1 << 32) - 1 - 410) // 8:
+        raise RuntimeError("MLA: used metadata word count overflow")
+    for name, tensor in (("seqused_q", seqused_q), ("seqused_k", seqused_k)):
+        if tensor is None:
+            continue
+        if tensor.dtype != torch.int32:
+            raise RuntimeError(f"MLA: {name} must have dtype int32")
+        if tensor.device != q.device:
+            raise RuntimeError(f"MLA: {name} must be on the same NPU device")
+        if tensor.ndim != 1 or tensor.numel() != batch:
+            raise RuntimeError(f"MLA: {name} must have shape [batch_size]")
+        if not tensor.is_contiguous():
+            raise RuntimeError(f"MLA: {name} must be contiguous")
+
+
 def _check_mla_forward_metadata(q, cache_seqlens, metadata):
     if cache_seqlens is not None or metadata is not None:
         _mla_bsnd_metadata_words(q.shape[0])
@@ -428,7 +449,7 @@ def _flash_attn_forward(
                 v_new,
                 out_,
                 cu_seqlens_k_new,
-                seqused_q,
+                seqused_q if cu_seqlens_q is not None else None,
                 max_seqlen_q if cu_seqlens_q is None else None,
                 max_seqlen_k if cu_seqlens_k is None else None,
                 kv_batch_idx,
@@ -452,6 +473,8 @@ def _flash_attn_forward(
                         "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
                     )
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+        elif seqused_q is not None:
+            _check_mla_bsnd_used(q, seqused_q, seqused_k, scheduler_metadata)
         else:
             _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
     q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
@@ -576,7 +599,7 @@ def _flash_attn_forward_fake(
                 v_new,
                 out_,
                 cu_seqlens_k_new,
-                seqused_q,
+                seqused_q if cu_seqlens_q is not None else None,
                 max_seqlen_q if cu_seqlens_q is None else None,
                 max_seqlen_k if cu_seqlens_k is None else None,
                 kv_batch_idx,
@@ -600,6 +623,8 @@ def _flash_attn_forward_fake(
                         "MLA compressed forward is not implemented yet for TND used lengths or explicit metadata"
                     )
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+        elif seqused_q is not None:
+            _check_mla_bsnd_used(q, seqused_q, seqused_k, scheduler_metadata)
         else:
             _check_mla_forward_metadata(q, seqused_k, scheduler_metadata)
 

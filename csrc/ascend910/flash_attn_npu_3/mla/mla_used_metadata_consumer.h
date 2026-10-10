@@ -24,20 +24,6 @@
 
 namespace flash_attn::mla {
 
-struct MlaUsedMetadataContext {
-    uint32_t dtype, batch, heads, usedFlags;
-    MlaMetadataAllocation query, kv;
-    uint32_t aicNum, aivNum, blockDim;
-    uint64_t workspaceBytes, libApiBytes;
-    MlaLocalMemory localMemory;
-};
-
-// Descriptor addresses belong to this invocation, never to the record.
-// Read-only inputs may alias; all inputs must remain stable until completion.
-struct MlaUsedMetadataInputs {
-    MlaUsedMetadataArray cuQuery, cuKv, usedQuery, usedKv;
-};
-
 // Allocation geometry is distinct from effective lengths in the v5 spans.
 // tiling.sq/sk retain allocation maxima, including when every used value is 0.
 struct MlaUsedKernelSchedule {

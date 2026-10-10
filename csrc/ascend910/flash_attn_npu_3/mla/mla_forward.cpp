@@ -4,6 +4,7 @@
 #include "mla_metadata_args.h"
 #include "mla_tnd_metadata_args.h"
 #include "mla_tnd_bsnd_metadata_args.h"
+#include "mla_used_metadata_args.h"
 #include "mla_validation.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
@@ -22,6 +23,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadataFromPrefix(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
 
 namespace flash_attn::mla {
 namespace {
@@ -72,6 +74,8 @@ struct MetadataSubmission {
             ComputeMlaTndMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else if constexpr (std::is_same_v<Args, MlaTndBsndMetadataArgs>) {
             ComputeMlaTndBsndMetadataFromPrefix<<<1, nullptr, worker>>>(&args, sizeof(args));
+        } else if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs>) {
+            ComputeMlaUsedMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else if (hasKvLengths) {
             ComputeMlaBsndKvLengthMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else {
@@ -107,7 +111,7 @@ MetadataSubmission<Args> PrepareSubmission(const at::Tensor& metadata, const Arg
     if (lengths && lengths->numel() != 0) {
         c10_npu::NPUCachingAllocator::recordStream(lengths->storage().data_ptr(), worker);
     }
-    if (query) {
+    if (query && query->numel() != 0) {
         c10_npu::NPUCachingAllocator::recordStream(query->storage().data_ptr(), worker);
     }
     return {metadata,
@@ -294,6 +298,105 @@ std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, c
         out.zero_();
         lse.fill_(std::numeric_limits<float>::infinity());
     }
+    return {out, lse, at::Tensor(), at::Tensor()};
+}
+
+std::vector<at::Tensor> BsndUsedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                        const at::Tensor& qv, const at::Tensor& usedQuery,
+                                        const std::optional<at::Tensor>& usedKv, float scale)
+{
+    const uint32_t words = CheckBsndUsedInputs(q, usedQuery, usedKv);
+    const int64_t batch = q.size(0), sq = q.size(1), heads = q.size(2), sk = k.size(1);
+    const bool nonempty = batch != 0 && sq != 0 && sk != 0;
+    auto p = DensePlatform(nonempty);
+    // Static allocation bounds only; source scheduling reads used on AICPU.
+    const uint64_t m = (std::min(uint64_t(sq) * heads, uint64_t(256)) + 15) / 16 * 16;
+    const uint64_t n = (std::min(uint64_t(sk), uint64_t(512)) + 31) / 32 * 32;
+    const uint64_t userBytes = nonempty ? uint64_t(2) * p.aicNum * (6 * m * n + 8 * m * 512 + 8 * 256) : 0;
+    const uint64_t libBytes = nonempty ? p.libApiWorkspaceBytes : 0;
+    TORCH_CHECK(libBytes <= uint64_t(INT64_MAX) - userBytes, "MLA: workspace overflow");
+    auto out = at::empty({batch, sq, heads, 512}, q.options());
+    auto lse = at::empty({batch, heads, sq}, q.options().dtype(at::kFloat));
+    auto workspace = at::empty({static_cast<int64_t>(userBytes + libBytes)}, q.options().dtype(at::kByte));
+    auto metadata = at::empty({words}, q.options().dtype(at::kInt));
+    const auto checkAddress = [](const at::Tensor& t) {
+        const auto address = reinterpret_cast<uintptr_t>(t.data_ptr());
+        TORCH_CHECK((t.numel() == 0 || address != 0) && uint64_t(t.nbytes()) <= UINTPTR_MAX - address,
+                    "MLA: tensor address overflow");
+    };
+    for (const auto& t : {q, k, v, qv, usedQuery, out, lse, workspace, metadata}) {
+        checkAddress(t);
+    }
+    if (usedKv) {
+        checkAddress(*usedKv);
+    }
+    const uint32_t dtype = uint32_t(q.scalar_type() == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16);
+    const auto descriptor = [&](const at::Tensor& t) {
+        // Empty torch tensors may have null data_ptr. A nonnull zero-extent
+        // descriptor preserves explicit presence for B=0; it is never read
+        // and has no overlap with the metadata output's nonempty extent.
+        return MlaUsedMetadataArray{reinterpret_cast<uint64_t>(t.numel() == 0 ? metadata.data_ptr() : t.data_ptr()),
+                                    uint64_t(t.numel())};
+    };
+    MlaUsedMetadataArgs args{
+        reinterpret_cast<uint64_t>(metadata.data_ptr()),
+        words,
+        dtype,
+        {batch, heads, {MlaSequenceLayout::Bsnd, batch * sq, sq}, {MlaSequenceLayout::Bsnd, batch * sk, sk}},
+        p,
+        {},
+        {},
+        descriptor(usedQuery),
+        usedKv ? descriptor(*usedKv) : MlaUsedMetadataArray{}};
+    auto producer = PrepareSubmission(metadata, args, usedKv, usedQuery, true);
+    auto stream = c10_npu::getCurrentNPUStream();
+    for (const auto& t : {q, k, v, qv, usedQuery, metadata}) {
+        if (t.numel() != 0) {
+            c10_npu::NPUCachingAllocator::recordStream(t.storage().data_ptr(), stream);
+        }
+    }
+    if (usedKv && usedKv->numel() != 0) {
+        c10_npu::NPUCachingAllocator::recordStream(usedKv->storage().data_ptr(), stream);
+    }
+    MlaUsedLaunchArgs a{};
+    uint32_t fftsLength = 0;
+    TORCH_CHECK(rtGetC2cCtrlAddr(&a.ffts, &fftsLength) == RT_ERROR_NONE,
+                "MLA: failed to obtain cross-core synchronization address");
+    a.stream = stream.stream(false);
+    a.qc = static_cast<uint8_t*>(qv.data_ptr());
+    a.qr = static_cast<uint8_t*>(q.data_ptr());
+    a.kv = static_cast<uint8_t*>(v.data_ptr());
+    a.kr = static_cast<uint8_t*>(k.data_ptr());
+    a.output = static_cast<uint8_t*>(out.data_ptr());
+    a.lse = static_cast<uint8_t*>(lse.data_ptr());
+    a.workspace = workspace.numel() == 0 ? nullptr : static_cast<uint8_t*>(workspace.data_ptr()) + libBytes;
+    a.metadata = static_cast<uint8_t*>(metadata.data_ptr());
+    const auto allocation = [](const MlaSequenceAllocation& axis) {
+        const auto total = uint64_t(axis.totalTokens);
+        return MlaMetadataAllocation{
+            uint32_t(axis.layout), {uint32_t(total), uint32_t(total >> 32)}, uint32_t(axis.maxLength)};
+    };
+    a.context = {dtype,
+                 uint32_t(batch),
+                 uint32_t(heads),
+                 kMlaUsedQueryPresent | (usedKv ? kMlaUsedKvPresent : 0),
+                 allocation(args.shape.query),
+                 allocation(args.shape.kv),
+                 p.aicNum,
+                 p.aivNum,
+                 p.blockDims[nonempty ? p.aicNum - 1 : 0],
+                 userBytes,
+                 libBytes,
+                 p.localMemory};
+    a.inputs = {args.cuQuery, args.cuKv, args.usedQuery, args.usedKv};
+    a.scale = scale;
+    at_npu::native::OpCommand::RunOpApiV2(
+        "ascendc_mla_bsnd_used", [a, producer, q, k, v, qv, out, lse, workspace]() mutable -> int {
+            producer.Enqueue();
+            auto error = q.scalar_type() == at::kBFloat16 ? LaunchBsndUsedBf16(a) : LaunchBsndUsedFp16(a);
+            TORCH_CHECK(error == ACL_SUCCESS, "MLA: BSND used BATCH_MODE kernel launch failed (", error, ")");
+            return 0;
+        });
     return {out, lse, at::Tensor(), at::Tensor()};
 }
 
