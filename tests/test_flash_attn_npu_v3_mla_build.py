@@ -106,8 +106,10 @@ def test_aicpu_sources_by_backend():
         ("mla_bsnd_metadata", "mla_bsnd_schedule.h"),
         ("mla_tnd_metadata", "mla_tnd_schedule.h"),
         ("mla_tnd_metadata", "mla_tnd_bsnd_schedule.h"),
+        ("mla_tnd_metadata", "mla_used_schedule.h"),
         ("mla_tnd_metadata", "mla_tnd_metadata_args.h"),
         ("mla_tnd_bsnd_metadata", "mla_tnd_bsnd_schedule.h"),
+        ("mla_tnd_bsnd_metadata", "mla_used_schedule.h"),
         ("mla_tnd_bsnd_metadata", "mla_tnd_bsnd_metadata.h"),
         ("mla_tnd_bsnd_metadata", "mla_tnd_bsnd_metadata_args.h"),
     ],
@@ -143,6 +145,7 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, hea
             "mla_tnd_metadata.cpp",
             "mla_tnd_schedule.h",
             "mla_tnd_bsnd_schedule.h",
+            "mla_used_schedule.h",
             "mla_tnd_schedule.cpp",
         ):
             assert name in dependencies
@@ -151,6 +154,7 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, hea
             "mla_tnd_bsnd_metadata.h",
             "mla_tnd_bsnd_metadata.cpp",
             "mla_tnd_bsnd_schedule.h",
+            "mla_used_schedule.h",
             "mla_tnd_schedule.cpp",
         ):
             assert name in dependencies

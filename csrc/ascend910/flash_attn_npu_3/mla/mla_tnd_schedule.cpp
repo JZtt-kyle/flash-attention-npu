@@ -18,9 +18,12 @@
 // num_splits=1 with variable Q lengths. Shared by CPU tests and the v3 AICPU producer.
 // Mixed TND Q/BSND KV additionally preserves physical capacity, noncumulative
 // source KV lengths and 64-bit physical starts, shared with the v4 AICPU producer.
+// Independent used-length CPU entry: allocation spans remain physical; explicit
+// used arrays override source actual lengths without altering those spans.
 
 #include "mla_tnd_schedule.h"
 #include "mla_tnd_bsnd_schedule.h"
+#include "mla_used_schedule.h"
 #include "detail/cann_split_core.h"
 
 #include <algorithm>
@@ -142,6 +145,113 @@ uint64_t AlignTnd(uint64_t value, uint64_t alignment)
     return (value + alignment - 1) / alignment * alignment;
 }
 
+bool ValidUsedCounts(uint64_t batch, const MlaSequenceAllocation& allocation, const MlaLengthArray& prefix,
+                     const MlaLengthArray& used)
+{
+    if ((used.data == nullptr && used.count != 0) || (used.data != nullptr && used.count != batch)) {
+        return false;
+    }
+    return allocation.layout == MlaSequenceLayout::Tnd ? prefix.data != nullptr && prefix.count == batch + 1
+                                                       : prefix.data == nullptr && prefix.count == 0;
+}
+
+MlaScheduleStatus ValidateUsedShape(const MlaUsedShape& shape, const MlaUsedInputs& inputs)
+{
+    const auto bsnd = MlaSequenceLayout::Bsnd, tnd = MlaSequenceLayout::Tnd;
+    if (!((shape.query.layout == bsnd && shape.kv.layout == bsnd) ||
+          (shape.query.layout == tnd && (shape.kv.layout == bsnd || shape.kv.layout == tnd)))) {
+        return MlaScheduleStatus::UnsupportedShape;
+    }
+    for (int64_t size : {shape.batch, shape.queryHeads, shape.query.maxLength, shape.kv.maxLength}) {
+        if (size < 0) {
+            return MlaScheduleStatus::UnsupportedShape;
+        }
+        if (uint64_t(size) > UINT32_MAX) {
+            return MlaScheduleStatus::FieldOverflow;
+        }
+    }
+    if (shape.queryHeads == 0 || shape.kv.maxLength > kMlaMaxKvLength || shape.query.totalTokens < 0 ||
+        shape.kv.totalTokens < 0) {
+        return MlaScheduleStatus::UnsupportedShape;
+    }
+    if (shape.queryHeads > kMlaMaxQueryHeads || shape.query.maxLength > kMlaMaxQueryLength ||
+        uint64_t(shape.query.maxLength) * shape.queryHeads > kMlaMaxDenseRows ||
+        uint64_t(shape.query.totalTokens) > kMlaMaxBatchRows / shape.queryHeads) {
+        return MlaScheduleStatus::FieldOverflow;
+    }
+    for (const auto& allocation : {shape.query, shape.kv}) {
+        if (allocation.layout == tnd) {
+            if (allocation.totalTokens > INT32_MAX) {
+                return MlaScheduleStatus::FieldOverflow;
+            }
+        } else if (uint64_t(allocation.totalTokens) != uint64_t(shape.batch) * allocation.maxLength) {
+            return MlaScheduleStatus::UnsupportedShape;
+        }
+    }
+    return ValidUsedCounts(shape.batch, shape.query, inputs.cuQuery, inputs.usedQuery) &&
+                   ValidUsedCounts(shape.batch, shape.kv, inputs.cuKv, inputs.usedKv)
+               ? MlaScheduleStatus::Success
+               : MlaScheduleStatus::UnsupportedShape;
+}
+
+uint64_t UsedStart(uint64_t batch, const MlaSequenceAllocation& allocation, const MlaLengthArray& prefix)
+{
+    return allocation.layout == MlaSequenceLayout::Tnd ? uint64_t(prefix.data[batch])
+                                                       : batch * uint64_t(allocation.maxLength);
+}
+
+uint32_t UsedCapacity(uint64_t batch, const MlaSequenceAllocation& allocation, const MlaLengthArray& prefix)
+{
+    return allocation.layout == MlaSequenceLayout::Tnd ? uint32_t(prefix.data[batch + 1] - prefix.data[batch])
+                                                       : uint32_t(allocation.maxLength);
+}
+
+bool ValidUsedValues(uint64_t batch, const MlaSequenceAllocation& allocation, const MlaLengthArray& prefix,
+                     const MlaLengthArray& used)
+{
+    const bool tnd = allocation.layout == MlaSequenceLayout::Tnd;
+    if (tnd && (prefix.data[0] != 0 || prefix.data[batch] != allocation.totalTokens)) {
+        return false;
+    }
+    for (uint64_t b = 0; b < batch; ++b) {
+        // Reject negative/decreasing prefixes before subtraction, including INT32_MIN.
+        if (tnd && prefix.data[b + 1] < prefix.data[b]) {
+            return false;
+        }
+        const uint32_t capacity = UsedCapacity(b, allocation, prefix);
+        if (capacity > allocation.maxLength || (used.data && (used.data[b] < 0 || uint32_t(used.data[b]) > capacity))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+MlaScheduleStatus Parse(const MlaUsedShape& shape, const MlaUsedInputs& inputs, MlaUsedLengths& result)
+{
+    const auto status = ValidateUsedShape(shape, inputs);
+    if (status != MlaScheduleStatus::Success) {
+        return status;
+    }
+    if (!ValidUsedValues(shape.batch, shape.query, inputs.cuQuery, inputs.usedQuery) ||
+        !ValidUsedValues(shape.batch, shape.kv, inputs.cuKv, inputs.usedKv)) {
+        return MlaScheduleStatus::UnsupportedShape;
+    }
+    result.sequences.reserve(shape.batch);
+    for (uint64_t b = 0; b < uint64_t(shape.batch); ++b) {
+        const uint32_t qCapacity = UsedCapacity(b, shape.query, inputs.cuQuery);
+        const uint32_t kvCapacity = UsedCapacity(b, shape.kv, inputs.cuKv);
+        const uint32_t q = inputs.usedQuery.data ? uint32_t(inputs.usedQuery.data[b]) : qCapacity;
+        const uint32_t kv = inputs.usedKv.data ? uint32_t(inputs.usedKv.data[b]) : kvCapacity;
+        result.maxQueryCapacity = std::max(result.maxQueryCapacity, qCapacity);
+        result.maxKvCapacity = std::max(result.maxKvCapacity, kvCapacity);
+        result.maxQueryLength = std::max(result.maxQueryLength, q);
+        result.maxKvLength = std::max(result.maxKvLength, kv);
+        result.sequences.push_back({UsedStart(b, shape.query, inputs.cuQuery), UsedStart(b, shape.kv, inputs.cuKv),
+                                    qCapacity, kvCapacity, q, kv});
+    }
+    return MlaScheduleStatus::Success;
+}
+
 bool ValidSplit(const detail::SplitResult& split, const detail::BaseInfo& base, const std::vector<uint32_t>& blocks,
                 uint32_t aicNum)
 {
@@ -220,18 +330,19 @@ void SplitWithoutFlashDecode(const detail::BaseInfo& base, const detail::SplitPa
 }
 
 template <typename Lengths>
-MlaScheduleStatus Calculate(uint32_t batch, uint32_t heads, uint32_t kvCapacity, bool compactKv,
-                            const MlaPlatformInfo& platform, const Lengths& lengths, MlaSchedule& s)
+MlaScheduleStatus Calculate(uint32_t batch, uint32_t heads, uint32_t queryCapacity, uint32_t kvCapacity,
+                            bool compactQuery, bool compactKv, const MlaPlatformInfo& platform, const Lengths& lengths,
+                            MlaSchedule& s)
 {
     // Reuse existing platform/local-memory validation and static geometry.
     // B=0 deliberately avoids the rectangular B*maxQ address/tile bound: TND
     // has only totalQuery rows. Parse already checked its true address bound.
-    auto status = BuildDenseSchedule({0, lengths.maxQueryLength, heads, kvCapacity}, platform, s);
+    auto status = BuildDenseSchedule({0, queryCapacity, heads, kvCapacity}, platform, s);
     if (status != MlaScheduleStatus::Success) {
         return status;
     }
     s.bSize = batch;
-    if (batch == 0 || lengths.maxQueryLength == 0 || kvCapacity == 0) {
+    if (batch == 0 || queryCapacity == 0 || kvCapacity == 0) {
         return MlaScheduleStatus::Success;
     }
     // Preserve ProcessKVActualSeqLoop: equality compares the source array's
@@ -284,13 +395,13 @@ MlaScheduleStatus Calculate(uint32_t batch, uint32_t heads, uint32_t kvCapacity,
     base.gSize = s.gSize;
     base.s1Size = s.s1Size;
     base.s2Size = s.s2Size;
-    base.isAccumSeqS1 = true;
+    base.isAccumSeqS1 = compactQuery;
     base.isAccumSeqS2 = compactKv;
     base.actualLenQDims = base.actualLenKvDims = s.bSize;
     base.actualSeqS1Size.reserve(s.bSize);
     base.actualSeqS2Size.reserve(s.bSize);
     for (const auto& seq : lengths.sequences) {
-        base.actualSeqS1Size.push_back(int64_t(seq.queryStart) + seq.queryLength);
+        base.actualSeqS1Size.push_back(compactQuery ? int64_t(seq.queryStart) + seq.queryLength : seq.queryLength);
         base.actualSeqS2Size.push_back(compactKv ? int64_t(seq.kvStart) + seq.kvLength : seq.kvLength);
     }
     detail::SplitParam param{};
@@ -346,8 +457,8 @@ MlaScheduleStatus BuildTndSchedule(const MlaTndShape& shape, const MlaPlatformIn
         MlaTndSchedule result;
         auto status = Parse(shape, cuQuery, queryCount, cuKv, kvCount, result.lengths);
         if (status == MlaScheduleStatus::Success) {
-            status = Calculate(shape.batch, shape.queryHeads, result.lengths.maxKvLength, true, platform,
-                               result.lengths, result.schedule);
+            status = Calculate(shape.batch, shape.queryHeads, result.lengths.maxQueryLength, result.lengths.maxKvLength,
+                               true, true, platform, result.lengths, result.schedule);
         }
         if (status == MlaScheduleStatus::Success) {
             output = std::move(result);
@@ -381,8 +492,45 @@ MlaScheduleStatus BuildTndBsndSchedule(const MlaTndBsndShape& shape, const MlaPl
         MlaTndBsndSchedule result;
         auto status = Parse(shape, cuQuery, queryCount, kvLengths, kvCount, result.lengths);
         if (status == MlaScheduleStatus::Success) {
-            status = Calculate(shape.batch, shape.queryHeads, shape.kvCapacity, false, platform, result.lengths,
-                               result.schedule);
+            status = Calculate(shape.batch, shape.queryHeads, result.lengths.maxQueryLength, shape.kvCapacity, true,
+                               false, platform, result.lengths, result.schedule);
+        }
+        if (status == MlaScheduleStatus::Success) {
+            output = std::move(result);
+        }
+        return status;
+    } catch (const std::bad_alloc&) {
+        return MlaScheduleStatus::AllocationFailure;
+    }
+}
+
+MlaScheduleStatus ParseUsedLengths(const MlaUsedShape& shape, const MlaUsedInputs& inputs, MlaUsedLengths& output)
+{
+    try {
+        MlaUsedLengths result;
+        const auto status = Parse(shape, inputs, result);
+        if (status == MlaScheduleStatus::Success) {
+            output = std::move(result);
+        }
+        return status;
+    } catch (const std::bad_alloc&) {
+        return MlaScheduleStatus::AllocationFailure;
+    }
+}
+
+MlaScheduleStatus BuildUsedSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
+                                    const MlaUsedInputs& inputs, MlaUsedSchedule& output)
+{
+    try {
+        MlaUsedSchedule result;
+        auto status = Parse(shape, inputs, result.lengths);
+        if (status == MlaScheduleStatus::Success) {
+            const bool tndQuery = shape.query.layout == MlaSequenceLayout::Tnd;
+            const bool tndKv = shape.kv.layout == MlaSequenceLayout::Tnd;
+            status = Calculate(
+                shape.batch, shape.queryHeads, tndQuery ? result.lengths.maxQueryCapacity : shape.query.maxLength,
+                tndKv ? result.lengths.maxKvCapacity : shape.kv.maxLength, tndQuery && inputs.usedQuery.data == nullptr,
+                tndKv && inputs.usedKv.data == nullptr, platform, result.lengths, result.schedule);
         }
         if (status == MlaScheduleStatus::Success) {
             output = std::move(result);

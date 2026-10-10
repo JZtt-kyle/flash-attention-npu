@@ -24,6 +24,12 @@ struct Input {
     uint64_t queryCount = 0;
     std::vector<int32_t> cuQuery;
 #endif
+#ifdef USED_LENGTHS
+    int layout = 0; // 0: BSND/BSND; 1: TND/TND; 2: TND/BSND.
+    bool hasUsedQ = false, hasUsedKv = false;
+    uint64_t usedQCount = 0, usedKvCount = 0;
+    std::vector<int32_t> usedQ, usedKv;
+#endif
 };
 
 template <class T>
@@ -203,6 +209,22 @@ void Run(const Input& in)
     LengthTensor tensor{};
 #ifdef TND_LENGTHS
     LengthTensor query{};
+#ifdef USED_LENGTHS
+    // Independent FA3-to-source adapter. Allocation tails determine geometry
+    // and addresses; used arrays independently select noncumulative source
+    // actual lengths. Never include or invoke the migrated parser here.
+    std::vector<uint32_t> qCapacity, kCapacity;
+    for (uint32_t b = 0; b < in.batch; ++b) {
+        qCapacity.push_back(in.layout == 0 ? in.sq : in.cuQuery.at(b + 1) - in.cuQuery.at(b));
+        kCapacity.push_back(in.layout == 1 ? in.kvLengths.at(b + 1) - in.kvLengths.at(b) : in.sk);
+        query.values.push_back(in.hasUsedQ ? in.usedQ.at(b) : (in.layout == 0 ? in.sq : in.cuQuery.at(b + 1)));
+        tensor.values.push_back(in.hasUsedKv ? in.usedKv.at(b) : (in.layout == 1 ? in.kvLengths.at(b + 1) : in.sk));
+    }
+    info.isAccumQSeq = in.layout != 0 && !in.hasUsedQ;
+    info.isAccumKVSeq = in.layout == 1 && !in.hasUsedKv;
+    info.s1Size = in.layout == 0 ? in.sq : *std::max_element(qCapacity.begin(), qCapacity.end());
+    info.s2Size = in.layout == 1 ? *std::max_element(kCapacity.begin(), kCapacity.end()) : in.sk;
+#else
     // The oracle owns int64 *tails*, independently of ParseTndLengths.
     // GetS1/GetS2SeqSize below are the original cumulative-length functions.
     query.values.assign(in.cuQuery.begin() + 1, in.cuQuery.end());
@@ -212,12 +234,15 @@ void Run(const Input& in)
 #else
     tensor.values.assign(in.kvLengths.begin() + 1, in.kvLengths.end());
 #endif
+#endif
     FiaInfoParser parser;
     parser.ProcessKVActualSeqLoop(tensor.values.data(), in.batch);
     info.inputLayout = TilingKeyLayout::TND;
+#ifndef USED_LENGTHS
     info.isAccumQSeq = info.isAccumKVSeq = true;
 #ifdef TND_BSND_KV
     info.isAccumKVSeq = false;
+#endif
 #endif
     info.actualSeqLenFlag = true;
     info.actualLenQDims = info.actualLenKvDims = in.batch;
@@ -241,7 +266,7 @@ void Run(const Input& in)
     host.cvRatio_ = in.aiv / in.aic;
     host.libapiSize_ = in.libapi;
     BaseInfo base{};
-#ifdef TND_LENGTHS
+#if defined(TND_LENGTHS) && !defined(USED_LENGTHS)
     SplitParam initial{};
     host.CreateSplitInput(base, initial);
     info.s1Size = 0;
@@ -393,6 +418,25 @@ void Run(const Input& in)
     EmitArray(split.fdRes.gS1IdxEndOfFdHead, 52);
     EmitArray(split.fdRes.gS1IdxEndOfFdHeadSplit, 52);
 #ifdef TND_LENGTHS
+#ifdef USED_LENGTHS
+    uint32_t maxQ = 0, maxKv = 0;
+    for (uint32_t b = 0; b < info.bSize; ++b) {
+        maxQ = std::max(maxQ, GetS1SeqSize(b, base));
+        maxKv = std::max(maxKv, GetS2SeqSize(b, base));
+    }
+    Emit(maxQ);
+    Emit(maxKv);
+    Emit(*std::max_element(qCapacity.begin(), qCapacity.end()));
+    Emit(*std::max_element(kCapacity.begin(), kCapacity.end()));
+    for (uint32_t b = 0; b < info.bSize; ++b) {
+        Emit(in.layout == 0 ? uint64_t(b) * in.sq : uint64_t(in.cuQuery.at(b)));
+        Emit(in.layout == 1 ? uint64_t(in.kvLengths.at(b)) : uint64_t(b) * in.sk);
+        Emit(qCapacity[b]);
+        Emit(kCapacity[b]);
+        Emit(GetS1SeqSize(b, base));
+        Emit(GetS2SeqSize(b, base));
+    }
+#else
     Emit(info.s1Size);
 #ifdef TND_BSND_KV
     Emit(*std::max_element(tensor.values.begin(), tensor.values.end()));
@@ -410,6 +454,7 @@ void Run(const Input& in)
         Emit(GetS2SeqSize(b, base));
     }
 #endif
+#endif
     std::cout << "]\n";
 }
 
@@ -420,6 +465,9 @@ void Run(const Input& in)
 #endif
 #ifdef TND_LENGTHS
 #include "mla_tnd_schedule.h"
+#ifdef USED_LENGTHS
+#include "mla_used_schedule.h"
+#endif
 #ifdef TND_BSND_KV
 #include "mla_tnd_bsnd_schedule.h"
 #endif
@@ -445,14 +493,22 @@ void Run(const Input& in)
         platform.blockDims[i] = in.blockDimOverride ? in.blockDimOverride : i + 1;
     }
 #ifdef TND_LENGTHS
-#ifdef TND_BSND_KV
+#ifdef USED_LENGTHS
+    MlaUsedSchedule tnd;
+#elif defined(TND_BSND_KV)
     MlaTndBsndSchedule tnd;
 #else
     MlaTndSchedule tnd;
 #endif
     tnd.lengths.maxQueryLength = 99;
     tnd.lengths.maxKvLength = 77;
+#ifdef USED_LENGTHS
+    tnd.lengths.maxQueryCapacity = 101;
+    tnd.lengths.maxKvCapacity = 102;
+    tnd.lengths.sequences.push_back({11, 22, 33, 44, 55, 66});
+#else
     tnd.lengths.sequences.push_back({11, 22, 33, 44});
+#endif
     const auto beforeLengths = tnd.lengths;
     auto& schedule = tnd.schedule;
 #else
@@ -466,7 +522,26 @@ void Run(const Input& in)
     const int32_t* cq = in.hasQuery ? (in.cuQuery.empty() ? &sentinel : in.cuQuery.data()) : nullptr;
     const int32_t* ck = in.hasLengths ? (in.kvLengths.empty() ? &sentinel : in.kvLengths.data()) : nullptr;
     const bool parseOnly = std::getenv("MLA_TND_PARSE_ONLY") != nullptr;
-#ifdef TND_BSND_KV
+#ifdef USED_LENGTHS
+    const auto bsnd = MlaSequenceLayout::Bsnd, tndLayout = MlaSequenceLayout::Tnd;
+    const auto qLayout = in.layout == 0 ? bsnd : (in.layout == 1 || in.layout == 2 ? tndLayout : MlaSequenceLayout(99));
+    MlaUsedShape shape{
+        in.batch, in.heads, {qLayout, in.totalQuery, in.sq}, {in.layout == 1 ? tndLayout : bsnd, in.totalKv, in.sk}};
+    const auto array = [&](bool present, uint64_t count, const std::vector<int32_t>& values) {
+        return MlaLengthArray{present ? (values.empty() ? &sentinel : values.data()) : nullptr, count};
+    };
+    MlaUsedInputs inputs{{cq, in.queryCount},
+                         {ck, in.lengthCount},
+                         array(in.hasUsedQ, in.usedQCount, in.usedQ),
+                         array(in.hasUsedKv, in.usedKvCount, in.usedKv)};
+    auto status =
+        parseOnly ? ParseUsedLengths(shape, inputs, tnd.lengths) : BuildUsedSchedule(shape, platform, inputs, tnd);
+    if (status != MlaScheduleStatus::Success &&
+        (tnd.lengths.maxQueryCapacity != 101 || tnd.lengths.maxKvCapacity != 102 ||
+         tnd.lengths.sequences.at(0).queryCapacity != 33 || tnd.lengths.sequences.at(0).kvCapacity != 44)) {
+        std::abort();
+    }
+#elif defined(TND_BSND_KV)
     MlaTndBsndShape shape{in.batch, in.totalQuery, in.heads, in.sq, in.sk};
     auto status = parseOnly ? ParseTndBsndLengths(shape, cq, in.queryCount, ck, in.lengthCount, tnd.lengths)
                             : BuildTndBsndSchedule(shape, platform, cq, in.queryCount, ck, in.lengthCount, tnd);
@@ -479,8 +554,12 @@ void Run(const Input& in)
         (tnd.lengths.maxQueryLength != beforeLengths.maxQueryLength ||
          tnd.lengths.maxKvLength != beforeLengths.maxKvLength ||
          tnd.lengths.sequences.size() != beforeLengths.sequences.size() || tnd.lengths.sequences[0].queryStart != 11 ||
-         tnd.lengths.sequences[0].kvStart != 22 || tnd.lengths.sequences[0].queryLength != 33 ||
-         tnd.lengths.sequences[0].kvLength != 44)) {
+         tnd.lengths.sequences[0].kvStart != 22 ||
+#ifdef USED_LENGTHS
+         tnd.lengths.sequences[0].queryLength != 55 || tnd.lengths.sequences[0].kvLength != 66)) {
+#else
+         tnd.lengths.sequences[0].queryLength != 33 || tnd.lengths.sequences[0].kvLength != 44)) {
+#endif
         std::abort();
     }
 #elif defined(BSND_KV_LENGTHS)
@@ -507,9 +586,17 @@ void Run(const Input& in)
     const auto emitLengths = [&]() {
         Emit(tnd.lengths.maxQueryLength);
         Emit(tnd.lengths.maxKvLength);
+#ifdef USED_LENGTHS
+        Emit(tnd.lengths.maxQueryCapacity);
+        Emit(tnd.lengths.maxKvCapacity);
+#endif
         for (const auto& seq : tnd.lengths.sequences) {
             Emit(seq.queryStart);
             Emit(seq.kvStart);
+#ifdef USED_LENGTHS
+            Emit(seq.queryCapacity);
+            Emit(seq.kvCapacity);
+#endif
             Emit(seq.queryLength);
             Emit(seq.kvLength);
         }
@@ -522,11 +609,16 @@ void Run(const Input& in)
         std::cout << "]\n";
         return;
     }
+#ifdef USED_LENGTHS
+    const uint32_t sq = in.layout == 0 ? in.sq : tnd.lengths.maxQueryCapacity;
+    const uint32_t sk = in.layout == 1 ? tnd.lengths.maxKvCapacity : in.sk;
+#else
     const uint32_t sq = tnd.lengths.maxQueryLength;
 #ifdef TND_BSND_KV
     const uint32_t sk = in.sk;
 #else
     const uint32_t sk = tnd.lengths.maxKvLength;
+#endif
 #endif
 #else
     const int64_t sq = in.sq, sk = in.sk;
@@ -601,6 +693,27 @@ int main()
             if (!(std::cin >> value)) {
                 return 1;
             }
+        }
+#endif
+#ifdef USED_LENGTHS
+        if (!(std::cin >> in.layout)) {
+            return 1;
+        }
+        const auto readUsed = [](bool& present, uint64_t& count, std::vector<int32_t>& values) {
+            size_t supplied;
+            if (!(std::cin >> present >> count >> supplied)) {
+                return false;
+            }
+            values.resize(supplied);
+            for (auto& value : values) {
+                if (!(std::cin >> value)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        if (!readUsed(in.hasUsedQ, in.usedQCount, in.usedQ) || !readUsed(in.hasUsedKv, in.usedKvCount, in.usedKv)) {
+            return 1;
         }
 #endif
         Run(in);
