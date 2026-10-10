@@ -7,14 +7,14 @@
 #include "../mla_tnd_metadata_consumer.h"
 
 namespace flash_attn::mla::Kernel {
-template <typename InputT>
-class MlaTnd : private MlaNonPaged<InputT, true, true> {
+template <typename InputT, bool HasStrides = false>
+class MlaTnd : private MlaNonPaged<InputT, true, true, false, false, HasStrides> {
   public:
     // Caller must validate v3 and current prefixes on every core before TPipe,
     // synchronization or writes. Empty capacity still passes that validation.
     __aicore__ inline void operator()(const MlaTndKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
                                       GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
-                                      TPipe* pipe, GM_ADDR spans)
+                                      TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts* layouts = nullptr)
     {
         if (schedule.totalQuery == 0) {
             return;
@@ -42,7 +42,8 @@ class MlaTnd : private MlaNonPaged<InputT, true, true> {
             }
             return;
         }
-        this->Run(schedule.tiling, scale, qc, qr, kv, kr, output, lse, workspace, pipe, spans, schedule.totalQuery);
+        this->Run(schedule.tiling, scale, qc, qr, kv, kr, output, lse, workspace, pipe, spans, schedule.totalQuery,
+                  layouts);
     }
 };
 } // namespace flash_attn::mla::Kernel

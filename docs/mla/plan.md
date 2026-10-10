@@ -2,7 +2,7 @@
 
 本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#m06-剩余步骤) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
 
-唯一下一步为 **[M06e2b：TND 与混合布局独立 stride attention](#下一步m06e2b)**。其后依次为 M06e2c → M07..M17；本轮文档核验不推进功能步骤。
+唯一下一步为 **[M06e2c：TND stride 生产接入](#下一步m06e2c)**。M06e2b 独立 attention 已完成，其后依次为 M07..M17。
 
 ## M06：非分页长度、TND 与 stride
 
@@ -10,16 +10,15 @@
 
 每行单独验收、提交。长度和布局按“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 入口接入”推进；stride 在已有协议上按“CPU 地址校验 → 独立 attention → 入口接入”推进。独立组件完成不代表公开入口开放。
 
-### 下一步：M06e2b
+### 下一步：M06e2c
 
-前置 M06e1a/b/c 和 M06e2a 已完成。复用 [TND CPU 地址组件](design.md#642-tnd-输入-stride-与地址组合) 与现有 64 位寻址、Kernel / Block / Tile，只接通独立 attention 的 v3/v4/v5 原视图读取。覆盖 ST01 token/head stride、NTD、四路独立 offset，以及 T01/used/BSND cache 组合；末维保持连续。生产开放留在 M06e2c，完成条件分别见下表。
+前置 M06e1a/b/c 和 M06e2a/b 已完成。将已验收的 TND 地址组件和 v3/v4/v5 stride 实例接入生产：公开 varlen、混合只读 kvcache 和内部 used。接入真实/fake/C++/compile 的完整 storage 校验，保持分配前缀、used、metadata 更新及流生命周期语义。按下表完成生产 Kernel、适用公开 E2E 和普通 FA3 回归；独立组件的源物化对照不能替代公开同物理视图 E2E。
 
 ### M06 剩余步骤
 
 | 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
 | --- | --- | --- | --- |
-| M06e2b | 唯一下一步 | TND 与混合布局独立 stride attention；v3/v4/v5 消费原视图 | 双 dtype 910B 源/数学精度，含 used poison、真实大地址和 65536 边界；固定源组件性能、连续及普通 FA3 回归；生产仍拒绝未接通组合 |
-| M06e2c | 待开始 | TND stride 生产接入，完成 M06；公开 varlen、混合只读 kvcache、内部 used | 真实/fake/C++/compile、完整 storage 拒绝、长度/metadata 更新和生命周期；双 dtype 精度、生产 Kernel 对照、适用公开 E2E 及普通 FA3 回归通过 |
+| M06e2c | 唯一下一步 | TND stride 生产接入，完成 M06；公开 varlen、混合只读 kvcache、内部 used | 真实/fake/C++/compile、完整 storage 拒绝、长度/metadata 更新和生命周期；双 dtype 精度、生产 Kernel 对照、适用公开 E2E 及普通 FA3 回归通过 |
 
 M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定性能矩阵与阶段边界)。生成记录、校验记录和执行 attention 分别验收；全部样本实际长度为零也不等于全局空容量。
 
@@ -116,3 +115,4 @@ M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[�
 | M06e1b | BSND 独立 v1/v2/v5 stride attention；64 位寻址与 65536 多矩阵回退修正 |
 | M06e1c | BSND stride 生产接入 v1/v2/v5，完成 M06e1；适用公开 metadata E2E 达标 |
 | M06e2a | TND 独立 CPU 地址组件，复用 BSND 校验；四路视图与分配/used/BSND cache 地址组合 |
+| M06e2b | TND/混合独立 v3/v4/v5 stride attention；原分配视图读取、NTD/独立 offset、used poison、65536 与真实大地址边界；固定源组件性能及连续/普通 FA3 回归，生产仍拒绝非连续输入 |

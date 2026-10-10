@@ -13,7 +13,7 @@
 // attention/common/op_kernel/memcopy/attn_copy_gm_to_l1.h:
 // CopySingle/MultiMatrixNDToNZ, CopyQueryGmToL1::ProcessS1G,
 // CopyKvGmToL1::ProcessContinuousOrTensorlist, specialized to FP16/BF16.
-// FA3 BSND adaptation: independent 64-bit batch/row/head strides, including
+// FA3 BSND/TND adaptation: independent 64-bit batch/row/head strides, including
 // read-only overlap. Keep the source S1G row order and ND-to-NZ fallbacks.
 #pragma once
 #include "catlass/gemm/tile/atlasa2/copy_l0c_to_gm.hpp"
@@ -45,8 +45,9 @@ struct DenseTensor {
     GlobalTensor<InputT> gmTensor;
     uint32_t sequence, heads, dim;
     MlaBsndTensorLayout layout;
+    bool tokenAddressing;
     __aicore__ inline void Init(GM_ADDR ptr, uint32_t s, uint32_t h, uint32_t d,
-                                const MlaBsndTensorLayout* strides = nullptr)
+                                const MlaBsndTensorLayout* strides = nullptr, bool isTnd = false)
     {
         gmTensor.SetGlobalBuffer((__gm__ InputT*)ptr);
         sequence = s;
@@ -54,6 +55,7 @@ struct DenseTensor {
         dim = d;
         if constexpr (HasStrides) {
             layout = *strides;
+            tokenAddressing = isTnd;
         }
     }
     __aicore__ inline uint64_t RowStride() const
@@ -73,7 +75,10 @@ struct DenseTensor {
     __aicore__ inline uint64_t RowOffset(uint64_t tokenStart, uint32_t batch, uint32_t row) const
     {
         if constexpr (HasStrides) {
-            return uint64_t(batch) * layout.batchStride + uint64_t(row) * layout.rowStride;
+            // TND starts are allocation prefixes, including unused slots.
+            // Mixed cache uses its own BSND batch/row strides instead.
+            return tokenAddressing ? (tokenStart + row) * layout.rowStride
+                                   : uint64_t(batch) * layout.batchStride + uint64_t(row) * layout.rowStride;
         }
         return (tokenStart + row) * heads * dim;
     }

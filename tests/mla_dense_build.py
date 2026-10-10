@@ -29,9 +29,10 @@ def build_probes(
     mixed=False,
     used=False,
     stride=False,
+    tnd_stride=False,
 ):
     assert dtype in ("fp16", "bf16")
-    assert sum((metadata, bsnd, tnd, mixed, used, stride)) <= 1
+    assert sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride)) <= 1
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
@@ -113,30 +114,36 @@ def build_probes(
         common.append("-DMLA_DENSE_BF16")
     if bsnd:
         common += ["-DMLA_BSND_ATTENTION", "-DNDEBUG"]
-    if tnd or mixed or used or stride:
+    if tnd or mixed or used or stride or tnd_stride:
         common += ["-DNDEBUG"]
-    layout_object = artifacts / "layout.o"
-    if stride:
+    layout_objects = []
+    for layout in ["bsnd", "tnd"] if tnd_stride else ["bsnd"] if stride else []:
+        layout_object = artifacts / f"{layout}_layout.o"
         layout_command = [
             "g++",
             "-std=c++17",
             "-O2",
             "-fPIC",
             "-c",
-            str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_layout.cpp"),
+            str(ROOT / f"csrc/ascend910/flash_attn_npu_3/mla/mla_{layout}_layout.cpp"),
             "-o",
             str(layout_object),
         ]
-        (artifacts / "layout-command.json").write_text(json.dumps(layout_command, indent=2) + "\n")
-        with (artifacts / "layout-compile.log").open("w") as log:
+        (artifacts / f"{layout}-layout-command.json").write_text(
+            json.dumps(layout_command, indent=2) + "\n"
+        )
+        with (artifacts / f"{layout}-layout-compile.log").open("w") as log:
             subprocess.run(
                 layout_command, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=60
             )
+        layout_objects.append(str(layout_object))
     probe_source = (
         ROOT
         / "tests"
         / (
-            "mla_bsnd_stride_probe.cpp"
+            "mla_tnd_stride_probe.cpp"
+            if tnd_stride
+            else "mla_bsnd_stride_probe.cpp"
             if stride
             else "mla_used_attention_probe.cpp"
             if used
@@ -167,8 +174,8 @@ def build_probes(
             if name == "metadata_checked":
                 cmd += ["-DMLA_DENSE_METADATA_CHECKED", "-DNDEBUG"]
         cmd += ["-MMD", "-MF", str(artifacts / f"{name}.d"), "-o", str(output)]
-        if stride:
-            cmd += ["-x", "none", str(layout_object)]
+        if layout_objects:
+            cmd += ["-x", "none", *layout_objects]
         (artifacts / f"{name}-command.json").write_text(json.dumps(cmd, indent=2) + "\n")
         with (artifacts / f"{name}-compile.log").open("w") as log:
             result = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, timeout=300)
@@ -228,6 +235,19 @@ def build_probes(
             )
         if bsnd and name == "migrated":
             assert "mla_bsnd_metadata.hpp" in dependencies
+        if tnd_stride and name == "migrated":
+            assert all(
+                header in dependencies
+                for header in (
+                    "mla_tnd_layout.h",
+                    "mla_tnd.hpp",
+                    "mla_tnd_bsnd.hpp",
+                    "mla_used.hpp",
+                    "mla_tnd_metadata.hpp",
+                    "mla_tnd_bsnd_metadata.hpp",
+                    "mla_used_metadata.hpp",
+                )
+            )
         assert ("oracle-source" in dependencies) == (name == "oracle")
         return str(output)
 
@@ -272,6 +292,7 @@ def build_probes(
         ROOT / "tests/mla_probe_batch_launch.h",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_layout.h",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_layout.cpp",
+        *([ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_layout.cpp"] if tnd_stride else []),
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("mla_tnd*.h")),
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("mla_used*.h")),
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h",
@@ -287,7 +308,8 @@ def build_probes(
         "mixed": mixed,
         "used": used,
         "stride": stride,
-        "ndebug": bsnd or tnd or mixed or used or stride,
+        "tnd_stride": tnd_stride,
+        "ndebug": bsnd or tnd or mixed or used or stride or tnd_stride,
         "oracle_tiling_sha256": sha256(artifacts / "oracle_tiling.h"),
         "libraries": {
             name: {"path": path, "sha256": sha256(Path(path))} for name, path in libraries.items()

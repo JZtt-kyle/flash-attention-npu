@@ -12,7 +12,7 @@
 // Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0.
 // attention/fused_infer_attention_score/op_kernel/arch22/
 // fia_block_cube_nonquant_mla.h::ComputeMm1/2, ProcessMm1/2.
-// BSND (optional independent strides) or compact TND, Hkv=1, split-RoPE FP16/BF16.
+// BSND/TND (optional independent strides), Hkv=1, split-RoPE FP16/BF16.
 // QK/PV retain the source loops, seven L1 slots and synchronization protocol.
 // This is a component, not a forward entry point; its caller validates bounds.
 #pragma once
@@ -51,22 +51,20 @@ struct MSplitInfo {
 
 template <typename InputT, bool IsTnd = false, bool HasStrides = false>
 class MlaCube {
-    static_assert(!HasStrides || !IsTnd, "Only BSND strides are supported");
-
   public:
     using Q_T = InputT;
     using KV_T = InputT;
     using MM_OUT_T = float;
     __aicore__ inline void Init(TPipe* pipe_, CubeParams params, GM_ADDR query, GM_ADDR queryRope, GM_ADDR sharedKv,
-                                GM_ADDR keyRope, const MlaBsndInputLayouts* layouts = nullptr)
+                                GM_ADDR keyRope, const MlaBsndInputLayouts* layouts = nullptr, bool kvIsTnd = IsTnd)
     {
         pipe = pipe_;
         constInfo = params;
-        queryGmTensor.Init(query, params.qSeqSize, params.gSize, 512, HasStrides ? &layouts->qv : nullptr);
-        queryRopeGmTensor.Init(queryRope, params.qSeqSize, params.gSize, 64, HasStrides ? &layouts->q : nullptr);
-        keyGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr);
-        keyRopeGmTensor.Init(keyRope, params.kvSeqSize, 1, 64, HasStrides ? &layouts->k : nullptr);
-        valueGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr);
+        queryGmTensor.Init(query, params.qSeqSize, params.gSize, 512, HasStrides ? &layouts->qv : nullptr, IsTnd);
+        queryRopeGmTensor.Init(queryRope, params.qSeqSize, params.gSize, 64, HasStrides ? &layouts->q : nullptr, IsTnd);
+        keyGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr, kvIsTnd);
+        keyRopeGmTensor.Init(keyRope, params.kvSeqSize, 1, 64, HasStrides ? &layouts->k : nullptr, kvIsTnd);
+        valueGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr, kvIsTnd);
         pipe->InitBuffer(bufQPL1, L1_BLOCK_SIZE * 4);
         l1QPTensor = bufQPL1.Get<Q_T>();
         pipe->InitBuffer(bufKVL1, L1_BLOCK_SIZE * 3);

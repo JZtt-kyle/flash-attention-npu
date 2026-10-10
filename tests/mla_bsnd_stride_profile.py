@@ -18,19 +18,12 @@ import torch
 import torch_npu
 
 from tests.mla_dense_build import ROOT, sha256
-from tests.test_flash_attn_npu_v3_mla_bsnd_stride import (
-    PERFORMANCE_CASES,
-    check_case,
-    configure_producer,
-    launch,
-    load_attention,
-    make_case,
-)
+from tests import test_flash_attn_npu_v3_mla_bsnd_stride as bsnd_stride
 from tests.test_flash_attn_npu_v3_mla_metadata import load_probe
 
 
-def profile(probe_dir, producer_manifest, output):
-    probes = load_attention(probe_dir)
+def profile(probe_dir, producer_manifest, output, *, suite=bsnd_stride, kernel_prefix="bsnd"):
+    probes = suite.load_attention(probe_dir)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     manifest = json.loads(Path(producer_manifest).read_text())
@@ -38,13 +31,13 @@ def profile(probe_dir, producer_manifest, output):
         assert sha256(ROOT / name) == digest, name
     assert sha256(Path(manifest["library"])) == manifest["library_sha256"]
     with load_probe(manifest["library"], output / "producer") as producer:
-        configure_producer(producer)
-        cases = [make_case(probes, producer, spec) for spec in PERFORMANCE_CASES]
-        accuracy = [check_case(probes, case) for case in cases]
+        suite.configure_producer(producer)
+        cases = [suite.make_case(probes, producer, spec) for spec in suite.PERFORMANCE_CASES]
+        accuracy = [suite.check_case(probes, case) for case in cases]
         names = ("oracle", "migrated")
 
         def call(index, name):
-            assert launch(probes, cases[index], name) == 0
+            assert suite.launch(probes, cases[index], name) == 0
             torch.npu.synchronize()
 
         (output / "npu-before.log").write_text(
@@ -113,9 +106,11 @@ def profile(probe_dir, producer_manifest, output):
                 source["Task Start Time(us)"].strip()
             )
             assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
-            assert ("cann_bsnd_stride" if label["name"] == "oracle" else "mla_bsnd_stride") in row[
-                "Name"
-            ]
+            assert (
+                f"cann_{kernel_prefix}_stride"
+                if label["name"] == "oracle"
+                else f"mla_{kernel_prefix}_stride"
+            ) in row["Name"]
             label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
         (output / "kernel-samples.json").write_text(json.dumps(labels, indent=2) + "\n")
         results = []
@@ -136,7 +131,7 @@ def profile(probe_dir, producer_manifest, output):
             subprocess.check_output(["npu-smi", "info"], text=True)
         )
         report = dict(
-            scope="Standalone BSND v1/v2/v5 strided attention versus pinned CANN non-FD Kernel with identical schedules and logical inputs. Source receives contiguous materializations prepared before timing because arbitrary FA3 strides have no source ABI. No cache copy in migrated launch; preallocated buffers; not public metadata E2E or a same-physical-layout comparison.",
+            scope=f"Standalone {kernel_prefix.upper()} strided attention versus pinned CANN non-FD Kernel with identical schedules and logical inputs. Source receives contiguous materializations prepared before timing because arbitrary FA3 strides have no source ABI. No cache copy in migrated launch; preallocated buffers; not public metadata E2E or a same-physical-layout comparison.",
             empty_lse="FA3 -inf versus source +inf checked separately",
             manifest=str(Path(probe_dir) / "build-manifest.json"),
             cpu_affinity=sorted(os.sched_getaffinity(0)),

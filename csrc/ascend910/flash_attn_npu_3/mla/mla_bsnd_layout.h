@@ -26,6 +26,9 @@ struct MlaBsndTensorLayout {
 };
 
 struct MlaBsndInputLayouts {
+    // TND reuses the row/head representation with batchStride=0 and
+    // rowStride=tokenStride after BuildTndTensorLayout validation. The Kernel
+    // separately selects prefix addressing from its validated sequence layout.
     MlaBsndTensorLayout q, qv, k, v;
 };
 

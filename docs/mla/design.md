@@ -445,6 +445,10 @@ Copy Tile 沿用固定 CANN 源 `attention/common/op_kernel/memcopy/attn_copy_gm
 
 该组件只校验单 tensor 地址；dtype/device、四路形状、分配前缀、used 和调度资源仍由各自边界检查。[CPU 验收](../../tests/test_flash_attn_npu_v3_mla_tnd_layout.py) 以独立大整数 oracle 和真实 PyTorch 标量地址验证四路视图、T01/used/BSND cache 组合。组件是否已链接生产、是否有设备 stride 验收，以 status 为准；CPU 地址成立不代表 launcher 已消费该描述。
 
+独立设备链路将已校验的 TND 描述表示为 `batchStride=0、rowStride=tokenStride`，复用 `MlaBsndInputLayouts` 的四路 row/head 描述。`MlaTnd`、`MlaTndBsnd` 与 `MlaUsed` 的 `HasStrides` 实例在完成 v3/v4/v5 校验后传给 Cube / Copy Tile；Q 按 TND 分配前缀寻址，KV 的寻址模式由布局及 v5 已校验的 KV layout 决定。连续实例保留原地址路径，输出布局、metadata 字节协议、任务环、数值与同步顺序不变。生产前向仍须在独立接入步骤中开放输入边界。
+
+独立 [TND stride attention 验收](../../tests/test_flash_attn_npu_v3_mla_tnd_stride.py) 覆盖 ST01/NTD、四路 offset、T01 与 used poison、混合 cache、空/广播/重叠、65535/65536/65537 和实际读取的 >uint32 stride。固定源接收从原始测试输入独立物化的连续视图；TND 的有效段按 used 压紧，混合 cache 保留分配槽位。物化与压紧在计时前完成，组件结果不能解释为相同物理布局或公开 E2E。
+
 ### 6.5 数值路径与资源布局
 
 QK 的 L1 循环顺序为 N→K→M，M/N 子块均为 128。576 维并非先算完整内容再算完整 RoPE：两组 288 依次为 `[content 0:256, rope 0:32]`、`[rope 32:64, content 256:512]`，每组按 K=96 的 L0 片累加到 FP32 L0C。Q 的 64 维 RoPE 一次复制跨越相邻 Q/P 槽，尾 M 用 padding 偏移保持相邻关系；复制前必须同时取得两个槽的释放事件。最终 QK 以 FP32 ND 写入 GM，再乘 scale。
@@ -551,6 +555,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 内部混合 Q-used `PERFORMANCE_CASES` | 9 | [`mla_bsnd_used_profile.py --layout mixed`](../../tests/mla_bsnd_used_profile.py)：混合 T01、分配间隙、非均匀/零长度、M/S2 尾块、16384 KV、KV-used 缺省与显式整段 used；生产 Kernel 对同调度固定源，单列逐次 v5 生成与内部 wall，无公开 E2E 等价入口 |
 | 公开 varlen used `PERFORMANCE_CASES` | 10 | [`mla_varlen_used_profile.py`](../../tests/mla_varlen_used_profile.py)：T01/分配间隙、非均匀/零长度、M/S2 尾块、16384 KV、单轴 used 与显式整段 used；每次内部 v5 生成计入 R=1/4 E2E，原生转换与 FD 分派单列 |
 | BSND stride `PERFORMANCE_CASES` | 9 | [`mla_bsnd_stride_profile.py`](../../tests/mla_bsnd_stride_profile.py)：连续对照、BNSD、独立布局、U01、任务环/尾块、16384 KV、65536 回退及广播；双 dtype 同逻辑输入/调度，源侧连续物化在计时前完成，分别记录 Kernel 与预分配 probe 调用耗时 |
+| TND/混合 stride `PERFORMANCE_CASES` | 12 | [`mla_tnd_stride_profile.py`](../../tests/mla_tnd_stride_profile.py)：v3/v4/v5、连续对照、NTD、独立布局、T01/used、单核任务环、16384 KV、65536 回退及广播；固定源非 FD、相同逻辑输入/调度，源连续物化及有效段压紧在计时前完成 |
 | 生产 BSND stride `PERFORMANCE_CASES` | 9 | [`mla_bsnd_used_profile.py --layout bsnd-stride`](../../tests/mla_bsnd_used_profile.py)：保持独立 stride 矩阵几何，按生产平台核数对照固定源；单列 AICPU、Kernel 与生产内部 wall，源连续物化在计时前完成 |
 | 公开 BSND `STRIDE_CASES` | 10 | [`mla_forward_profile.py`](../../tests/mla_forward_profile.py)：连续对照、BNSD、独立布局、零长度、长 KV、65536 回退、广播/重叠；双方相同物理输入，CANN 转换计入公开 metadata 复用、生成加 R=1/4 对照，FD 分派单列 |
 

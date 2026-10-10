@@ -22,7 +22,7 @@
 // HasKvLengths additionally consumes a validated v2 int32 length snapshot.
 // HasUsed selects v5 eight-word spans: physical starts, capacities and used.
 // Default BSND addressing is uint64(b)*capacity; TND uses validated starts.
-// HasStrides selects independent BSND input layouts, without changing the
+// HasStrides selects independent BSND/TND input layouts, without changing the
 // task ring, output layout, metadata or numerical/synchronization order.
 // Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
 // compute endpoints. FA3 requires -inf (source +inf) LSE for these empty rows.
@@ -40,13 +40,13 @@ class MlaNonPaged {
                   "MLA dense only supports FP16 and BF16");
     static_assert(!MixedKv || (IsTnd && HasKvLengths));
     static_assert(!HasUsed || HasKvLengths);
-    static_assert(!HasStrides || !IsTnd, "Only BSND strides are supported");
     static constexpr uint32_t kSpanWords = HasUsed ? 8 : MixedKv ? 5 : 4;
 
   protected:
     __aicore__ inline void Run(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv,
                                GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace, TPipe* pipe,
-                               GM_ADDR kvLengths, uint32_t totalQuery = 0, const MlaBsndInputLayouts* layouts = nullptr)
+                               GM_ADDR kvLengths, uint32_t totalQuery = 0, const MlaBsndInputLayouts* layouts = nullptr,
+                               bool kvIsTnd = IsTnd && !MixedKv)
     {
         params = schedule;
         queryTokens = IsTnd ? totalQuery : params.sq;
@@ -92,7 +92,7 @@ class MlaNonPaged {
 
         Block::CubeParams cubeParams{queryTokens, params.heads, params.sk, params.mm1ResSize, params.mm2ResSize};
         if ASCEND_IS_AIC {
-            cube.Init(pipe, cubeParams, qc, qr, kv, kr, layouts);
+            cube.Init(pipe, cubeParams, qc, qr, kv, kr, layouts, kvIsTnd);
             cube.InitMm1GlobalTensor(qk);
             cube.InitMm2GlobalTensor(p, pv);
             cube.AllocEventID();

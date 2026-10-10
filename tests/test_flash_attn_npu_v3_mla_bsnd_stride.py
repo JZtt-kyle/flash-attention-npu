@@ -363,7 +363,7 @@ def launch(probes, case, name="migrated", *, views=None):
     )
 
 
-def check_case(probes, case, *, repeats=3):
+def check_case(probes, case, *, repeats=3, launch_fn=launch):
     uq, uk = effective(case["item"])
     empty = torch.tensor([k == 0 for q, k in zip(uq, uk) for _ in range(q)], dtype=torch.bool)
     source_ok = bool(sum(uq) and sum(case["item"]["kv"]))
@@ -371,8 +371,8 @@ def check_case(probes, case, *, repeats=3):
     for _ in range(repeats):
         with forbid_host_readback():
             if source_ok:
-                assert launch(probes, case, "oracle") == 0
-            assert launch(probes, case) == 0
+                assert launch_fn(probes, case, "oracle") == 0
+            assert launch_fn(probes, case) == 0
         actual = valid_outputs(case, [t.cpu() for t in case["outputs"]["migrated"]])
         if source_ok:
             source = valid_outputs(case, [t.cpu() for t in case["outputs"]["oracle"]], source=True)

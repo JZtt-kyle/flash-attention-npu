@@ -43,7 +43,7 @@ class MlaUsed : private MlaNonPaged<InputT, true, IsTnd, false, true, HasStrides
             return;
         }
         this->Run(schedule.tiling, scale, qc, qr, kv, kr, output, lse, workspace, pipe, spans,
-                  IsTnd ? uint32_t(totalQuery) : 0, layouts);
+                  IsTnd ? uint32_t(totalQuery) : 0, layouts, schedule.kv.layout == uint32_t(MlaSequenceLayout::Tnd));
     }
 };
 } // namespace flash_attn::mla::Kernel
