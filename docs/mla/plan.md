@@ -6,7 +6,7 @@
 
 ## M06：非分页长度、TND 与 stride
 
-本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`；各入口默认值及调用要求见 [status](status.md#当前可调用能力)。BSND 每样本 KV 容量 `Sk` 与 TND 每段长度上界 `maxKvLength` 均为 0..16384；紧凑 TND 总 Q/KV 容量各自不超过 `INT32_MAX`，混合布局的 BSND 总容量为 64 位 `B*Sk`，均受 [字段、地址及资源边界](design.md#62-调度字段与边界) 约束。先 BSND 实际 KV 长度，再紧凑 TND 与混合布局，再区分 used 与分配长度，最后外层 stride。PA、mask、FD、192/128 与调度选项仍按后续步骤推进。
+本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`。先 BSND 实际 KV 长度，再紧凑 TND 与混合布局，再区分 used 与分配长度，最后外层 stride；容量/字段/地址限制统一见 [design 6.2](design.md#62-调度字段与边界)，入口现状见 [status](status.md#当前可调用能力)。PA、mask、FD、192/128 与调度选项留在后续步骤。
 
 每行单独验收、提交。长度和布局沿用“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 公开接入”的顺序；混合布局已接通公开只读 kvcache，used 继续按同一顺序推进。
 
@@ -61,57 +61,57 @@ M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[�
 
 ## 已完成步骤
 
-表中记录各步完成时的产物和验收边界；当前公共支持以 [status](status.md#当前可调用能力) 为准。早期临时限制由后续步骤扩展；历史测试数量、性能结果和原始失败从 Git 中对应的 status 查找，不在计划重复维护。
+以下只保留步骤编号、产物与完成边界，便于定位历史提交；早期临时限制已由后续步骤扩展。当前公共支持见 [status](status.md#当前可调用能力)，历史测试数量、性能和排障过程用 `git log -- docs/mla/status.md` 查找，不在计划重复维护。文档整理不改变任何功能步骤的状态。
 
 ### 范围、基线与 BSND 接入
 
-| 步骤 | 产物 | 完成条件 |
-| --- | --- | --- |
-| M00 | 固定范围、来源与 FA3 契约 | 交集、排除项、组件等价及 metadata E2E 口径明确 |
-| M01 | 两种表示的独立 reference 与 CANN 映射 | 共享 KV/独立 V、scale、stride、mask、窗口与空行数学对照 |
-| M02a | 910B CANN 执行器 | D01/D02/P01 双 dtype O/LSE、重复执行、布局和加载路径可追溯 |
-| M02b1 | 固定 CANN 源隔离构建与分派溯源 | vendor、host tiling、device binary 对应固定源码 |
-| M02b2 | profiler 基线与代表矩阵 | Kernel、转换与调用 E2E 分开计量，支持同轮交替测量 |
-| M03 | MLA 识别、校验及未实现拦截 | 真实/fake/C++/公开入口拒绝一致，普通 FA3 回归通过 |
-| M04a | 源映射与 dense 拆分（文档） | 固定函数、字段、数值/资源/事件及组件复用条件 |
-| M04b1 | 无 gert 的 dense CPU 调度 | 源基本块/端点/核数/workspace 一致，边界及 sanitizer 通过 |
-| M04b2a | FP16 QK/PV Cube Block 与 Tile | 独立 910B 精度、尾块/offset/复用与组件性能对照 |
-| M04b2b | FP16 Vector Block 与 dense Kernel | O/LSE 源与数学对照、任务环及组件回归；性能诊断 |
-| M04b2c | FP16 `flash_attn_func` 与构建接入 | 强制构建/增量依赖/加载产物、入口精度及普通 FA3 回归；性能诊断 |
-| M04b3 | 同范围 BF16 实例 | 舍入/数值路径与源一致，双 dtype 同边界；性能诊断 |
-| M05a | AICPU 调度生成与 v1 记录 | 设备与 CPU/固定源一致，生成生命周期、构建与回归通过 |
-| M05b1 | v1 独立设备消费者 | 几何/平台/端点/workspace 校验，拒绝不写输出，精度与复用通过 |
-| M05b2a | 官方 metadata 签名与普通 FA 兼容 | 官方位置参数、旧数值关键字、fake/compile 与 byte 协议回归 |
-| M05b2b1 | AICPU 读取 dense 长度 | 仅接受整容量，失败清零 payload；设备及回归通过 |
-| M05b2b2 | 消费者设备错误上报 | release 构建真实 Trap、拒绝不写输出，无长度 D2H/主机等待 |
-| M05b2b3a | 生产内部生成/消费链路 | 前向内部生成 v1，launcher 校验消费；scale、精度和生命周期通过 |
-| M05b2b3b | 公开生成与只读 kvcache 复用 | 官方入口、长度复核、真实/fake/C++、普通 FA3 和性能诊断 |
-| M05c1 | 精简前向 dispatcher | 入口/compile/精度/生命周期通过；复用 E2E 达标 |
-| M05c2 | 精简 metadata dispatcher 与重复准备优化 | 双 dtype 原五组复用及生成加 R=1/4 前向 E2E 逐例达标，M05 闭环 |
-| M04c1 | S1G 多块 | 解除 256 行临时限制，源 M 基块/尾块、多块精度及适用 E2E 通过 |
-| M04c2 | KV 513..1024 与无 split 端点映射 | 保留 nUpdate/PV 原子加/事件；同调度源精度及适用 E2E 通过 |
-| M04c3 | KV 上界扩展至 16384 | 含 8193 尾块，固定 26 组同路径组件对照及适用公开 E2E 通过 |
-| M04c4 | 全局空 batch/query/KV 容量 | 空 shape、O/LSE、记录校验、真实 Trap、普通 FA3 及适用 E2E 通过 |
+| 步骤 | 已完成产物与边界 |
+| --- | --- |
+| M00 | 固定范围、来源、FA3 契约及 metadata E2E 口径 |
+| M01 | 独立双 reference 与两种表示的 CANN 映射，覆盖数学/scale/stride/mask/空行 |
+| M02a | 910B CANN 执行器；D01/D02/P01 双 dtype O/LSE 与运行溯源 |
+| M02b1 | 固定 CANN 源隔离构建；vendor、host tiling、device binary 对应固定源码 |
+| M02b2 | profiler 基线与代表矩阵；Kernel、转换、调用 E2E 分开计量 |
+| M03 | MLA 识别、校验与未实现拦截；真实/fake/C++/公开入口及普通 FA3 回归 |
+| M04a | dense 源映射与拆分设计；函数/字段、数值/资源/事件和组件复用条件 |
+| M04b1 | 无 gert 的 dense CPU 调度；源字段差分、边界与 sanitizer |
+| M04b2a | FP16 Cube Block / Tile；独立精度与源组件性能 |
+| M04b2b | FP16 Vector Block / dense Kernel；源/数学精度、任务环及性能诊断 |
+| M04b2c | FP16 flash_attn_func 与构建接入；依赖/加载核验、入口与普通 FA3 回归 |
+| M04b3 | BF16 实例；源舍入/数值路径、双 dtype 边界及性能诊断 |
+| M05a | AICPU v1 生成；CPU/固定源一致性、生命周期、构建与回归 |
+| M05b1 | v1 独立设备消费者；几何/平台/端点/workspace 校验与拒绝不写输出 |
+| M05b2a | 官方 metadata 签名与普通 FA 兼容；旧数值关键字、fake/compile、byte 协议 |
+| M05b2b1 | AICPU 读取整容量长度；失败记录清零 payload |
+| M05b2b2 | 消费者 release 真实 Trap；拒绝不写输出，无长度 D2H/主机等待 |
+| M05b2b3a | 生产内部 v1 生成/消费；scale、精度和生命周期 |
+| M05b2b3b | 公开 metadata 与只读 kvcache 复用；入口/普通 FA3 回归及性能诊断 |
+| M05c1 | 精简前向 dispatcher；入口/compile/生命周期回归，复用 E2E 达标 |
+| M05c2 | 精简 metadata dispatcher；双 dtype 原五组复用及生成加 R=1/4 E2E 逐例达标 |
+| M04c1 | S1G 多块；解除 256 行临时限制，精度及适用 E2E 达标 |
+| M04c2 | KV 513..1024 与无 split 端点映射；源数值/事件保留，精度及适用 E2E 达标 |
+| M04c3 | KV 上界 16384；固定 26 组同路径组件及适用公开 E2E 达标 |
+| M04c4 | 全局空 batch/query/KV；空 shape、O/LSE、记录校验、Trap 与适用 E2E |
 
 ### M06 已完成子步骤
 
-| 子步骤 | 产物与接入边界 | 完成条件 |
-| --- | --- | --- |
-| M06a | 源依赖核对与实施拆分 | 源锚点、官方签名、交接证据与步骤边界一致 |
-| M06b1 | 独立 BSND 实际 KV 长度 CPU 调度，Q 使用整容量 | 原生非 FD/无 split 映射分开对照，零尾部、退化 dense、非法长度及 sanitizer 通过 |
-| M06b2a | v2 序列化与独立 AICPU 生成，不接前向 | CPU/AICPU/固定源一致，失败清零、对齐/字数/重叠、生命周期、构建及旧路径回归；生成耗时诊断 |
-| M06b2b | BSND 实际长度记录的设备校验消费者；该步未开放公开短长度 | 版本/类型/字数、快照与当前长度、调度/资源均校验；省略尾部逐样本为零；损坏/过期记录真实 Trap，拒绝不写输出；只读复用、生命周期、旧 dense 与普通 FA3 metadata 回归通过 |
-| M06b3 | 按样本实际 KV 长度执行的 BSND Kernel / Block / Tile，独立驱动 | 双 dtype 短 KV、跨 S2 块、混合/全零长度、端点外空行与 poison padding 精度；源组件性能及 dense 回归通过 |
-| M06b4 | 公开只读 BSND `cache_seqlens`、metadata 生成/复用 | None/整数/int32 tensor、真实/fake/C++、有/无/过期记录、跨流与 compile；普通 FA3 及适用公开 E2E 达标 |
-| M06c1 | 紧凑 TND 前缀和解析、起点与 CPU 调度 | T01 的起始 0、单调性、尾值、计数、空样本、总容量/max 上界/溢出；BSND 等价与固定源累计长度对照通过 |
-| M06c2a1 | TND v3 记录与独立 AICPU 生成；不接消费者或公开 TND | 解析与 c1 一致，起点/长度/总容量/max 上界与调度完整保存；CPU/AICPU/固定源一致，失败清零、缓冲边界、生命周期、构建与普通 FA3 metadata 回归通过；生成耗时诊断 |
-| M06c2a2 | TND v3 设备校验消费者；公开 TND 仍拒绝 | 记录/前缀/变长端点/资源校验、release 真实 Trap、拒绝不写输出、生命周期与旧 metadata/普通 FA3 回归通过 |
-| M06c2b1 | 紧凑 TND Q/KV 设备寻址，独立驱动 | 双 dtype T01、多 query/跨样本尾块/零样本/总空容量/offset、O/LSE 布局；记录先校验，源精度/组件性能与 BSND/metadata/普通 FA3 回归通过 |
-| M06c2b2a | TND Q + BSND KV 的 CPU 长度解析与调度 | 64 位物理 KV 起点、容量/实际长度分离、固定源差分、边界及 sanitizer、已有调度/metadata 回归通过 |
-| M06c2b2b | 混合布局独立 metadata 协议与 AICPU 生成 | 布局/物理容量/起点/长度完整保存；CPU/AICPU/固定源一致，失败清零、缓冲边界、生命周期、构建和普通 FA3 回归通过 |
-| M06c2b2c | 混合布局记录设备校验消费者 | 记录、当前 Q 前缀/KV 长度、容量、端点和资源校验；真实 Trap、拒绝不写输出、生命周期与已有布局/普通 FA3 回归通过 |
-| M06c2b2d | 混合布局设备寻址与独立 attention 驱动 | v4 先校验、64 位物理 KV 起点与变长任务环；双 dtype 源/数学精度、空容量/零尾部/poison/offset、记录更新/复用/生命周期/真实 Trap 通过；组件性能对照归档，已有布局/普通 FA3 回归通过 |
-| M06c3a | 公开紧凑 TND varlen 与内部 v3 生成 | 真实/fake/C++、双 dtype 源/数学精度、空总容量、非法前缀真实 Trap、前缀更新/跨流/allocator/compile、普通 FA3 回归通过；固定矩阵保留原生 FD 分类，同路径包含逐次生成的 R=1/4 E2E 达标 |
-| M06c3b | 官方 metadata 入口按 TND query 生成混合 v4；公开混合前向仍拒绝 | AICPU 从 Q 前缀推导总量，CPU/固定源一致；真实/fake/C++、失败记录、空容量/64 位物理起点/offset、长度更新/跨流/allocator/compile、普通 FA3 与生成耗时诊断通过 |
-| M06c3c | 公开只读 TND Q + BSND KV kvcache，内部 v4 与显式复用 | None/整数/tensor、真实/fake/C++、损坏/过期记录真实 Trap、双 dtype 源/数学精度、空容量/poison/offset、生命周期及普通 FA3 回归通过；固定矩阵保留原生 FD/空 KV 分类，适用七例复用、生成加 R=1/4 及逐次内部生成 E2E 逐例达标 |
-| M06d1 | BSND/TND 实际 Q/KV 使用长度 CPU 归一与调度 | U01/T01 used 小于分配长度、64 位物理起点不重排、零长度及字段/计数/溢出；固定源差分、独立任务枚举、sanitizer、旧调度/metadata 与重建后的普通 FA3/已有 MLA 回归通过；used 仍未接设备或公开入口 |
+| 步骤 | 已完成产物与边界 |
+| --- | --- |
+| M06a | 长度/布局源依赖与实施拆分；源锚点、官方签名和步骤边界核对 |
+| M06b1 | BSND 实际 KV 长度 CPU 调度；Q 整容量，固定源差分、零尾部及 sanitizer |
+| M06b2a | v2 独立 AICPU 生成；失败清零、缓冲/生命周期、构建及旧路径回归 |
+| M06b2b | v2 设备校验；当前长度、零尾部、损坏/过期记录真实 Trap |
+| M06b3 | BSND 实际长度独立 attention；双 dtype、零样本/poison、源组件性能 |
+| M06b4 | 公开只读 BSND cache_seqlens 与 v2 复用；入口/普通 FA3 回归及适用 E2E 达标 |
+| M06c1 | 紧凑 TND 前缀、起点和 CPU 调度；固定源差分、边界及 sanitizer |
+| M06c2a1 | v3 独立 AICPU 生成；前缀/容量/max 上界快照、失败清零、生命周期 |
+| M06c2a2 | v3 设备校验；前缀/端点/资源、真实 Trap 与拒绝不写输出 |
+| M06c2b1 | 紧凑 TND 独立 attention；双 dtype、空容量/offset、O/LSE 与源组件性能 |
+| M06c2b2a | 混合布局 CPU 调度；Q 前缀、64 位物理 KV 起点、容量/长度分离 |
+| M06c2b2b | 混合 v4 独立 AICPU 生成；完整布局快照、失败清零与生命周期 |
+| M06c2b2c | v4 设备校验；Q 前缀/KV 长度/容量/端点、真实 Trap 与旧路径回归 |
+| M06c2b2d | 混合独立 attention；v4 校验与 64 位寻址、双 dtype/空行/poison/生命周期及组件性能 |
+| M06c3a | 公开紧凑 TND varlen；内部 v3、入口/普通 FA3 回归，逐次生成的 R=1/4 E2E 达标 |
+| M06c3b | 公开混合 v4 生成；AICPU 从 Q 前缀推导总量，入口/生命周期/普通 FA3 回归 |
+| M06c3c | 公开只读混合 kvcache；内部 v4 与显式复用，适用七例各调用段 E2E 达标 |
+| M06d1 | 分配/used CPU 归一与调度；64 位起点不重排、源差分/sanitizer/已有链路回归；未接 used 协议、设备或公开入口 |

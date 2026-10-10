@@ -1681,13 +1681,21 @@ def flash_attn_with_kvcache(
             returned by get_scheduler_metadata unchanged (do not clone/copy it).
             softmax_scale and the numerical softcap value come from this forward
             call and may change when reusing metadata with the same has_softcap.
+            MLA uses int32 v2 records for BSND queries or v4 records for TND queries
+            with a BSND cache. The device checks the current lengths and, for v4, query
+            prefixes against the record. MLA records may be cloned or passed as contiguous
+            offset views; scale is supplied to forward and is not fixed by the record.
+            Reuse skips AICPU generation; host workspace budgeting still runs.
+            Current MLA options and limits are documented in docs/mla/status.md.
         return_softmax_lse: bool. Whether to return the logsumexp of the attention scores.
 
     Return:
-        out: (batch_size, seqlen, nheads, headdim).
-        softmax_lse [optional, if return_softmax_lse=True]: (batch_size, nheads, seqlen). The
-            logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
-            normalization factor).
+        out: query layout with last dimension v_cache.shape[-1].
+        If return_softmax_lse=True, returns (out, softmax_lse, out_accum, softmax_lse_accum).
+        softmax_lse is FP32 with shape (batch_size, nheads, seqlen) for BSND queries or
+            (nheads, total_q) for TND queries. It contains the natural log of each row's
+            softmax normalization factor, including the qv contribution for MLA.
+        For MLA without split, both accumulators are empty tensors on the output device.
     """
     # The qv dispatchers validate tensors independently in real/fake
     # execution. Route before repeating those checks in Python; other forms
@@ -2188,7 +2196,8 @@ def get_scheduler_metadata(
     MLA returns int32 metadata with per-sample BSND KV length snapshots and
     num_splits=1. With cu_seqlens_q it generates a v4 TND-query/BSND-cache record;
     max_seqlen_q is a per-query-segment bound, max_seqlen_k is cache capacity.
-    Public mixed-layout forward is not implemented yet.
+    Read-only flash_attn_with_kvcache accepts this v4 record with TND queries
+    and a BSND cache; the current query prefixes and KV lengths must match.
     Its scale is supplied only to forward; legacy numerical
     keywords are not supported. Length values are checked on device.
     """
