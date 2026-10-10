@@ -1,8 +1,8 @@
 # MLA 当前状态
 
-最近功能闭环为 **M06d3b2：内部混合 Q-used 接入**（2026-10-10，分支 `feat/mla-cann-migration`）。唯一下一步为 **[M06e1：BSND 合法外层 stride](plan.md#下一步m06e1)**，尚未开始。
+最近闭环为 **M06e1a：BSND stride 描述与地址校验**（2026-10-10，分支 `feat/mla-cann-migration`）。本步是独立 CPU 组件；现有生产能力仍为 M06d3b2，非连续输入尚未开放。唯一下一步为 **[M06e1b：BSND 独立 stride attention](plan.md#下一步m06e1b)**。
 
-本页是当前能力与交接入口；契约、协议和架构见 [design](design.md)，迭代顺序与完成条件见 [plan](plan.md)。本次基于 `0279155`，当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
+本页是当前能力与交接入口；契约、协议和架构见 [design](design.md)，迭代顺序与完成条件见 [plan](plan.md)。本次基于 `3b8be96`，当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
 
 ## 当前可调用能力
 
@@ -29,9 +29,10 @@
 | `_flash_attn_forward` / C++ `fwd`，BSND Q/KV | `seqused_q` 存在时使用 v5，可选 `seqused_k`；无 Q-used 沿用 v1/v2；Q-used 与显式 metadata 组合拒绝 |
 | 同一内部入口，TND Q/KV | 前缀、max、可选 used 及 v3/v5 选择与公开 varlen 相同；拒绝显式 metadata |
 | 同一内部入口，TND Q + BSND KV | 无 Q-used 沿用 v4；有 `seqused_q` 时每次内部 v5，可选 `seqused_k`；Q-used 与显式 metadata、`max_seqlen_k` 仍拒绝 |
+| BSND stride 地址组件 | 独立 CPU 校验四路输入的 64 位 stride、storage offset 和完整分配视图边界；尚未接入设备或前向 |
 | v5 独立生成、消费者与 attention probe | BSND、TND、混合三布局均已验收；生产接入见上述入口 |
 
-入口依据为 [Python 包装/fake](../../flash_attn_npu_3/flash_attn_npu_interface.py)、[C++ 通用分派](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp)、[专用前向](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 和 [静态校验](../../csrc/ascend910/flash_attn_npu_3/mla/mla_validation.h)。生产 BSND/TND/混合 used 共用 `UsedForward`、v5 生成/校验与 `MlaUsed`，数值 Block / Tile 沿用原路径。
+生产入口依据为 [Python 包装/fake](../../flash_attn_npu_3/flash_attn_npu_interface.py)、[C++ 通用分派](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp)、[专用前向](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 和 [静态校验](../../csrc/ascend910/flash_attn_npu_3/mla/mla_validation.h)。生产 BSND/TND/混合 used 共用 `UsedForward`、v5 生成/校验与 `MlaUsed`，数值 Block / Tile 沿用原路径。
 
 ### 调用约束与输出
 
@@ -44,76 +45,61 @@
 
 ## 本步实现与验收证据
 
-M06d3b2 归档为 **`build/mla-m06d3b2-mixed-used/`**，以下路径均相对该目录。`*-command.json` / `*-exit.json` 保存完整命令、环境和退出码；`acceptance.json` 为总索引，`source-snapshots/` / `production-final/` 保存源码和构建产物，全部验收证据记录哈希。
+M06e1a 归档为 **`build/mla-m06e1a-bsnd-layout/`**，以下路径均相对该目录。`*-command.json` / `*-exit.json` 保存完整命令、环境和退出码；`acceptance.json` 为总索引，`source-snapshots/` 保存本步源码。原始输入、驱动输出、编译命令、二进制及源码哈希均归档。
 
-- 内部 `_flash_attn_forward` / C++ `fwd` 的混合 Q-used 进入 `TndBsndUsedForward` → `UsedForward`，复用已有 v5 生成器、消费者与 TND used launcher。Q 起点来自分配前缀，KV 起点始终为 64 位 `b*Sk`，缩短 used 不压紧任一轴。
-- 未增加公开参数或私有 kvcache op 参数；公开混合 kvcache 仍使用 v4。Q-used 与任何显式 metadata 组合拒绝，混合 `max_seqlen_k` 仍拒绝。
-- Kernel / Block / Tile、metadata 协议、CATLASS 与 CANN 源未改。29 个生产链接对象中仅 `flash_api.o`、`mla_forward.o` 改变；实际加载扩展与链接产物、251 个源码依赖和全部对象已核对。
+- 新增 [`mla_bsnd_layout.h/.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_layout.h)，以整个分配视图检查 storage 和有符号 64 位字节界限，乘加前检查溢出，失败保留原输出。Q/qv/K/V 分别构造描述，实际 `data_ptr()` 已含 offset，设备侧不得重复相加。
+- 地址组件接受末维连续、非负外层 stride，包括 BNSD、切片、只读广播/重叠；空视图不访问 storage，单例轴不窄化未使用 stride。详见 [design 6.2.8](design.md#628-bsnd-输入-stride-与地址校验)。这些是组件能力，不代表前向入口开放。
+- M06e1 拆为 CPU 地址校验、独立设备执行、生产接入三个提交。本步未修改 Kernel / Block / Tile、公共/fake/C++ 入口、metadata、setup、CATLASS 或 CANN 源；新组件由测试驱动直接编译，尚未链接生产扩展。
 
 | 验收面 | 结果 | 证据 |
 | --- | --- | --- |
-| 上一步最小复查 | 184 项通过；双 dtype 固定源/迁移 probe 与 v5 producer 从源码重建 | `baseline.xml`、`baseline-attention/`、`baseline-producer/` |
-| 内部混合 Q-used | 359 项通过；双 dtype 有效行/poison padding、源/数学精度、空容量/零 used、前缀/used 更新、offset/alias/clone、跨流与 allocator 生命周期、真实/fake/C++/compile、静态边界；含双 dtype 各 15 项真实 Trap | `production-tests.xml`、`production/`、`production-source/` |
-| 普通 FA3 / 接口 | 833 项通过；普通 metadata、compile、签名及 MLA 契约 | `ordinary-regressions.xml`、`ordinary-nodes.json` |
-| 既有 MLA 入口 | 1624 项通过；完整 BSND/TND used，公开混合 v4、varlen 和 kvcache 的相关入口/空值/更新/生命周期回归 | `legacy-public.xml`、`legacy-nodes.json` |
-| 构建 | 19 项通过；实例生成、header/AICPU/设备依赖及 sanitizer | `build-tests.xml`、`production-build-manifest.json` |
+| 上一步证据与生产构建 | 2,307 个归档文件、251 个源码依赖、29 个对象及加载/链接扩展哈希一致；上步 2,835 项结果与最小复查命令已复核 | `baseline-audit.json`、`verify_baseline.py`、`baseline-final.log` |
+| CPU 地址组件 | 82 项通过；双 dtype 真实视图地址、四路独立 offset、U01 poison、广播/重叠、空/单例轴、65536/uint32/int64 边界、失败不修改输出；含 1,200 组大整数随机对照 | `cpu-final.xml`、`cpu-final/` |
+| ASan / UBSan / LeakSanitizer | 82 项通过；沙箱外从源码重建，保留泄漏检测，无 sanitizer 报告 | `sanitizer-final.xml`、`sanitizer-final/` |
+| 既有入口边界 | 120 项通过；910B 双 dtype 真实/fake/原始 C++ 的支持边界及 BSND Q-used stride 拒绝 | `public-boundary.xml`、`public-boundary-command.json` |
 
-**合计 2,835 项去重 pytest 通过，无失败或跳过项**；184 项 baseline 已包含于后续回归，不重复累加。
+**合计 202 项去重 pytest 通过**；sanitizer 的 82 项为同一 CPU 矩阵重验，不重复累加。
 
-主精度矩阵每 dtype 25 组，分别通过 Python 内部入口和原始 C++ 调用，重复三次；非空有效行 O/LSE 与固定源逐元素一致，零 KV 的 LSE 符号按 FA3 单独检查。独立数学对照的最大 O 绝对误差为 FP16 0.0009765625、BF16 0.015625，最大 LSE 绝对误差均为 9.537e-7；没有放宽既定精度阈值。记录见 `baseline-attention/{fp16,bf16}/production-mixed-used-accuracy.jsonl`。
+CPU 初测 82 项通过；增加大 offset 边界并格式化后重建，最终仍为 82 项通过。沙箱中的首次 sanitizer 在首例退出，错误为 `LeakSanitizer does not work under ptrace`，保留 `sanitizer.log` 和 `sanitizer/`，未计为通过。沙箱外复测结果见上表。
 
-### 性能口径与限制
-
-本步无公开 FA3 等价入口，性能仅作**内部调用与同调度固定源 Kernel 对照**，不作公开 E2E 不劣化结论。双 dtype 各 9 个预先固定用例，包含混合 T01、非均匀/零长度、M/S2 尾块、16384 KV、43 batch、缺省 KV-used、显式整段 used 与多块 query。双方同输入、基本块、核数、端点；生产每次调用均生成 v5，源 probe 预分配缓冲区。
-
-在 7 号 910B 同进程交替测量，CPU 亲和性 128..135，预热 5 次，五轮各 20 个 wall 样本和各 10 个 profiler 样本。同期旧入口回归位于 6 号卡。下表为每例中位数的范围，逐例值与全部原始样本均保存。
-
-| dtype | 生产/固定源 Kernel 比值 | 逐次 v5 生成（μs） | 完整内部调用 wall（μs） |
-| --- | --- | --- | --- |
-| FP16 | 0.992–2.549 | 24.871–37.991 | 430.925–1299.860 |
-| BF16 | 1.008–2.679 | 23.281–38.241 | 431.485–1318.590 |
-
-**组件仍有开销，不声称纯 Kernel 不劣化。** 逐例生产/源 Kernel、生成及双方内部 wall 见 `performance-{fp16,bf16}/summary.json`；其 `wall.json`、`kernel-samples.json` 和 `profiler/` 为原始证据。公开 varlen used 的最近 E2E 结论仍来自 M06d3b1，见 `build/mla-m06d3b1-varlen-used/performance-acceptance.json`，不能将本步内部计时替代该口径。
-
-profiler 两 dtype 均出现 `fwk_api_db` 解析失败，**未记为完整 framework trace 通过**。设备计时按调用顺序核对原始 CANN `op_summary` 与 `kernel_details.csv`，每 dtype 1,350 条任务逐项一致，其中 450 条为 v5 生成；诊断见 `profiler-diagnostics.json` 与 `device-trace-audit.json`。此前 4/5 号卡固定源 probe 的 AICore 超时根因仍未定，未认定硬件故障，本次未使用这两张卡；历史证据在 M06d3b1 的 `timeout-analysis.json` 和 `timeout-evidence/`。
+本步未改公共入口或 metadata，未重跑普通 FA3 全套；未改设备数值路径，未运行新的 stride NPU 精度或性能，也未重建生产扩展。源 ND→NZ stride 字段与 64 位输入 stride 间的逐行/逐矩阵回退仍需 M06e1b 设备验收。既有完整功能与性能证据仍在 `build/mla-m06d3b2-mixed-used/acceptance.json`；公开 varlen used 的 E2E 证据仍在 `build/mla-m06d3b1-varlen-used/performance-acceptance.json`，本步没有新增性能结论。
 
 ## 本次实测环境
 
 | 项目 | 本步记录 |
 | --- | --- |
 | Python / PyTorch | `/usr/local/python3.11.15/bin/python3` 3.11.15；torch `2.7.1+cpu`、torch_npu `2.7.1` |
-| CANN / 编译器 | `/usr/local/Ascend/cann-9.0.0-beta.2`；bisheng clang 15.0.5 |
-| 芯片 | 八张 Ascend910B3；预检所用 6/7 号卡健康空闲，新入口/性能用 7，普通 FA3 与既有入口回归用 6 |
-| CATLASS / 只读 CANN 源 | `769cd40a8716b28650b6bebb08db4834eea4462f` / `ca18aee610729ca5270a44e2d84c751bc687fbf0`；CATLASS 干净，CANN 原有工作区差异保留 |
-| 实际加载扩展 | `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`；SHA256 `277e55d03ca46c77a2b1691ebc8b6b2de11b2c3bc8298ef13a214977d13acd73` |
+| CANN / 编译器 | `/usr/local/Ascend/cann-9.0.0-beta.2`；bisheng clang 15.0.5；CPU 驱动使用 g++，版本与完整编译参数见 `environment.json`、各驱动目录的 `compile-command.json` |
+| 芯片 | 八张 Ascend910B3；预检健康状态为 OK，7 号卡空闲，用于既有入口边界回归 |
+| CATLASS / 只读 CANN 源 | `769cd40a8716b28650b6bebb08db4834eea4462f` / `ca18aee610729ca5270a44e2d84c751bc687fbf0`；CATLASS 干净，CANN 原有工作区差异未变 |
+| 实际加载扩展 | `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`；SHA256 `277e55d03ca46c77a2b1691ebc8b6b2de11b2c3bc8298ef13a214977d13acd73`，沿用已核验生产构建 |
 
-预检核对上步 2,659 个归档文件、251 个源码依赖、29 个对象与原扩展哈希，均一致，见 `precheck.json`。实际构建命令见 `production-build-command.json`；重建后的加载路径和对象变化见 `production-build-manifest.json`。功能与性能检查期间生产源码及扩展哈希未变。原有未跟踪 `kernel_meta/` 保留。
+`environment.json` 保存版本、芯片状态及实际扩展路径/哈希；加载时 CANN 的版本/tiling 注册警告保留在 `environment.log`，进程正常退出。CPU 检查设置 `TORCH_DEVICE_BACKEND_AUTOLOAD=0`，只验证 CPU 视图；910B 回归加载上述 CANN 环境。原有未跟踪 `kernel_meta/` 保留。
+
+此前 4/5 号卡固定源 probe 的 AICore 超时根因仍未定，本次未使用这两张卡；历史证据见 `build/mla-m06d3b1-varlen-used/timeout-analysis.json` 和 `timeout-evidence/`。上步 profiler 的 `fwk_api_db` 解析失败仍只按原始设备任务表验收，不记为完整 framework trace 通过。
 
 ## 最小复现与交接
 
-先检查健康空闲卡，设置 `MLA_DEVICE` 并加载上述 CANN 的 `set_env.sh`。共享头或生产源码改变时先执行 `FLASH_ATTN_BUILD_VERSION=v3 FLASH_ATTN_BUILD_NPU=910 python3 setup.py build_ext --inplace` 并核对实际加载扩展。以下从源码重建独立 probe，覆盖混合 T01、空值、前缀/used 更新、生命周期及空 KV 坏 Q-used 的设备拒绝：
+新 CPU 组件的最小闭环不需 CANN/NPU。sanitizer 同一命令增加 `MLA_BSND_LAYOUT_SANITIZE=1`、`ASAN_OPTIONS=detect_leaks=1:halt_on_error=1` 与 `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1`；若沙箱不支持 LeakSanitizer，须在允许其线程检查的环境运行，不能把环境失败计为通过。
 
 ```bash
-ASCEND_RT_VISIBLE_DEVICES=${MLA_DEVICE:?set MLA_DEVICE} \
-OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 MLA_USED_ATTENTION_REUSE=0 \
-MLA_USED_ATTENTION_DIR=build/mla-m06d3b2-mixed-used/recheck-attention \
-MLA_USED_METADATA_DEVICE_DIR=build/mla-m06d3b2-mixed-used/recheck-producer \
-MLA_MIXED_USED_DIR=build/mla-m06d3b2-mixed-used/recheck-production \
-python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_mixed_used.py \
-  -k '(production_accuracy and spec0) or shapes_empty_and_defaults or fullgraph_prefix or alias_clone or updates_preserve or cross_stream_allocator_lifetime or (runtime_trap and empty_k_bad_q)' \
-  --basetemp=build/mla-m06d3b2-mixed-used/recheck-tmp
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 \
+MLA_BSND_LAYOUT_DIR=build/mla-m06e1a-bsnd-layout/recheck \
+python3 -m pytest -x -q tests/test_flash_attn_npu_v3_mla_bsnd_layout.py \
+  --basetemp=build/mla-m06e1a-bsnd-layout/recheck-tmp
 ```
 
-完整命令见 `production-tests-command.json`、`ordinary-regressions-command.json`、`legacy-public-command.json`、`build-tests-command.json` 和 `performance-{fp16,bf16}-command.json`。本步未运行 910C 实机或完整 graph replay，后者仍在 M16。
+完整 sanitizer 和既有入口边界复现见 `sanitizer-final-command.json` 与 `public-boundary-command.json`。后续修改共享头或生产源码后必须重建扩展并核对加载哈希，再按 plan 验证受影响路径；上步混合入口的完整最小命令保存在 `build/mla-m06d3b2-mixed-used/source-snapshots/docs/mla/status.md`。
 
-文档链接/锚点、表格、固定官方签名、协议常量与步骤/性能矩阵一致性检查通过，见 `docs-check.json`。`git diff --check` 与适用质量钩子通过，见 `quality-staged.log`；首轮格式化重写另保留在 `quality-initial.log`。复现命令如下，质量工具沿用 `/tmp` 安装与缓存，保留 CANN 的 PYTHONPATH：
+文档链接/锚点、步骤拆分、官方签名、协议与来源核对结果保存在 `docs-check.json`；最终质量检查与证据索引分别为 `quality-staged.log`、`acceptance.json`。复现命令如下：
 
 ```bash
-python3 build/mla-m06d3b2-mixed-used/check_docs.py
+python3 build/mla-m06e1a-bsnd-layout/verify_baseline.py
+python3 build/mla-m06e1a-bsnd-layout/check_docs.py
 PYTHONPATH=/tmp/mla-m01-precommit${PYTHONPATH:+:$PYTHONPATH} \
 PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache ci/code_quality.sh --staged
-python3 build/mla-m06d3b2-mixed-used/acceptance.py
+python3 build/mla-m06e1a-bsnd-layout/acceptance.py
 git diff --check
 ```
 
-后续只推进 plan 中的 M06e1；本步未开始外层 stride 开发。
+后续只推进 M06e1b；生产 stride 接入在 M06e1c，TND/混合 query stride 在 M06e2。
