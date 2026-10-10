@@ -1,22 +1,18 @@
 # MLA 迭代计划
 
-本文件只记录迭代顺序、每步产物与完成条件。当前可调用能力、最近一次闭环和复现命令见 [status](status.md)，目标范围、协议与验收口径见 [design](design.md)。步骤编号沿用历史，M04c 在 M05 闭环后执行；不按编号重新排序。
+本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#m06-剩余步骤) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
 
-唯一下一步为 **M06e2b：TND 与混合布局独立 stride attention**，完成条件见下。未完成工作按 M06 → M07..M17 排列，[已完成步骤](#已完成步骤) 集中放在末尾，保留原编号以便追溯提交。独立组件完成不代表公开入口开放。
+唯一下一步为 **[M06e2b：TND 与混合布局独立 stride attention](#下一步m06e2b)**。其后依次为 M06e2c → M07..M17；本轮文档核验不推进功能步骤。
 
 ## M06：非分页长度、TND 与 stride
 
-本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`。先 BSND 实际 KV 长度，再紧凑 TND 与混合布局，再区分 used 与分配长度，最后外层 stride；容量/字段/地址限制统一见 [design 6.2](design.md#62-调度字段与边界)，入口现状见 [status](status.md#当前可调用能力)。PA、mask、FD、192/128 与调度选项留在后续步骤。
+本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`。BSND 实际长度、TND/混合连续布局、分配与 used、BSND stride 已完成；剩余 TND/混合 stride。字段、长度和地址规则分别见 design [6.2](design.md#62-调度字段与边界)、[6.3](design.md#63-长度与布局调度)、[6.4](design.md#64-输入-stride-与地址校验)。PA、mask、FD、192/128 与调度选项留在后续步骤。
 
-每行单独验收、提交。长度和布局沿用“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 公开接入”的顺序；混合布局已接通公开只读 kvcache，used 继续按同一顺序推进。
+每行单独验收、提交。长度和布局按“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 入口接入”推进；stride 在已有协议上按“CPU 地址校验 → 独立 attention → 入口接入”推进。独立组件完成不代表公开入口开放。
 
 ### 下一步：M06e2b
 
-前置 M06e1a/b/c 已完成 BSND 四路 stride 的 CPU 校验、独立设备与生产接入；M06e2a 已完成 TND CPU 地址校验。下一步只处理 TND 与混合布局的独立 stride attention，覆盖 ST01 token/head stride、NTD 视图、四路独立 offset，以及 T01/used/BSND cache 组合；保持最后一维连续和既有功能范围。
-
-M06e2 按“CPU 地址校验 → 独立设备 → 生产接入”拆分。已完成的 M06e2a 复用 BSND 完整 storage/字节边界校验，将 TND token/head stride 映射为单 batch 的 row/head stride；独立大整数 oracle、真实 PyTorch 视图、分配前缀/used/BSND cache 地址组合及 ASan/UBSan 已通过。该 CPU 组件未接入 Kernel、metadata 或生产入口。
-
-M06e2b/c 继续复用 64 位寻址与现有 Kernel / Block / Tile，完成双 dtype 910B 源/数学精度、代表性性能、适用公开 E2E 和普通 FA3 回归；不提前开放未验收的组合。
+前置 M06e1a/b/c 和 M06e2a 已完成。复用 [TND CPU 地址组件](design.md#642-tnd-输入-stride-与地址组合) 与现有 64 位寻址、Kernel / Block / Tile，只接通独立 attention 的 v3/v4/v5 原视图读取。覆盖 ST01 token/head stride、NTD、四路独立 offset，以及 T01/used/BSND cache 组合；末维保持连续。生产开放留在 M06e2c，完成条件分别见下表。
 
 ### M06 剩余步骤
 
@@ -25,7 +21,7 @@ M06e2b/c 继续复用 64 位寻址与现有 Kernel / Block / Tile，完成双 dt
 | M06e2b | 唯一下一步 | TND 与混合布局独立 stride attention；v3/v4/v5 消费原视图 | 双 dtype 910B 源/数学精度，含 used poison、真实大地址和 65536 边界；固定源组件性能、连续及普通 FA3 回归；生产仍拒绝未接通组合 |
 | M06e2c | 待开始 | TND stride 生产接入，完成 M06；公开 varlen、混合只读 kvcache、内部 used | 真实/fake/C++/compile、完整 storage 拒绝、长度/metadata 更新和生命周期；双 dtype 精度、生产 Kernel 对照、适用公开 E2E 及普通 FA3 回归通过 |
 
-M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[源调度与零尾部](design.md#62-调度字段与边界)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定性能矩阵与阶段边界)。生成记录、校验记录和执行 attention 分别验收；全部样本实际长度为零也不等于全局空容量。
+M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定性能矩阵与阶段边界)。生成记录、校验记录和执行 attention 分别验收；全部样本实际长度为零也不等于全局空容量。
 
 ## M07 之后
 
@@ -56,7 +52,7 @@ M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[�
 
 ## 已完成步骤
 
-以下只保留步骤编号、产物与完成边界，便于定位历史提交。各行描述该步交付的部分，不能单独作为当前支持清单；早期组件步骤也不代表当时已经开放入口。共同验证要求见[每步完成条件](#每步完成条件)，历史数量、性能和排障用 `git log -- docs/mla/status.md` 查找。文档整理不改变任何功能步骤的状态。
+以下只索引各步交付的部分，不作为当前支持清单；CPU、生成器、消费者和 probe 的交付均不代表生产开放。共同验证要求见[每步完成条件](#每步完成条件)，历史数量、性能和排障用 `git log -- docs/mla/status.md` 查找。
 
 ### 范围、基线与 BSND 接入
 
@@ -113,10 +109,10 @@ M06 的实现依据集中在 [metadata 协议](design.md#5-metadata-设计)、[�
 | M06d2a | v5 协议与独立 AICPU 生成；四数组快照、失败清零与 64 位跨度 |
 | M06d2b | v5 设备消费者；四数组、物理跨度、端点/资源校验与 release Trap |
 | M06d2c | v5 三布局独立 attention；按分配起点和 used 执行，共用源数值路径并验收组件性能 |
-| M06d3a | 内部 BSND Q-used 与可选 KV-used；每次生成/消费 v5，完成入口验收及生产 Kernel 对照；无公开等价入口 |
-| M06d3b1 | 公开 varlen 与内部 TND Q/KV 可选 `seqused_q/k`；任一 used 存在时使用 v5，完成入口、四数组更新/生命周期、组件性能与适用公开 R=1/4 E2E 验收 |
-| M06d3b2 | 内部 TND Q + BSND KV 的 Q-used 与可选 KV-used；每次内部生成/消费 v5，复用 TND used launcher，完成入口、前缀/used 更新与生命周期、设备拒绝、双 dtype 同调度源 Kernel 对照及普通 FA3 回归；公开混合 kvcache 仍为 v4 |
-| M06e1a | BSND 独立 CPU stride 描述与地址校验；四路真实 stride/offset、整个分配视图的 storage/字节界限、空/单例/广播/重叠、大整数 oracle 与 ASan/UBSan；生产非连续输入仍拒绝 |
-| M06e1b | BSND 独立 stride attention；四路 64 位地址接入 v1/v2/v5，保留源数值/任务环/同步，修复 65536 多矩阵边界，完成真实大地址/广播/重叠的双 dtype 910B 精度、连续与普通 FA3 回归及固定组件性能对照；生产非连续输入仍拒绝 |
-| M06e1c | BSND stride 生产接入，完成 M06e1；整容量 v1、只读 cache 实际 KV 长度 v2 与内部 Q-used v5，真实/fake/C++/compile、完整 storage 拒绝、长度/记录更新与生命周期；双 dtype 源/数学精度、同调度生产 Kernel 对照、适用公开 metadata E2E 及普通 FA3 回归通过 |
-| M06e2a | TND 独立 CPU stride 描述与地址校验；复用 BSND 完整 storage/字节边界检查，覆盖 ST01/NTD、四路独立 offset、T01/used/BSND cache 地址组合、空/单例/广播/重叠、大整数 oracle 与 ASan/UBSan；生产非连续 TND/混合输入仍拒绝 |
+| M06d3a | 内部 BSND Q-used 与可选 KV-used 接入 v5；无公开等价入口 |
+| M06d3b1 | 公开 varlen 与内部 TND Q/KV 的可选 Q/KV-used 接入 v5；适用公开 R=1/4 E2E 达标 |
+| M06d3b2 | 内部混合 Q-used 接入 v5，复用 TND used launcher；公开混合 kvcache 保持 v4 |
+| M06e1a | BSND 独立 CPU stride 描述与完整 storage/字节边界校验 |
+| M06e1b | BSND 独立 v1/v2/v5 stride attention；64 位寻址与 65536 多矩阵回退修正 |
+| M06e1c | BSND stride 生产接入 v1/v2/v5，完成 M06e1；适用公开 metadata E2E 达标 |
+| M06e2a | TND 独立 CPU 地址组件，复用 BSND 校验；四路视图与分配/used/BSND cache 地址组合 |
