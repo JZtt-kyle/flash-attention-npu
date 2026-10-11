@@ -5,6 +5,7 @@
 #include "mla_tnd_metadata_args.h"
 #include "mla_tnd_bsnd_metadata_args.h"
 #include "mla_used_metadata_args.h"
+#include "mla_paged_metadata_args.h"
 #include "mla_validation.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
@@ -24,6 +25,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadataFromPrefix(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args);
 
 namespace flash_attn::mla {
 namespace {
@@ -76,6 +78,8 @@ struct MetadataSubmission {
             ComputeMlaTndBsndMetadataFromPrefix<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs>) {
             ComputeMlaUsedMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
+        } else if constexpr (std::is_same_v<Args, MlaPagedMetadataArgs>) {
+            ComputeMlaPagedMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else if (hasKvLengths) {
             ComputeMlaBsndKvLengthMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else {
@@ -197,6 +201,34 @@ at::Tensor TndBsndMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t he
         return 0;
     });
     return submission.metadata;
+}
+
+at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_t heads, int64_t pageSize,
+                           at::ScalarType dtype, const at::Tensor& cacheSeqlens, const std::optional<at::Tensor>& cuQ)
+{
+    const auto words = CheckPagedMetadataInputs(batch, maxQ, capacity, heads, pageSize, dtype, cacheSeqlens, cuQ);
+    const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
+    auto metadata = at::empty({words}, cacheSeqlens.options().dtype(at::kInt));
+    const MlaSequenceAllocation query{cuQ ? MlaSequenceLayout::Tnd : MlaSequenceLayout::Bsnd, cuQ ? 0 : batch * maxQ,
+                                      maxQ};
+    // AICPU derives the TND total from the prefix and reads all length values.
+    // No physical pages, cache addresses or strides are part of generation.
+    // Static capacity fixes blockDim, including device-only zero lengths, so
+    // a future consumer need not read the record to choose its launch size.
+    MlaPagedMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
+                              words,
+                              uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),
+                              {batch, heads, query, capacity, pageSize},
+                              DensePlatform(batch != 0 && maxQ != 0 && capacity != 0),
+                              {cuQ ? reinterpret_cast<uint64_t>(cuQ->data_ptr()) : 0, cuQ ? uint64_t(cuQ->numel()) : 0},
+                              {},
+                              {reinterpret_cast<uint64_t>(cacheSeqlens.data_ptr()), uint64_t(cacheSeqlens.numel())}};
+    auto submission = PrepareSubmission(metadata, args, cacheSeqlens, cuQ, true);
+    at_npu::native::OpCommand::RunOpApiV2("ascendc_mla_paged_metadata", [submission]() mutable -> int {
+        submission.Enqueue();
+        return 0;
+    });
+    return metadata;
 }
 
 std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -685,6 +717,8 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
           "ScalarType qkv_dtype, Tensor cache_seqlens) -> Tensor");
     m.def("_mla_tnd_bsnd_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
           "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q) -> Tensor");
+    m.def("_mla_paged_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, int page_size, "
+          "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor? cu_seqlens_q) -> Tensor");
     m.def("_mla_dense_forward(Tensor q, Tensor k, Tensor v, Tensor qv, float? softmax_scale=None, "
           "Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
     m.def("_mla_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
@@ -701,6 +735,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
     // including when a direct caller supplies CPU lengths.
     m.impl("_mla_dense_metadata", &flash_attn::mla::DenseMetadataOp);
     m.impl("_mla_tnd_bsnd_metadata", &flash_attn::mla::TndBsndMetadataOp);
+    m.impl("_mla_paged_metadata", &flash_attn::mla::PagedMetadataOp);
 }
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
@@ -709,6 +744,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
     // dtype, including malformed floating tensors that require gradients.
     m.impl("_mla_dense_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_tnd_bsnd_metadata", torch::CppFunction::makeFallthrough());
+    m.impl("_mla_paged_metadata", torch::CppFunction::makeFallthrough());
 }
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)

@@ -2068,6 +2068,48 @@ def _mla_dense_metadata_fake(
     )
 
 
+def _check_mla_metadata_query_prefix(cu_seqlens_q, batch_size, device):
+    if cu_seqlens_q.dtype != torch.int32:
+        raise RuntimeError("MLA: cu_seqlens_q must have dtype int32")
+    if cu_seqlens_q.device != device:
+        raise RuntimeError("MLA: cu_seqlens_q must be on the same NPU device")
+    if cu_seqlens_q.ndim != 1 or cu_seqlens_q.numel() != batch_size + 1:
+        raise RuntimeError("MLA: cu_seqlens_q must have shape [batch_size + 1]")
+    if not cu_seqlens_q.is_contiguous():
+        raise RuntimeError("MLA: cu_seqlens_q must be contiguous")
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_paged_metadata")
+def _mla_paged_metadata_fake(
+    batch_size,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_heads_q,
+    page_size,
+    qkv_dtype,
+    cache_seqlens,
+    cu_seqlens_q,
+):
+    if not 0 <= batch_size <= (2**32 - 1 - 408) // 5:
+        raise RuntimeError("MLA: paged metadata word count overflow")
+    if not (16 <= page_size <= 1024 and page_size % 16 == 0):
+        raise RuntimeError("MLA: page_size must be a multiple of 16 in [16, 1024]")
+    batch_bound = batch_size if cu_seqlens_q is None else 0
+    if (
+        not _fits_mla_dense_shape(batch_bound, max_seqlen_q, num_heads_q, max_seqlen_k)
+        or max_seqlen_k % page_size != 0
+    ):
+        raise RuntimeError(
+            "MLA: paged metadata shape bounds exceeded or max_seqlen_k is not divisible by page_size"
+        )
+    if qkv_dtype not in (torch.float16, torch.bfloat16):
+        raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
+    _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
+    if cu_seqlens_q is not None:
+        _check_mla_metadata_query_prefix(cu_seqlens_q, batch_size, cache_seqlens.device)
+    return torch.empty((408 + 5 * batch_size,), dtype=torch.int32, device=cache_seqlens.device)
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_tnd_bsnd_metadata")
 def _mla_tnd_bsnd_metadata_fake(
     batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens, cu_seqlens_q
@@ -2079,14 +2121,7 @@ def _mla_tnd_bsnd_metadata_fake(
     if qkv_dtype not in (torch.float16, torch.bfloat16):
         raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
     _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
-    if cu_seqlens_q.dtype != torch.int32:
-        raise RuntimeError("MLA: cu_seqlens_q must have dtype int32")
-    if cu_seqlens_q.device != cache_seqlens.device:
-        raise RuntimeError("MLA: cu_seqlens_q must be on the same NPU device")
-    if cu_seqlens_q.ndim != 1 or cu_seqlens_q.numel() != batch_size + 1:
-        raise RuntimeError("MLA: cu_seqlens_q must have shape [batch_size + 1]")
-    if not cu_seqlens_q.is_contiguous():
-        raise RuntimeError("MLA: cu_seqlens_q must be contiguous")
+    _check_mla_metadata_query_prefix(cu_seqlens_q, batch_size, cache_seqlens.device)
     return torch.empty((406 + 5 * batch_size,), dtype=torch.int32, device=cache_seqlens.device)
 
 
@@ -2218,12 +2253,22 @@ def _get_scheduler_metadata_fake(
                 cu_seqlens_k_new,
                 seqused_q,
                 cache_leftpad,
-                page_size,
                 pack_gqa,
                 softcap,
                 softmax_scale,
             ),
         )
+        if page_size is not None:
+            return _mla_paged_metadata_fake(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                page_size,
+                qkv_dtype,
+                cache_seqlens,
+                cu_seqlens_q,
+            )
         if cu_seqlens_q is not None:
             return _mla_tnd_bsnd_metadata_fake(
                 batch_size,
@@ -2282,6 +2327,10 @@ def get_scheduler_metadata(
     max_seqlen_q is a per-query-segment bound, max_seqlen_k is cache capacity.
     Read-only flash_attn_with_kvcache accepts this v4 record with TND queries
     and a BSND cache; the current query prefixes and KV lengths must match.
+    With page_size it generates v6 for BSND/TND queries: page_size must be a
+    multiple of 16 in [16, 1024], and max_seqlen_k is logical capacity, divisible
+    by page_size and at most 16384. No page table or physical cache is inspected.
+    Public MLA paged forward is not implemented yet.
     Its scale is supplied only to forward; legacy numerical
     keywords are not supported. Length values are checked on device.
     """
@@ -2300,12 +2349,22 @@ def get_scheduler_metadata(
             (
                 cu_seqlens_k_new,
                 cache_leftpad,
-                page_size,
                 pack_gqa,
                 softcap,
                 softmax_scale,
             ),
         )
+        if page_size is not None:
+            return torch.ops.flash_attn_npu_3._mla_paged_metadata(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                page_size,
+                qkv_dtype,
+                cache_seqlens,
+                cu_seqlens_q,
+            )
         if cu_seqlens_q is not None:
             return torch.ops.flash_attn_npu_3._mla_tnd_bsnd_metadata(
                 batch_size,

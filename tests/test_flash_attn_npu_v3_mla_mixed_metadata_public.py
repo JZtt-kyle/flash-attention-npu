@@ -217,7 +217,7 @@ def test_internal_length_options_still_rejected(dtype, kind, extra):
         ("has_softcap", True),
         ("pack_gqa", False),
         ("sm_margin", 1),
-        ("page_size", 16),
+        ("page_size", 17),
         ("max_seqlen_k_new", 1),
         ("softcap", 0.0),
         ("softmax_scale", 0.23),

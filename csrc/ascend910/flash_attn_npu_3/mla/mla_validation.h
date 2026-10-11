@@ -5,6 +5,7 @@
 #include "mla_tnd_metadata.h"
 #include "mla_tnd_bsnd_metadata.h"
 #include "mla_used_metadata.h"
+#include "mla_paged_metadata.h"
 #include "mla_bsnd_layout.h"
 #include "mla_tnd_layout.h"
 
@@ -204,6 +205,33 @@ inline uint32_t CheckUsedInputs(const at::Tensor& q, int64_t batch, const std::o
     return kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * batch;
 }
 
+inline void CheckMetadataQueryPrefix(const at::Tensor& cuQ, int64_t batch, const at::Device& device)
+{
+    TORCH_CHECK(cuQ.scalar_type() == at::kInt, "MLA: cu_seqlens_q must have dtype int32");
+    TORCH_CHECK(cuQ.device() == device, "MLA: cu_seqlens_q must be on the same NPU device");
+    TORCH_CHECK(cuQ.dim() == 1 && cuQ.numel() == batch + 1, "MLA: cu_seqlens_q must have shape [batch_size + 1]");
+    TORCH_CHECK(cuQ.is_contiguous(), "MLA: cu_seqlens_q must be contiguous");
+}
+
+inline uint32_t CheckPagedMetadataInputs(int64_t batch, int64_t maxQ, int64_t capacity, int64_t heads, int64_t pageSize,
+                                         at::ScalarType dtype, const at::Tensor& cacheSeqlens,
+                                         const std::optional<at::Tensor>& cuQ)
+{
+    TORCH_CHECK(batch >= 0 && batch <= (UINT32_MAX - kMlaPagedMetadataPrefixWords) / kMlaPagedMetadataSequenceWords,
+                "MLA: paged metadata word count overflow");
+    TORCH_CHECK(pageSize >= 16 && pageSize <= 1024 && pageSize % 16 == 0,
+                "MLA: page_size must be a multiple of 16 in [16, 1024]");
+    // TND total Q is checked on device, not bounded by a rectangular B*maxQ.
+    TORCH_CHECK(FitsDenseShape(cuQ ? 0 : batch, maxQ, heads, capacity) && capacity % pageSize == 0,
+                "MLA: paged metadata shape bounds exceeded or max_seqlen_k is not divisible by page_size");
+    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
+    CheckCacheLengths(cacheSeqlens, batch, cacheSeqlens.device());
+    if (cuQ) {
+        CheckMetadataQueryPrefix(*cuQ, batch, cacheSeqlens.device());
+    }
+    return kMlaPagedMetadataPrefixWords + kMlaPagedMetadataSequenceWords * batch;
+}
+
 inline uint32_t CheckTndBsndMetadataInputs(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,
                                            const at::Tensor& cacheSeqlens, const at::Tensor& cuQ)
 {
@@ -213,10 +241,7 @@ inline uint32_t CheckTndBsndMetadataInputs(int64_t batch, int64_t maxQ, int64_t 
     TORCH_CHECK(FitsDenseShape(0, maxQ, heads, sk), "MLA: mixed metadata shape or max_seqlen bounds exceeded");
     TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
     CheckCacheLengths(cacheSeqlens, batch, cacheSeqlens.device());
-    TORCH_CHECK(cuQ.scalar_type() == at::kInt, "MLA: cu_seqlens_q must have dtype int32");
-    TORCH_CHECK(cuQ.device() == cacheSeqlens.device(), "MLA: cu_seqlens_q must be on the same NPU device");
-    TORCH_CHECK(cuQ.dim() == 1 && cuQ.numel() == batch + 1, "MLA: cu_seqlens_q must have shape [batch_size + 1]");
-    TORCH_CHECK(cuQ.is_contiguous(), "MLA: cu_seqlens_q must be contiguous");
+    CheckMetadataQueryPrefix(cuQ, batch, cacheSeqlens.device());
     return kMlaTndBsndMetadataPrefixWords + kMlaTndBsndMetadataSequenceWords * batch;
 }
 

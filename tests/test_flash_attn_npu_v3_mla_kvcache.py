@@ -161,7 +161,7 @@ def test_public_record_matches_host(bsnd_probe, dtype, shape):
         ("pack_gqa", False),
         ("pack_gqa", True),
         ("sm_margin", 1),
-        ("page_size", 16),
+        ("page_size", 17),
         ("max_seqlen_k_new", 1),
         ("softcap", 0.0),
         ("softcap", 15.0),
