@@ -1,4 +1,4 @@
-// BSND PA specialization of the CANN nonquant MLA task ring.
+// BSND/TND PA specializations of the CANN nonquant MLA task ring.
 // Source and license: mla_dense.hpp and ../LICENSE.cann. v6 validates current
 // lengths, all effective pages and complete cache spans before TPipe/events.
 // This independent component does not enable a public PA forward entry.
@@ -7,16 +7,19 @@
 #include "mla_paged_metadata.hpp"
 
 namespace flash_attn::mla::Kernel {
-template <typename InputT>
-class MlaPagedBsnd : private MlaTaskRing<InputT, true, false, false, false, true, true> {
+template <typename InputT, bool IsTnd>
+class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, true> {
   public:
-    // The caller has passed LoadPagedMetadata on every core, checked BSND Q
-    // and qv storage, and bound cache addresses to this invocation. No TND.
+    // The caller has passed LoadPagedMetadata on every core, checked Q/qv
+    // storage and matching query layout, and bound cache addresses to this call.
     __aicore__ inline void operator()(const MlaPagedKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
                                       const MlaPagedCacheInputs& cache, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
                                       TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts& layouts)
     {
-        const uint64_t rows = uint64_t(schedule.tiling.batch) * schedule.tiling.sq * schedule.tiling.heads;
+        // TND total and allocation starts have been validated to fit int32.
+        const uint32_t totalQuery = IsTnd ? schedule.query.totalTokens.low : 0;
+        const uint64_t tokens = IsTnd ? totalQuery : uint64_t(schedule.tiling.batch) * schedule.tiling.sq;
+        const uint64_t rows = tokens * schedule.tiling.heads;
         if (rows == 0) {
             return;
         }
@@ -44,8 +47,12 @@ class MlaPagedBsnd : private MlaTaskRing<InputT, true, false, false, false, true
             return;
         }
         this->Run(schedule.tiling, scale, qc, qr, reinterpret_cast<GM_ADDR>(cache.v.address),
-                  reinterpret_cast<GM_ADDR>(cache.k.address), output, lse, workspace, pipe, spans, 0, &layouts, false,
-                  reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout);
+                  reinterpret_cast<GM_ADDR>(cache.k.address), output, lse, workspace, pipe, spans, totalQuery, &layouts,
+                  false, reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout);
     }
 };
+template <typename InputT>
+using MlaPagedBsnd = MlaPaged<InputT, false>;
+template <typename InputT>
+using MlaPagedTnd = MlaPaged<InputT, true>;
 } // namespace flash_attn::mla::Kernel

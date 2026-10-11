@@ -1,4 +1,4 @@
-// Independent BSND PA attention probe, never linked into the public extension.
+// Independent BSND/TND PA attention probe, never linked into the public extension.
 // Oracle instantiates pinned unmodified CANN PA/non-FD headers. Q/row/table
 // strides outside its ABI are materialized by the test before launch/timing.
 #include <cmath>
@@ -6,6 +6,7 @@
 #include "runtime/rt_ffts.h"
 #include "kernel_operator.h"
 #include "mla/mla_paged_metadata_consumer.h"
+#include "mla/mla_tnd_layout.h"
 #include "mla_probe_batch_launch.h"
 using namespace AscendC;
 using namespace flash_attn::mla;
@@ -27,14 +28,14 @@ using fa_base_vector::FLOAT_ZERO;
 constexpr float FLOAT_INF = AttentionCommon::ConstInfo::FLOAT_INF;
 constexpr uint32_t BUFFER_SIZE_BYTE_1K = AttentionCommon::ConstInfo::BUFFER_SIZE_BYTE_1K;
 #include "fia_kernel_nonquant_mla.h"
+template <AttentionCommon::FIA_LAYOUT QLayout>
 __aicore__ inline void RunSource(GM_ADDR qc, GM_ADDR qr, GM_ADDR kvList, GM_ADDR kr, GM_ADDR output, GM_ADDR lse,
                                  GM_ADDR workspace, const MlaPagedKernelSchedule& sourceSchedule, float scale,
                                  GM_ADDR sourceQ, GM_ADDR sourceK, const MlaPagedCacheInputs& cache,
                                  bool sourceNeedInit, TPipe& pipe)
 {
-    using Types =
-        AttentionCommon::FIAType<InputT, InputT, InputT, InputT, true, false, AttentionCommon::FIA_LAYOUT::BSH, 0,
-                                 false, AttentionCommon::FIA_LAYOUT::BSH>;
+    using Types = AttentionCommon::FIAType<InputT, InputT, InputT, InputT, true, false, QLayout, 0, false,
+                                           AttentionCommon::FIA_LAYOUT::BSH>;
     using OracleCube = typename std::conditional<g_coreType == AscendC::AIC, FiaBlockCubeNonQuantMla<Types>,
                                                  FiaBlockCubeNonQuantMlaDummy<Types>>::type;
     using OracleVector = typename std::conditional<g_coreType == AscendC::AIC, FiaBlockVecNonQuantMlaDummy<Types>,
@@ -54,7 +55,7 @@ __aicore__ inline void RunSource(GM_ADDR qc, GM_ADDR qr, GM_ADDR kvList, GM_ADDR
     tiling.baseParams.usedCoreNum = params.usedCoreNum;
     tiling.baseParams.batchContinuous = 1;
     tiling.baseParams.softmaxLseFlag = 1;
-    tiling.baseParams.outputLayout = uint32_t(AttentionCommon::FIA_LAYOUT::BSH);
+    tiling.baseParams.outputLayout = uint32_t(QLayout);
     tiling.baseParams.actualSeqS1Dims = params.batch;
     tiling.baseParams.actualSeqS2Dims = params.batch;
     tiling.baseParams.needInit = sourceNeedInit;
@@ -122,12 +123,24 @@ __global__ __aicore__ __mix__(1, 2) void PAGED_ENTRY(uint64_t ffts, GM_ADDR qc, 
     SetSyncBaseAddr(ffts);
     TPipe pipe;
 #ifdef MLA_DENSE_ORACLE
-    RunSource(qc, qr, kvList, reinterpret_cast<GM_ADDR>(cache.k.address), output, lse, workspace, sourceSchedule, scale,
-              sourceQ, sourceK, cache, sourceNeedInit, pipe);
+    using Layout = AttentionCommon::FIA_LAYOUT;
+    if (context.query.layout == 1) {
+        // PA keeps KV lengths non-cumulative even with TND query prefixes.
+        RunSource<Layout::TND>(qc, qr, kvList, reinterpret_cast<GM_ADDR>(cache.k.address), output, lse, workspace,
+                               sourceSchedule, scale, sourceQ, sourceK, cache, sourceNeedInit, pipe);
+    } else {
+        RunSource<Layout::BSH>(qc, qr, kvList, reinterpret_cast<GM_ADDR>(cache.k.address), output, lse, workspace,
+                               sourceSchedule, scale, sourceQ, sourceK, cache, sourceNeedInit, pipe);
+    }
 #else
-    Kernel::MlaPagedBsnd<InputT> op;
-    op(schedule, scale, qc, qr, cache, output, lse, workspace, &pipe,
-       metadata + kMlaPagedMetadataPrefixWords * sizeof(uint32_t), layouts);
+    GM_ADDR spans = metadata + kMlaPagedMetadataPrefixWords * sizeof(uint32_t);
+    if (context.query.layout == 1) {
+        Kernel::MlaPagedTnd<InputT> op;
+        op(schedule, scale, qc, qr, cache, output, lse, workspace, &pipe, spans, layouts);
+    } else {
+        Kernel::MlaPagedBsnd<InputT> op;
+        op(schedule, scale, qc, qr, cache, output, lse, workspace, &pipe, spans, layouts);
+    }
 #endif
 #endif
 }
@@ -150,15 +163,38 @@ extern "C" int launch_paged_attention(void* stream, void* qc, void* qr, void* kv
                                       bool sourceNeedInit, void* status, bool checked, uint32_t blocks)
 {
     if (!context || !inputs || !cache || !sourceSchedule || !views || !std::isfinite(scale) || blocks == 0 ||
-        blocks > 26 || context->query.layout != 0)
+        blocks > 26 || context->query.layout > 1)
         return -1;
     MlaBsndInputLayouts layouts{};
 #if !defined(__NPU_ARCH__)
     MlaBsndTensorLayout* targets[] = {&layouts.q, &layouts.qv};
+    const void* pointers[] = {qr, qc};
+    const bool tnd = context->query.layout == 1;
     for (uint32_t i = 0; i < 2; ++i) {
-        if (views[i].sizes[0] != context->batch || views[i].sizes[1] != context->query.maxLength ||
-            views[i].sizes[2] != context->heads || views[i].sizes[3] != (i == 0 ? 64 : 512) ||
-            BuildBsndTensorLayout(views[i], *targets[i]) != MlaLayoutStatus::Success)
+        const auto& v = views[i];
+        if (v.sizes[0] != (tnd ? 1 : context->batch) || v.sizes[2] != context->heads ||
+            v.sizes[3] != (i == 0 ? 64 : 512))
+            return -3;
+#ifndef MLA_DENSE_ORACLE
+        const uint64_t tokens =
+            uint64_t(context->query.totalTokens.low) | (uint64_t(context->query.totalTokens.high) << 32);
+        if (v.sizes[1] != (tnd ? tokens : context->query.maxLength))
+            return -3;
+#endif
+        if (tnd) {
+            const MlaTndTensorView view{{v.sizes[1], v.sizes[2], v.sizes[3]},
+                                        {v.strides[1], v.strides[2], v.strides[3]},
+                                        v.storageOffset,
+                                        v.storageBytes};
+            MlaTndTensorLayout layout{};
+            if (BuildTndTensorLayout(view, layout) != MlaLayoutStatus::Success)
+                return -3;
+            *targets[i] = {0, layout.tokenStride, layout.headStride, layout.spanElements};
+        } else if (BuildBsndTensorLayout(v, *targets[i]) != MlaLayoutStatus::Success) {
+            return -3;
+        }
+        const auto span = targets[i]->spanElements;
+        if (span && (!pointers[i] || uintptr_t(pointers[i]) > UINTPTR_MAX - span * sizeof(InputT)))
             return -3;
     }
 #ifdef MLA_DENSE_ORACLE

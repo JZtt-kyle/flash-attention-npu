@@ -119,7 +119,7 @@ def build_probes(
         common += ["-DNDEBUG"]
     layout_objects = []
     for layout in (
-        ["bsnd", "paged"]
+        ["bsnd", "tnd", "paged"]
         if paged
         else ["bsnd", "tnd"]
         if tnd_stride
@@ -314,7 +314,11 @@ def build_probes(
         ROOT / "tests/mla_probe_batch_launch.h",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_layout.h",
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_layout.cpp",
-        *([ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_layout.cpp"] if tnd_stride else []),
+        *(
+            [ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_layout.cpp"]
+            if tnd_stride or paged
+            else []
+        ),
         *([ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_paged_layout.cpp"] if paged else []),
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("mla_paged*.h")),
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("mla_tnd*.h")),

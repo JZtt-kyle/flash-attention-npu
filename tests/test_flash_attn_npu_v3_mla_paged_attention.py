@@ -1,4 +1,4 @@
-"""Standalone BSND PA attention: pinned non-FD source and independent O/LSE math.
+"""Standalone PA attention helpers and BSND tests with source/independent O/LSE math.
 
 Only the source adapter materializes layouts outside the CANN ABI. Neither
 oracle reads the v6 spans to interpret query-used, logical KV or page IDs.
@@ -73,6 +73,7 @@ def config(
     pool=7,
     aic=None,
     repeat=False,
+    layout=0,
 ):
     return dict(
         page=page,
@@ -85,6 +86,7 @@ def config(
         pool=pool,
         aic=aic,
         repeat=repeat,
+        layout=layout,
     )
 
 
@@ -222,12 +224,13 @@ def make_case(
     spec = dict(spec)
     dtype = probes[0]["dtype"]
     q, uq, kv, p = spec["q"], spec["uq"], spec["lengths"], spec["page"]
+    tnd = spec["layout"] == 2
     batch, sq, heads = len(q), max(q, default=0), spec["heads"]
-    assert all(x == sq for x in q) and len(kv) == batch
+    assert (tnd or all(x == sq for x in q)) and len(kv) == batch
     used = q if uq is None else uq
     platform = producer["platform"]
     item = paged_case(
-        0,
+        spec["layout"],
         q,
         kv,
         uq,
@@ -264,7 +267,7 @@ def make_case(
     for name, offset in zip(("q", "qv", "k", "v"), (5, 11, 19, 29)):
         is_query = name in ("q", "qv")
         shape = (
-            (batch, sq, heads, 64 if name == "q" else 512)
+            (1 if tnd else batch, sum(q) if tnd else sq, heads, 64 if name == "q" else 512)
             if is_query
             else (pool, p, 1, 64 if name == "k" else 512)
         )
@@ -280,11 +283,18 @@ def make_case(
                     data[..., hi:] = 0
                 else:
                     data.zero_()
-            for b, length in enumerate(used):
-                data[b, length:] = torch.nan
+            pos = 0
+            for b, (allocation, length) in enumerate(zip(q, used)):
+                if tnd:
+                    data[0, pos + length : pos + allocation] = torch.nan
+                    pos += allocation
+                else:
+                    data[b, length:] = torch.nan
         else:
             data[~active] = torch.nan
         profile = spec["profile"]
+        if profile == "ntd":
+            profile = "bnsd"
         if profile.startswith("table_") or (is_query and profile.startswith("pa02_")):
             profile = "contiguous"
         strides = (
@@ -294,13 +304,22 @@ def make_case(
             data, strides, offset, overlap=profile in ("broadcast", "overlap")
         )
         host[name] = logical
-        devices["migrated"][name] = device
+        devices["migrated"][name] = device[0] if tnd and is_query else device
         checks += guards
         # Preserve native PA02 page stride. Q, cache row and table views outside
         # the source ABI are independently materialized before its invocation.
         native = not is_query and spec["profile"].startswith("pa02_")
-        src_strides = strides if native else strides_for(shape, "contiguous", name)
-        source, _, guards = make_view(logical, src_strides, offset + 2)
+        source_data = logical
+        if tnd and is_query:
+            # Independently pack effective Q segments from allocation/used inputs.
+            # The source parser uses these cumulative tails for both starts and lengths.
+            pos, chunks = 0, []
+            for allocation, length in zip(q, used):
+                chunks.append(logical[:, pos : pos + length])
+                pos += allocation
+            source_data = torch.cat(chunks, dim=1) if chunks else logical
+        src_strides = strides if native else strides_for(source_data.shape, "contiguous", name)
+        source, _, guards = make_view(source_data, src_strides, offset + 2)
         devices["oracle"][name] = source
         checks += guards
     # Preserve int32 page-table offset/row stride, including legal row aliases.
@@ -342,7 +361,12 @@ def make_case(
     outputs, output_bases, workspace, ws_bases = {}, {}, {}, {}
     for n in devices:
         outputs[n], output_bases[n] = [], []
-        for shape, typ in (((batch, sq, heads, 512), dtype), ((batch, heads, sq), torch.float32)):
+        total = sum(used) if n == "oracle" else sum(q)
+        output_shape = (total, heads, 512) if tnd else (batch, sq, heads, 512)
+        lse_shape = (
+            ((total, heads) if n == "oracle" else (heads, total)) if tnd else (batch, heads, sq)
+        )
+        for shape, typ in ((output_shape, dtype), (lse_shape, torch.float32)):
             count = 1
             for size in shape:
                 count *= size
@@ -372,7 +396,12 @@ def make_case(
         workspace=workspace,
         ws_bases=ws_bases,
         scale=1 / 24 if scale is None else scale,
-        source_q=torch.tensor(used, dtype=torch.int64).npu(),
+        source_q=(
+            torch.tensor(used, dtype=torch.int64).cumsum(0)
+            if tnd
+            else torch.tensor(used, dtype=torch.int64)
+        ).npu(),
+        # PA KV lengths stay per-sample, including with TND Q.
         source_k=torch.tensor(kv, dtype=torch.int64).npu(),
         status=torch.full((3 * context.block_dim * 16,), SENTINEL, dtype=torch.int32, device="npu"),
     )
@@ -381,7 +410,10 @@ def make_case(
         for n, d in devices.items()
     }
     case["views"] = {
-        n: (TensorView * 2)(*[descriptor(d[k]) for k in ("q", "qv")]) for n, d in devices.items()
+        n: (TensorView * 2)(
+            *[descriptor(d[k].unsqueeze(0) if d[k].ndim == 3 else d[k]) for k in ("q", "qv")]
+        )
+        for n, d in devices.items()
     }
     with forbid_host_readback():
         enqueue(producer, args, storage, inputs)
@@ -450,13 +482,22 @@ def launch(
     )
 
 
-def valid_outputs(case, outputs):
+def valid_outputs(case, outputs, *, source=False):
     q = case["item"]["q"] if case["item"]["uq"] is None else case["item"]["uq"]
     if not q:
         return [
             outputs[0].reshape(0, case["context"].heads, 512),
             outputs[1].reshape(case["context"].heads, 0),
         ]
+    if case["item"]["layout"] == 2:
+        if source:
+            return [outputs[0], outputs[1].T]
+        pos, out, lse = 0, [], []
+        for allocation, length in zip(case["item"]["q"], q):
+            out.append(outputs[0][pos : pos + length])
+            lse.append(outputs[1][:, pos : pos + length])
+            pos += allocation
+        return [torch.cat(out), torch.cat(lse, dim=1)]
     return [
         torch.cat([outputs[0][b, :length] for b, length in enumerate(q)]),
         torch.cat([outputs[1][b, :, :length] for b, length in enumerate(q)], dim=1),
@@ -467,11 +508,17 @@ def references(case):
     q = case["item"]["q"] if case["item"]["uq"] is None else case["item"]["uq"]
     results = [[], [], [], []]
     heads, page = case["context"].heads, case["config"]["page"]
+    starts = list(itertools.accumulate([0, *case["item"]["q"]]))
     for b, (qlen, klen) in enumerate(zip(q, case["config"]["lengths"])):
         if not qlen:
             continue
         if klen:
-            data = {n: case["host"][n][b : b + 1, :qlen] for n in ("q", "qv")}
+            data = {
+                n: case["host"][n][:, starts[b] : starts[b] + qlen]
+                if case["item"]["layout"] == 2
+                else case["host"][n][b : b + 1, :qlen]
+                for n in ("q", "qv")
+            }
             # Independent scalar token indexing, never schedule spans/Copy traces.
             for n in ("k", "v"):
                 data[n] = torch.stack(
@@ -505,7 +552,10 @@ def check_case(probes, case, *, repeats=2):
         dtype=torch.bool,
     )
     source_ok = bool(
-        case["context"].batch and case["context"].query.maximum and case["schedule"].tiling.sk
+        case["context"].batch
+        and case["context"].query.maximum
+        and case["schedule"].tiling.sk
+        and (case["item"]["layout"] == 0 or sum(used))
     )
     first = source = None
     for _ in range(repeats):
@@ -515,7 +565,7 @@ def check_case(probes, case, *, repeats=2):
             assert launch(probes, case) == 0
         actual = valid_outputs(case, [t.cpu() for t in case["outputs"]["migrated"]])
         if source_ok:
-            source = valid_outputs(case, [t.cpu() for t in case["outputs"]["oracle"]])
+            source = valid_outputs(case, [t.cpu() for t in case["outputs"]["oracle"]], source=True)
             torch.testing.assert_close(actual[0], source[0], rtol=0, atol=0)
             torch.testing.assert_close(actual[1][:, ~empty], source[1][:, ~empty], rtol=0, atol=0)
             assert torch.isposinf(source[1][:, empty]).all()
@@ -880,8 +930,10 @@ FAULTS = (
 )
 
 
-def fault_case(probes, producer, fault):
-    spec = config(aic=1)
+def fault_case(probes, producer, fault, *, layout=0):
+    spec = config(aic=1, layout=layout)
+    if layout == 2:
+        spec.update(q=[5, 2], uq=[3, 1])
     if fault == "unused_q_page":
         spec["uq"] = [3, 0]
     if fault == "empty_query":
@@ -896,6 +948,9 @@ def fault_case(probes, producer, fault):
     elif fault in ("stale_q", "stale_k"):
         case["inputs"][1 if fault == "stale_q" else 2][1] = 0
         expected = 13 if fault == "stale_q" else 11
+    elif fault == "stale_prefix":
+        case["inputs"][0][1] = 4
+        expected = 12
     elif fault in ("page", "unused_q_page", "empty_query"):
         case["tables"]["migrated"][1, 1] = -1
         expected = 15

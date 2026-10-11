@@ -22,7 +22,7 @@ from tests.test_flash_attn_npu_v3_mla_paged_attention import (
 )
 
 
-def run(attention, producer_manifest, fault, output):
+def run(attention, producer_manifest, fault, output, layout="0"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     output = Path(output)
     probes = load_attention(attention)
@@ -32,7 +32,7 @@ def run(attention, producer_manifest, fault, output):
         assert sha256(ROOT / name) == digest, name
     with load_probe(manifest["library"], output / "producer") as producer:
         configure_producer(producer)
-        case, options, status = fault_case(probes, producer, fault)
+        case, options, status = fault_case(probes, producer, fault, layout=int(layout))
         assert launch(probes, case, checked=False, diagnostic=True, **options) == 0
         check_rejected(case, status)
         start = time.monotonic()
@@ -50,6 +50,7 @@ def run(attention, producer_manifest, fault, output):
         except RuntimeError as error:
             report = dict(
                 fault=fault,
+                layout=int(layout),
                 expected_status=status,
                 error=str(error),
                 seconds=time.monotonic() - start,

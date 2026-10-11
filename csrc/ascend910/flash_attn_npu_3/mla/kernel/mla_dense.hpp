@@ -16,7 +16,7 @@
 // Specialization: nonempty BSND capacity, Hkv=1, no mask/FD,
 // Sq*Hq>0, 1<=Sk<=16384. The caller validates source field/address bounds and
 // supplies the source M-block partition, including cross-core and tail blocks.
-// MlaTaskRing shares the task ring with typed nonpaged and BSND PA wrappers.
+// MlaTaskRing shares the task ring with typed nonpaged and BSND/TND PA wrappers.
 // IsTnd uses compact Q token starts and per-sample Q/KV lengths. MixedKv
 // selects v4 five-word spans with a 64-bit physical KV start instead of v3.
 // HasKvLengths additionally consumes a validated v2 int32 length snapshot.
@@ -42,7 +42,7 @@ class MlaTaskRing {
                   "MLA dense only supports FP16 and BF16");
     static_assert(!MixedKv || (IsTnd && HasKvLengths));
     static_assert(!HasUsed || HasKvLengths);
-    static_assert(!IsPaged || (HasKvLengths && HasStrides && !IsTnd && !MixedKv && !HasUsed));
+    static_assert(!IsPaged || (HasKvLengths && HasStrides && !MixedKv && !HasUsed));
     static constexpr uint32_t kSpanWords = IsPaged ? 5 : HasUsed ? 8 : MixedKv ? 5 : 4;
     static constexpr bool kQueryLengths = IsTnd || HasUsed || IsPaged;
 
@@ -275,6 +275,11 @@ class MlaTaskRing {
                     if (b != previousBatch) {
                         if constexpr (IsPaged) {
                             const uint32_t start = kSpanWords * b;
+                            if constexpr (IsTnd) {
+                                // v6 validates TND allocation starts within int32.
+                                // Q-used limits rows; it never moves later samples.
+                                queryStart = lengths.GetValue(start);
+                            }
                             actualQueryLength = lengths.GetValue(start + 3);
                             actualKvLength = lengths.GetValue(start + 4);
                         } else if constexpr (HasUsed) {
