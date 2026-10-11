@@ -41,14 +41,14 @@ struct MlaPagedSchedule {
     MlaSchedule schedule{};
 };
 
-// Independent CPU component only: BSND/TND Q, optional Q-used, shared 512+64
-// KV, no mask, num_splits=1. Also used by standalone CPU metadata serialization;
-// no AICPU, device or public caller uses this API.
+// Independent CPU/AICPU component: BSND/TND Q, optional Q-used, shared 512+64
+// KV, no mask, num_splits=1. Used by standalone v6 metadata generation;
+// no device consumer or public caller uses this API.
 // P is 16..1024 in multiples of 16; C is 0..16384 and divisible by P.
 // Q allocation/prefix/used follow ParseUsedLengths. KV lengths are mandatory
 // int32[B], always per sample, in [0,C]; nullptr/count=0 is allowed only at B=0.
 // Validate all samples even when Q allocation/used or KV is zero. Inputs are
-// readable, stable CPU buffers; never copy device lengths to the host for this.
+// readable, stable buffers on the executing CPU/AICPU; no device-to-host copy.
 // Output owns its spans, retains no input pointers and is unchanged on failure.
 MlaScheduleStatus ParsePagedLengths(const MlaPagedShape& shape, const MlaPagedInputs& inputs, MlaPagedLengths& output);
 

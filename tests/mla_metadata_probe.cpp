@@ -24,12 +24,61 @@ extern __global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadata(void* args);
 #include "mla/mla_used_metadata_args.h"
 extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
 #endif
+#ifdef MLA_PAGED_METADATA
+#include "mla/mla_paged_metadata.h"
+#include "mla_paged_metadata_probe.h"
+extern __global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ProbeMlaPagedMetadata(void* args);
+#endif
 using namespace flash_attn::mla;
 
 extern "C" uint32_t metadata_args_size()
 {
     return sizeof(MlaMetadataArgs);
 }
+
+#ifdef MLA_PAGED_METADATA
+extern "C" uint32_t paged_metadata_args_size()
+{
+    return sizeof(MlaPagedMetadataArgs);
+}
+
+extern "C" uint32_t paged_metadata_probe_args_size()
+{
+    return sizeof(MlaPagedMetadataProbeArgs);
+}
+
+extern "C" uint32_t paged_metadata_host(const MlaPagedMetadataArgs* args, uint32_t* output)
+{
+    // Explicit CPU total, independently compared with AICPU's prefix-derived total.
+    return BuildPagedMetadata(args->shape, args->platform, args->dtype, output, args->outputWords,
+                              PagedMetadataInputs(*args))
+               ? 0
+               : 1;
+}
+
+extern "C" int launch_paged_metadata(void* current, void* worker, void* ready, void* done,
+                                     const MlaPagedMetadataArgs* args, uint64_t diagnosticStatus, bool nullArgs)
+{
+    auto status = aclrtRecordEvent(ready, current);
+    if (status != ACL_SUCCESS)
+        return status;
+    status = aclrtStreamWaitEvent(worker, ready);
+    if (status != ACL_SUCCESS)
+        return status;
+    if (diagnosticStatus != 0) {
+        MlaPagedMetadataProbeArgs launchArgs{*args, diagnosticStatus, uint32_t(nullArgs)};
+        ProbeMlaPagedMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
+    } else {
+        MlaPagedMetadataArgs launchArgs = *args;
+        ComputeMlaPagedMetadata<<<1, nullptr, worker>>>(&launchArgs, sizeof(launchArgs));
+    }
+    status = aclrtRecordEvent(done, worker);
+    if (status != ACL_SUCCESS)
+        return status;
+    return aclrtStreamWaitEvent(current, done);
+}
+#endif
 
 #ifdef MLA_USED_METADATA
 extern "C" uint32_t used_metadata_args_size()

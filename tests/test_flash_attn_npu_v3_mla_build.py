@@ -96,6 +96,7 @@ def test_aicpu_sources_by_backend():
             expected.append(f"csrc/{directory}/mla/mla_tnd_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_tnd_bsnd_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_used_metadata.aicpu")
+            expected.append(f"csrc/{directory}/mla/mla_paged_metadata.aicpu")
         assert builder._build_aicpu_metadata("unused.so", name) == expected
     assert builder._build_aicpu_metadata("unused.so", "unknown") == []
 
@@ -117,6 +118,11 @@ def test_aicpu_sources_by_backend():
         ("mla_used_metadata", "mla_used_metadata.h"),
         ("mla_used_metadata", "mla_used_metadata_args.h"),
         ("mla_used_metadata", "mla_tnd_schedule.cpp"),
+        ("mla_paged_metadata", "mla_paged_metadata.h"),
+        ("mla_paged_metadata", "mla_paged_metadata_args.h"),
+        ("mla_paged_metadata", "mla_paged_metadata.cpp"),
+        ("mla_paged_metadata", "mla_paged_schedule.h"),
+        ("mla_paged_metadata", "mla_tnd_schedule.cpp"),
     ],
 )
 def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, header_name):
@@ -130,7 +136,8 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, hea
     for name in (
         "mla_metadata.h",
         stem + "_args.h"
-        if stem in ("mla_tnd_metadata", "mla_tnd_bsnd_metadata", "mla_used_metadata")
+        if stem
+        in ("mla_tnd_metadata", "mla_tnd_bsnd_metadata", "mla_used_metadata", "mla_paged_metadata")
         else "mla_metadata_args.h",
         "mla_schedule.cpp",
         "cann_split_core.cpp",
@@ -171,6 +178,16 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, hea
             "mla_tnd_schedule.cpp",
         ):
             assert name in dependencies
+    if stem == "mla_paged_metadata":
+        for name in (
+            "mla_paged_metadata.h",
+            "mla_paged_metadata.cpp",
+            "mla_paged_metadata_args.h",
+            "mla_paged_schedule.h",
+            "mla_used_schedule.h",
+            "mla_tnd_schedule.cpp",
+        ):
+            assert name in dependencies
     capsys.readouterr()
     assert builder._build_aicpu_object(out, src) == str(obj)
     assert "[compile-aicpu-skip]" in capsys.readouterr().out
@@ -188,7 +205,14 @@ def test_aicpu_incremental_dependencies(tmp_path, monkeypatch, capsys, stem, hea
         assert "[compile-aicpu-skip]" not in capsys.readouterr().out
 
 
-def test_metadata_entry_bounds_and_serialization(tmp_path):
+@pytest.mark.parametrize(
+    "stem,driver",
+    [
+        ("mla_metadata", "mla_metadata_driver.cpp"),
+        ("mla_paged_metadata", "mla_paged_metadata_entry_driver.cpp"),
+    ],
+)
+def test_metadata_entry_bounds_and_serialization(tmp_path, stem, driver):
     # The barrier itself is tested on 910B; this shim allows sanitizers to check
     # the real entry's pointer/size guards and serializer without an NPU runtime.
     (tmp_path / "aicpu_api.h").write_text(
@@ -211,8 +235,8 @@ def test_metadata_entry_bounds_and_serialization(tmp_path):
         f"-I{MLA}",
         "-x",
         "c++",
-        str(MLA / "mla_metadata.aicpu"),
-        str(ROOT / "tests/mla_metadata_driver.cpp"),
+        str(MLA / (stem + ".aicpu")),
+        str(ROOT / "tests" / driver),
         "-o",
         str(executable),
     ]

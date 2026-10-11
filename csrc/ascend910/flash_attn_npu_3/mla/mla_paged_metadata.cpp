@@ -14,9 +14,10 @@ bool PagedMetadataWords(int64_t batch, uint32_t& words)
     return true;
 }
 
-bool BuildPagedMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype, uint32_t* output,
-                        uint32_t outputWords, const MlaPagedInputs& inputs)
+bool BuildPagedMetadata(const MlaPagedShape& inputShape, const MlaPlatformInfo& platform, uint32_t dtype,
+                        uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs, bool fromQueryPrefix)
 {
+    auto shape = inputShape;
     uint32_t expectedWords;
     const uintptr_t outAddress = reinterpret_cast<uintptr_t>(output);
     constexpr auto maxAddress = std::numeric_limits<uintptr_t>::max();
@@ -59,6 +60,11 @@ bool BuildPagedMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platf
     } else if (!validLengths) {
         prefix.status = uint32_t(MlaPagedMetadataStatus::InvalidLengths);
     } else {
+        if (fromQueryPrefix && shape.query.layout == MlaSequenceLayout::Tnd) {
+            // No host readback. The scheduler still validates the initial
+            // zero, monotonicity, per-segment bound, used and all KV lengths.
+            shape.query.totalTokens = inputs.cuQuery.data[shape.batch];
+        }
         const auto status = BuildPagedSchedule(shape, platform, inputs, result);
         prefix.scheduleStatus = uint32_t(status);
         if (status == MlaScheduleStatus::Success) {

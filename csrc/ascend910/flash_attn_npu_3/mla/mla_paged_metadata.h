@@ -1,4 +1,5 @@
-// Private PA protocol. No AICPU, device consumer or public caller uses it yet.
+// Private PA protocol shared by the CPU and standalone AICPU generator.
+// No device consumer or public caller uses it yet.
 // Scheduling retains its CANN source/license in mla_tnd_schedule.cpp,
 // mla_schedule.cpp and detail/cann_split_core.cpp (see LICENSE.cann).
 #pragma once
@@ -68,14 +69,17 @@ static_assert(uint32_t(MlaSequenceLayout::Bsnd) == 0 && uint32_t(MlaSequenceLayo
 // Exact static allocation bound; false leaves words unchanged.
 bool PagedMetadataWords(int64_t batch, uint32_t& words);
 
-// Independent CPU serialization of BuildPagedSchedule's owned snapshot.
+// CPU/AICPU serialization of BuildPagedSchedule's owned snapshot.
 // False: unsafe output size/address or any input/output overlap; no writes.
 // True: complete success/failure record; failure clears every payload word
 // after the eight-word header. Validate descriptors before reading values.
 // KV lengths are mandatory even when Q/used is zero; null/count=0 only at B=0.
 // Read-only inputs may alias each other and must remain readable/stable until
 // completion. A present, zero-count Q-used array at B=0 retains its flag.
+// fromQueryPrefix: for TND only, derive totalTokens from the device prefix tail
+// after descriptor/overlap validation; ignore the supplied total. BSND keeps
+// its explicit allocation. This does not change the wire or the CPU default.
 bool BuildPagedMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype, uint32_t* output,
-                        uint32_t outputWords, const MlaPagedInputs& inputs);
+                        uint32_t outputWords, const MlaPagedInputs& inputs, bool fromQueryPrefix = false);
 
 } // namespace flash_attn::mla

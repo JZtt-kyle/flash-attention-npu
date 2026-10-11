@@ -1,21 +1,21 @@
 # MLA 迭代计划
 
-本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。依次阅读 [唯一下一步](#下一步m07c2)、[M07 后续步骤](#m07-剩余步骤) 和 [后续阶段](#m07-之后)；[已完成步骤](#已完成步骤) 放在末尾，仅作历史索引。
+本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。依次阅读 [唯一下一步](#下一步m07c3)、[M07 后续步骤](#m07-剩余步骤) 和 [后续阶段](#m07-之后)；[已完成步骤](#已完成步骤) 放在末尾，仅作历史索引。
 
-M06 已完成，M07 完成到 M07c1 的独立 PA CPU 协议与序列化。唯一下一步为 **[M07c2：独立 PA AICPU 生成器](#下一步m07c2)**；M07 按下表逐项验收，完成后再依次推进 M08..M17。
+M06 已完成，M07 完成到 M07c2 的独立 PA AICPU 生成器。唯一下一步为 **[M07c3：PA 设备消费者](#下一步m07c3)**；M07 按下表逐项验收，完成后再依次推进 M08..M17。
 
 ## M07：ND paged cache
 
 本阶段限 FP16/BF16、512+64 共享 KV、Hkv=1、无 mask、`num_splits=1`，接入 BSND/TND query 和内部 Q-used。接口、页大小、长度、物理地址和来源见 [design 6.4.3](design.md#643-nd-paged-cache-契约与来源)，新增记录的职责见 [metadata PA 约束](design.md#51-签名与复用规则)。64 种源页大小、两路 cache 独立 stride、页表行 stride 均在范围内；CANN 原生只支持部分外层 stride 时，测试侧转换计入公开 E2E。
 
-### 下一步：M07c2
+### 下一步：M07c3
 
-前置产物为 M07b1 的 [CPU 地址组件](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_layout.h)、M07b2 的 [CPU 调度](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_schedule.h) 和 M07c1 的 [v6 CPU 序列化](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_metadata.h)，最近闭环证据见 [status](status.md#本轮核验与证据)。本步交付独立 PA AICPU 生成器，按以下条件验收：
+前置产物为 M07b1 的 [CPU 地址组件](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_layout.h)、M07b2 的 [CPU/AICPU 调度](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_schedule.h)、M07c1 的 [v6 协议](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_metadata.h) 和 M07c2 的 [独立 AICPU 生成器](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_metadata.aicpu)，最近闭环证据见 [status](status.md#本轮核验与证据)。本步交付独立 PA 设备消费者，按以下条件验收：
 
-- 复用 v6 的 `408+5B` 字 CPU 序列化与源调度，直接读取设备长度；TND 总 Q 从前缀尾值推导，不做长度 D2H。
-- 910B 双 dtype 对照 CPU/固定源，覆盖 BSND/TND Q、全部页大小、可选 Q-used、空分配/全零 KV、长度/描述符错误及失败清零；输出与输入别名在写入前拒绝。
-- 验证 worker/current stream 依赖和异步生命周期，运行旧 metadata 与普通 FA3 回归；核对编译、依赖及实际加载产物。
-- 保持独立生成边界；不接入 PA 设备消费者、Copy、attention 或公开入口。
+- 使用独立调用 context 校验 v6 的版本、精确字数、几何、Q 分配/used、KV 快照、P/C、源 S2、端点及资源；过期长度、Q 前缀、页大小和损坏记录均在写输出前拒绝。
+- 按当次页表与物理 cache 描述检查全部有效页、页号越界、padding 哨兵及空池/空表；Q 分配或 used 为零也不能跳过必要的有效页校验。
+- 910B 双 dtype 覆盖成功读取、拒绝不写输出、release 真实 Trap、流依赖与异步生命周期，补旧消费者及普通 FA3 回归；核对实际加载产物。
+- 保持独立校验边界，不接入 PA Copy、attention 或公开入口；本步不定义 PA attention 的空行 O/LSE。
 
 ### M07 剩余步骤
 
@@ -23,8 +23,7 @@ M06 已完成，M07 完成到 M07c1 的独立 PA CPU 协议与序列化。唯一
 
 | 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
 | --- | --- | --- | --- |
-| M07c2 | 唯一下一步 | 独立 PA AICPU 生成器，仍无公开接入 | 见[上节完成条件](#下一步m07c2) |
-| M07c3 | 待开始 | PA 设备消费者：记录校验及当次页表/物理 cache 校验 | 损坏/过期长度/页大小、有效页越界与 padding 哨兵、Q=0 仍验有效页、空池/空表；写输出前拒绝、release 真实 Trap、流生命周期及旧消费者/普通 FA3 回归 |
+| M07c3 | 唯一下一步 | PA 设备消费者：记录校验及当次页表/物理 cache 校验 | 见[上节完成条件](#下一步m07c3) |
 | M07d1 | 待开始 | 独立 PA Copy Tile，源 QK 内容/RoPE 联合搬运与 PV 搬运 | 910B 双 dtype 搬运逐元素一致、L1 布局/页边界/真实 stride/65536 回退/大地址；固定源代表性 Copy 组件性能，保留同步依赖 |
 | M07d2 | 待开始 | BSND Q 的独立 PA attention，含内部 Q-used 所需组合 | 双 dtype 对固定源 PA Kernel 与双数学 reference 的 O/LSE；64 种 P、PA01/PA02、空行/空池、poison、metadata、任务环；同调度非 FD Kernel 性能 |
 | M07d3 | 待开始 | TND Q 的独立 PA attention，含分配与 Q-used | Q 前缀/used 不移动起点、KV 非累计、非均匀/零尾部、所有 stride；910B 双 dtype 源/数学精度、同调度 PA Kernel 性能及 BSND PA 回归 |
@@ -140,3 +139,4 @@ PA01/PA02 的地址、Copy 与精度覆盖全部 16..1024 的 16 倍数；代表
 | M07b1 | 独立 PA CPU 地址组件；复用 BSND 完整 storage 校验，分离逻辑容量/物理页池/页表行距、校验有效页并返回页内段；全部 64 种页大小、固定源 offset/QK/PV Copy trace、标量 oracle、真实视图、溢出/空值、ASan/UBSan 与 BSND/TND CPU 回归；未改调度或开放 PA |
 | M07b2 | 独立 PA CPU 调度；BSND/TND Q 分配/used 与非累计 KV 长度归一，逻辑 C 与源页对齐 S2 分离；全部 64 种 P、112/528 基块、完整分核/FD 候选/workspace 固定源差分、标量任务/成本、溢出/失败不改输出、ASan/UBSan 与旧 CPU 调度回归；未改 metadata、Kernel 或公开入口 |
 | M07c1 | 独立 PA v6 协议与 CPU 序列化；408+5B 精确字数、独立调用 context、Q 分配/used 与非累计 KV 快照、P/C 与源 S2 分离；固定源逐字差分、测试解码损坏、缓冲/溢出/失败清零、ASan/UBSan、旧 CPU 协议与普通 FA3 回归；未接入 AICPU、设备消费者或公开 PA |
+| M07c2 | 独立 PA AICPU 生成器；共用 v6 序列化、直接读取三组设备长度并推导 TND 总 Q；910B 双 dtype/全部页大小对照 CPU 与固定源、失败清零、危险输出/别名拒绝、异步生命周期、旧 metadata 与普通 FA3 回归；加入构建和传递依赖，仍无 PA 设备消费者或公开接入 |
