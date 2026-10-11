@@ -1,8 +1,8 @@
 # MLA 当前状态
 
-核对日期：2026-10-11；分支：`feat/mla-cann-migration`；代码基线：`9f9aeb9`（M07c3）。**本轮仅核验和整理文档，没有新增功能或重跑 CPU/NPU 功能测试。** 最近生产接入为 M06e2c2，PA 完成到独立设备消费者；唯一下一步仍是 [M07d1：独立 PA Copy Tile](plan.md#下一步m07d1)。
+核对日期：2026-10-11；分支：`feat/mla-cann-migration`；接手基线：`7618939`。本轮完成 **M07d1：独立 PA Copy Tile**，相关 1,401 项 pytest 通过，完成固定源 Copy 性能采样。最近生产接入仍为 M06e2c2；唯一下一步为 [M07d2：BSND Q 的独立 PA attention](plan.md#下一步m07d2)。
 
-本页回答“现在能用什么、证据在哪里、下一步是什么”。接口、协议和验收方法查 [design](design.md)，步骤与完成条件查 [plan](plan.md)。本轮文档提交用 `git log -1 -- docs/mla/status.md` 定位。
+本页回答“现在能用什么、证据在哪里、下一步是什么”。接口、协议和验收方法查 [design](design.md)，步骤与完成条件查 [plan](plan.md)。本轮闭环提交用 `git log -1 -- docs/mla/status.md` 定位。
 
 ## 当前可调用能力
 
@@ -16,7 +16,7 @@
 | 公开只读 cache | `flash_attn_with_kvcache`，TND Q + BSND KV | Q 使用完整分配段；内部生成或显式复用 v4 |
 | 公开 metadata | `get_scheduler_metadata` | 仅 v2（BSND）和 v4（混合）；生成器须接收 KV 长度 tensor |
 | 内部前向 | BSND、TND、混合布局的 Q-used | 内部 v5；BSND/混合 Q-used 无公开等价入口，不开放显式 v5 复用 |
-| 独立 PA 组件 | CPU 地址/调度、v6 CPU/AICPU 生成、CPU/910B 设备消费校验 | **PA 仍明确拒绝**；尚无设备 Copy、attention 或公开调用 |
+| 独立 PA 组件 | CPU 地址/调度、v6 CPU/AICPU 生成、CPU/910B 消费者、910B PA Copy Tile | **PA 仍明确拒绝**；Copy 只由独立探针调用，尚无 PA attention 或公开调用 |
 
 三种非分页布局均支持四路独立的末维连续、外层非负 stride，包括 BNSD/NTD 归一视图、切片、广播、重叠及 offset；发射前检查完整 storage。显式 v2/v4 可跨合法视图复用，仍须匹配当次长度和 v4 Q 前缀。完整入口分派见 [design 6.7.1](design.md#671-非分页入口与记录选择)。
 
@@ -29,20 +29,33 @@
 
 计划内尚未开放：PA、causal/window、自动或多 split、192/128 prefill、非零 softcap 与非默认调度选项。fake/compile 已有覆盖，完整 graph replay 留在 M16；910C 尚未开放或实机验收。KV 追加、内置 rotary、量化、backward 等排除项见 [design 第 4 节](design.md#4-功能边界)。
 
-## 本轮文档核验
+## 本轮闭环与证据
 
-证据目录为 `build/mla-docs-audit-9f9aeb9/`。只修改三个 MLA 文档；本仓原有未跟踪 `kernel_meta/`、CANN 的 67 项已有差异和 CATLASS 均保留。
+新增 [PA Copy Tile](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_paged_copy.hpp)，沿固定 CANN `CopyKKropePAGmToL1` / `CopyKvGmToL1` 按页拆段，QK 每段共用一次页号读取，K/V 地址各用自己的 64 位 stride，复用既有 ND→NZ 回退。调用方仍负责前置完整校验和事件/L1 生命周期；本步没有接入 attention 或公共入口。协议及探针边界见 [design](design.md#独立设备-copy)。
+
+证据保存在忽略目录 `build/mla-m07d1-paged-copy/`，以下路径相对此目录。保留命令、日志、XML、源码快照、固定源、实际加载库、L1 导出和性能原始数据；汇总为 `acceptance.json`，完整性由 `check_acceptance.py` 检查。这些本机证据不随 Git 分发，迁机须复制该目录。
 
 | 核验 | 结果与依据 |
 | --- | --- |
-| 上一步闭环 | 编辑前运行 M07c3 的 `check_acceptance.py` 通过；校验历史源码/产物哈希、XML 与验收汇总，未执行其中的功能测试。结果保存为 `prerequisite-acceptance.json` |
-| 文档与源码 | Python/fake/C++ 入口、v1–v6 字数与版本、PA 调用链、构建依赖及固定性能清单核对通过；官方 FA3 使用固定快照及既有来源哈希，CANN 使用固定 Git blob。见 `source-audit.json`、`signatures.json`、`official/` |
-| 结构与契约 | 明确目标契约、生产入口和独立组件的区别；修正 PA 静态描述与 CPU buffer 检查的边界；合并历史步骤索引，性能矩阵直接链接定义与采样器。范围、协议、验收门槛和 M07d1 顺序不变；链接、锚点、表格及命令语法检查见 `docs-check.json` |
-| 提交质量 | `git diff --check`、暂存差异检查及仓库适用质量钩子通过；仅三个文档进入本步提交。见 `quality-staged.log` |
+| 前置闭环 | 编辑前重跑上一文档步 `check_docs.py`、差异和适用质量检查通过；历史证据核验不计作本轮功能测试。`prerequisite.log` |
+| 本轮功能 | **1,401 项去重 pytest 通过，无失败/跳过**：新 Copy 300、CPU 地址/消费者 596、设备 v6 消费者 274、既有 Cube 155、双 dtype 非分页 stride 76；`*-command.json`、五套 `*.xml` 与日志 |
+| 全页大小搬运 | 双 dtype、全部 64 种 P，各覆盖连续与两路独立 stride；L1 NZ 有效元素与未改写的固定源 Copy、独立 host 标量索引逐元素一致。覆盖 QK 两半、PV 四个 D 块、尾页/跨页、重复/乱序页和 offset；`probes/accuracy.jsonl`、`probes/accuracy/*.pt` 保存输入及实际导出 |
+| 地址与空值 | 覆盖 65535/65536/65537、广播/重叠、页表行广播/重叠、零 count 和空表/池；K/V 各自真实 >uint32 页偏移/行地址及 >uint32 页表行距，实际 storage 约 8–16 GiB。零 count 只证明 Copy 不读 cache，不定义 attention 空行 O/LSE；`device.xml`、上述精度文件 |
+| 缓冲和 stream | 两个 L1 槽位跨多轮复用、MTE2→MTE1 就绪/反向释放和两条 worker stream 的显式事件依赖通过。诊断 L1→GM 使用额外 MTE3 同步；Vector 分支不执行 Copy。`device.xml`、`tests/mla_paged_copy_probe.cpp` |
+| 构建与来源 | FP16/BF16 各自固定源/迁移 release 库重新构建，核验设备依赖、626 项文件哈希和实际加载库；固定源读取 Git blob，不依赖 CANN 工作区改动。`probes/build-manifest.json`、`*-loaded.json`、`oracle-source-manifest.json` |
+| Copy 性能 | 双 dtype 各 12 例，P=16/112/128/256/528/1024，短/长 KV、单/多 Q 块工作量、乱序页和零长度；5 次预热、五轮各 20 对 wall 与 10 对设备样本。迁移/源 Kernel 中位比为 FP16 **0.9985–1.0036**、BF16 **0.9949–1.0041**；wall 比为 **0.9807–1.0278**、**0.9873–1.0134**。`performance/comparison.json`、双 dtype `wall.json`、原始 profiler CSV |
+| 受影响回归 | v6 当前长度/页表/资源/空值/流，以及既有非分页 Copy/Cube 和双 dtype stride 通过；消费者 release Trap、旧耗时对比、普通 FA3 全套未重跑。公共入口、metadata 和生产实现未改动；相关 XML 见上表 |
+| 提交质量 | 文档链接/锚点、表格和命令语法、源码/产物哈希、暂存差异、`git diff --check` 及仓库适用质量钩子通过；仅本步 8 个文件进入提交。`docs-check.json`、`quality-staged.log` |
+
+**性能口径：** Copy 计时含页表/任务读取、GM→L1、每 tile 512 字节 MTE1 消费及双缓冲事件，初始化和诊断导出在计时外。BSND/TND 标签仅描述复制工作量，未执行 Q 读取、metadata 或 attention；不是公开 PA E2E。FP16 的 7 例、BF16 的 4 例中位比大于 1，差异很小但未据此宣称逐例不劣化。固定源使用测试侧 layout stride 注入；广播及超宽页表行距的精度对照先物化源输入，不能宣称原生 FIA host 接受相同视图。
+
+profiler 仍报告 `fwk_api_db` / host flow 解析错误，保留在 `profile.log`；采样器逐条核对 `kernel_details.csv` 与原始 `op_summary_*.csv` 的名称、时间、设备和数量，因此只使用设备任务耗时，不声称 host 关联解析通过。
+
+开发期两次探针失败均已修复并保留：`initial-vector-launch-failure/` 记录未显式 C1V2 发射导致 Vector 核内存异常；`initial-mixed-launch-mismatch/` 和 `debug-*.pt` 记录 L1 导出缺少 MTE3 同步、读到初始化哨兵。修正后小测和完整 300 项设备套件通过；早期失败不计入通过数量。
 
 ## 最近功能闭环与限制
 
-以下均是**历史运行结果，本轮只核验证据**。路径相对仓库根目录；这些忽略目录不随 Git 分发，迁机复现须保留或恢复相应证据目录。
+以下保留此前功能闭环的完整结果。本轮新运行的回归子集见上表，不能以子集代替历史全套。路径相对仓库根目录，迁机须保留相应证据目录。
 
 | 功能闭环 | 结果与证据 |
 | --- | --- |
@@ -54,32 +67,32 @@
 
 **仍保留的限制：** M06e2c2 组件 Kernel 比值为 FP16 0.898–1.888、BF16 0.901–2.458，两种 dtype 均有 6 例中的 4 例慢于固定源；不能宣称 Kernel 全部不劣化。profiler 的 `fwk_api_db` 解析错误仍保留，设备 CSV 不证明 host 关联可用。
 
-PA 消费者只读调度、长度、页表，不读 cache 内容，不定义 attention 空行 O/LSE。空表/空池只通过校验层；Copy、attention 精度、真实 cache 大地址及公开 PA E2E 待后续验收。v6 的 >uint32 cache 地址只有算术证据，64 位 Q 起点也不代表分配了相应 attention tensor。
+PA 消费者仍只读调度、长度和页表；本轮 Copy 已搬运真实 cache 并验证大地址，但 PA attention 的 O/LSE、完整任务环和公开 E2E 尚待后续验收。Copy 零 count/空池通过不代表 attention 空行处理已接通，历史 64 位 Q 起点测试也不代表分配了相应 attention tensor。
 
 M07c3 已处理的开发期失败保留在原目录 `initial-full-device*`、`aicpu-comparison-failure-*`，处理经过查该提交的 status；早期失败不计入通过数量。旧设备 Trap 和旧耗时对比未在 M07c3 重跑。
 
 ## 环境与构建
 
-最近功能运行环境（M07c3）：Python `/usr/local/python3.11.15/bin/python3` 3.11.15，torch `2.7.1+cpu`、torch_npu `2.7.1`，CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，卡 6 的 Ascend910B3（进程内设备 0）。CATLASS 为 `769cd40a8716b28650b6bebb08db4834eea4462f` 且干净，CANN 源为 `ca18aee610729ca5270a44e2d84c751bc687fbf0`。版本/tiling 注册警告保留在原日志。
+本轮使用 Python `/usr/local/python3.11.15/bin/python3` 3.11.15，torch `2.7.1+cpu`、torch_npu `2.7.1`，CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，物理卡 6 的 Ascend910B3（进程内设备 0）。8 张卡健康，卡 6 在接手查询时无运行进程；采样前后健康/占用见 `npu-smi.log` 与 `performance/npu-before.log` / `npu-after.log`。
 
-M07c3 实际加载 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 为 `0e8f3c6e343fe7aac542622845b65519cb505c55f03d177f3d672d72ba30e74f`，见原目录 `build-provenance.json` / `production-load.log`；生产扩展编入 v6 生成器，但没有 PA 发射调用。v6 消费者只由独立 FP16/BF16 release 探针调用。
+CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f` 且干净；只读 CANN `ca18aee610729ca5270a44e2d84c751bc687fbf0` 的原有 67 项差异、本仓原有未跟踪 `kernel_meta/` 均保留。详见 `environment.json` 和 `cann-status-before.txt`。
 
-**本轮未查询 NPU 健康/占用、未加载扩展或重建。** 仅复核磁盘产物哈希、源码与静态环境信息；上述卡号不作为下一次运行的可用性保证。继续使用非 login shell；CPU pytest 设置 `TORCH_DEVICE_BACKEND_AUTOLOAD=0`，质量工具沿用 `/tmp/mla-m01-precommit` 及其 cache。开发或实机测试前按 [AGENTS.md](../../AGENTS.md) 重新检查环境、设备和实际加载路径。
+本轮实际导入的生产扩展为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 仍为 `0e8f3c6e343fe7aac542622845b65519cb505c55f03d177f3d672d72ba30e74f`，见 `environment-load.log` / `environment.json`。新增 header 只由独立 Copy probe 使用，不在生产依赖中，生产扩展没有重建。四个新库的源码/依赖/实际加载哈希见 `probes/build-manifest.json` 与 `fp16/bf16-loaded.json`；各回归探针也由本轮源码构建。
+
+继续使用非 login shell；CPU pytest 设置 `TORCH_DEVICE_BACKEND_AUTOLOAD=0`，NPU 在沙箱外执行，质量工具使用 `/tmp/mla-m01-precommit` 及其 cache。版本/tiling 注册警告保留在日志中。下次开发/实机验证前仍须重新检查设备和加载产物，不能把本轮卡号视为持续可用保证。
 
 ## 唯一下一步与复现
 
-下一步仅为 **[M07d1](plan.md#下一步m07d1)**：独立 PA Copy Tile，按页拆段搬运内容/RoPE 和 PV，完成全部页大小的双 dtype 搬运精度及固定源代表性 Copy 性能。本轮文档提交后停止。
+下一步仅为 **[M07d2](plan.md#下一步m07d2)**：BSND Q 的独立 PA attention，接通 v6 消费与 PA Copy，保留源数值/事件/任务环，完成固定源及双数学 O/LSE、同调度非 FD Kernel 性能。TND attention 和公开 PA 分别留在后续步骤；本轮提交后停止。
 
-本轮最小复核（仓库根目录，非 login shell；不导入 torch 或发射 NPU）：
+本轮最小闭环复核（仓库根目录，非 login shell，不发射 NPU）：
 
 ```bash
-python3 build/mla-docs-audit-9f9aeb9/check_docs.py
+python3 build/mla-m07d1-paged-copy/check_acceptance.py
 PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache \
 bash ci/code_quality.sh --staged
 git diff --check
 git diff --cached --check
 ```
 
-M07c3 的原 `check_acceptance.py` 绑定当时三个文档及步骤表的哈希/结构；本轮编辑前已通过，编辑后不应直接用它检查新文档。上面的文档检查按 `9f9aeb9` Git 内容核对历史快照，再独立核验当前文档与未变代码，不改写历史验收规则。
-
-功能重跑从原证据目录的 `run_checks.py` 及各 `*-command.json` 取完整命令：`cpu/device/old-cpu/ordinary/old-device-bsnd/old-device-tnd/old-device-tnd_bsnd/old-device-used`；构建见 `build-command.json`、`collect_production.py` 和独立探针清单。源码、环境或二进制变化后须在新证据目录重跑受影响检查，历史通过不能代替新运行结果。
+完整构建/功能复现从本步 `run_checks.py` 与各 `*-command.json` 取命令：`build`、`device`、`cpu-regression`、`consumer-regression`、`copy-regression`、`stride-regression`、`profile`。设备测试固定卡 6；`MLA_PAGED_COPY_REUSE=1` 只加载哈希一致的已构建 probe。重新执行须改用新证据目录，保留既有失败与通过产物；源码、环境或构建变化后重跑受影响检查，历史证据核验不替代新运行。

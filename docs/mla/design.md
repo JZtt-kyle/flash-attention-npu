@@ -348,8 +348,9 @@ PA 的独立链路与上面的非分页 attention 链路分开：
 | 地址描述 | [`mla_paged_layout.h/.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_layout.h) | host 静态 storage/stride 描述；CPU 动态页表检查与分段查询是另两个接口，见 [6.4.3](#643-nd-paged-cache-契约与来源) |
 | 调度与记录 | `mla_paged_schedule.h`、`mla_tnd_schedule.cpp`、`mla_paged_metadata.*` | 逻辑几何/长度 → 源 PA 调度 → v6；不接收物理页表 |
 | 当次设备校验 | [`mla_paged_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_metadata_consumer.h)、[`kernel/mla_paged_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_paged_metadata.hpp) | v6 + 当前长度 + 当次 cache 描述/页表 → 调度或 Trap；不搬运 cache 内容 |
+| 页内 Copy | [`tile/mla_paged_copy.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_paged_copy.hpp) | 已校验的 cache 描述/页表与逻辑 token 范围 → L1 NZ；QK 联合搬运内容/RoPE，PV 搬运共享 V；尚未接入 attention |
 
-`setup.py` 编入 v6 AICPU 生成器；地址 `.cpp` 和设备消费者仍由独立测试构建/调用，尚无生产 PA 发射。构建范围与运行调用方必须分别核对，不能从 `.so` 含有某个对象推断公开能力。
+`setup.py` 编入 v6 AICPU 生成器；地址 `.cpp`、设备消费者和 PA Copy 仍由独立测试构建/调用，尚无生产 PA 发射。构建范围与运行调用方必须分别核对，不能从 `.so` 含有某个对象推断公开能力。
 
 - 以固定 CANN 源码为起点，保留来源及版权；许可证位于 [`LICENSE.cann`](../../csrc/ascend910/flash_attn_npu_3/mla/LICENSE.cann)。CATLASS 示例用于理解分层，不能替代源执行流程。
 - 允许文件拆分、命名、类/模板组织、参数封装、构建接入和 gert/optiling 解耦。复用已有组件须保证运算、布局、精度、资源与同步契约等价；无法等价时在本仓封装源逻辑，不修改 CATLASS 子模块来容纳常规迭代。
@@ -376,6 +377,7 @@ PA 的独立链路与上面的非分页 attention 链路分开：
 | `op_kernel/arch22/fia_block_vec_nonquant_mla.h`：`SoftmaxFlashV2Compute`、`AmlaVecCompute`、`ProcessAmlaNupdate`、`ProcessVec1L/2L`、`DealBmm2ResBaseBlock` | `block/mla_vector.hpp` | 源 softmax 与 aMLA 更新、舍入、尾列、行分工、O/LSE 写回；不是普通 online softmax 的替代实现 |
 | `../common/op_kernel/matmul.h`：`MatmulKPP`、`LoadDataToL0A/B`；`buffers_policy.h` | `tile/` 与 Cube Block 的局部资源管理 | L0 双缓冲、加载布局、首 K 清零、unitFlag 和小矩阵 PIPE_M barrier |
 | `../common/op_kernel/memcopy/attn_copy_gm_to_l1.h`：`CopyQueryGmToL1`、`CopyKvGmToL1` | `tile/mla_copy.hpp` | BSND 的 S1G 展平次序、ND→NZ、跨 query/head 的复制分段 |
+| 同一文件：`CopyKKropePAGmToL1`、`CopyKvGmToL1::ProcessPageAttention` | `tile/mla_paged_copy.hpp`，复用 `mla_copy.hpp` | 页内拆段、QK 每段共用页号查询、K/V 独立 64 位 stride、NZ 偏移；事件仍由 Block 管理 |
 | `op_kernel/arch22/memory_copy.h`：`CopyAttenOutUbToGm`、`DataCopySoftmaxLseBSND` | `block/mla_vector.hpp` 的 dense 写回 | 保留 O 的 query/head 首段、中段和尾段复制，以及 LSE 的 `[B,Hq,Sq]` 寻址 |
 | `../common/op_kernel/vector_common.h`：`RowDivs`、`RowMuls`、`ComputeSoftMaxLse` | `tile/mla_vector_ops.hpp` | 保留行列 repeat 选择、广播布局、向量指令及 barrier 顺序 |
 
@@ -542,6 +544,14 @@ B/Tq/Sq 为零的合法调用保留空输出 shape，但仍验长度、页表描
 
 [`PA 地址测试`](../../tests/test_flash_attn_npu_v3_mla_paged_layout.py) 从固定 Git blob 提取 offset、页表 parser、QK 联合 Copy 和 PV Copy，替换搬运操作为 CPU 参数 trace，与组件和独立标量 oracle 对比。它验证地址、页边界、L1 偏移参数和查询次数，**不验证设备 Copy/L1 数值、同步、attention 或性能**；注入源 layout getter 的外层 stride 也不证明原生 FIA host 接受这些视图。大于 uint32 的 cache 地址在该套件中只作算术检查。
 
+##### 独立设备 Copy
+
+[`PagedCache` / PA Copy Tile](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_paged_copy.hpp) 复用上述描述、页内分段语义和已有 ND→NZ Tile。调用方须先完成当次完整描述、长度和有效页校验，保证 QK 两坐标使用相同的合法 token 范围，并管理 L1 容量、事件与输入生命周期。Copy 不重复运行 metadata 校验；零 count 不读取页表或 cache，不能据此跳过前置校验。内容 K 与 RoPE K 的页号每段只读取一次，两路地址分别按 V/K stride 计算；PV 只搬运 V。
+
+[`设备搬运测试`](../../tests/test_flash_attn_npu_v3_mla_paged_copy.py) 用独立 C1V2 probe 导出 L1 NZ，逐元素比较固定源 Copy 与原始 host 输入的标量索引；覆盖全部页大小、内容/RoPE 两半、PV 四个 D 块、双缓冲循环、零 count、真实 offset/stride 与大地址。源 Copy 的测试适配只注入 layout stride；无法等价表达的零 stride 或 >uint32 页表行距在测试侧先物化源输入，不能宣称原生 FIA 接受相同物理视图。诊断导出另同步 MTE3，固定源与迁移侧使用相同的探针缓冲/事件流程。
+
+[`Copy 性能驱动`](../../tests/mla_paged_copy_profile.py) 单列两种 dtype 的 12 例预定矩阵。计时包含页表查询、GM→L1、每 tile 的 512 字节 MTE1 消费及双缓冲事件；初始化和 L1→GM 诊断导出不在计时内。BSND/TND 标签描述单/多 Q 块对应的复制工作量，Copy 本身不接收 Q tensor，也不代表 attention 调度或公开 PA E2E。
+
 ##### CPU/AICPU 调度
 
 [`ParsePagedLengths` / `BuildPagedSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_schedule.h) 在 `mla_tnd_schedule.cpp` 中复用分配/used 归一、变长 SplitCore、无 split 端点映射与资源预算；由独立 v6 生成器使用，没有公开调用方。输入仅为逻辑几何及执行 CPU/AICPU 可读的长度数组，不接收页表、物理页池或 stride。P 必须为 16..1024 的 16 倍数，C 必须为 0..16384 且为 P 的整数倍；先限制 C 再计算虚拟 batch 总量，地址组件本身仍不施加这一调度上限。
@@ -682,6 +692,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 生产 stride Kernel | [BSND](../../tests/test_flash_attn_npu_v3_mla_bsnd_stride_production.py)、[TND](../../tests/test_flash_attn_npu_v3_mla_tnd_stride_production.py)、[混合](../../tests/test_flash_attn_npu_v3_mla_mixed_stride_production.py) 的 `PERFORMANCE_CASES` | [`mla_bsnd_used_profile.py`](../../tests/mla_bsnd_used_profile.py) 的 `--layout bsnd-stride/tnd-stride/mixed-stride`；保留独立矩阵几何，使用生产核数，组件转换仍在计时外 |
 | 公开 BSND stride | [`mla_profile_cases.py`](../../tests/mla_profile_cases.py) 的 `STRIDE_CASES` | [`mla_forward_profile.py`](../../tests/mla_forward_profile.py)；同物理视图，CANN 转换计入复用、生成加 R=1/4 E2E |
 | 公开 TND/混合 stride | [TND](../../tests/test_flash_attn_npu_v3_mla_tnd_stride_production.py)、[混合](../../tests/test_flash_attn_npu_v3_mla_mixed_stride_production.py) 的 `PUBLIC_CASES` | [`mla_varlen_used_profile.py --stride`](../../tests/mla_varlen_used_profile.py)、[`mla_mixed_profile.py --stride-probes/--stride-producer`](../../tests/mla_mixed_profile.py)；同物理视图，计入原生转换和相应 metadata 调用段 |
+| 独立 PA Copy | [`mla_paged_copy_profile.py`](../../tests/mla_paged_copy_profile.py) 的 `PERFORMANCE_CASES` | 同文件采样；P=16/112/128/256/528/1024，每种 dtype 各 12 例。相同物理视图、固定源 Copy 与迁移 Tile；不含 metadata、attention 或公开 E2E |
 
 源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。整容量四组作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E；`BSND_CASES` 的实际长度另行验收。公开全零实际长度同样计入对应路径的 E2E。
 
