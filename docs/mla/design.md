@@ -322,7 +322,7 @@ C++ 校验与分派：mla_validation.h、mla_forward.cpp
         ↓
 MlaDense / MlaTnd / MlaTndBsnd / MlaUsed
         ↓
-MlaNonPaged 任务环、缓冲、Cube/Vector 同步
+MlaNonPaged（MlaTaskRing 别名）任务环、缓冲、Cube/Vector 同步
         ↓
 block/mla_cube.hpp、mla_vector.hpp：QK + RoPE / softmax / PV / aMLA 更新
         ↓
@@ -341,16 +341,17 @@ v2 消费后将快照传给 `MlaDense<InputT, true, HasStrides>` 实际长度特
 
 v3/v4 各自使用独立 context 和 Kernel 调度类型，防止将布局不同的起点快照误传给 BSND 或紧凑 TND。混合 span 的 KV 起点从两个 uint32 字恢复为 uint64，并在任务环 `RunInfo` 与 Tile 坐标中保持 64 位。FD 合并与 192/128 通用路径按计划迁移。
 
-PA 的独立链路与上面的非分页 attention 链路分开：
+PA 的独立链路通过编译期特化复用上述任务环和 Cube/Vector：
 
 | 层次 | 代码入口 | 职责 |
 | --- | --- | --- |
 | 地址描述 | [`mla_paged_layout.h/.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_layout.h) | host 静态 storage/stride 描述；CPU 动态页表检查与分段查询是另两个接口，见 [6.4.3](#643-nd-paged-cache-契约与来源) |
 | 调度与记录 | `mla_paged_schedule.h`、`mla_tnd_schedule.cpp`、`mla_paged_metadata.*` | 逻辑几何/长度 → 源 PA 调度 → v6；不接收物理页表 |
 | 当次设备校验 | [`mla_paged_metadata_consumer.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_metadata_consumer.h)、[`kernel/mla_paged_metadata.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_paged_metadata.hpp) | v6 + 当前长度 + 当次 cache 描述/页表 → 调度或 Trap；不搬运 cache 内容 |
-| 页内 Copy | [`tile/mla_paged_copy.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_paged_copy.hpp) | 已校验的 cache 描述/页表与逻辑 token 范围 → L1 NZ；QK 联合搬运内容/RoPE，PV 搬运共享 V；尚未接入 attention |
+| 页内 Copy | [`tile/mla_paged_copy.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_paged_copy.hpp) | 已校验的 cache 描述/页表与逻辑 token 范围 → L1 NZ；QK 联合搬运内容/RoPE，PV 搬运共享 V |
+| BSND PA attention | [`kernel/mla_paged.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_paged.hpp) 与 [`mla_paged_attention_probe.cpp`](../../tests/mla_paged_attention_probe.cpp) | 独立 v6 消费 → `MlaPagedBsnd` → `MlaTaskRing` 的 PA 特化；含 Q-used、设备空行初始化及页内 Copy，尚无生产发射 |
 
-`setup.py` 编入 v6 AICPU 生成器；地址 `.cpp`、设备消费者和 PA Copy 仍由独立测试构建/调用，尚无生产 PA 发射。构建范围与运行调用方必须分别核对，不能从 `.so` 含有某个对象推断公开能力。
+`setup.py` 编入 v6 AICPU 生成器；PA attention 实例、消费者和地址 `.cpp` 仍只由独立测试调用。共用 Cube 包含 PA Copy header，但生产实例保持非分页特化。构建范围与运行调用方必须分别核对，不能从 `.so` 含有某个对象推断公开能力。
 
 - 以固定 CANN 源码为起点，保留来源及版权；许可证位于 [`LICENSE.cann`](../../csrc/ascend910/flash_attn_npu_3/mla/LICENSE.cann)。CATLASS 示例用于理解分层，不能替代源执行流程。
 - 允许文件拆分、命名、类/模板组织、参数封装、构建接入和 gert/optiling 解耦。复用已有组件须保证运算、布局、精度、资源与同步契约等价；无法等价时在本仓封装源逻辑，不修改 CATLASS 子模块来容纳常规迭代。
@@ -497,7 +498,7 @@ Copy Tile 沿用固定 CANN 源 `attention/common/op_kernel/memcopy/attn_copy_gm
 
 #### 6.4.3 ND paged cache 契约与来源
 
-本节先定义 **PA 目标契约**，再说明 **静态地址描述、CPU 动态检查与 CPU/AICPU 调度**；设备 v6 消费校验见 [5.7](#57-v6nd-pa-的独立记录)。这些层次分别验收，不代表 PA attention 或公开调用已通过实机验收。目标限 FP16/BF16、512+64 共享 KV、Hkv=1、无 mask、`num_splits=1`。Q/qv 复用 BSND 或 TND stride 描述；cache 为 `k:[Np,P,1,64]`、`v:[Np,P,1,512]`，页表为同设备 `int32[B,M]`，末维 stride=1，行 stride 可为合法非负值。K/V 各自末维连续、外层非负 stride 和独立 storage offset，沿用完整 storage/字节校验；只读广播、重叠和重复页号不因地址相同而拒绝。
+本节先定义 **PA 目标契约**，再说明地址、Copy、独立 attention 与调度组件；设备 v6 消费校验见 [5.7](#57-v6nd-pa-的独立记录)。这些层次分别验收，实机结果见 [status](status.md)，组件通过不能代替公开接入验收。目标限 FP16/BF16、512+64 共享 KV、Hkv=1、无 mask、`num_splits=1`。Q/qv 复用 BSND 或 TND stride 描述；cache 为 `k:[Np,P,1,64]`、`v:[Np,P,1,512]`，页表为同设备 `int32[B,M]`，末维 stride=1，行 stride 可为合法非负值。K/V 各自末维连续、外层非负 stride 和独立 storage offset，沿用完整 storage/字节校验；只读广播、重叠和重复页号不因地址相同而拒绝。
 
 ##### 入口、容量与固定来源
 
@@ -551,6 +552,14 @@ B/Tq/Sq 为零的合法调用保留空输出 shape，但仍验长度、页表描
 [`设备搬运测试`](../../tests/test_flash_attn_npu_v3_mla_paged_copy.py) 用独立 C1V2 probe 导出 L1 NZ，逐元素比较固定源 Copy 与原始 host 输入的标量索引；覆盖全部页大小、内容/RoPE 两半、PV 四个 D 块、双缓冲循环、零 count、真实 offset/stride 与大地址。源 Copy 的测试适配只注入 layout stride；无法等价表达的零 stride 或 >uint32 页表行距在测试侧先物化源输入，不能宣称原生 FIA 接受相同物理视图。诊断导出另同步 MTE3，固定源与迁移侧使用相同的探针缓冲/事件流程。
 
 [`Copy 性能驱动`](../../tests/mla_paged_copy_profile.py) 单列两种 dtype 的 12 例预定矩阵。计时包含页表查询、GM→L1、每 tile 的 512 字节 MTE1 消费及双缓冲事件；初始化和 L1→GM 诊断导出不在计时内。BSND/TND 标签描述单/多 Q 块对应的复制工作量，Copy 本身不接收 Q tensor，也不代表 attention 调度或公开 PA E2E。
+
+##### 独立 BSND PA attention
+
+[`MlaPagedBsnd`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_paged.hpp) 复用既有任务环、Cube/Vector 数值流程与事件顺序；v6 的五字 span 提供 Q-used 和非累计 KV 长度，Q 物理起点仍由 BSND 分配及独立 stride 决定。Cube 的编译期 PA 分支将 QK 联合内容/RoPE 与 PV 交给分页 Copy Tile，源调度 S2 不用于物理 cache 地址。各核在 `TPipe`、同步与 O/LSE/workspace 写入前完整消费 v6，检查当次长度、完整 cache 描述和所有有效页，包括 Q-used 为零的样本。
+
+BSND 独立 attention 的空 query 保留空输出；非零 Q 的零 KV 有效行输出 `O=0、LSE=-inf`，合法空页表或空物理池也使用该 PA 设备空行语义。所有样本 KV 长度为零时使用已校验的单 C1V2、零 workspace 调度，不建立计算缓冲或读取 Q/cache。TND PA attention 和公开 PA 接入仍各自独立验收。
+
+[`独立 attention 测试`](../../tests/test_flash_attn_npu_v3_mla_paged_attention.py) 比较未修改的固定源 PA/non-FD Kernel 和双数学 reference；数学侧从原始 Q-used、长度和页表逐 token 索引，不读取 metadata span。固定源保留可原生表示的 K/V 独立页间距，其他 Q/cache 行/页表 stride 在测试侧计时前物化；此转换不能解释为原生 FIA host 支持所有视图。非空有效行 O/LSE 要求与固定源逐元素一致，零 KV 的源 `+inf` 与 FA3 `-inf` 分开检查；零工作调度/空表由数学对照验收，不伪造源可调用结果。独立 probe 的调用耗时不是公开 PA E2E。
 
 ##### CPU/AICPU 调度
 
@@ -693,6 +702,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 公开 BSND stride | [`mla_profile_cases.py`](../../tests/mla_profile_cases.py) 的 `STRIDE_CASES` | [`mla_forward_profile.py`](../../tests/mla_forward_profile.py)；同物理视图，CANN 转换计入复用、生成加 R=1/4 E2E |
 | 公开 TND/混合 stride | [TND](../../tests/test_flash_attn_npu_v3_mla_tnd_stride_production.py)、[混合](../../tests/test_flash_attn_npu_v3_mla_mixed_stride_production.py) 的 `PUBLIC_CASES` | [`mla_varlen_used_profile.py --stride`](../../tests/mla_varlen_used_profile.py)、[`mla_mixed_profile.py --stride-probes/--stride-producer`](../../tests/mla_mixed_profile.py)；同物理视图，计入原生转换和相应 metadata 调用段 |
 | 独立 PA Copy | [`mla_paged_copy_profile.py`](../../tests/mla_paged_copy_profile.py) 的 `PERFORMANCE_CASES` | 同文件采样；P=16/112/128/256/528/1024，每种 dtype 各 12 例。相同物理视图、固定源 Copy 与迁移 Tile；不含 metadata、attention 或公开 E2E |
+| 独立 BSND PA attention | [PA attention](../../tests/test_flash_attn_npu_v3_mla_paged_attention.py) 的 `PERFORMANCE_CASES` | [`mla_paged_attention_profile.py`](../../tests/mla_paged_attention_profile.py)；同调度固定源 PA/non-FD Kernel，迁移计时包含 v6/当次页表校验，metadata 生成与测试侧物化在计时外；原生 FD 分派单列 |
 
 源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。整容量四组作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E；`BSND_CASES` 的实际长度另行验收。公开全零实际长度同样计入对应路径的 E2E。
 

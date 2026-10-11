@@ -18,6 +18,7 @@
 #pragma once
 
 #include "../tile/mla_mmad.hpp"
+#include "../tile/mla_paged_copy.hpp"
 
 namespace flash_attn::mla::Block {
 using namespace AscendC;
@@ -49,22 +50,27 @@ struct MSplitInfo {
     uint32_t nBufferIdx, vecStartM, vecDealM;
 };
 
-template <typename InputT, bool IsTnd = false, bool HasStrides = false>
+template <typename InputT, bool IsTnd = false, bool HasStrides = false, bool IsPaged = false>
 class MlaCube {
   public:
     using Q_T = InputT;
     using KV_T = InputT;
     using MM_OUT_T = float;
     __aicore__ inline void Init(TPipe* pipe_, CubeParams params, GM_ADDR query, GM_ADDR queryRope, GM_ADDR sharedKv,
-                                GM_ADDR keyRope, const MlaBsndInputLayouts* layouts = nullptr, bool kvIsTnd = IsTnd)
+                                GM_ADDR keyRope, const MlaBsndInputLayouts* layouts = nullptr, bool kvIsTnd = IsTnd,
+                                GM_ADDR pageTable = nullptr, const MlaPagedCacheLayout* pagedLayout = nullptr)
     {
         pipe = pipe_;
         constInfo = params;
         queryGmTensor.Init(query, params.qSeqSize, params.gSize, 512, HasStrides ? &layouts->qv : nullptr, IsTnd);
         queryRopeGmTensor.Init(queryRope, params.qSeqSize, params.gSize, 64, HasStrides ? &layouts->q : nullptr, IsTnd);
-        keyGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr, kvIsTnd);
-        keyRopeGmTensor.Init(keyRope, params.kvSeqSize, 1, 64, HasStrides ? &layouts->k : nullptr, kvIsTnd);
-        valueGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr, kvIsTnd);
+        if constexpr (IsPaged) {
+            pagedCache.Init(keyRope, sharedKv, pageTable, *pagedLayout);
+        } else {
+            keyGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr, kvIsTnd);
+            keyRopeGmTensor.Init(keyRope, params.kvSeqSize, 1, 64, HasStrides ? &layouts->k : nullptr, kvIsTnd);
+            valueGmTensor.Init(sharedKv, params.kvSeqSize, 1, 512, HasStrides ? &layouts->v : nullptr, kvIsTnd);
+        }
         pipe->InitBuffer(bufQPL1, L1_BLOCK_SIZE * 4);
         l1QPTensor = bufQPL1.Get<Q_T>();
         pipe->InitBuffer(bufKVL1, L1_BLOCK_SIZE * 3);
@@ -118,6 +124,9 @@ class MlaCube {
     Tile::DenseTensor<InputT, HasStrides> queryGmTensor, queryRopeGmTensor, keyGmTensor, keyRopeGmTensor, valueGmTensor;
     Tile::CopyQueryGmToL1<InputT, HasStrides> copyQueryGmToL1;
     Tile::CopyKvGmToL1<InputT, HasStrides> copyKvGmToL1;
+    Tile::PagedCache<InputT> pagedCache;
+    Tile::CopyKKropePAGmToL1<InputT> copyPagedQk;
+    Tile::CopyPagedKvGmToL1<InputT> copyPagedV;
     GlobalTensor<float> mm1ResGm, mm2ResGm;
     GlobalTensor<InputT> vec1ResGm;
     TBuf<TPosition::A1> bufQPL1, bufKVL1;
@@ -129,8 +138,8 @@ class MlaCube {
     uint32_t qpL1BufIter = 0, kvL1BufIter = 0, cL0BufIter = 0;
 };
 
-template <typename InputT, bool IsTnd, bool HasStrides>
-__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::AllocEventID()
+template <typename InputT, bool IsTnd, bool HasStrides, bool IsPaged>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides, IsPaged>::AllocEventID()
 {
     CrossCoreSetFlag<CubeParams::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC2V1);
     SetFlag<HardEvent::MTE1_MTE2>(L1_EVENT0);
@@ -142,8 +151,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::AllocEventID()
     SetFlag<HardEvent::MTE1_MTE2>(L1_EVENT6);
 }
 
-template <typename InputT, bool IsTnd, bool HasStrides>
-__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::FreeEventID()
+template <typename InputT, bool IsTnd, bool HasStrides, bool IsPaged>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides, IsPaged>::FreeEventID()
 {
     WaitFlag<HardEvent::MTE1_MTE2>(L1_EVENT0);
     WaitFlag<HardEvent::MTE1_MTE2>(L1_EVENT1);
@@ -157,10 +166,10 @@ __aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::FreeEventID()
     mmL0BBuffers.Uninit(pipe);
 }
 
-template <typename InputT, bool IsTnd, bool HasStrides>
-__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::CopyGmToL1(LocalTensor<KV_T>& l1Tensor,
-                                                                      GlobalTensor<KV_T>& gmSrcTensor, uint32_t srcN,
-                                                                      uint32_t srcD, uint32_t srcDstride)
+template <typename InputT, bool IsTnd, bool HasStrides, bool IsPaged>
+__aicore__ inline void
+MlaCube<InputT, IsTnd, HasStrides, IsPaged>::CopyGmToL1(LocalTensor<KV_T>& l1Tensor, GlobalTensor<KV_T>& gmSrcTensor,
+                                                        uint32_t srcN, uint32_t srcD, uint32_t srcDstride)
 {
     Nd2NzParams nd2nzPara;
     nd2nzPara.ndNum = 1;
@@ -175,10 +184,11 @@ __aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::CopyGmToL1(LocalTenso
     DataCopy(l1Tensor, gmSrcTensor, nd2nzPara);
 }
 
-template <typename InputT, bool IsTnd, bool HasStrides>
+template <typename InputT, bool IsTnd, bool HasStrides, bool IsPaged>
 __aicore__ inline void
-MlaCube<InputT, IsTnd, HasStrides>::CopyInMm2AToL1(LocalTensor<KV_T>& aL1Tensor, const RunInfo& info, uint32_t mSeqIdx,
-                                                   uint32_t subMSizeAct, uint32_t nSize, uint32_t nOffset)
+MlaCube<InputT, IsTnd, HasStrides, IsPaged>::CopyInMm2AToL1(LocalTensor<KV_T>& aL1Tensor, const RunInfo& info,
+                                                            uint32_t mSeqIdx, uint32_t subMSizeAct, uint32_t nSize,
+                                                            uint32_t nOffset)
 {
     // 全量拷贝 确认是否是紧密排布, actualSingleProcessSInnerSize是否需要32B对齐
     auto srcGm = vec1ResGm[(info.loop % constInfo.preLoadNum) * constInfo.mmResUbSize +
@@ -186,8 +196,8 @@ MlaCube<InputT, IsTnd, HasStrides>::CopyInMm2AToL1(LocalTensor<KV_T>& aL1Tensor,
     CopyGmToL1(aL1Tensor, srcGm, subMSizeAct, nSize, info.actualSingleProcessSInnerSizeAlign);
 }
 
-template <typename InputT, bool IsTnd, bool HasStrides>
-__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ComputeMm1(const RunInfo& info)
+template <typename InputT, bool IsTnd, bool HasStrides, bool IsPaged>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides, IsPaged>::ComputeMm1(const RunInfo& info)
 {
     uint32_t nBufferLoopTimes = (info.actMBaseSize + constInfo.nBufferMBaseSize - 1) / constInfo.nBufferMBaseSize;
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -200,8 +210,8 @@ __aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ComputeMm1(const RunI
     }
 }
 
-template <typename InputT, bool IsTnd, bool HasStrides>
-__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ComputeMm2(const RunInfo& info)
+template <typename InputT, bool IsTnd, bool HasStrides, bool IsPaged>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides, IsPaged>::ComputeMm2(const RunInfo& info)
 {
     uint32_t nBufferLoopTimes = (info.actMBaseSize + constInfo.nBufferMBaseSize - 1) / constInfo.nBufferMBaseSize;
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -216,8 +226,9 @@ __aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ComputeMm2(const RunI
     }
 }
 
-template <typename InputT, bool IsTnd, bool HasStrides>
-__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ProcessMm1(const RunInfo& info, const MSplitInfo mSplitInfo)
+template <typename InputT, bool IsTnd, bool HasStrides, bool IsPaged>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides, IsPaged>::ProcessMm1(const RunInfo& info,
+                                                                               const MSplitInfo mSplitInfo)
 {
     // 最外层还需要一层m的循环
     uint32_t mSize = mSplitInfo.nBufferDealM;
@@ -276,8 +287,12 @@ __aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ProcessMm1(const RunI
                                            .s2DealSize = nL1Size,
                                            .dDealSize = 32U, // D方向上切32
                                            .batchIdx = info.bIdx};
-                copyKvGmToL1(dstTensor, keyGmTensor, gmCoord);
-                copyKvGmToL1(dstRopeTensor, keyRopeGmTensor, gmCoordKRope);
+                if constexpr (IsPaged) {
+                    copyPagedQk(dstTensor, dstRopeTensor, pagedCache, gmCoord, gmCoordKRope);
+                } else {
+                    copyKvGmToL1(dstTensor, keyGmTensor, gmCoord);
+                    copyKvGmToL1(dstRopeTensor, keyRopeGmTensor, gmCoordKRope);
+                }
 
             } else {
                 Tile::L1Tensor<InputT> dstRopeTensor{.tensor = bL1Tensor, .rowCount = nL1SizeAlign};
@@ -297,8 +312,12 @@ __aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ProcessMm1(const RunI
                                       .s2DealSize = nL1Size,
                                       .dDealSize = 256U, // D方向上切256
                                       .batchIdx = info.bIdx};
-                copyKvGmToL1(dstRopeTensor, keyRopeGmTensor, gmCoordKRope);
-                copyKvGmToL1(dstTensor, keyGmTensor, gmCoord);
+                if constexpr (IsPaged) {
+                    copyPagedQk(dstTensor, dstRopeTensor, pagedCache, gmCoord, gmCoordKRope);
+                } else {
+                    copyKvGmToL1(dstRopeTensor, keyRopeGmTensor, gmCoordKRope);
+                    copyKvGmToL1(dstTensor, keyGmTensor, gmCoord);
+                }
             }
             SetFlag<HardEvent::MTE2_MTE1>(mte21KVIds[kb]);
             WaitFlag<HardEvent::MTE2_MTE1>(mte21KVIds[kb]);
@@ -410,8 +429,9 @@ __aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ProcessMm1(const RunI
     qpL1BufIter += mL1Loops;
 }
 
-template <typename InputT, bool IsTnd, bool HasStrides>
-__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ProcessMm2(const RunInfo& info, const MSplitInfo mSplitInfo)
+template <typename InputT, bool IsTnd, bool HasStrides, bool IsPaged>
+__aicore__ inline void MlaCube<InputT, IsTnd, HasStrides, IsPaged>::ProcessMm2(const RunInfo& info,
+                                                                               const MSplitInfo mSplitInfo)
 {
     uint32_t mSize = mSplitInfo.nBufferDealM;
     uint32_t mSizeAlign = (mSize + 16 - 1) / 16;
@@ -477,7 +497,11 @@ __aicore__ inline void MlaCube<InputT, IsTnd, HasStrides>::ProcessMm2(const RunI
                                       .s2DealSize = kL0Size,
                                       .dDealSize = N_L1_SPLIT_SIZE,
                                       .batchIdx = info.bIdx};
-                copyKvGmToL1(dstTensor, valueGmTensor, gmCoord);
+                if constexpr (IsPaged) {
+                    copyPagedV(dstTensor, pagedCache, gmCoord);
+                } else {
+                    copyKvGmToL1(dstTensor, valueGmTensor, gmCoord);
+                }
             }
             SetFlag<HardEvent::MTE2_MTE1>(mte21KVIds[kb]);
             WaitFlag<HardEvent::MTE2_MTE1>(mte21KVIds[kb]);

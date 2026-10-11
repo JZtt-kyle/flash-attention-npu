@@ -22,7 +22,17 @@ from tests import test_flash_attn_npu_v3_mla_bsnd_stride as bsnd_stride
 from tests.test_flash_attn_npu_v3_mla_metadata import load_probe
 
 
-def profile(probe_dir, producer_manifest, output, *, suite=bsnd_stride, kernel_prefix="bsnd"):
+def profile(
+    probe_dir,
+    producer_manifest,
+    output,
+    *,
+    suite=bsnd_stride,
+    kernel_prefix="bsnd",
+    kernel_suffix="stride",
+    scope=None,
+    seed=20261010,
+):
     probes = suite.load_attention(probe_dir)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -107,9 +117,9 @@ def profile(probe_dir, producer_manifest, output, *, suite=bsnd_stride, kernel_p
             )
             assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
             assert (
-                f"cann_{kernel_prefix}_stride"
+                f"cann_{kernel_prefix}_{kernel_suffix}"
                 if label["name"] == "oracle"
-                else f"mla_{kernel_prefix}_stride"
+                else f"mla_{kernel_prefix}_{kernel_suffix}"
             ) in row["Name"]
             label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
         (output / "kernel-samples.json").write_text(json.dumps(labels, indent=2) + "\n")
@@ -131,12 +141,13 @@ def profile(probe_dir, producer_manifest, output, *, suite=bsnd_stride, kernel_p
             subprocess.check_output(["npu-smi", "info"], text=True)
         )
         report = dict(
-            scope=f"Standalone {kernel_prefix.upper()} strided attention versus pinned CANN non-FD Kernel with identical schedules and logical inputs. Source receives contiguous materializations prepared before timing because arbitrary FA3 strides have no source ABI. No cache copy in migrated launch; preallocated buffers; not public metadata E2E or a same-physical-layout comparison.",
+            scope=scope
+            or f"Standalone {kernel_prefix.upper()} strided attention versus pinned CANN non-FD Kernel with identical schedules and logical inputs. Source receives contiguous materializations prepared before timing because arbitrary FA3 strides have no source ABI. No cache copy in migrated launch; preallocated buffers; not public metadata E2E or a same-physical-layout comparison.",
             empty_lse="FA3 -inf versus source +inf checked separately",
             manifest=str(Path(probe_dir) / "build-manifest.json"),
             cpu_affinity=sorted(os.sched_getaffinity(0)),
             visible_devices=os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
-            seed=20261010,
+            seed=seed,
             device=torch.npu.get_device_name(0),
             torch_version=torch.__version__,
             torch_npu_version=torch_npu.__version__,

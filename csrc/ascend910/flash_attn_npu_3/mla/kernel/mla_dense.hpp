@@ -16,7 +16,7 @@
 // Specialization: nonempty BSND capacity, Hkv=1, no mask/FD,
 // Sq*Hq>0, 1<=Sk<=16384. The caller validates source field/address bounds and
 // supplies the source M-block partition, including cross-core and tail blocks.
-// MlaNonPaged shares the task ring with typed TND and mixed-layout wrappers.
+// MlaTaskRing shares the task ring with typed nonpaged and BSND PA wrappers.
 // IsTnd uses compact Q token starts and per-sample Q/KV lengths. MixedKv
 // selects v4 five-word spans with a 64-bit physical KV start instead of v3.
 // HasKvLengths additionally consumes a validated v2 int32 length snapshot.
@@ -24,6 +24,8 @@
 // Default BSND addressing is uint64(b)*capacity; TND uses validated starts.
 // HasStrides selects independent BSND/TND input layouts, without changing the
 // task ring, output layout, metadata or numerical/synchronization order.
+// IsPaged selects validated v6 five-word spans and the PA Copy Tile. Query
+// allocation/used stay separate; the source S2 is not a physical cache stride.
 // Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
 // compute endpoints. FA3 requires -inf (source +inf) LSE for these empty rows.
 #pragma once
@@ -34,19 +36,22 @@ namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
 template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false, bool HasUsed = false,
-          bool HasStrides = false>
-class MlaNonPaged {
+          bool HasStrides = false, bool IsPaged = false>
+class MlaTaskRing {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
     static_assert(!MixedKv || (IsTnd && HasKvLengths));
     static_assert(!HasUsed || HasKvLengths);
-    static constexpr uint32_t kSpanWords = HasUsed ? 8 : MixedKv ? 5 : 4;
+    static_assert(!IsPaged || (HasKvLengths && HasStrides && !IsTnd && !MixedKv && !HasUsed));
+    static constexpr uint32_t kSpanWords = IsPaged ? 5 : HasUsed ? 8 : MixedKv ? 5 : 4;
+    static constexpr bool kQueryLengths = IsTnd || HasUsed || IsPaged;
 
   protected:
     __aicore__ inline void Run(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv,
                                GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace, TPipe* pipe,
                                GM_ADDR kvLengths, uint32_t totalQuery = 0, const MlaBsndInputLayouts* layouts = nullptr,
-                               bool kvIsTnd = IsTnd && !MixedKv)
+                               bool kvIsTnd = IsTnd && !MixedKv, GM_ADDR pageTable = nullptr,
+                               const MlaPagedCacheLayout* pagedLayout = nullptr)
     {
         params = schedule;
         queryTokens = IsTnd ? totalQuery : params.sq;
@@ -92,7 +97,7 @@ class MlaNonPaged {
 
         Block::CubeParams cubeParams{queryTokens, params.heads, params.sk, params.mm1ResSize, params.mm2ResSize};
         if ASCEND_IS_AIC {
-            cube.Init(pipe, cubeParams, qc, qr, kv, kr, layouts, kvIsTnd);
+            cube.Init(pipe, cubeParams, qc, qr, kv, kr, layouts, kvIsTnd, pageTable, pagedLayout);
             cube.InitMm1GlobalTensor(qk);
             cube.InitMm2GlobalTensor(p, pv);
             cube.AllocEventID();
@@ -117,7 +122,7 @@ class MlaNonPaged {
   private:
     using RunInfo = Block::RunInfo;
     static constexpr uint32_t kTaskCount = 3;
-    Block::MlaCube<InputT, IsTnd, HasStrides> cube;
+    Block::MlaCube<InputT, IsTnd, HasStrides, IsPaged> cube;
     Block::MlaVector<InputT, IsTnd> vector;
     MlaDenseKernelSchedule params;
     GlobalTensor<uint32_t> lengths;
@@ -138,7 +143,7 @@ class MlaNonPaged {
         if constexpr (HasKvLengths) {
             bool needInit = false;
             for (uint32_t b = 0; b < params.batch; ++b) {
-                needInit |= lengths.GetValue((IsTnd || HasUsed) ? kSpanWords * b + kSpanWords - 1 : b) == 0;
+                needInit |= lengths.GetValue(kQueryLengths ? kSpanWords * b + kSpanWords - 1 : b) == 0;
             }
             // Like source needInit, cover every output, including zero-KV
             // samples beyond the last compute endpoint. Never read their Q/KV.
@@ -176,7 +181,7 @@ class MlaNonPaged {
         info.bIdx = b;
         info.n2Idx = 0;
         info.gS1Idx = m * params.mBaseSize;
-        uint32_t rows = ((IsTnd || HasUsed) ? actualQueryLength : params.sq) * params.heads;
+        uint32_t rows = (kQueryLengths ? actualQueryLength : params.sq) * params.heads;
         if constexpr (IsTnd) {
             info.queryStart = queryStart;
             info.kvStart = kvStart;
@@ -203,8 +208,8 @@ class MlaNonPaged {
 
     __aicore__ inline void UpdateAxisInfo(uint32_t& b, uint32_t& m, uint32_t& s)
     {
-        uint32_t mLoops = (((IsTnd || HasUsed) ? actualQueryLength : params.sq) * params.heads + params.mBaseSize - 1) /
-                          params.mBaseSize;
+        uint32_t mLoops =
+            ((kQueryLengths ? actualQueryLength : params.sq) * params.heads + params.mBaseSize - 1) / params.mBaseSize;
         uint32_t kvLength = HasKvLengths ? actualKvLength : params.sk;
         uint32_t sLoops = (kvLength + params.s2BaseSize - 1) / params.s2BaseSize;
         if (s + 1 < sLoops) {
@@ -268,7 +273,11 @@ class MlaNonPaged {
             if (dispatch) {
                 if constexpr (HasKvLengths) {
                     if (b != previousBatch) {
-                        if constexpr (HasUsed) {
+                        if constexpr (IsPaged) {
+                            const uint32_t start = kSpanWords * b;
+                            actualQueryLength = lengths.GetValue(start + 3);
+                            actualKvLength = lengths.GetValue(start + 4);
+                        } else if constexpr (HasUsed) {
                             const uint32_t start = kSpanWords * b;
                             // TND query totals fit int32. BSND uses the existing
                             // 64-bit b*Sq address in Block, equal to this span.
@@ -291,7 +300,7 @@ class MlaNonPaged {
                         }
                         previousBatch = b;
                     }
-                    if (actualKvLength == 0 || ((IsTnd || HasUsed) && actualQueryLength == 0)) {
+                    if (actualKvLength == 0 || (kQueryLengths && actualQueryLength == 0)) {
                         // Preserve the source task-ring counters while skipping
                         // DEAL_ZERO/SKIP_ZERO. Pending tasks drain after dispatch.
                         UpdateAxisInfo(b, m, s);
@@ -309,6 +318,9 @@ class MlaNonPaged {
         }
     }
 };
+template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false, bool HasUsed = false,
+          bool HasStrides = false>
+using MlaNonPaged = MlaTaskRing<InputT, HasKvLengths, IsTnd, MixedKv, HasUsed, HasStrides>;
 // Typed BSND entry retains the original interface; the common engine is only
 // accessible through layout-specific wrappers after metadata validation.
 template <typename InputT, bool HasKvLengths = false, bool HasStrides = false>
