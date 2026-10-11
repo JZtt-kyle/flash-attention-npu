@@ -1,16 +1,8 @@
 # MLA 迭代计划
 
-本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。[待完成工作](#下一步m07b2) 在前，[已完成步骤](#已完成步骤) 仅作历史索引；步骤编号保留，M04c 实际在 M05 闭环后执行。
+本文件只记录迭代顺序、每步产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。依次阅读 [唯一下一步](#下一步m07b2)、[M07 后续步骤](#m07-剩余步骤) 和 [后续阶段](#m07-之后)；[已完成步骤](#已完成步骤) 放在末尾，仅作历史索引。
 
 M06 已完成，M07a 的源边界核对与实施拆分、M07b1 的独立 PA CPU 地址组件也已完成。唯一下一步为 **[M07b2：PA CPU 调度](#下一步m07b2)**；M07 按下表逐项验收，完成后再依次推进 M08..M17。
-
-## M06：非分页长度、TND 与 stride
-
-本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`。BSND 实际长度、TND/混合布局、分配与 used，以及三种布局的 stride 均已完成生产接入。字段、长度和地址规则分别见 design [6.2](design.md#62-调度字段与边界)、[6.3](design.md#63-长度与布局调度)、[6.4](design.md#64-输入-stride-与地址校验)。PA、mask、FD、192/128 与调度选项留在后续步骤。
-
-每行单独验收、提交。长度和布局按“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 入口接入”推进；stride 在已有协议上按“CPU 地址校验 → 独立 attention → 入口接入”推进。独立组件完成不代表公开入口开放。
-
-M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[用例与 reference](design.md#42-代表用例与参考实现边界) 和 [验收矩阵](design.md#71-固定性能矩阵与阶段边界)。生成记录、校验记录和执行 attention 分别验收；全部样本实际长度为零也不等于全局空容量。
 
 ## M07：ND paged cache
 
@@ -18,7 +10,11 @@ M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[�
 
 ### 下一步：M07b2
 
-交付不被生产调用的 PA CPU 调度：BSND/TND Q、可选 Q-used、按样本的 KV 长度与逻辑容量分离，复用既有长度归一、SplitCore、无 split 端点和资源预算。按固定源次序接入 PA `CalcInnerSize`，覆盖全部页大小、P=112 的 448 基块和 P=528 的跨页复制范围；对完整分核、FD 候选记账和 workspace 做固定源差分、边界和 sanitizer 检查，并回归旧 CPU 路径。M07b1 地址组件不承担调度容量上限；本步须按 design 校验每样本逻辑容量 0..16384。此步不改 metadata、Kernel 或公开入口。
+前置产物为 M07b1 的 [CPU 地址组件](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_layout.h)，最近闭环证据见 [status](status.md#最近功能闭环与限制)。本步交付不被生产调用的 PA CPU 调度，按以下条件验收：
+
+- 支持 BSND/TND Q、可选 Q-used；KV 长度按样本，逻辑容量与实际长度分离。复用既有长度归一、SplitCore、无 split 端点和资源预算。
+- 按固定源次序接入 PA `CalcInnerSize`，覆盖全部 64 种页大小、P=112 的 448 基块和 P=528 的跨页范围。对完整分核、FD 候选记账和 workspace 做固定源差分、边界及 ASan/UBSan 检查，回归旧 CPU 路径。
+- 按 design 校验每样本逻辑容量 0..16384；M07b1 地址层不承担该调度上限。不改 metadata、Kernel 或公开入口。
 
 ### M07 剩余步骤
 
@@ -26,7 +22,7 @@ M06 的实现依据还包括 [metadata 协议](design.md#5-metadata-设计)、[�
 
 | 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
 | --- | --- | --- | --- |
-| M07b2 | 唯一下一步 | BSND/TND Q、可选 Q-used 的 PA CPU 调度；KV 长度按样本 | 固定源 `CalcInnerSize`、完整分核/FD 字段/workspace 差分；逻辑容量与有效长度分离、P=112/528 等边界、无 split 映射、sanitizer；不改旧路径结果 |
+| M07b2 | 唯一下一步 | 独立 PA CPU 调度 | 见[上节完成条件](#下一步m07b2) |
 | M07c1 | 待开始 | 新 PA 协议与 CPU 序列化，固化版本、精确字数与调用 context | 独立解码/损坏/溢出/失败清零，Q 分配/used 和 KV 长度快照；不保存页表、物理页数或 stride；v1–v5 互斥与回归 |
 | M07c2 | 待开始 | 独立 PA AICPU 生成器，仍无公开接入 | 910B 对照 CPU/固定源；设备长度、TND 总 Q 推导、空值、失败清零、输出/输入别名检查、异步生命周期与 metadata/普通 FA3 回归 |
 | M07c3 | 待开始 | PA 设备消费者：记录校验及当次页表/物理 cache 校验 | 损坏/过期长度/页大小、有效页越界与 padding 哨兵、Q=0 仍验有效页、空池/空表；写输出前拒绝、release 真实 Trap、流生命周期及旧消费者/普通 FA3 回归 |
@@ -67,7 +63,7 @@ PA01/PA02 的地址、Copy 与精度覆盖全部 16..1024 的 16 倍数；代表
 
 ## 已完成步骤
 
-以下只索引各步交付的部分，不作为当前支持清单；CPU、生成器、消费者和 probe 的交付均不代表生产开放。共同验证要求见[每步完成条件](#每步完成条件)，历史数量、性能和排障用 `git log -- docs/mla/status.md` 查找。
+以下只索引各步交付的部分，不作为当前支持清单；“仍拒绝”等描述只表示该步结束时的边界，后续生产接入以 status 为准。共同验证要求见[每步完成条件](#每步完成条件)，历史数量、性能和排障用 `git log -- docs/mla/status.md` 查找。步骤编号保留，M04c 实际在 M05 闭环后执行。
 
 ### 范围、基线与 BSND 接入
 
@@ -100,6 +96,8 @@ PA01/PA02 的地址、Copy 与精度覆盖全部 16..1024 的 16 倍数；代表
 | M04c4 | 全局空 batch/query/KV；空 shape、O/LSE、记录校验、Trap 与适用 E2E |
 
 ### M06 已完成子步骤
+
+本阶段限 512+64 共享 KV、FP16/BF16、Hkv=1、无 mask、`num_splits=1`，完成非分页长度、分配/used 及三种布局的 stride 生产接入。长度/布局按“CPU 调度 → AICPU 生成 → 设备校验 → 独立 attention → 入口接入”推进；stride 在已有协议上按“CPU 地址校验 → 独立 attention → 入口接入”推进。协议、地址与验收口径见 design [第 5 节](design.md#5-metadata-设计)、[6.3–6.4](design.md#63-长度与布局调度) 和 [7.1](design.md#71-固定性能矩阵与阶段边界)。
 
 | 步骤 | 已完成产物与边界 |
 | --- | --- |
