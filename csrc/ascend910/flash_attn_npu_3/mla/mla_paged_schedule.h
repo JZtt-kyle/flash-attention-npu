@@ -42,7 +42,8 @@ struct MlaPagedSchedule {
 };
 
 // Independent CPU component only: BSND/TND Q, optional Q-used, shared 512+64
-// KV, no mask, num_splits=1. No metadata, device or public caller uses this API.
+// KV, no mask, num_splits=1. Also used by standalone CPU metadata serialization;
+// no AICPU, device or public caller uses this API.
 // P is 16..1024 in multiples of 16; C is 0..16384 and divisible by P.
 // Q allocation/prefix/used follow ParseUsedLengths. KV lengths are mandatory
 // int32[B], always per sample, in [0,C]; nullptr/count=0 is allowed only at B=0.
