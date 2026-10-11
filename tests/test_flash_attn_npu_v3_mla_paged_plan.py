@@ -54,6 +54,7 @@ def paged_plan(tmp_path_factory):
             "mla_paged_plan.cpp",
             "mla_paged_layout.cpp",
             "mla_bsnd_layout.cpp",
+            "mla_tnd_layout.cpp",
             "mla_schedule.cpp",
             "detail/cann_split_core.cpp",
         )
@@ -119,20 +120,26 @@ def static_case(page=112, batch=3, sq=7, heads=128, width=5, pool=7, dtype=1, us
 
 
 def evaluate(binary, cases):
+    tnd = "max_q" in cases[0]
+    assert all(("max_q" in item) == tnd for item in cases)
     rows = []
     for item in cases:
         row = [item["dtype"], int(item["used"])]
+        if tnd:
+            row += [item["max_q"]]
         for name in ("q", "qv", "k", "v", "table"):
             t = item[name]
             row += [*t["sizes"], *t["strides"], t["offset"], t["storage"]]
         rows.append([*row, *item["platform"], *item["blocks"]])
     stdin = "".join(" ".join(map(str, row)) + "\n" for row in rows)
-    result = subprocess.run([str(binary)], input=stdin, capture_output=True, text=True, timeout=30)
+    command = [str(binary)] + (["--tnd"] if tnd else [])
+    result = subprocess.run(command, input=stdin, capture_output=True, text=True, timeout=30)
     calls = binary.parent / "calls"
     calls.mkdir(exist_ok=True)
     (calls / f"{len(list(calls.glob('*.json'))):04d}.json").write_text(
         json.dumps(
             dict(
+                command=command,
                 inputs=cases,
                 stdin=stdin,
                 stdout=result.stdout,
@@ -158,12 +165,18 @@ def expected_layout(t):
 
 def check_static(item, plan):
     assert plan["status"] == 0, (item, plan)
-    batch, sq, heads, _ = item["q"]["sizes"]
+    tnd = "max_q" in item
+    if tnd:
+        total, heads, _ = item["q"]["sizes"]
+        batch, sq = item["table"]["sizes"][0], item["max_q"]
+    else:
+        batch, sq, heads, _ = item["q"]["sizes"]
+        total = batch * sq
     pool, page = item["k"]["sizes"][:2]
     width = item["table"]["sizes"][1]
     capacity = width * page
-    blocks = item["platform"][0] if batch and sq and capacity else 1
-    assert plan["shape"] == [batch, heads, 0, batch * sq, sq, capacity, page]
+    blocks = item["platform"][0] if batch and total and capacity else 1
+    assert plan["shape"] == [batch, heads, int(tnd), total, sq, capacity, page]
     assert plan["words"] == 408 + 5 * batch <= U32_MAX
     assert plan["blocks"] == [blocks] * 26
     assert plan["platform"] == item["platform"]
@@ -173,9 +186,9 @@ def check_static(item, plan):
         batch,
         heads,
         int(item["used"]),
-        0,
-        batch * sq & U32_MAX,
-        batch * sq >> 32,
+        int(tnd),
+        total & U32_MAX,
+        total >> 32,
         sq,
         page,
         capacity,
@@ -184,11 +197,13 @@ def check_static(item, plan):
     ]
     assert context[15:] == item["platform"][2:7]
     assert 0 <= plan["workspace"] == sum(context[13:15]) <= I64_MAX
-    if not (batch and sq and capacity):
+    if not (batch and total and capacity):
         assert plan["workspace"] == 0
     else:
         assert context[13] > 0 and context[14] == item["platform"][-1]
     layouts = [expected_layout(item[name]) for name in ("q", "qv", "k", "v")]
+    if tnd:
+        layouts[:2] = [[0, *layout] for layout in layouts[:2]]
     assert plan["layouts"] == layouts
     row_stride, span = expected_layout(item["table"])
     assert plan["cache"] == [batch, width, capacity, pool, page, row_stride, span, *layouts[2:]]

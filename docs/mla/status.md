@@ -1,7 +1,7 @@
 # MLA 当前状态
 
-核对日期：2026-10-11；分支：`feat/mla-cann-migration`；接手基线：`ea3be44`。
-本轮完成 **M07e2c：BSND 只读 PA kvcache 公开接入**，8,280 项去重 pytest 通过。910B 双 dtype 精度、生产 Kernel 对照和 **72 个适用公开 R=1/4 调用段逐例 E2E** 完成；TND PA 前向仍明确拒绝。唯一下一步为 [M07e3：TND Q 只读 PA kvcache 接入](plan.md#下一步m07e3)。
+核对日期：2026-10-11；分支：`feat/mla-cann-migration`；接手基线：`f14aad6`。
+本轮完成 **M07e3a：独立 TND PA 静态发射计划**，4,174 项去重 pytest 通过；完整 928 组静态输入通过 ASan/UBSan 和泄漏检查，439 组 BSND 计划与基线逐字段一致。TND PA 前向仍明确拒绝。唯一下一步为 [M07e3b：TND PA 内部生产前向](plan.md#下一步m07e3b)。
 
 本页记录当前能力、最近闭环证据和唯一下一步；契约见 [design](design.md)，迭代边界见 [plan](plan.md)。本轮闭环提交用 `git log -1 -- docs/mla/status.md` 定位。
 
@@ -18,6 +18,7 @@
 | **公开只读 PA cache** | `flash_attn_with_kvcache(page_table=...)`，BSND Q + ND PA KV | **内部生成或显式复用 v6；None/整数/tensor KV 长度；完整 Q 分配段** |
 | 公开 metadata | `get_scheduler_metadata` | 非 PA：BSND v2、TND v4；指定 `page_size`：BSND/TND v6 `int32[408+5B]` |
 | 内部前向 | 非 PA 三布局 Q-used；BSND PA Q-used | 非 PA v5、PA v6；Q-used 每次生成记录，不开放显式复用 |
+| 独立静态计划 | BSND/TND PA host 计划 | TND 的 `BuildPagedTndPlan` 已验收；仍无 TND PA 生产 launcher |
 | 独立 TND PA attention | TND Q 分配/used、独立 stride | 尚无 TND PA 生产前向；独立 probe 不代表公开能力 |
 
 调用时须注意：
@@ -32,57 +33,48 @@
 
 ## 本轮闭环与证据
 
-公开包装按逻辑容量处理整数长度并直接调用既有 PA dispatcher；通用 dispatcher/raw C++ 也汇入 `PagedBsndForward`。新增 fake 静态几何、完整 storage、页表/长度/记录描述校验；复用既有 AICPU、消费者及 Kernel/Block/Tile，没有设备数值路径修改、动态值读回、完整 cache gather 或 CANN attention 转调。
+`BuildPagedTndPlan` 复用完整 TND/PA storage 校验和共享静态资源准备，分离逻辑 B、实际 Tq 与声明 max Q；按实际 Tq 校验总地址、按 `min(Tq,maxQ)` 预算 M，并保留原 max Q 的 v6 context。仅接收静态描述，不读取前缀、used、KV 长度或页表值。BSND/TND 共用 `MlaPagedPlan`，保留原 BSND 类型别名；Kernel/Block/Tile、消费者协议和公开入口未改。
 
-证据位于忽略目录 `build/mla-m07e2c-bsnd-paged-public/`，下表路径相对此目录。包含命令、日志、XML、输入/输出、固定源快照、实际库及逐样本性能数据；本机证据不随 Git 分发，迁机须复制该目录和 manifest 引用的历史固定源产物。
+证据位于忽略目录 `build/mla-m07e3a-tnd-paged-plan/`，下表路径相对此目录。包含复现脚本、日志、XML、输入/输出、固定源快照和实际库；本机证据不随 Git 分发，迁机须复制本目录及 manifest 引用的历史固定源产物。
 
 | 核验 | 结果与依据 |
 | --- | --- |
-| 前置闭环 | 编辑前 M07e2b 的 6,392 项历史证据及最小质量检查复核通过，不计本轮测试；`prerequisite.json` |
-| 功能与回归 | **8,280 项去重 pytest，无失败/跳过**：CPU 893、公开功能 1882、公开真实 Trap 32、普通 FA3/入口 822、非分页及 TND PA 共享组件 1098、公开 PA metadata 2840、内部 PA 713；各模式 XML、日志及 `*-command.json` |
-| 公开精度与记录 | 双 dtype 全部 64 种 P×4 个 cache profile，共 512 组源/双数学 O/LSE；另有 36 组公开/raw C++ 跨视图复用与 stride/真实大地址检查。固定源 O/非空行 LSE 逐元素一致，零 KV 符号单验；`probes/*/public-accuracy/` |
-| 入口与生命周期 | None/整数/tensor、offset 记录、空表/池、完整 storage、fake/fullgraph compile、当前流长度原位更新、多 stream 释放后复用均通过；非法页/过期长度/v1–v5/损坏 v6 共 32 项真实 Trap，独立进程先正常预热；`public.xml`、`public-trap.xml`、`kvcache/` |
-| 构建与加载 | 最终扩展 36 对象、271 个仓库源、6,197 个依赖核验；仅 `flash_api.o` / `mla_forward.o` 两个 host 对象变化，34 个对象含 PA 设备实例保持原哈希；`production-load.json`、`production-object-delta.json`、`production-final/` |
-| 独立探针复用 | 逐项核对 M07e2b 探针依赖，双 dtype 各 55 源/953 依赖与 v6 producer 22 源未变，复用库但隔离新输出；`probe-reuse-audit.json` |
-| 固定源原生 PA | 从既有固定源快照补编 FP16/BF16 BSND ND PA 非 FD/FD 实例，不改 CANN 源仓；24 例实际 Kernel、tiling key 与新包对应，每 dtype 各 6 例非 FD/FD；`native-package.json`、`native-dispatch-proof.json`、`native-*/` |
-| 性能 | 双 dtype 24 例生产 Kernel 组件对照，另有 24 例公开生成/复用/内部生成 R=1/4 E2E；先验源/双数学精度，性能驱动用例不计 pytest；`profile-*/`、`public-profile-*/` |
-| 提交质量 | 文档链接/锚点、命令与表格、差异及 staged 质量钩子通过；只暂存本步文件；`docs-check.json`、`quality-staged-result.json`、`source-snapshots.json`、`acceptance.json` |
+| 前置闭环 | 编辑前核对 M07e2c 的 8,280 项历史 pytest、扩展/对象/依赖与固定源性能证据通过，不计本轮测试；`prerequisite.json` |
+| CPU | **1,305 项通过**：BSND/TND 计划、全部 P×双 dtype 的固定源预算/v6 消费、Q 分配/used/宽松 max、空值/storage/宽字段/平台边界、PA/TND 布局及相关构建检查；`cpu.xml`、`cpu-command.json`、`cpu/` |
+| Sanitizer | **928 组完整静态输入**（BSND 439、TND 489）按布局批量执行，开启 ASan/UBSan、失败即停和泄漏检查，所有字段与 CPU 输出一致、stderr 为空；`sanitizer-batch.json`、`sanitize-batch/` |
+| BSND 基线差分 | 从 `f14aad6` 提取原计划和驱动，439 组输入的全部计划字段、workspace、核数、布局及拒绝状态一致；`bsnd-differential.json`、`baseline-bsnd/` |
+| 910B BSND PA | **713 项通过**：全部页大小、双 dtype 源/双数学 O/LSE、stride/大地址/空值/记录复用/生命周期；每 dtype 保存 328 组结果，其中 313 组含源对照；`device.xml`、`probes/*/production-accuracy/` |
+| 公开入口与普通 FA3 | **1,334 项公开 PA + 822 项普通 FA3/入口回归通过**，含真实/fake/compile、长度更新、storage、生命周期及未接通 TND PA 的明确拒绝；`public.xml`、`ordinary.xml` |
+| 构建与加载 | 36 个链接对象、271 个仓库源、6,197 个依赖核验；仅 `mla_paged_plan.o` / `mla_forward.o` 变化，34 个对象含全部设备 Kernel 保持原哈希；`production-load.json`、`production-object-delta.json`、`production-final/` |
+| 独立探针复用 | 双 dtype 各 55 源/953 依赖及 v6 producer 22 源核对；唯一变化是实际 include 依赖未消费的计划头，保留原 manifest 与快照差异，复制库并隔离新输出；`probe-reuse-audit.json` |
+| 提交质量 | 三份文档链接/锚点、命令/表格、差异与 staged 质量钩子通过，只暂存本步文件；`docs-check.json`、`quality-staged-result.json`、`source-snapshots.json`、`acceptance.json` |
 
-初轮 Dynamo 参数化测试达到缓存上限，已在编译测试间 reset；大地址测试的 11 页误需 80 GiB，已缩为仍跨 >32 位地址的 2 页。失败日志和旧测试源码分别保存在 `failed-compile-test-cache/`、`failed-wide-pool/`，最终完整公开测试重跑通过。原生 OPC 首次受沙箱网络接口枚举限制，已在沙箱外完成；`failed-native-sandbox/` 保留原错误。一次重复生产构建被主动停止，随后串行重建所有受影响 host 对象，最终链接/加载审计为准；早期日志保留在 `preformat-build/`、`duplicate-build-stopped/`。初轮 1,334 项 smoke 不重复计数。
+上述 pytest 无失败/跳过；初轮 184 项 smoke 不重复计数。Sanitizer 首轮在沙箱内因 LeakSanitizer 的 ptrace 限制退出，日志保留在 `failed-sanitizer-sandbox/`；沙箱外逐项运行因每进程退出约 4.5 秒，在完整批量矩阵通过后主动停止，40 项部分运行不计闭环测试。该中止记录为 `sanitizer-unbatched-stop.json`，最终批量复现脚本为 `check_sanitizer_batch.py`。
 
-## 性能范围与保留限制
+## 验收范围与保留限制
 
-两种 dtype 使用预先固定的 P=16/112/128/256/528/1024 × 短/长 KV 矩阵，每种 12 例。组件保留既有内部 Q-used 几何；公开矩阵使用完整 BSND Q。每例预热 5 次、5 轮交替采样，每轮 20 个 wall、10 个 profiler 样本；公开 R=1/4，双方同进程固定同一 CPU，seed=20261011。
+本步只接入独立 TND 静态计划；虽随共享 host 单元构建，仍无 TND PA 生产 launcher 或公开前向。动态前缀/used、记录和有效页由既有 v6 消费者逐次检查，静态成功不代表任意动态长度合法。
 
-| dtype | 生产/固定源组件 Kernel 比值 | Kernel 较慢例数 | 适用公开 E2E 比值范围 | 适用调用段 |
-| --- | --- | --- | --- | --- |
-| FP16 | 0.9947–1.2360 | 9/12 | 0.3581–0.6988 | 36/36 ≤1.0 |
-| BF16 | 1.0108–1.2097 | 12/12 | 0.3552–0.7238 | 36/36 ≤1.0 |
-
-E2E 比值为 FA3/CANN，含 O/LSE 完成、入口校验、输出/workspace 分配、必要转换和同步；生成加 R 次、既有记录复用及每次内部生成分别计量。CANN 保留可原生表达的独立页 stride，其余 Q/cache/页表转换计入每次调用。**72 个适用调用段逐例达标；原生 FD 另列能力差距，不纳入当前单 split 门槛。** 组件 Kernel 含 v6/当次长度/全部有效页校验，不能据公开 E2E 达标宣称 Kernel 逐例不劣化；probe wall 不作公开 E2E。
-
-Profiler 框架 API 数据库导出状态由 `acceptance.json` 的 `profiler_exports` 逐模式记录；本轮发现 2 条已知 `Failed to find node launch str id` 错误。计时仅使用与 CANN `op_summary` 逐行核对的文本 Kernel CSV，不依赖失败的框架关联表；解析器源码/哈希保存在 `profiler-parser-sources/`。
-
-未重跑普通 FA3 全套、完整 TND PA attention 矩阵、独立 Copy 性能、全部历史 Trap、NPU sanitizer 或全布局公开 E2E；相关共享路径回归已补。非分页公开性能仍为 M06e2c2 的历史结果，不能记作本轮新测；TND PA、mask 和 FD 尚未接入生产，910C 未验收。
+未修改设备数值对象，本轮未重测 Kernel 性能或公开 E2E；M07e2c 的生产 Kernel 比值和 72 个适用公开 R=1/4 调用段为历史结果，见其提交和 `build/mla-m07e2c-bsnd-paged-public/acceptance.json`。未重跑完整 TND PA attention、全部历史 Trap、PA metadata/非分页 MLA 全套、普通 FA3 全套或 NPU sanitizer；本轮回归针对共享 host 计划及现有 BSND 生产路径。TND PA 生产精度/性能留在 M07e3b，公开精度与 E2E 留在 M07e3c，910C 未实机验收。
 
 ## 环境与构建
 
-Python 3.11.15，torch 2.7.1+cpu、torch_npu 2.7.1，CANN 9.0.0-beta.2；8 张 910B3，使用物理卡 6、进程内设备 0，设备任务串行。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f` 干净；只读 CANN `ca18aee610729ca5270a44e2d84c751bc687fbf0` 原有 67 项差异及本仓未跟踪 `kernel_meta/` 保留。环境与前后状态见 `environment.json`、`*-status-before.txt` / `*-status-final.txt`。
+Python 3.11.15，torch 2.7.1+cpu、torch_npu 2.7.1，CANN 9.0.0-beta.2；8 张 910B3，使用物理卡 6、进程内设备 0，设备任务串行。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f` 干净；只读 CANN `ca18aee610729ca5270a44e2d84c751bc687fbf0` 原有 67 项差异及本仓未跟踪 `kernel_meta/` 保留。环境与前后状态见 `environment.json`、`*-status-before.txt` / `*-status-final.txt`。沙箱内首次驱动查询失败，沙箱外检查通过。
 
-最终扩展实际路径为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `4844118428c071d40512259ea6a0bf2770c869b315bb0b9e925d6cf2eab0193f`。固定源原生包、host/device 库与实际分派分别见 `native-package.json`、`public-profile-*/environment.json`、`native-dispatch-proof.json`。
+最终扩展实际路径为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `e03589054dc67611025bb965f8cc81048178b55c256650fe5d63d483a3e9d1fe`。构建为 `build_production.py`，实际加载/对象/依赖审计为 `audit_production.py`，证据保存于 `production-final/`；双 dtype 精度使用核对后复制的固定源 probe 库，不覆盖历史结果。
 
 ## 唯一下一步与复现
 
-下一步仅为 **[M07e3](plan.md#下一步m07e3)**：TND Q 只读 PA kvcache 与内部 TND PA Q-used 的生产接入及相应验收。本轮只提交一次，成功后停止。
+下一步仅为 **[M07e3b](plan.md#下一步m07e3b)**：复用 TND 静态计划和既有 attention，接双 dtype 生产实例与内部前向，完成相应 910B 精度、代表性能和回归；公开 TND PA kvcache 留在 M07e3c。本轮只提交一次，成功后停止。
 
 最小闭环复核（仓库根目录，非 login shell，不发射 NPU）：
 
 ```bash
-python3 build/mla-m07e2c-bsnd-paged-public/check_acceptance.py
+python3 build/mla-m07e3a-tnd-paged-plan/check_acceptance.py
 PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache \
 bash ci/code_quality.sh --staged
 git diff --check
 git diff --cached --check
 ```
 
-`run_checks.py` 支持 `cpu`、`public`、`public-trap`、`ordinary`、`nonpaged`、`metadata`、`device`、`native-fp16/bf16`、`profile-fp16/bf16`、`public-profile-fp16/bf16`；命令与环境保存在相应 `*-command.json`。生产构建/审计为 `build_production.py` / `audit_production.py`，固定源补编/打包为 `build_native.py` / `package_native.py`。重跑先复制脚本到新证据目录，不覆盖本轮数据；设备任务须在沙箱外串行执行，CPU 禁用 torch 自动加载 NPU。
+`run_checks.py` 的闭环模式为 `cpu`、`device`、`public`、`ordinary`；命令与环境保存于各模式 `*-command.json`。`compare_bsnd.py` 比较历史 BSND 计划，`check_sanitizer_batch.py` 从 CPU 全部捕获输入构建独立插桩驱动并验收；`run_device_checks.py` 审计扩展后串行运行三个 NPU 模式。重跑先复制脚本到新证据目录，不覆盖本轮数据；NPU 与 sanitizer 在沙箱外执行，CPU 禁用 torch 自动加载 NPU。

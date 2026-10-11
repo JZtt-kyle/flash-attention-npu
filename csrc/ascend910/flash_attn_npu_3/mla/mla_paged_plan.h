@@ -1,23 +1,27 @@
-// Static host preparation for compressed BSND MLA paged attention.
+// Static host preparation for compressed BSND/TND MLA paged attention.
 // No tensor data, addresses, torch types or device runtime calls enter this API.
 #pragma once
 
 #include "mla_paged_layout.h"
 #include "mla_paged_metadata.h"
+#include "mla_tnd_layout.h"
 
 namespace flash_attn::mla {
 
-struct MlaPagedBsndPlan {
+struct MlaPagedPlan {
     MlaPagedShape shape;
     // Pass this fixed launch policy to the AICPU generator, including when
     // device-only lengths turn a nonempty allocation into an empty schedule.
     MlaPlatformInfo platform;
     MlaPagedMetadataContext context;
-    MlaBsndInputLayouts layouts;
+    MlaBsndInputLayouts layouts; // TND Q/qv: batchStride=0, rowStride=tokenStride.
     MlaPagedCacheLayout cache;
     uint32_t metadataWords;
     uint64_t totalWorkspaceBytes; // context.workspaceBytes + context.libApiBytes.
 };
+
+using MlaPagedBsndPlan = MlaPagedPlan;
+using MlaPagedTndPlan = MlaPagedPlan;
 
 enum class MlaPagedPlanStatus {
     Success,
@@ -50,5 +54,19 @@ MlaPagedPlanStatus BuildPagedBsndPlan(const MlaBsndTensorView& q, const MlaBsndT
                                       const MlaBsndTensorView& k, const MlaBsndTensorView& v,
                                       const MlaPageTableView& table, const MlaPlatformInfo& platform, uint32_t dtype,
                                       bool hasUsedQuery, MlaPagedBsndPlan& output);
+
+// q:[T,H,64], qv:[T,H,512], table:[B,M]; cache as above. The caller supplies
+// maxQueryLength and checks that the Q prefix descriptor has B+1 entries.
+// T is the actual allocation, not B*maxQueryLength; maxQueryLength may exceed
+// the observed maximum. Bound M by min(T,maxQueryLength)*H, while preserving
+// the declared maximum in the context for dynamic validation. No prefix or
+// used values enter this API. Sample starts remain allocationPrefix[b].
+// Static B/T/C selects one or all C1V2 cores, independently of physical pages
+// or Q-used. All other BSND plan guarantees and caller obligations apply.
+// This standalone plan does not enable TND PA production/public attention.
+MlaPagedPlanStatus BuildPagedTndPlan(const MlaTndTensorView& q, const MlaTndTensorView& qv, const MlaBsndTensorView& k,
+                                     const MlaBsndTensorView& v, const MlaPageTableView& table, int64_t maxQueryLength,
+                                     const MlaPlatformInfo& platform, uint32_t dtype, bool hasUsedQuery,
+                                     MlaPagedTndPlan& output);
 
 } // namespace flash_attn::mla

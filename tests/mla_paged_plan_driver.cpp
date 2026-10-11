@@ -26,15 +26,27 @@ void PrintTensor(const MlaBsndTensorLayout& x)
     std::cout << '[' << x.batchStride << ',' << x.rowStride << ',' << x.headStride << ',' << x.spanElements << ']';
 }
 
-int main()
+int main(int argc, char** argv)
 {
+    const bool tnd = argc == 2 && std::strcmp(argv[1], "--tnd") == 0;
+    if (argc != (tnd ? 2 : 1)) {
+        return 2;
+    }
     uint32_t dtype;
     bool used;
     while (std::cin >> dtype >> used) {
         MlaBsndTensorView q{}, qv{}, k{}, v{};
+        MlaTndTensorView tq{}, tqv{};
+        int64_t maxQuery = 0;
         MlaPageTableView table{};
-        ReadView(q);
-        ReadView(qv);
+        if (tnd) {
+            std::cin >> maxQuery;
+            ReadView(tq);
+            ReadView(tqv);
+        } else {
+            ReadView(q);
+            ReadView(qv);
+        }
         ReadView(k);
         ReadView(v);
         ReadView(table);
@@ -48,11 +60,12 @@ int main()
         if (!std::cin) {
             return 2;
         }
-        MlaPagedBsndPlan plan;
+        MlaPagedPlan plan;
         std::memset(&plan, 0xa5, sizeof(plan));
         unsigned char before[sizeof(plan)];
         std::memcpy(before, &plan, sizeof(plan));
-        const auto status = BuildPagedBsndPlan(q, qv, k, v, table, platform, dtype, used, plan);
+        const auto status = tnd ? BuildPagedTndPlan(tq, tqv, k, v, table, maxQuery, platform, dtype, used, plan)
+                                : BuildPagedBsndPlan(q, qv, k, v, table, platform, dtype, used, plan);
         const bool unchanged = std::memcmp(before, &plan, sizeof(plan)) == 0;
         std::cout << "{\"status\":" << int(status) << ",\"unchanged\":" << (unchanged ? "true" : "false");
         if (status == MlaPagedPlanStatus::Success) {
