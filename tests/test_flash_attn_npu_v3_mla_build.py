@@ -43,7 +43,7 @@ def test_generated_mla_launch(tmp_path):
         ["python3", str(autogen / "generate_kernels.py"), "-o", str(tmp_path)], check=True
     )
     generated = list(tmp_path.glob("*.cpp"))
-    assert len(generated) == 18
+    assert len(generated) == 20
     for path in generated:
         assert path.read_bytes() == (autogen / path.name).read_bytes()
 

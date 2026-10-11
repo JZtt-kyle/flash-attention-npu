@@ -1,0 +1,85 @@
+"""One real release Trap through the production BSND PA forward per process."""
+
+import hashlib
+import json
+import os
+from pathlib import Path
+import resource
+import sys
+import time
+
+import torch
+
+from flash_attn_npu_3 import flash_attn_npu_interface as api
+from tests.mla_metadata_error_probe import forbid_host_readback
+from tests.test_flash_attn_npu_v3_mla_paged_bsnd_production import small_inputs, forward, generate
+
+
+def run(kind, fault, directory):
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[kind]
+    args = small_inputs(
+        dtype,
+        sq=0 if fault == "empty_q_page" else 3,
+        pool=0 if fault == "empty_pool" else 7,
+        used=fault in ("bad_q", "zero_k_bad_q", "unused_q_page"),
+    )
+    if fault == "empty_pool":
+        args["cache_seqlens"].zero_()
+    with forbid_host_readback():
+        forward(args)
+    torch.npu.synchronize()
+    record = None
+    if fault in ("page_negative", "page_over", "unused_q_page", "empty_q_page"):
+        # The last effective page is checked even when the sample has no Q.
+        args["page_table"][0, 1] = 7 if fault == "page_over" else -1
+        if fault == "unused_q_page":
+            args["seqused_q"].zero_()
+    elif fault == "stale_k":
+        record = generate(args)
+        torch.npu.synchronize()
+        args["cache_seqlens"][0] = 17
+    elif fault in ("bad_q", "zero_k_bad_q"):
+        args["seqused_q"][0] = 4
+        if fault == "zero_k_bad_q":
+            args["cache_seqlens"].zero_()
+    elif fault in ("bad_k", "empty_pool"):
+        args["cache_seqlens"][0] = -1 if fault == "bad_k" else 1
+    else:
+        if fault == "empty_payload":
+            args["cache_seqlens"].zero_()
+        record = generate(args)
+        torch.npu.synchronize()
+        if fault == "magic":
+            record[0] = 0
+        elif fault == "dtype":
+            record[4] = 2 if kind == "fp16" else 1
+        elif fault == "v5":
+            record[1] = 5
+        elif fault == "empty_payload":
+            record[385] = 16
+        else:
+            raise ValueError(fault)
+    start = time.monotonic()
+    try:
+        with forbid_host_readback():
+            result = forward(args, record)
+        torch.npu.current_stream().synchronize()
+    except RuntimeError as error:
+        extension = Path(api.flash_attn_npu_3.__file__)
+        report = dict(
+            fault=fault,
+            dtype=kind,
+            error=str(error),
+            elapsed_seconds=time.monotonic() - start,
+            extension=str(extension),
+            extension_sha256=hashlib.sha256(extension.read_bytes()).hexdigest(),
+        )
+        Path(directory, "runtime-error.json").write_text(json.dumps(report, indent=2) + "\n")
+        assert "trap error" in str(error), str(error)
+        os._exit(0)
+    raise AssertionError(f"Invalid PA input completed without a Trap: {result}")
+
+
+if __name__ == "__main__":
+    run(*sys.argv[1:])

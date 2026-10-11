@@ -23,7 +23,16 @@ from tests.test_flash_attn_npu_v3_mla_metadata import load_probe
 
 
 def profile(probe_dir, producer_manifest, output, layout="bsnd"):
-    if layout in ("tnd-stride", "mixed-stride"):
+    if layout == "paged-bsnd":
+        from tests import test_flash_attn_npu_v3_mla_paged_bsnd_production as cases_api
+        from tests.test_flash_attn_npu_v3_mla_paged_attention import (
+            configure_producer,
+            launch,
+            load_attention,
+        )
+
+        production_case = cases_api.make_case
+    elif layout in ("tnd-stride", "mixed-stride"):
         if layout == "tnd-stride":
             from tests import test_flash_attn_npu_v3_mla_tnd_stride_production as cases_api
         else:
@@ -50,7 +59,7 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         assert layout == "bsnd"
         from tests import test_flash_attn_npu_v3_mla_bsnd_used as cases_api
 
-    if layout not in ("bsnd-stride", "tnd-stride", "mixed-stride"):
+    if layout not in ("bsnd-stride", "tnd-stride", "mixed-stride", "paged-bsnd"):
         from tests.test_flash_attn_npu_v3_mla_used_attention import (
             configure_producer,
             launch,
@@ -61,6 +70,18 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
     probes = load_attention(probe_dir)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
+    if layout == "paged-bsnd":
+        # Persist the full matrix and native dispatch before collecting samples.
+        dispatch = json.loads((Path(probe_dir) / "production-schedules.json").read_text())
+        (output / "matrix.json").write_text(
+            json.dumps(cases_api.PERFORMANCE_CASES, indent=2) + "\n"
+        )
+        (output / "dispatch.json").write_text(json.dumps(dispatch, indent=2) + "\n")
+    call_forward = (
+        cases_api.forward
+        if layout == "paged-bsnd"
+        else lambda args: api._flash_attn_forward(**args)
+    )
     manifest = json.loads(Path(producer_manifest).read_text())
     for name, digest in manifest["sources"].items():
         assert sha256(ROOT / name) == digest, name
@@ -72,15 +93,18 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         errors = []
         for case, args in zip(cases, arguments):
             launch(probes, case, "oracle")
-            errors.append(
-                cases_api.check_result(case, api._flash_attn_forward(**args), source=True)
-            )
+            errors.append(cases_api.check_result(case, call_forward(args), source=True))
+
+        if layout == "paged-bsnd":
+            # Both timed paths share one fixed CPU. Reference math above is
+            # outside the timing boundary and can use the configured threads.
+            os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
 
         def call(index, name):
             if name == "source":
                 launch(probes, cases[index], "oracle")
             else:
-                api._flash_attn_forward(**arguments[index])
+                call_forward(arguments[index])
             torch.npu.synchronize()
 
         (output / "npu-before.log").write_text(
@@ -152,13 +176,18 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         pos = 0
         for label in labels:
             if label["name"] == "production":
-                version = cases[label["case"]].get("config", {}).get("version", 5)
+                version = (
+                    6
+                    if layout == "paged-bsnd"
+                    else cases[label["case"]].get("config", {}).get("version", 5)
+                )
                 producer_name = {
                     1: "ComputeMlaDenseMetadata",
                     2: "ComputeMlaBsndKvLengthMetadata",
                     3: "ComputeMlaTndMetadata",
                     4: "ComputeMlaTndBsndMetadataFromPrefix",
                     5: "ComputeMlaUsedMetadata",
+                    6: "ComputeMlaPagedMetadata",
                 }[version]
                 assert producer_name in raw[pos]["Op Name"]
                 label["generation_us"] = float(raw[pos]["Task Duration(us)"])
@@ -166,7 +195,9 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
             row = raw[pos]
             expected_name = (
                 (
-                    "cann_tnd_stride"
+                    "cann_paged_attention"
+                    if layout == "paged-bsnd"
+                    else "cann_tnd_stride"
                     if layout in ("tnd-stride", "mixed-stride")
                     else "cann_bsnd_stride"
                     if layout == "bsnd-stride"
@@ -174,7 +205,9 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
                 )
                 if label["name"] == "source"
                 else (
-                    ("mla_tnd_used" if version == 5 else "mla_tnd")
+                    "mla_paged_bsnd"
+                    if layout == "paged-bsnd"
+                    else ("mla_tnd_used" if version == 5 else "mla_tnd")
                     if layout == "tnd-stride"
                     else ("mla_tnd_used" if version == 5 else "mla_tnd_bsnd")
                     if layout == "mixed-stride"
@@ -191,17 +224,21 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         results = []
         for index, case in enumerate(cases):
             result = dict(item=case.get("config", case["item"]), errors=errors[index])
-            if layout in ("bsnd-stride", "tnd-stride", "mixed-stride"):
+            if layout in ("bsnd-stride", "tnd-stride", "mixed-stride", "paged-bsnd"):
                 result["source_metadata"] = case["expected"]
                 result["launched_blocks"] = (
                     case["context"]
-                    if layout in ("tnd-stride", "mixed-stride") or case["config"]["version"] == 5
+                    if layout in ("tnd-stride", "mixed-stride", "paged-bsnd")
+                    or case["config"]["version"] == 5
                     else case["dense_context"]
                 ).block_dim
                 result["input_views"] = {
                     n: dict(shape=list(t.shape), stride=list(t.stride()), offset=t.storage_offset())
                     for n, t in case["devices"]["migrated"].items()
                 }
+                if layout == "paged-bsnd":
+                    assert case["expected"] == dispatch["metadata"][index]
+                    result["native_fd"] = bool(dispatch["native"][index][5])
             for name in names:
                 samples = [s for s in labels if s["case"] == index and s["name"] == name]
                 result[name] = dict(
@@ -221,12 +258,14 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         extension = Path(api.flash_attn_npu_3.__file__)
         report = dict(
             scope=(
-                "Production BSND/TND/mixed stride versus pinned non-FD source, with identical logical inputs, schedules and launch blocks. Source receives contiguous materializations and packed effective TND segments prepared before timing; physical input layouts differ. Production wall includes internal metadata generation; source probe buffers are preallocated. Not public metadata E2E."
+                "Production internal BSND PA versus pinned CANN PA/non-FD Kernel with identical logical inputs, schedules and launch blocks. Source Q/cache-row/table materialization is before timing. Production wall includes internal v6 generation, allocations and device validation; source probe buffers are preallocated. Not public PA E2E; native FD dispatch is separate."
+                if layout == "paged-bsnd"
+                else "Production BSND/TND/mixed stride versus pinned non-FD source, with identical logical inputs, schedules and launch blocks. Source receives contiguous materializations and packed effective TND segments prepared before timing; physical input layouts differ. Production wall includes internal metadata generation; source probe buffers are preallocated. Not public metadata E2E."
                 if layout in ("bsnd-stride", "tnd-stride", "mixed-stride")
                 else __doc__
             ),
             layout=layout,
-            seed=20261010,
+            seed=20261011 if layout == "paged-bsnd" else 20261010,
             warmup=5,
             rounds=5,
             wall_iterations=20,
@@ -259,7 +298,7 @@ if __name__ == "__main__":
     parser.add_argument("output")
     parser.add_argument(
         "--layout",
-        choices=("bsnd", "mixed", "bsnd-stride", "tnd-stride", "mixed-stride"),
+        choices=("bsnd", "mixed", "bsnd-stride", "tnd-stride", "mixed-stride", "paged-bsnd"),
         default="bsnd",
     )
     args = parser.parse_args()

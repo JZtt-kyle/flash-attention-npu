@@ -12,6 +12,7 @@
 // Page addressing: mla_paged_layout.cpp (LICENSE.cann). This checks compatible
 // geometry/resources and every current effective page, not schedule optimality.
 #pragma once
+#include "mla_paged_inputs.h"
 #include "mla_paged_metadata.h"
 #include "mla_paged_metadata_args.h"
 #include "mla_paged_layout.h"
@@ -24,20 +25,6 @@
 #endif
 
 namespace flash_attn::mla {
-
-struct MlaPagedMetadataInputs {
-    MlaPagedMetadataArray cuQuery, usedQuery, kvLengths;
-};
-
-// Invocation-only addresses/counts are relative to data_ptr(), after storage
-// offset. The host builds layout with BuildPagedCacheLayout and validates
-// dtype/device. The consumer independently checks its spans and geometry.
-// table counts int32 entries; k/v count FP16/BF16 elements, including padding.
-struct MlaPagedCacheInputs {
-    MlaPagedCacheLayout layout;
-    MlaPagedMetadataArray table, k, v;
-};
-static_assert(std::is_standard_layout_v<MlaPagedCacheInputs> && std::is_trivially_copyable_v<MlaPagedCacheInputs>);
 
 struct MlaPagedKernelSchedule {
     MlaDenseKernelSchedule tiling;

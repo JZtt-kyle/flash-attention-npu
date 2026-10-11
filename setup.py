@@ -663,6 +663,8 @@ src_ascend910_v3 += [
         "mla_forward.cpp",
         "mla_bsnd_layout.cpp",
         "mla_tnd_layout.cpp",
+        "mla_paged_layout.cpp",
+        "mla_paged_plan.cpp",
         "mla_launch.cpp",
         "mla_schedule.cpp",
         "detail/cann_split_core.cpp",

@@ -13,6 +13,13 @@ at::Tensor TndBsndMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t he
                              const at::Tensor& cacheSeqlens, const at::Tensor& cuQ);
 at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_t heads, int64_t pageSize,
                            at::ScalarType dtype, const at::Tensor& cacheSeqlens, const std::optional<at::Tensor>& cuQ);
+// Internal BSND PA only; performs its own tensor/storage validation. Q-used
+// always generates a fresh record. Public kvcache PA remains rejected.
+std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                         const at::Tensor& qv, const at::Tensor& pageTable, float scale,
+                                         const std::optional<at::Tensor>& cacheSeqlens,
+                                         const std::optional<at::Tensor>& usedQuery,
+                                         const std::optional<at::Tensor>& schedulerMetadata);
 std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
                                    const at::Tensor& cuQ, const at::Tensor& cuK, int64_t maxQ, int64_t maxK,
                                    float scale, const std::optional<at::Tensor>& usedQuery = std::nullopt,
