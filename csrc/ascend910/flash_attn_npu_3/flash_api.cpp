@@ -190,6 +190,10 @@ std::vector<at::Tensor> mha_fwd(
                     "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
+        if (page_table_) {
+            return flash_attn::mla::PagedBsndForward(q, k, v, *q_v_, *page_table_, scale, seqused_k_, seqused_q_,
+                                                     scheduler_metadata_);
+        }
         if (cu_seqlens_q_) {
             if (!cu_seqlens_k_) {
                 TORCH_CHECK(max_seqlen_q_, "MLA: mixed TND/BSND requires max_seqlen_q");

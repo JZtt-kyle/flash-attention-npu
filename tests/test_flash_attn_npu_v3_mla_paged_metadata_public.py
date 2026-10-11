@@ -1,4 +1,4 @@
-"""Public v6 generation: logical geometry only, device lengths, no PA forward."""
+"""Public v6 generation: logical geometry, device lengths and consumer boundary."""
 
 from contextlib import nullcontext
 import inspect
@@ -449,7 +449,7 @@ def test_wide_allocation_and_fake_bounds(dtype):
 
 
 @pytest.mark.parametrize("kind", ["eager", "cpp", "fake", "public"])
-def test_v6_rejected_by_nonpaged_and_paged_forward(dtype, layout, kind):
+def test_v6_forward_protocol_boundary(dtype, layout, kind):
     with FakeTensorMode() if kind == "fake" else nullcontext():
         args = _inputs(layout="paged_tnd" if layout == 2 else "paged", dtype=dtype)
         q, kv = ([3, 1] if layout == 2 else [3, 3]), [17, 32]
@@ -461,7 +461,13 @@ def test_v6_rejected_by_nonpaged_and_paged_forward(dtype, layout, kind):
                 current.pop("page_table")
                 current["k"] = torch.empty(2, 32, 1, 64, dtype=dtype, device="npu")
                 current["v"] = torch.empty(2, 32, 1, 512, dtype=dtype, device="npu")
-            with pytest.raises(RuntimeError, match="not implemented yet|scheduler_metadata"):
+            # Only BSND PA can consume v6; TND PA is still pending and
+            # nonpaged consumers must reject the PA protocol.
+            with (
+                nullcontext()
+                if paged and layout == 0
+                else pytest.raises(RuntimeError, match="not implemented yet|scheduler_metadata")
+            ):
                 if kind == "public":
                     api.flash_attn_with_kvcache(
                         current["q"],

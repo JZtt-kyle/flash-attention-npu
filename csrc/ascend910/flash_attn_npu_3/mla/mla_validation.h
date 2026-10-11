@@ -120,10 +120,10 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
         TORCH_CHECK(q.size(-1) == 64 && v.size(-1) == 512,
                     "MLA: supported qv representation requires Dq=64 and Dv=512");
         TORCH_CHECK(headsKV == 1, "MLA: compressed representation requires one KV head");
-        TORCH_CHECK((varlenQ || !varlenK) && !pagedKV,
-                    "MLA compressed forward is not implemented yet for BSND Q with TND KV or paged KV");
-        TORCH_CHECK(varlenQ || q.size(0) == k.size(0), "MLA: dense batch sizes must match");
-        TORCH_CHECK(varlenQ || FitsDenseShape(q.size(0), q.size(1), headsQ, k.size(1)),
+        TORCH_CHECK(varlenQ || !varlenK, "MLA compressed forward is not implemented yet for BSND Q with TND KV");
+        TORCH_CHECK(!pagedKV || !varlenQ, "MLA compressed paged forward is not implemented yet for TND Q");
+        TORCH_CHECK(pagedKV || varlenQ || q.size(0) == k.size(0), "MLA: dense batch sizes must match");
+        TORCH_CHECK(varlenQ || FitsDenseShape(q.size(0), q.size(1), headsQ, pagedKV ? 0 : k.size(1)),
                     "MLA compressed forward is not implemented yet outside B>=0, nonnegative S1G within address/field "
                     "bounds, 0<=Sk<=16384");
         for (const auto& t : {q, k, v, *qv}) {

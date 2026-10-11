@@ -272,7 +272,7 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
                 "MLA: inputs must have FP16 or BF16 dtype");
     TORCH_CHECK(q.device().type() == at::kPrivateUse1, "MLA: inputs must be NPU tensors");
     for (const auto& t : {q, k, v, qv}) {
-        TORCH_CHECK(t.dim() == 4, "MLA: internal paged forward requires BSND Q and rank-4 KV");
+        TORCH_CHECK(t.dim() == 4, "MLA: paged forward requires BSND Q and rank-4 KV");
         TORCH_CHECK(t.scalar_type() == q.scalar_type(), "MLA: all inputs must have the same dtype");
         TORCH_CHECK(t.device() == q.device(), "MLA: all inputs must be on the same NPU device");
         TORCH_CHECK(!t.requires_grad(), "MLA compressed forward is not implemented yet for gradients");

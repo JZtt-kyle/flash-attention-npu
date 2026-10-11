@@ -15,9 +15,16 @@ from tests.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_mla_paged_bsnd_production import small_inputs, forward, generate
 
 
-def run(kind, fault, directory):
+def run(kind, fault, directory, entry="internal"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[kind]
+    if entry == "public":
+        from tests.test_flash_attn_npu_v3_mla_paged_public import public
+
+        def call(args, metadata=None):
+            return public(dict(args, scheduler_metadata=metadata))
+    else:
+        call = forward
     args = small_inputs(
         dtype,
         sq=0 if fault == "empty_q_page" else 3,
@@ -27,7 +34,7 @@ def run(kind, fault, directory):
     if fault == "empty_pool":
         args["cache_seqlens"].zero_()
     with forbid_host_readback():
-        forward(args)
+        call(args)
     torch.npu.synchronize()
     record = None
     if fault in ("page_negative", "page_over", "unused_q_page", "empty_q_page"):
@@ -54,8 +61,12 @@ def run(kind, fault, directory):
             record[0] = 0
         elif fault == "dtype":
             record[4] = 2 if kind == "fp16" else 1
-        elif fault == "v5":
-            record[1] = 5
+        elif fault in ("v1", "v2", "v3", "v4", "v5"):
+            record[1] = int(fault[1])
+        elif fault == "page_size":
+            record[406] = 128
+        elif fault == "capacity":
+            record[407] = 224
         elif fault == "empty_payload":
             record[385] = 16
         else:
@@ -63,12 +74,13 @@ def run(kind, fault, directory):
     start = time.monotonic()
     try:
         with forbid_host_readback():
-            result = forward(args, record)
+            result = call(args, record)
         torch.npu.current_stream().synchronize()
     except RuntimeError as error:
         extension = Path(api.flash_attn_npu_3.__file__)
         report = dict(
             fault=fault,
+            entry=entry,
             dtype=kind,
             error=str(error),
             elapsed_seconds=time.monotonic() - start,

@@ -1,93 +1,88 @@
 # MLA 当前状态
 
-核对日期：2026-10-11；分支：`feat/mla-cann-migration`；接手基线：`0813a17`。
-本轮完成 **M07e2b：BSND PA 生产实例与内部前向**，6,392 项去重 pytest 通过，910B 双 dtype 代表精度和生产 Kernel 性能对照完成。公开 PA 前向仍明确拒绝；唯一下一步为 [M07e2c：BSND 只读 PA kvcache 公开接入](plan.md#下一步m07e2c)。
+核对日期：2026-10-11；分支：`feat/mla-cann-migration`；接手基线：`ea3be44`。
+本轮完成 **M07e2c：BSND 只读 PA kvcache 公开接入**，8,280 项去重 pytest 通过。910B 双 dtype 精度、生产 Kernel 对照和 **72 个适用公开 R=1/4 调用段逐例 E2E** 完成；TND PA 前向仍明确拒绝。唯一下一步为 [M07e3：TND Q 只读 PA kvcache 接入](plan.md#下一步m07e3)。
 
 本页记录当前能力、最近闭环证据和唯一下一步；契约见 [design](design.md)，迭代边界见 [plan](plan.md)。本轮闭环提交用 `git log -1 -- docs/mla/status.md` 定位。
 
 ## 当前可调用能力
 
-共同边界：**910B C1V2、FP16/BF16、512+64 共享 KV、Hkv=1、无梯度、无 mask、`num_splits=1`**。Q/K 末维为 64，qv/V 为 512，四路同 dtype、同 NPU 设备。非分页 BSND 单样本 KV 容量及 TND 的 `max_seqlen_k` 为 0..16384；非分页 TND 总 Q/KV 各不超过 `INT32_MAX`，总 KV 可超过 16384。完整边界见 [design 6.2–6.4](design.md#62-调度字段与边界)。
+共同边界：**910B C1V2、FP16/BF16、512+64 共享 KV、Hkv=1、无梯度、无 mask、`num_splits=1`**。Q/K 末维为 64，qv/V 为 512，四路同 dtype、同 NPU 设备。单样本逻辑 KV 容量上界 16384；TND 总 KV 可超过 16384。完整边界见 [design 6.2–6.4](design.md#62-调度字段与边界)。
 
 | 层次 | 已接通能力 | 记录与边界 |
 | --- | --- | --- |
 | 公开前向 | `flash_attn_func`，BSND Q/KV | 整容量，内部 v1 |
-| 公开前向 | `flash_attn_varlen_func`，TND Q/KV | 两轴分配前缀；无 used 时内部 v3，任一 `seqused_q/k` 存在时内部 v5 |
-| 公开只读 cache | `flash_attn_with_kvcache`，BSND Q + BSND KV | 整容量或实际 KV 长度；无长度且无记录走 v1，否则 v2；支持显式 v2 复用 |
-| 公开只读 cache | `flash_attn_with_kvcache`，TND Q + BSND KV | Q 使用完整分配段；内部生成或显式复用 v4 |
-| 公开非分页 metadata | `get_scheduler_metadata(page_size=None)` | BSND Q 生成 v2，TND Q 生成 v4 |
-| **公开 PA metadata** | `get_scheduler_metadata(page_size=P)`，BSND/TND Q | **v6 `int32[408+5B]`**；生成器只接收逻辑几何和长度，公开 PA 前向尚未接通 |
-| 内部非分页前向 | BSND、TND、混合布局的 Q-used | 内部 v5；BSND/混合 Q-used 无公开等价入口，不开放显式 v5 复用 |
-| **内部 BSND PA 前向** | `_mla_paged_bsnd_forward`，整容量/实际 KV/Q-used，独立 stride | 生产双 dtype 实例；无 Q-used 可消费公开 v6，Q-used 每次生成新记录 |
-| 独立 PA 组件/attention | 地址、调度、v6 生成/消费、Copy；TND Q attention 含 Q-used 和独立 stride | TND PA 尚无生产前向；独立 probe 不代表公开 PA 能力 |
-
-公开 PA 生成器要求 P 为 **16..1024 的 16 倍数**，`max_seqlen_k=C` 在 **0..16384 且可被 P 整除**。C 是每样本逻辑容量；生成器没有页表、物理页数、cache 或 stride 参数。KV 长度须为同设备连续 `int32[B]` tensor，始终非累计；可选 Q 前缀为同设备连续 `int32[B+1]`，B=0 时仍需 `[0]`。无前缀时 Q 为 BSND 整容量；有前缀时 TND 总 Q 由 AICPU 推导，不按矩形 `B*max_seqlen_q` 限制实际分配。公开生成器没有 Q-used 参数。协议和资源规则见 [design 5.7](design.md#57-v6nd-pa-记录)。
+| 公开前向 | `flash_attn_varlen_func`，TND Q/KV | 两轴分配前缀；无 used 时内部 v3，任一 used 存在时内部 v5 |
+| 公开只读 cache | `flash_attn_with_kvcache`，BSND Q + BSND KV | 无长度且无记录走 v1，否则 v2；支持显式 v2 复用 |
+| 公开只读 cache | `flash_attn_with_kvcache`，TND Q + BSND KV | Q 使用完整分配段，生成或显式复用 v4 |
+| **公开只读 PA cache** | `flash_attn_with_kvcache(page_table=...)`，BSND Q + ND PA KV | **内部生成或显式复用 v6；None/整数/tensor KV 长度；完整 Q 分配段** |
+| 公开 metadata | `get_scheduler_metadata` | 非 PA：BSND v2、TND v4；指定 `page_size`：BSND/TND v6 `int32[408+5B]` |
+| 内部前向 | 非 PA 三布局 Q-used；BSND PA Q-used | 非 PA v5、PA v6；Q-used 每次生成记录，不开放显式复用 |
+| 独立 TND PA attention | TND Q 分配/used、独立 stride | 尚无 TND PA 生产前向；独立 probe 不代表公开能力 |
 
 调用时须注意：
 
-- kvcache/metadata 的 `num_splits` 默认 0，MLA 须显式传 **1**；生成器的 `qkv_dtype` 默认 BF16，须匹配前向输入。func/varlen 默认 `num_splits=1`。
-- 所有公开 MLA metadata 生成器都要求长度 tensor；公开入口的 None/整数便利长度只属于 kvcache。仅接受默认 mask/调度选项；生成器使用 `has_softcap=False`，拒绝数值 `softcap/softmax_scale` 兼容关键字。前向 scale 默认 `1/sqrt(576)`，显式值须在 FP32 有限范围。
-- metadata 不绑定 cache 地址、stride 或 scale。生成器在设备检查动态值，非法值写失败记录并清零载荷；消费者才触发 Trap。PA 与非 PA 协议互斥，v6 不能传给当前非分页前向。
-- 三种非分页布局及内部 BSND PA 支持四路末维连续、外层非负 stride，包括切片、广播、重叠及 offset；发射前检查完整 storage。显式 v2/v4 仍须匹配当次长度和 v4 Q 前缀；PA v6 仍须匹配当次长度及全部有效页。
-- 请求 LSE 时 func/varlen 返回二项，kvcache 返回四项。非分页非零容量中的零 KV 有效行为 `O=0、LSE=-inf`；全局空 KV 初始化分配区为 `O=0、LSE=+inf`。内部 BSND PA 返回二项，所有有效零 KV 行均为 `O=0、LSE=-inf`，包括 C=0/空物理池；其他未使用 query 槽位不承诺值。详见 [design 6.7](design.md#67-生产接入与构建)。
-- 内部 BSND PA 的长度只接受 None 或同设备连续 `int32[B]`；None 按逻辑容量 C 物化。内部无整数便利输入、fake 或 compile 接入；公开 PA kvcache 仍拒绝调用。
+- kvcache/metadata 的 `num_splits` 默认 0，MLA 须显式传 **1**；生成器的 `qkv_dtype` 默认 BF16，须匹配输入。生成器只接受长度 tensor，None/整数便利输入属于公开 kvcache。
+- PA 页大小 P 为 **16..1024 的 16 倍数**；逻辑容量 **C=页表列数×P，在 0..16384**。None 表示 C，整数须在 0..C，按 Q 的逻辑 B 物化；物理页数不决定 B 或 C。生成器的 `max_seqlen_k` 须等于 C。
+- v6 不绑定 cache 地址、stride、页表或 scale。每次前向都在设备核对当次长度及全部有效页；未用列允许 poison。PA 与非 PA 协议互斥。四路末维连续、外层非负独立 stride、offset、广播和重叠按完整 storage 校验。
+- 请求 LSE 时 func/varlen 返回二项，kvcache 返回四项；未 split 的两个 accumulator 为同设备空 tensor。PA 所有有效零 KV 行均为 `O=0、LSE=-inf`，含 C=0/空物理池；非 PA 全局空 KV 的 `+inf` 分支保持不变。
+- BSND PA 的专用/通用 fake、公开 fullgraph compile 与真实路径校验一致；编译后的真实调用仍检查 storage。完整 graph replay 留在 M16。公开没有 Q-used 参数；内部通用 `fwd` 可传 Q-used，但不能显式复用其记录。
 
-计划内尚未开放：公开 PA 前向、causal/window、自动或多 split、192/128 prefill、非零 softcap 与非默认调度选项。已开放公开路径的 fake/compile 已有覆盖，完整 graph replay 留在 M16；910C 尚未开放或实机验收。KV 追加、内置 rotary、量化、backward 等排除项见 [design 第 4 节](design.md#4-功能边界)。
+尚未开放：TND PA 生产前向、causal/window、自动或多 split、192/128 prefill、非零 softcap 和非默认调度选项；910C 未开放或实机验收。追加 KV、内置 rotary、量化、backward 等排除项见 [design 第 4 节](design.md#4-功能边界)。
 
 ## 本轮闭环与证据
 
-本轮将既有 BSND PA 静态计划、布局适配器和双 dtype PA attention 实例编入生产扩展，新增内部 `_mla_paged_bsnd_forward`。host 校验 rank/dtype/device、完整 storage/跨度/地址、长度和 v6 描述符，复用当前流与 AICPU worker 的 event 依赖和异步持有；每核在 TPipe/同步/写出之前检查记录、当前长度及全部有效页，再进入既有 `MlaPagedBsnd`。无动态值读回、完整 cache gather 或 CANN attention 转调。共享调用参数拆入 host/device 可共用的头文件，消费者算法及 Kernel/Block/Tile 数值路径未改。
+公开包装按逻辑容量处理整数长度并直接调用既有 PA dispatcher；通用 dispatcher/raw C++ 也汇入 `PagedBsndForward`。新增 fake 静态几何、完整 storage、页表/长度/记录描述校验；复用既有 AICPU、消费者及 Kernel/Block/Tile，没有设备数值路径修改、动态值读回、完整 cache gather 或 CANN attention 转调。
 
-证据保存在忽略目录 `build/mla-m07e2b-bsnd-paged-production/`，以下路径相对此目录。保留命令、日志、XML、源码/固定源快照、实际加载库及性能原始数据；本机证据不随 Git 分发，迁机须复制目录。
+证据位于忽略目录 `build/mla-m07e2c-bsnd-paged-public/`，下表路径相对此目录。包含命令、日志、XML、输入/输出、固定源快照、实际库及逐样本性能数据；本机证据不随 Git 分发，迁机须复制该目录和 manifest 引用的历史固定源产物。
 
 | 核验 | 结果与依据 |
 | --- | --- |
-| 前置闭环 | 编辑前核验 M07e2a 的 5,991 项历史证据和最小质量检查通过，不计本轮新测试。`prerequisite.json` |
-| 本轮功能与回归 | **6,392 项去重 pytest 通过，无失败/跳过**：CPU 893、生产功能 713、真实 Trap 26、普通 FA3/入口 822、非分页及 TND PA 共享组件 1,098、公开 PA metadata 2,840。各模式 XML、日志及 `*-command.json` |
-| 固定源记录与精度 | 双 dtype 共 **152 组**完整 v6 固定源对照，每种 64 种 P 与 12 个代表形状。源 O/非空行 LSE 逐元素一致，独立双数学 O/LSE 通过；含独立 stride、真实大地址、scale/半路扰动、任务环与头数边界。`probes/*/production-schedules.json`、`probes/*/production-accuracy/` |
-| 空值、动态值与生命周期 | 整容量/实际 KV/Q-used、空表/池/全零 KV、完整 storage、记录跨合法物理池/页表/stride 复用、当前流长度更新与多流释放后复用均通过。非法页、过期长度、损坏协议/空记录等双 dtype **26 项真实 Trap**；每例独立进程，正常调用预热后触发，最长约 0.131 秒。`device.xml`、`trap.xml`、`production/*/trap-*/` |
-| 构建与加载 | 最终生产扩展 **36 个对象、271 个仓库源、6,197 个依赖**及双 dtype 设备依赖核验通过；静态计划、布局和 PA Kernel 均在实际链接/加载路径中。双 dtype PA probe 和 v6 AICPU probe 重编。`production-build-command.json`、`production-load.json`、`production-final/`、`probes/*/build-manifest.json`、`producer/build-manifest.json` |
-| 代表性能 | 双 dtype **24 个代表用例**先通过源/双数学精度，再交替采样生产/固定源 Kernel、v6 AICPU 和内部 wall；这 24 例在性能驱动中运行，不计 pytest 总数。`profile-*/summary.json`、逐样本 JSON 及 profiler CSV |
-| 源码一致性与重复覆盖 | CPU 893 项消费的编译源码与最终版本一致；其广泛快照另含两处未消费文件变更，由实际依赖 manifest 核对。生产功能运行后仅将空值断言缩至契约定义的 Q-used 区域，保存旧测试快照并核对其余 AST 一致，最终 **24 项重跑通过**，去重后不增加总数。`device-test-snapshot/`、`empty-final.xml`、`acceptance.json` |
-| 提交质量 | 文档链接/锚点、表格/命令语法、差异及适用质量钩子通过；只暂存本步 **17 个文件**。`docs-check.json`、`quality-staged.log`、`source-snapshots.json`；`check_acceptance.py` 汇总为 `acceptance.json` |
+| 前置闭环 | 编辑前 M07e2b 的 6,392 项历史证据及最小质量检查复核通过，不计本轮测试；`prerequisite.json` |
+| 功能与回归 | **8,280 项去重 pytest，无失败/跳过**：CPU 893、公开功能 1882、公开真实 Trap 32、普通 FA3/入口 822、非分页及 TND PA 共享组件 1098、公开 PA metadata 2840、内部 PA 713；各模式 XML、日志及 `*-command.json` |
+| 公开精度与记录 | 双 dtype 全部 64 种 P×4 个 cache profile，共 512 组源/双数学 O/LSE；另有 36 组公开/raw C++ 跨视图复用与 stride/真实大地址检查。固定源 O/非空行 LSE 逐元素一致，零 KV 符号单验；`probes/*/public-accuracy/` |
+| 入口与生命周期 | None/整数/tensor、offset 记录、空表/池、完整 storage、fake/fullgraph compile、当前流长度原位更新、多 stream 释放后复用均通过；非法页/过期长度/v1–v5/损坏 v6 共 32 项真实 Trap，独立进程先正常预热；`public.xml`、`public-trap.xml`、`kvcache/` |
+| 构建与加载 | 最终扩展 36 对象、271 个仓库源、6,197 个依赖核验；仅 `flash_api.o` / `mla_forward.o` 两个 host 对象变化，34 个对象含 PA 设备实例保持原哈希；`production-load.json`、`production-object-delta.json`、`production-final/` |
+| 独立探针复用 | 逐项核对 M07e2b 探针依赖，双 dtype 各 55 源/953 依赖与 v6 producer 22 源未变，复用库但隔离新输出；`probe-reuse-audit.json` |
+| 固定源原生 PA | 从既有固定源快照补编 FP16/BF16 BSND ND PA 非 FD/FD 实例，不改 CANN 源仓；24 例实际 Kernel、tiling key 与新包对应，每 dtype 各 6 例非 FD/FD；`native-package.json`、`native-dispatch-proof.json`、`native-*/` |
+| 性能 | 双 dtype 24 例生产 Kernel 组件对照，另有 24 例公开生成/复用/内部生成 R=1/4 E2E；先验源/双数学精度，性能驱动用例不计 pytest；`profile-*/`、`public-profile-*/` |
+| 提交质量 | 文档链接/锚点、命令与表格、差异及 staged 质量钩子通过；只暂存本步文件；`docs-check.json`、`quality-staged-result.json`、`source-snapshots.json`、`acceptance.json` |
 
-两次头文件依赖编译失败已修复，原日志保存在 `failed-initial-build/`、`failed-context-include/`。后续发现 Q-used 描述符不能复用 v5 的字数上界，已改用静态计划的 v6 上界并重编、重跑最终生产检查；此前 40 项 smoke、706 项生产检查及早期 CPU 运行分别保留在对应日志和 `pre-v6-bound/`、`prebuild-cpu/`，均不重复计数。格式修正前的质量日志保留，最终 staged 检查为准。
+初轮 Dynamo 参数化测试达到缓存上限，已在编译测试间 reset；大地址测试的 11 页误需 80 GiB，已缩为仍跨 >32 位地址的 2 页。失败日志和旧测试源码分别保存在 `failed-compile-test-cache/`、`failed-wide-pool/`，最终完整公开测试重跑通过。原生 OPC 首次受沙箱网络接口枚举限制，已在沙箱外完成；`failed-native-sandbox/` 保留原错误。一次重复生产构建被主动停止，随后串行重建所有受影响 host 对象，最终链接/加载审计为准；早期日志保留在 `preformat-build/`、`duplicate-build-stopped/`。初轮 1,334 项 smoke 不重复计数。
 
 ## 性能范围与保留限制
 
-本轮固定 BSND × FP16/BF16 各 12 例，P=16/112/128/256/528/1024 × 短/长 KV；每例预热 5 次，5 轮交替采样，每轮每实现 20 个 wall、10 个 Kernel 样本。同进程固定同一 CPU，seed 为 20261011；矩阵和原生 FD 分派在采样前保存。每种 dtype 各有 6 个原生非 FD、6 个原生 FD 用例；FD 按已确认的无 split 映射对照，不作为原生 E2E。
+两种 dtype 使用预先固定的 P=16/112/128/256/528/1024 × 短/长 KV 矩阵，每种 12 例。组件保留既有内部 Q-used 几何；公开矩阵使用完整 BSND Q。每例预热 5 次、5 轮交替采样，每轮 20 个 wall、10 个 profiler 样本；公开 R=1/4，双方同进程固定同一 CPU，seed=20261011。
 
-下表为逐例中位耗时范围，Kernel 比值为“生产 / 固定源”，其余单位为微秒。**24 例中 24 例 Kernel 慢于固定源，不能宣称 Kernel 逐例不劣化。**
+| dtype | 生产/固定源组件 Kernel 比值 | Kernel 较慢例数 | 适用公开 E2E 比值范围 | 适用调用段 |
+| --- | --- | --- | --- | --- |
+| FP16 | 0.9947–1.2360 | 9/12 | 0.3581–0.6988 | 36/36 ≤1.0 |
+| BF16 | 1.0108–1.2097 | 12/12 | 0.3552–0.7238 | 36/36 ≤1.0 |
 
-| dtype | Kernel 比值 | 较慢例数 | v6 AICPU | 源 probe wall | 生产内部 wall |
-| --- | --- | --- | --- | --- | --- |
-| FP16 | 1.0058–1.1242 | 12/12 | 24.83–38.85 | 336.32–990.82 | 343.41–1008.21 |
-| BF16 | 1.0142–1.1651 | 12/12 | 25.22–39.22 | 332.69–984.03 | 357.74–999.42 |
+E2E 比值为 FA3/CANN，含 O/LSE 完成、入口校验、输出/workspace 分配、必要转换和同步；生成加 R 次、既有记录复用及每次内部生成分别计量。CANN 保留可原生表达的独立页 stride，其余 Q/cache/页表转换计入每次调用。**72 个适用调用段逐例达标；原生 FD 另列能力差距，不纳入当前单 split 门槛。** 组件 Kernel 含 v6/当次长度/全部有效页校验，不能据公开 E2E 达标宣称 Kernel 逐例不劣化；probe wall 不作公开 E2E。
 
-两侧使用相同逻辑输入、调度和核数；生产 Kernel 包含 v6/当次长度/全部有效页校验，源侧视图物化在计时外。生产内部 wall 包含 v6 生成、输出/workspace 分配、发射与同步，源 probe 使用预分配缓冲。**这些 wall 数据不能作为公开 PA E2E 或“不劣化”结论**；公开生成/复用/内部生成 R=1/4 调用段留在 M07e2c。逐例输入视图、源记录/原生 FD、误差和原始样本均保存在 `profile-fp16/`、`profile-bf16/`。
+Profiler 框架 API 数据库导出状态由 `acceptance.json` 的 `profiler_exports` 逐模式记录；本轮发现 2 条已知 `Failed to find node launch str id` 错误。计时仅使用与 CANN `op_summary` 逐行核对的文本 Kernel CSV，不依赖失败的框架关联表；解析器源码/哈希保存在 `profiler-parser-sources/`。
 
-两种 dtype 的 profiler **框架 API 数据库导出失败**，错误为 `Failed to find node launch str id`；数据库关联表不作为本次证据。计时使用的文本 Kernel CSV 直接读取 CANN `op_summary`，不依赖该表；每种 dtype 的 1,800 条设备任务逐行核对名称、设备、起点及耗时，1,200 个 Kernel 样本和 2,400 个 wall 样本完整，逐例中位数重算一致。失败日志、解析器源码和核验见 `profile-*/profiler/*/logs/`、`profiler-parser-sources/`、`profile-export-audit.json`。
-
-未重跑普通 FA3 全套、完整 TND PA attention 矩阵、独立 Copy 性能、全部历史 Trap、sanitizer 或全布局生产 MLA E2E；静态计划及消费者算法未改，相关 CPU、TND PA 共享组件和普通 FA3 回归已补。最近非分页公开性能仍为 M06e2c2 的历史证据：`build/mla-m06e2c2-mixed-stride-production/performance-acceptance.json` 中 96 个适用公开调用段逐例达标，原生 FD 留待 M10；当时组件 Kernel 的 FP16 0.898–1.888、BF16 0.901–2.458 比值及各 6 例中 4 例较慢的限制保留。
+未重跑普通 FA3 全套、完整 TND PA attention 矩阵、独立 Copy 性能、全部历史 Trap、NPU sanitizer 或全布局公开 E2E；相关共享路径回归已补。非分页公开性能仍为 M06e2c2 的历史结果，不能记作本轮新测；TND PA、mask 和 FD 尚未接入生产，910C 未验收。
 
 ## 环境与构建
 
-Python 3.11.15，torch 2.7.1+cpu、torch_npu 2.7.1，CANN 9.0.0-beta.2；8 张 910B3，使用物理卡 6、进程内设备 0，设备任务串行。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f` 干净；只读 CANN `ca18aee610729ca5270a44e2d84c751bc687fbf0` 原有 67 项差异和本仓未跟踪 `kernel_meta/` 保留。环境记录为 `environment.json`。
+Python 3.11.15，torch 2.7.1+cpu、torch_npu 2.7.1，CANN 9.0.0-beta.2；8 张 910B3，使用物理卡 6、进程内设备 0，设备任务串行。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f` 干净；只读 CANN `ca18aee610729ca5270a44e2d84c751bc687fbf0` 原有 67 项差异及本仓未跟踪 `kernel_meta/` 保留。环境与前后状态见 `environment.json`、`*-status-before.txt` / `*-status-final.txt`。
 
-最终生产扩展实际路径为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `0811e7bd54a214b057715982cbda625dc33c98ef684e2f8b6b9c96f3cb92fdd3`。36 个对象、271 个仓库源、6,197 个依赖核验见 `production-load.json`；双 dtype PA 独立探针及 v6 AICPU 探针也按本轮依赖重新构建。
+最终扩展实际路径为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `4844118428c071d40512259ea6a0bf2770c869b315bb0b9e925d6cf2eab0193f`。固定源原生包、host/device 库与实际分派分别见 `native-package.json`、`public-profile-*/environment.json`、`native-dispatch-proof.json`。
 
 ## 唯一下一步与复现
 
-下一步仅为 **[M07e2c](plan.md#下一步m07e2c)**：复用内部 BSND PA 路径，接通公开只读 kvcache，完成 None/整数/tensor 长度、显式 v6 复用、Python/dispatcher/raw C++/fake/compile 一致性和公开 R=1/4 E2E。TND PA 生产前向留在 M07e3。本轮只提交一次，成功后停止。
+下一步仅为 **[M07e3](plan.md#下一步m07e3)**：TND Q 只读 PA kvcache 与内部 TND PA Q-used 的生产接入及相应验收。本轮只提交一次，成功后停止。
 
-本轮最小闭环复核（仓库根目录，非 login shell，不发射 NPU）：
+最小闭环复核（仓库根目录，非 login shell，不发射 NPU）：
 
 ```bash
-python3 build/mla-m07e2b-bsnd-paged-production/check_acceptance.py
+python3 build/mla-m07e2c-bsnd-paged-public/check_acceptance.py
 PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache \
 bash ci/code_quality.sh --staged
 git diff --check
 git diff --cached --check
 ```
 
-证据脚本 `build/mla-m07e2b-bsnd-paged-production/run_checks.py` 支持 `cpu`、`probe-build`、`device`、`trap`、`ordinary`、`nonpaged`、`metadata`、`profile-fp16`、`profile-bf16` 和 `empty-final`；构建脚本为同目录 `build_production.py`，构建与加载审计为 `audit_production.py`。设备任务在沙箱外串行执行，CPU 禁用 torch 自动加载 NPU，使用非 login shell；重跑复制脚本到新证据目录，不能覆盖已有数据。
+`run_checks.py` 支持 `cpu`、`public`、`public-trap`、`ordinary`、`nonpaged`、`metadata`、`device`、`native-fp16/bf16`、`profile-fp16/bf16`、`public-profile-fp16/bf16`；命令与环境保存在相应 `*-command.json`。生产构建/审计为 `build_production.py` / `audit_production.py`，固定源补编/打包为 `build_native.py` / `package_native.py`。重跑先复制脚本到新证据目录，不覆盖本轮数据；设备任务须在沙箱外串行执行，CPU 禁用 torch 自动加载 NPU。
