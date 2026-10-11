@@ -30,6 +30,9 @@ struct Input {
     uint64_t usedQCount = 0, usedKvCount = 0;
     std::vector<int32_t> usedQ, usedKv;
 #endif
+#ifdef PAGED_KV
+    int64_t pageSize;
+#endif
 };
 
 template <class T>
@@ -47,8 +50,24 @@ void EmitArray(const T& values, size_t capacity)
 }
 
 #ifdef SOURCE_ORACLE
+#ifdef MLA_MIGRATED_SPLIT
+#include "detail/cann_split_core.h"
+namespace optiling {
+using namespace flash_attn::mla::detail;
+}
+#else
 #include "split_core.h"
+#endif
 #include "log/log.h"
+
+#ifdef PAGED_KV
+namespace ge {
+enum graphStatus {
+    GRAPH_SUCCESS,
+    GRAPH_FAILED
+};
+} // namespace ge
+#endif
 
 // Minimal data/API shims for executing verbatim pinned host function bodies.
 // All omitted features are fixed false; no tensors, gert context, or migrated formulas.
@@ -95,6 +114,25 @@ class FiaInfoParser {
     uint32_t s1Size_ = 0;
     int64_t s2Size_ = 0, maxActualseq_ = 0;
     void ProcessKVActualSeqLoop(const int64_t*, uint32_t);
+#ifdef PAGED_KV
+    // The independent driver supplies already validated logical geometry and
+    // raw KV lengths. Execute the pinned S2 selection body without gert.
+    bool isMaxWorkspace_ = false;
+    uint32_t blockTableDim2_ = 0, maxBlockNumPerBatch_ = 0, blockSize_ = 0;
+    ge::graphStatus GetBlockSize()
+    {
+        return ge::GRAPH_SUCCESS;
+    }
+    ge::graphStatus GetMaxBlockNumPerBatch()
+    {
+        return ge::GRAPH_SUCCESS;
+    }
+    ge::graphStatus GetBlockTableDim2()
+    {
+        return ge::GRAPH_SUCCESS;
+    }
+    ge::graphStatus GetS2SizeForPageAttention();
+#endif
 };
 #include "source_parser.inc"
 #endif
@@ -203,6 +241,10 @@ void Run(const Input& in)
     info.gSize = in.heads;
     info.s2Size = in.sk;
     info.platformInfo = &in;
+#ifdef PAGED_KV
+    info.pageAttentionFlag = true;
+    info.blockSize = in.pageSize;
+#endif
 #ifdef BSND_KV_LENGTHS
     // Oracle input shim owns true int64 storage, as required by the unmodified
     // pinned CreateSplitInput. It does not share the migrated length parser.
@@ -236,8 +278,25 @@ void Run(const Input& in)
 #endif
 #endif
     FiaInfoParser parser;
+#ifdef PAGED_KV
+    parser.qLayout_ = in.layout == 0 ? FiaLayout::BSND : FiaLayout::TND;
+    parser.kvStorageMode_ = KvStorageMode::PAGE_ATTENTION;
+    parser.blockSize_ = in.pageSize;
+    parser.blockTableDim2_ = in.sk / in.pageSize;
+    for (const auto length : tensor.values) {
+        parser.maxBlockNumPerBatch_ =
+            std::max(parser.maxBlockNumPerBatch_, uint32_t((length + in.pageSize - 1) / in.pageSize));
+    }
+    if (parser.GetS2SizeForPageAttention() != ge::GRAPH_SUCCESS) {
+        std::abort();
+    }
+    info.s2Size = parser.s2Size_;
+#endif
     parser.ProcessKVActualSeqLoop(tensor.values.data(), in.batch);
     info.inputLayout = TilingKeyLayout::TND;
+#ifdef PAGED_KV
+    info.inputLayout = in.layout == 0 ? TilingKeyLayout::BSH_BSND : TilingKeyLayout::TND;
+#endif
 #ifndef USED_LENGTHS
     info.isAccumQSeq = info.isAccumKVSeq = true;
 #ifdef TND_BSND_KV
@@ -427,15 +486,27 @@ void Run(const Input& in)
     Emit(maxQ);
     Emit(maxKv);
     Emit(*std::max_element(qCapacity.begin(), qCapacity.end()));
+#ifndef PAGED_KV
     Emit(*std::max_element(kCapacity.begin(), kCapacity.end()));
+#endif
     for (uint32_t b = 0; b < info.bSize; ++b) {
         Emit(in.layout == 0 ? uint64_t(b) * in.sq : uint64_t(in.cuQuery.at(b)));
+#ifndef PAGED_KV
         Emit(in.layout == 1 ? uint64_t(in.kvLengths.at(b)) : uint64_t(b) * in.sk);
+#endif
         Emit(qCapacity[b]);
+#ifndef PAGED_KV
         Emit(kCapacity[b]);
+#endif
         Emit(GetS1SeqSize(b, base));
         Emit(GetS2SeqSize(b, base));
     }
+#ifdef PAGED_KV
+    Emit(in.pageSize);
+    Emit(in.sk);
+    Emit(info.s1Size);
+    Emit(info.s2Size);
+#endif
 #else
     Emit(info.s1Size);
 #ifdef TND_BSND_KV
@@ -458,6 +529,8 @@ void Run(const Input& in)
     std::cout << "]\n";
 }
 
+#elif defined(PAGED_KV)
+#include "mla_paged_schedule_driver.h"
 #else
 #include "mla_schedule.h"
 #ifdef BSND_KV_LENGTHS
@@ -713,6 +786,11 @@ int main()
             return true;
         };
         if (!readUsed(in.hasUsedQ, in.usedQCount, in.usedQ) || !readUsed(in.hasUsedKv, in.usedKvCount, in.usedKv)) {
+            return 1;
+        }
+#endif
+#ifdef PAGED_KV
+        if (!(std::cin >> in.pageSize)) {
             return 1;
         }
 #endif

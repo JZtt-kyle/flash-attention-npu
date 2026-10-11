@@ -43,12 +43,18 @@ def tnd_artifacts(tmp_path_factory):
     return directory
 
 
-def compile_driver(directory, oracle, *, mixed=False, used=False):
+def compile_driver(
+    directory, oracle, *, mixed=False, used=False, paged=False, migrated_split=False
+):
     name = "oracle" if oracle else "schedule"
     if mixed:
         name += "-mixed"
     if used:
         name += "-used"
+    if paged:
+        name += "-paged"
+    if migrated_split:
+        name += "-migrated-split"
     binary = directory / name
     command = [
         os.environ.get("CXX", "g++"),
@@ -63,6 +69,8 @@ def compile_driver(directory, oracle, *, mixed=False, used=False):
         command += ["-DTND_BSND_KV"]
     if used:
         command += ["-DUSED_LENGTHS"]
+    if paged:
+        command += ["-DPAGED_KV"]
     if os.environ.get("MLA_SCHEDULE_SANITIZE") == "1":
         command += [
             "-fsanitize=address,undefined",
@@ -70,7 +78,15 @@ def compile_driver(directory, oracle, *, mixed=False, used=False):
             "-fno-sanitize-recover=all",
         ]
     if oracle:
-        command += ["-DSOURCE_ORACLE", "-I" + str(directory), str(directory / "split_core.cpp")]
+        command += ["-DSOURCE_ORACLE", "-I" + str(directory)]
+        if migrated_split:
+            command += [
+                "-DMLA_MIGRATED_SPLIT",
+                "-I" + str(MLA),
+                str(MLA / "detail/cann_split_core.cpp"),
+            ]
+        else:
+            command += [str(directory / "split_core.cpp")]
     else:
         command += ["-Wall", "-Wextra", "-Werror", "-pedantic", "-I" + str(MLA)]
         command += [
@@ -102,7 +118,7 @@ def tnd_oracle(tnd_artifacts):
     return build_oracle(tnd_artifacts)
 
 
-def build_oracle(tnd_artifacts, *, mixed=False, used=False):
+def build_oracle(tnd_artifacts, *, mixed=False, used=False, paged=False):
     source_root = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
     blobs = {
         name: subprocess.check_output(
@@ -117,8 +133,14 @@ def build_oracle(tnd_artifacts, *, mixed=False, used=False):
     bodies = ["template <typename T>\n" + source_function(source, "inline auto Align(")]
     bodies += [source_function(source, "FiaTilingNonQuantMla::" + f + "(") for f in functions]
     (tnd_artifacts / "source_functions.inc").write_text("\n".join(bodies))
+    parser_functions = ["ProcessKVActualSeqLoop"]
+    if paged:
+        parser_functions += ["GetS2SizeForPageAttention"]
     (tnd_artifacts / "source_parser.inc").write_text(
-        source_function(blobs[PARSER].decode(), "FiaInfoParser::ProcessKVActualSeqLoop(")
+        "\n".join(
+            source_function(blobs[PARSER].decode(), "FiaInfoParser::" + name + "(")
+            for name in parser_functions
+        )
     )
     (tnd_artifacts / "log").mkdir(exist_ok=True)
     (tnd_artifacts / "log/log.h").write_text(
@@ -128,13 +150,14 @@ def build_oracle(tnd_artifacts, *, mixed=False, used=False):
         commit=CANN_COMMIT,
         kv_layout="per input" if used else "BSND" if mixed else "TND",
         used_adapter=used,
+        paged_adapter=paged,
         functions=functions,
-        parser_functions=["ProcessKVActualSeqLoop"],
+        parser_functions=parser_functions,
         split_core_functions=["GetS1SeqSize", "GetS2SeqSize", "SplitCore"],
         files={name: hashlib.sha256(blob).hexdigest() for name, blob in blobs.items()},
     )
     (tnd_artifacts / "source-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    return compile_driver(tnd_artifacts, True, mixed=mixed, used=used)
+    return compile_driver(tnd_artifacts, True, mixed=mixed, used=used, paged=paged)
 
 
 def tnd_case(

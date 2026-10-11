@@ -20,10 +20,14 @@
 // source KV lengths and 64-bit physical starts, shared with the v4 AICPU producer.
 // Independent used-length CPU entry: allocation spans remain physical; explicit
 // used arrays override source actual lengths without altering those spans.
+// Independent PA CPU entry: logical capacity is validated separately from the
+// source GetS2SizeForPageAttention page-rounded maximum effective KV length.
+// Preserve PA CalcInnerSize order, sharing normalization and whole-M mapping.
 
 #include "mla_tnd_schedule.h"
 #include "mla_tnd_bsnd_schedule.h"
 #include "mla_used_schedule.h"
+#include "mla_paged_schedule.h"
 #include "detail/cann_split_core.h"
 
 #include <algorithm>
@@ -332,7 +336,7 @@ void SplitWithoutFlashDecode(const detail::BaseInfo& base, const detail::SplitPa
 template <typename Lengths>
 MlaScheduleStatus Calculate(uint32_t batch, uint32_t heads, uint32_t queryCapacity, uint32_t kvCapacity,
                             bool compactQuery, bool compactKv, const MlaPlatformInfo& platform, const Lengths& lengths,
-                            MlaSchedule& s)
+                            MlaSchedule& s, uint32_t pageSize = 0)
 {
     // Reuse existing platform/local-memory validation and static geometry.
     // B=0 deliberately avoids the rectangular B*maxQ address/tile bound: TND
@@ -364,7 +368,13 @@ MlaScheduleStatus Calculate(uint32_t batch, uint32_t heads, uint32_t queryCapaci
             s.mBaseSize = rows / parts;
         }
     }
-    s.s2BaseSize = std::min(s.s2Size, 512U);
+    s.s2BaseSize = 512;
+    // Source CalcInnerSize: PA alignment precedes short-sequence truncation.
+    // P=112 gives 448; P=528 retains 512 and therefore still crosses pages.
+    if (pageSize != 0 && s.s2BaseSize > pageSize && s.s2BaseSize % pageSize != 0) {
+        s.s2BaseSize = s.s2BaseSize / pageSize * pageSize;
+    }
+    s.s2BaseSize = std::min(s.s2Size, s.s2BaseSize);
     s.requiredLocalMemory = {7 * 128 * 288 * 2, (s.cvRatio == 1 ? 174U : 170U) * 1024, 65536, 65536, 131072};
     std::vector<uint32_t> blocks;
     blocks.reserve(s.bSize);
@@ -432,6 +442,40 @@ MlaScheduleStatus Calculate(uint32_t batch, uint32_t heads, uint32_t queryCapaci
     w.vec2OffsetBytes = w.pvOffsetBytes + slots * w.mm2ResSize * 4;
     w.kernelBytes = w.vec2OffsetBytes + slots * w.mm2ResSize * 4;
     return w.kernelBytes <= w.userBytes ? MlaScheduleStatus::Success : MlaScheduleStatus::WorkspaceOverflow;
+}
+
+MlaScheduleStatus ParsePaged(const MlaPagedShape& shape, const MlaPagedInputs& inputs, MlaUsedLengths& normalized,
+                             MlaPagedLengths& result)
+{
+    if (shape.batch < 0 || shape.logicalKvCapacity < 0 || shape.logicalKvCapacity > kMlaMaxKvLength ||
+        shape.pageSize < 16 || shape.pageSize > 1024 || shape.pageSize % 16 != 0 ||
+        shape.logicalKvCapacity % shape.pageSize != 0) {
+        return MlaScheduleStatus::UnsupportedShape;
+    }
+    if (uint64_t(shape.batch) > UINT32_MAX) {
+        return MlaScheduleStatus::FieldOverflow;
+    }
+    if (inputs.kvLengths.count != uint64_t(shape.batch) || (shape.batch != 0 && inputs.kvLengths.data == nullptr)) {
+        return MlaScheduleStatus::UnsupportedShape;
+    }
+    // A virtual BSND allocation reuses the validated length parser only. Its
+    // dense KV starts are discarded: PA has no batch-contiguous KV addresses.
+    const MlaUsedShape used{shape.batch,
+                            shape.queryHeads,
+                            shape.query,
+                            {MlaSequenceLayout::Bsnd, shape.batch * shape.logicalKvCapacity, shape.logicalKvCapacity}};
+    auto status = Parse(used, {inputs.cuQuery, {}, inputs.usedQuery, inputs.kvLengths}, normalized);
+    if (status != MlaScheduleStatus::Success) {
+        return status;
+    }
+    result.maxQueryCapacity = normalized.maxQueryCapacity;
+    result.maxQueryLength = normalized.maxQueryLength;
+    result.maxKvLength = normalized.maxKvLength;
+    result.sequences.reserve(normalized.sequences.size());
+    for (const auto& seq : normalized.sequences) {
+        result.sequences.push_back({seq.queryStart, seq.queryCapacity, seq.queryLength, seq.kvLength});
+    }
+    return MlaScheduleStatus::Success;
 }
 } // namespace
 
@@ -531,6 +575,47 @@ MlaScheduleStatus BuildUsedSchedule(const MlaUsedShape& shape, const MlaPlatform
                 shape.batch, shape.queryHeads, tndQuery ? result.lengths.maxQueryCapacity : shape.query.maxLength,
                 tndKv ? result.lengths.maxKvCapacity : shape.kv.maxLength, tndQuery && inputs.usedQuery.data == nullptr,
                 tndKv && inputs.usedKv.data == nullptr, platform, result.lengths, result.schedule);
+        }
+        if (status == MlaScheduleStatus::Success) {
+            output = std::move(result);
+        }
+        return status;
+    } catch (const std::bad_alloc&) {
+        return MlaScheduleStatus::AllocationFailure;
+    }
+}
+
+MlaScheduleStatus ParsePagedLengths(const MlaPagedShape& shape, const MlaPagedInputs& inputs, MlaPagedLengths& output)
+{
+    try {
+        MlaUsedLengths normalized;
+        MlaPagedLengths result;
+        const auto status = ParsePaged(shape, inputs, normalized, result);
+        if (status == MlaScheduleStatus::Success) {
+            output = std::move(result);
+        }
+        return status;
+    } catch (const std::bad_alloc&) {
+        return MlaScheduleStatus::AllocationFailure;
+    }
+}
+
+MlaScheduleStatus BuildPagedSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
+                                     const MlaPagedInputs& inputs, MlaPagedSchedule& output)
+{
+    try {
+        MlaUsedLengths normalized;
+        MlaPagedSchedule result;
+        auto status = ParsePaged(shape, inputs, normalized, result.lengths);
+        if (status == MlaScheduleStatus::Success) {
+            result.pageSize = uint32_t(shape.pageSize);
+            result.logicalKvCapacity = uint32_t(shape.logicalKvCapacity);
+            const uint32_t s2Size = AlignTnd(result.lengths.maxKvLength, result.pageSize);
+            const bool tndQuery = shape.query.layout == MlaSequenceLayout::Tnd;
+            status =
+                Calculate(shape.batch, shape.queryHeads, tndQuery ? normalized.maxQueryCapacity : shape.query.maxLength,
+                          s2Size, tndQuery && inputs.usedQuery.data == nullptr, false, platform, normalized,
+                          result.schedule, result.pageSize);
         }
         if (status == MlaScheduleStatus::Success) {
             output = std::move(result);

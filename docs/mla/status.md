@@ -1,6 +1,6 @@
 # MLA 当前状态
 
-本轮恢复并完成 **M07b1 后中断的文档核验与整理（纯文档）**，核验基线 `ccc5fe5`，分支 `feat/mla-cann-migration`，日期 2026-10-11。开发进度未推进：M06 已完成，M07 完成到独立 PA CPU 地址组件；**PA 仍明确拒绝**。唯一下一步是 **[M07b2：PA CPU 调度](plan.md#下一步m07b2)**。
+本轮完成 **M07b2：独立 PA CPU 调度**，基线 `402e154`，分支 `feat/mla-cann-migration`，日期 2026-10-11。M06 已完成，M07 完成到独立 CPU 地址与调度；**PA 仍明确拒绝**。唯一下一步是 **[M07c1：PA 协议与 CPU 序列化](plan.md#下一步m07c1)**。
 
 本页只维护当前能力、最近证据、环境差异和下一步。接口、协议与架构查 [design](design.md)，步骤与完成条件查 [plan](plan.md)；当前文档闭环提交用 `git log -1 -- docs/mla/status.md` 定位。
 
@@ -15,7 +15,7 @@
 | TND Q + BSND KV | 公开只读 kvcache 使用完整 Q 分配段，支持 v4 生成/复用；内部混合 Q-used 走 v5 |
 | 三种布局的 stride | 均已生产接入；四路末维连续、外层非负 stride，含 BNSD/NTD、切片、广播、重叠和独立 offset；发射前校验完整 storage |
 | 显式 metadata | 公开生成/复用仅 v2（BSND）和 v4（混合）；可跨合法视图复用，仍须匹配当次长度及 v4 的 Q 前缀 |
-| PA | 仅独立 CPU 地址、有效页校验与页内分段；未接入调度、metadata、设备 Copy、attention 或公开入口 |
+| PA | 独立 CPU 地址、有效页校验、页内分段及 BSND/TND Q 调度（含 Q-used）；未接入 metadata、设备 Copy、attention 或公开入口 |
 
 入口参数与 v1–v5 选择统一见 [design 6.7.1](design.md#671-非分页入口与记录选择)，stride 与 PA CPU 组件见 [design 6.4](design.md#64-输入-stride-与地址校验)。调用时还须注意：
 
@@ -27,19 +27,24 @@
 
 ## 本轮核验与证据
 
-本轮只修改 design、plan、status。原核验证据保留在忽略目录 `build/mla-docs-audit-ccc5fe5/`；恢复核验与最终检查位于 `build/mla-docs-audit-ccc5fe5-resume-20261011/`，下表未注明目录的文件均指后者。路径均相对仓库根目录，不随 Git 分发；包含核验前文档、来源快照、哈希清单、检查脚本及结果。没有改源码、重建或加载扩展，也没有运行 CPU/NPU 功能、精度或性能测试。
+新增 `mla_paged_schedule.h` 的独立解析/调度接口，实现在 `mla_tnd_schedule.cpp` 中复用既有长度归一、SplitCore、无 split 端点与资源预算。逻辑容量 C 与源常规 PA 的页对齐 S2 分开保存，保留 Q 分配起点与 used；没有生产调用方，未修改 metadata、Kernel 或公开入口。
+
+本轮证据位于忽略目录 `build/mla-m07b2-paged-schedule/`，下表未注明目录的文件均指此处；上一步核验副本为 `build/mla-m07b2-prerequisite/`，未覆盖旧证据。路径相对仓库根目录，不随 Git 分发。保存了固定源快照、编译命令、完整输入/输出、XML、sanitizer 重放及哈希清单，汇总为 `acceptance.json`。
 
 | 核验项 | 结论与证据 |
 | --- | --- |
-| 上一步交接 | 修改文档前复跑 M07b1 的文档/交接检查；199 个本地链接、27 个表格及既有源码/扩展哈希通过，历史 XML 与最终 sanitizer 报告可核对。原目录的 `prerequisite.log`、`prerequisite-check.json`；其中测试数来自历史记录，不是本轮重跑 |
-| 中断恢复 | 会话记录、Git HEAD/reflog 与进程核对确认无新提交、无遗留 MLA 构建/测试/提交进程；原 53 份核验产物及三份文档哈希匹配。`recovery.json`、`process-check.json`；此前提交审核超时未执行，不计为成功提交 |
-| 文档与实际代码 | 修正混合 v4/v5 的 stride 限制和模板映射、TND stride 的过时待接入表述；补齐 PA CPU 接口与未进生产构建的边界。Python/fake、C++ 分派、前向、launcher、metadata 常量及测试清单逐项核对，见 `docs-check.json` |
-| 固定来源与历史证据 | 25 份 CANN 固定 Git blob、官方 FA3 Python/C++ 归档及公开签名/默认值核对；M07b1 与 M06e2c2 共 5,867 份历史证据、534 个其余受跟踪文件及磁盘扩展哈希一致。`source-audit.json`、`signatures.json` |
-| 结构与提交质量 | 调用分支集中到 design，plan 待办在前、历史在后，status 保留能力摘要与交接；恢复后重跑文档核验，202 个本地链接/锚点、29 个表格、78 个步骤、22 组性能清单、命令语法及适用质量钩子通过。`docs-check.json`、`quality-staged.log`、`diff-check-command.json`；汇总见 `acceptance.json` |
+| 上一步交接 | 开发前复跑 `402e154` 的最小文档核验；202 个链接、29 个表格、25 份固定源、5,867 份历史证据、534 个其余受跟踪文件与扩展哈希通过。`prerequisite-command.json` / `prerequisite.log`；历史功能结果不算本轮重跑 |
+| PA CPU 与旧路径 | **1,131 个去重 pytest 通过，无失败或跳过**：PA 420、dense 93、BSND 92、TND 111、混合 109、used 306。`cpu.xml` / `cpu-command.json` 为 1,130 项；`empty-values.xml` 补 1 项；`capture.xml` 完整复跑最终 PA 420 项并采集全部驱动输入/输出 |
+| 固定源字段差分 | 7,897 组，原生非 FD 3,196、FA3 无 split 映射 4,701；全部 64 种 P、1..26 AIC、C1V1/C1V2、BSND/TND Q、可选 Q-used、非均匀与零尾部。完整端点、FD 候选及 workspace 与固定源一致，独立标量任务覆盖/成本一致；`capture/paged/*-inputs.json`、`*-outputs.json` 与 `source-manifest.json` |
+| 容量与边界 | P=112 的 448 基块、P=528 的 512 基块及跨页范围；C≤16384 且为 P 的整数倍，C 与源 S2 分离，KV 非累计；空分配/全零 KV、Q-used 为零仍验 KV、非法前缀/计数/页大小、>uint32 Q 起点、执行块/字段/workspace 溢出和失败不改输出。范围为 CPU 算术及调度，无 PA 设备结论 |
+| Sanitizer | **ASan/UBSan/LeakSanitizer 批量重放通过**：迁移调度 8,047、迁移解析 98、固定源映射 7,897、固定源原生 7,897、迁移 SplitCore 原生 7,897，共 31,836 条；5 个进程退出 0、stderr 为空，输出 SHA256 与普通运行一致。`sanitized-replay/report.json`、`manifest.json`、完整 stdin/expected/actual；命令为 `sanitizer-replay-command.json` |
+| 提交质量与来源 | 本步差异、文档链接/表格/步骤、源 blob 与未改文件、实际加载扩展及 CATLASS 核对；适用质量钩子与 `git diff --check`。`check_acceptance.py`、`checks.json`、`quality-staged.log`；仅提交本步 9 个文件 |
+
+逐用例 sanitizer 在 10 项通过后因每进程 LeakSanitizer 扫描耗时主动中断，退出 2，**不计为闭环通过**；`sanitized.log`、`sanitized-command.json`、`sanitized-interruption.json` 保留。随后完整采集最终 420 项的全部驱动调用并批量重放，以上最终报告才是 sanitizer 闭环依据。首次质量钩子自动格式化后已复核；没有绕过钩子。
 
 ## 最近功能闭环与限制
 
-以下是**此前闭环，本轮只复核证据和来源**，不作为本轮新增测试结果。
+以下是**此前闭环，本轮仅在前置检查中复核证据和来源**，不作为本轮新增测试结果。
 
 | 闭环 | 结果与可复现证据 |
 | --- | --- |
@@ -50,28 +55,30 @@
 
 **保留的限制：** M06e2c2 组件 Kernel 比值为 FP16 0.898–1.888、BF16 0.901–2.458，两种 dtype 均有 6 例中的 4 例慢于固定源，不能宣称 Kernel 全部不劣化。组件 profiler 的 `fwk_api_db` 解析错误保留，设备 CSV 已核验，不据此声称 host 关联可用。BSND/TND stride 的公开 E2E 证据分别在 `build/mla-m06e1c-bsnd-stride/`、`build/mla-m06e2c1-tnd-stride-production/`。
 
-M07b1 的 CPU Copy trace 只证明地址和分段，不能代替 PA 设备/attention/E2E；>uint32 cache 地址只作算术检查。早期 sanitizer 逐用例运行一次因沙箱 ptrace 限制失败、一次在 2 项通过后主动中断，均不计为通过；原日志和退出码保留在 M07b1 目录，闭环依据为最终批量重放报告。
+M07b1 的 CPU Copy trace 只证明地址和分段，不能代替 PA 设备/attention/E2E；>uint32 cache 地址只作算术检查。M07b2 的全零 KV 单校验核/零 workspace 也不定义 PA 空行 O/LSE；空表/空池及设备行为继续由后续步骤验收。
 
 ## 环境与构建
 
-本轮只作静态环境和来源核对：Python `/usr/local/python3.11.15/bin/python3` 3.11.15，已安装 torch/torch_npu distribution 均为 2.7.1，CANN `/usr/local/Ascend/cann-9.0.0-beta.2`；CATLASS 固定为 `769cd40a8716b28650b6bebb08db4834eea4462f` 且干净。M07b1 的最近实际导入记录为 torch `2.7.1+cpu`、torch_npu `2.7.1`；distribution 字符串不同不代表环境升级。
+本轮实际导入核验：Python `/usr/local/python3.11.15/bin/python3` 3.11.15、torch `2.7.1+cpu`、torch_npu `2.7.1`，CANN `/usr/local/Ascend/cann-9.0.0-beta.2`；CATLASS 固定为 `769cd40a8716b28650b6bebb08db4834eea4462f` 且干净。`environment.json` 与 `npu-smi.log` 确认 8 张 Ascend910B3 健康，查询时 1–7 卡无运行进程，0 卡已有占用；本步未运行 NPU 功能、精度或性能测试。
 
-磁盘扩展 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so` 的 SHA256 仍为 `38582e6e4deb2eed122a38e5c1da06cd6d5386b4d00bc405f21e1cf469a4a00e`，与 M07b1 的加载记录和 M06e2c2 最终构建记录一致；**PA CPU 组件未进入该扩展**。本轮未查询 NPU 健康或占用；M07b1 曾确认 8 张 Ascend910B3 健康，该历史记录不代表下次测试时设备可用。
+实际加载扩展 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so` 的 SHA256 仍为 `38582e6e4deb2eed122a38e5c1da06cd6d5386b4d00bc405f21e1cf469a4a00e`，与 M07b1 加载及 M06e2c2 构建记录一致。本步只重编独立 CPU 驱动，**未重建生产扩展，该 `.so` 不包含新增 PA 调度**。共享源码中的新 PA 入口没有生产调用方；旧 CPU 调度以本轮重编结果回归。
+
+初次沙箱内扩展导入因驱动设备查询失败退出 1，`npu-smi` 因 DCMI 初始化失败退出 187；沙箱外只读查询成功，见 `environment-sandbox-failures.json` 与最终环境记录。CPU pytest 设置 `TORCH_DEVICE_BACKEND_AUTOLOAD=0`；sanitizer 在允许 LeakSanitizer ptrace 的环境执行，未关闭 leak 检查。
 
 只读 CANN 源仍为 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，原有 67 项差异与本仓未跟踪 `kernel_meta/` 保留。使用非 login shell；质量检查沿用 `/tmp/mla-m01-precommit` 与 `/tmp/mla-m01-precommit-cache`，未修改系统安装。
 
 ## 唯一下一步与复现
 
-下一步仅为 **[M07b2](plan.md#下一步m07b2)**：独立 PA CPU 调度及固定源完整字段差分、sanitizer 和旧 CPU 路径回归；本轮提交后停止。
+下一步仅为 **[M07c1](plan.md#下一步m07c1)**：新 PA 协议与 CPU 序列化；固化版本、字数、调用 context 和长度快照，明确逻辑 C 与源 S2，独立解码/损坏/失败清零及旧协议回归；本轮提交后停止。
 
-本轮最小文档闭环（依赖本机保存的证据目录；检查脚本不导入 torch、不发射 NPU）：
+本轮最小闭环复核（依赖本机证据，不重新导入扩展或发射 NPU）：
 
 ```bash
-python3 build/mla-docs-audit-ccc5fe5-resume-20261011/check_docs.py
+python3 build/mla-m07b2-paged-schedule/check_acceptance.py
 PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache \
 bash ci/code_quality.sh --staged
 git diff --check
 git diff --cached --check
 ```
 
-后续变更使用新的证据目录，避免覆盖旧结果。CPU 复现见 M07b1 的 `cpu-command.json`、`sanitizer-replay-command.json`；sanitizer 依赖完整驱动输入及允许 LeakSanitizer ptrace 的环境。生产/性能复现见 M06e2c2 的 `production-build-command.json`、`production-audit-command.json`、`performance.py` 及原始 command JSON。进入开发或实机验证前重新检查环境、设备占用、构建和实际加载来源，再按影响范围重跑必要检查。
+重跑功能验证用本轮 `cpu-command.json` 的六套 CPU pytest 命令；最终 PA 套件为 420 项。编译命令和固定 Git blob 在对应驱动目录，sanitizer 完整重放命令见 `sanitizer-replay-command.json` 与 `replay_sanitized.py`。后续修改使用新的证据目录，避免覆盖旧结果；先核对源码/二进制/输入哈希再复现。生产/性能证据仍见 M06e2c2，不以本轮 CPU 结果代替设备验收。
