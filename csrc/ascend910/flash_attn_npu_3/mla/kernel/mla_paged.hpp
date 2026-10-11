@@ -26,7 +26,8 @@ class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, tr
         if (schedule.tiling.sk == 0) {
             // PA has positive P even with an empty table/pool. Every effective
             // row has zero KV, so use FA3 device-empty -inf, not dense +inf.
-            // The validated zero-work schedule launches exactly one C1V2.
+            // One C1V2 initializes the rows. A statically nonempty allocation
+            // may launch extra cores; their start is past the output extent.
             if ASCEND_IS_AIV {
                 const uint64_t single = (rows + GetSubBlockNum() - 1) / GetSubBlockNum();
                 const uint64_t start = GetBlockIdx() * single;

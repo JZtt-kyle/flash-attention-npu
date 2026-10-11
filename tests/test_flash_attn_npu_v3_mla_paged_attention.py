@@ -242,7 +242,7 @@ def make_case(
         libapi=platform.libapi,
         **{n: getattr(platform.memory, n) for n in ("l1", "ub", "l0a", "l0b", "l0c")},
     )
-    if full_launch and batch and sq and max(kv, default=0):
+    if full_launch and batch and sq and spec["capacity"]:
         item["block_dim"] = platform.block_dims[platform.aic - 1]
     kind = 1 if dtype == torch.float16 else 2
     row = host_record(producer, item, kind)
@@ -699,6 +699,28 @@ def test_empty_cache(paged_attention, paged_probe, pool, capacity, used):
     )
 
 
+@pytest.mark.parametrize("layout,pool,used", itertools.product((0, 2), (0, 7), (False, True)))
+def test_zero_lengths_with_static_workspace(paged_attention, paged_probe, layout, pool, used):
+    spec = config(
+        layout=layout,
+        q=(3, 3) if layout == 0 else (3, 1),
+        lengths=(0, 0),
+        uq=(2, 0) if used else None,
+        pool=pool,
+        capacity=448,
+    )
+    case = make_case(paged_attention, paged_probe, spec, full_launch=True)
+    assert case["context"].block_dim == paged_probe["platform"].aic
+    assert case["expected"][20] == 1
+    case["context"].workspace = 1 << 20
+    case["context"].libapi = paged_probe["platform"].libapi
+    base = torch.full((case["context"].workspace + 1024,), 205, dtype=torch.uint8, device="npu")
+    case["ws_bases"]["migrated"] = base
+    case["workspace"]["migrated"] = base[512:-512]
+    check_case(paged_attention, case)
+    assert (base.cpu() == 205).all()  # An empty schedule never consumes the reservation.
+
+
 @pytest.mark.parametrize(
     "q,kv,used,capacity",
     (([], [], None, 0), ([0, 0], [257, 1], None, 448), ([3, 3], [257, 1], [0, 0], 448)),
@@ -927,6 +949,7 @@ FAULTS = (
     "words",
     "empty_pool",
     "empty_query",
+    "empty_budget_payload",
 )
 
 
@@ -940,11 +963,18 @@ def fault_case(probes, producer, fault, *, layout=0):
         spec.update(q=[0, 0], uq=None)
     if fault == "empty_pool":
         spec.update(pool=0, lengths=[0, 0])
+    if fault == "empty_budget_payload":
+        spec.update(lengths=[0, 0])
     case = make_case(probes, producer, spec)
     options = {}
     if fault in ("version", "empty_pool"):
         case["metadata"][1] = 5
         expected = 2
+    elif fault == "empty_budget_payload":
+        case["context"].workspace = 1 << 20
+        case["context"].libapi = producer["platform"].libapi
+        case["metadata"][385] = 16
+        expected = 7
     elif fault in ("stale_q", "stale_k"):
         case["inputs"][1 if fault == "stale_q" else 2][1] = 0
         expected = 13 if fault == "stale_q" else 11

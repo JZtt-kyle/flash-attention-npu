@@ -220,7 +220,16 @@ MLA_PAGED_INLINE MlaMetadataReadStatus ReadPagedMetadata(const Reader& read, uin
     s.mBaseSize = MLA_PAGED_WORD(schedule.mBaseSize);
     s.s2BaseSize = MLA_PAGED_WORD(schedule.s2BaseSize);
     if (c.batch == 0 || maximumQ == 0 || sourceS2 == 0) {
-        status = ReadEmptyMetadataSchedule(read, c, s);
+        auto emptyContext = c;
+        if (c.batch != 0 && maximumQ != 0 && c.logicalKvCapacity != 0) {
+            // All current KV lengths were checked above and are zero. The
+            // host may already have reserved workspace for nonempty static
+            // capacity; no part of that allocation is consumed. Still require
+            // the entire record's empty schedule/workspace payload to be zero.
+            emptyContext.workspaceBytes = 0;
+            emptyContext.libApiBytes = 0;
+        }
+        status = ReadEmptyMetadataSchedule(read, emptyContext, s);
         if (status == Status::Success) {
             output = decoded;
         }
