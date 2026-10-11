@@ -42,6 +42,8 @@ enum class MlaMetadataReadStatus : uint32_t {
     InvalidCacheLengths,
     InvalidPrefixes,
     InvalidUsedLengths,
+    InvalidPageTable,
+    InvalidPage,
 };
 
 template <typename Reader>

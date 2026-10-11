@@ -184,7 +184,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v3](#54-v3紧凑-tnd-记录与设备消费) | 3 / 3 | 405+4B | 紧凑 TND Q/KV；两轴起点来自分配前缀，使用整个分配段 |
 | [v4](#55-v4tnd-q-与-bsnd-kv-混合记录) | 4 / 4 | 406+5B | TND Q 使用整个分配段，BSND KV 保存 64 位物理起点与实际长度 |
 | [v5](#56-v5分配与-used-记录) | 5 / 5 | 410+8B | BSND Q/KV、TND Q/KV、TND Q + BSND KV；分别保存分配起点、容量与可选 Q/KV-used |
-| [v6](#58-v6nd-pa-的独立记录) | 6 / 6 | 408+5B | ND PA，BSND/TND Q 分配与可选 Q-used、非累计 KV 长度；独立 CPU/AICPU 生成 |
+| [v6](#58-v6nd-pa-的独立记录) | 6 / 6 | 408+5B | ND PA，BSND/TND Q 分配与可选 Q-used、非累计 KV 长度；独立 CPU/AICPU 生成与设备消费 |
 
 协议能表达某布局，不代表该布局已接通生产入口。生成记录、设备校验、独立 attention、入口调用分别验收；当前接入层次见 [status](status.md#当前可调用能力)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 复用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
 
@@ -199,7 +199,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 普通 FA3 保留 `uint8` 协议。其旧数值参数 `softcap` / `softmax_scale` 为关键字兼容项，仍写入 byte 记录；单独 `has_softcap=True` 拒绝，须同时给出正 `softcap`。省略 `has_softcap` 时可由正 `softcap` 启用；True 与零值冲突、负值或非有限值均拒绝。MLA 不接受这两个生成器数值关键字。
 
-**PA 扩展约束（CPU/AICPU 生成已接通，设备消费与公开接入待实现）。** 上述 v1–v5 均不表达分页，不能把物理页当作 BSND batch，或只设置一个 PA 标志后复用旧记录。v6 保存 PA 类型、页大小、每样本逻辑容量、Q 分配/实际长度和 KV 实际长度及源调度；编码与独立调用 context 见 [5.8](#58-v6nd-pa-的独立记录)。公开 `get_scheduler_metadata(..., page_size=P)` 只知道逻辑几何和长度，既没有页表、物理页数，也没有 K/V storage 信息；生成器不校验或快照这些数据。前向须核对记录的页大小与逻辑容量，再独立校验当次页表和物理 cache，见 [6.4.3](#643-nd-paged-cache-契约与来源)。
+**PA 扩展约束（独立 CPU/AICPU 生成与设备消费已实现，attention 与公开接入待实现）。** 上述 v1–v5 均不表达分页，不能把物理页当作 BSND batch，或只设置一个 PA 标志后复用旧记录。v6 保存 PA 类型、页大小、每样本逻辑容量、Q 分配/实际长度和 KV 实际长度及源调度；编码与独立调用 context 见 [5.8](#58-v6nd-pa-的独立记录)。公开 `get_scheduler_metadata(..., page_size=P)` 只知道逻辑几何和长度，既没有页表、物理页数，也没有 K/V storage 信息；生成器不校验或快照这些数据。前向须核对记录的页大小与逻辑容量，再独立校验当次页表和物理 cache，见 [6.4.3](#643-nd-paged-cache-契约与来源)。
 
 同长度、Q 分配和调度条件下，记录可跨合法页表映射、物理 cache 和 stride 复用；页表变化不要求重算调度，但每次消费仍检查有效页号。长度、Q 前缀或页大小改变则重生成；页表和 cache 在当次异步调用结束前只读。内部 Q-used 每次生成，不开放显式复用，也不新增公共参数。原 v1–v5 与普通 FA3 byte 协议保持兼容，PA 与非 PA 记录必须互相拒绝。
 
@@ -292,11 +292,17 @@ v5 的 `UsedForward` 持有两组分配前缀与两组可选 used，生成和 at
 
 [`ComputeMlaPagedMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_metadata.aicpu) 使用独立 launch ABI 的三组设备地址/计数，调用上述序列化器的 `fromQueryPrefix=true` 分支：TND 总 Q 在输出区间、dtype 和全部长度描述符校验后，从 Q 前缀尾值推导，忽略 launch 中的 TND total；BSND 仍校验显式分配总量。初始零、单调、分配上界、used 和 KV 值继续由共同调度器检查，不读回 host。成功或失败记录写完后执行 `DataStoreBarrier`；不安全输出及空 launch 参数返回 1 且不写记录。
 
-`MlaPagedMetadataContext` 固化调用方独立提供的 dtype、B、Hq、Q 分配、used 标记、P/C、平台核数、实际 blockDim、workspace/libapi 和局部资源；当前长度描述符仍由当次调用提供，不能从记录反推调用条件。物理页池、页表及 stride 的当次校验留在设备消费者步骤。
+`MlaPagedMetadataContext` 固化调用方独立提供的 dtype、B、Hq、Q 分配、used 标记、P/C、平台核数、实际 blockDim、workspace/libapi 和局部资源；当前长度描述符仍由当次调用提供，不能从记录反推调用条件。物理页池、页表及 stride 由独立的 `MlaPagedCacheInputs` 当次描述提供，不序列化进 v6。
 
-[CPU 协议测试](../../tests/test_flash_attn_npu_v3_mla_paged_metadata.py) 用独立 Python 解码规范与固定源 PA parser/tiling/SplitCore 逐字比较完整记录、端点和资源；测试解码器还检查逐字损坏与调用条件变化，旧 v1–v5 CPU 消费者在读载荷前拒绝 v6。这里的严格源字段一致性包含诊断 `maxCost`，不规定未来设备消费者必须认证源划分最优性。**当前没有 PA 设备消费者、Trap、Copy、attention 或公开接入**；测试解码器的拒绝结果不代表设备拒绝验收。
+[CPU 协议测试](../../tests/test_flash_attn_npu_v3_mla_paged_metadata.py) 用独立 Python 解码规范与固定源 PA parser/tiling/SplitCore 逐字比较完整记录、端点和资源；测试解码器还检查逐字损坏与调用条件变化，旧 v1–v5 CPU 消费者在读载荷前拒绝 v6。这里的严格源字段一致性包含诊断 `maxCost`，不要求设备消费者认证源划分最优性。测试解码器和实际设备消费者各自验收；**当前没有 PA Copy、attention 或公开接入**。
 
 [独立 AICPU 测试](../../tests/test_flash_attn_npu_v3_mla_paged_metadata_aicpu.py) 在 910B 比较 CPU 与固定源完整记录，检查 prefix/used/KV 更新、双事件依赖、allocator stream 登记和释放后的快照。危险输出通过仅测试用的包装核调用相同入口并保存返回码，以便检查 guard 和输入不变；这不构成消费者 release Trap 验收。生成器的分配前缀和只读长度可相互别名，非零跨度不能与输出重叠；空数组以 live storage 地址保留显式 used 存在标记。
+
+[`ReadPagedMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_metadata_consumer.h) 使用独立调用 context、三组当前长度和当次 cache 描述，先检查精确字数、v6 头部/状态、dtype、Q 分配、used 标记及 P/C，再检查全部描述符、逐样本快照、源 S2 与有效页。Q 起点保持 64 位，KV 长度始终非累计；页表和 cache 不绑定记录，同条件下可换映射、物理池与合法 stride 后复用。调用方须先以 `BuildPagedCacheLayout` 校验原始视图及 storage；消费者再核对该布局的几何、完整跨度、可访问元素计数、地址/对齐与溢出边界，不读取 cache 内容。
+
+页表索引以 64 位计算，每样本仅访问前 `ceil(L/P)` 项；负页号及 `page>=Np` 拒绝，其余 padding 不读取。Q 分配/used 为空也校验所有有效页，M=0 或 Np=0 仅在全部 L=0 且描述合法时通过。长度全部通过后，复用共同平台、局部资源、workspace 和空调度校验，并按 PA 基块检查变长 M 端点、未用槽位、FD 记账及整个零成本后缀。失败保持返回调度不变；新增 `InvalidPageTable`/`InvalidPage` 状态追加到原有错误枚举，旧编号不变。
+
+[`LoadPagedMetadata`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_paged_metadata.hpp) 在每个 Cube/Vector 校验编译 dtype 和真实发射核数，失败执行不依赖 `NDEBUG` 的 `AscendC::Trap()`，不要求 D2H 或主机等待。调用方必须在通过之后才构造 TPipe、设置 attention 事件或写 O/LSE/workspace，并保持 metadata、长度、页表和 cache 在异步执行期间只读且存活。[CPU 消费者测试](../../tests/test_flash_attn_npu_v3_mla_paged_metadata_consumer.py) 和 [910B release 探针](../../tests/test_flash_attn_npu_v3_mla_paged_metadata_device.py) 检查固定源记录、拒绝不写诊断输出、真实 Trap 及流生命周期；这些校验输出不是 attention O/LSE，也不定义 PA 空行输出。
 
 ## 6. 代码结构
 
@@ -504,7 +510,7 @@ CANN 表内路径仍相对于第 1 节 FIA 根目录，标明 `attention/common/
 
 只要求每样本前 `ceil(L/P)` 项是合法页号，其余列可保留 -1 等 poison，不能因为 padding 中的哨兵拒绝合法调用。长度先检查 `0<=L<=C`，然后检查有效页；即使对应 Q-used 为 0，KV 长度和其有效页仍校验，反之 Q 前缀/used 也不因 KV 为 0 而跳过。host 检查静态 shape、dtype、同设备、stride、storage 和算术边界；页表值和动态长度由设备读取，禁止 D2H。所有参与执行的核在 attention 同步、TPipe 和 O/LSE/workspace 写入前完成消费者校验，错误执行 release Trap；运行期间页表不可被其他 stream 改写。
 
-**空值。** B/Tq/Sq 为零的合法调用保留空输出 shape，但仍验长度、页表描述与必要的有效页。P 始终为正；M=0 或 Np=0 时所有 L=0 是必要条件。固定官方 PA 前向计算 `total_k=B*P`，不按物理 cache 的 `numel` 或 `M*P` 判断 host 全局空 KV；正常非空页表/物理池中 L=0 的有效行按设备空行规则输出 `O=0、LSE=-inf`。这个 host 分支本身不足以证明空表/空物理池的整条设备路径可调用，M07c3/d/e 须单独核对并验收；在此之前明确拒绝这些未接通组合，不预先套用非分页 `+inf`。CANN `CheckBlockTable` 拒绝零元素页表，FA3 所需的空值适配须与原生 CANN PA E2E 分开记录。
+**空值。** B/Tq/Sq 为零的合法调用保留空输出 shape，但仍验长度、页表描述与必要的有效页。P 始终为正；M=0 或 Np=0 时所有 L=0 是必要条件。固定官方 PA 前向计算 `total_k=B*P`，不按物理 cache 的 `numel` 或 `M*P` 判断 host 全局空 KV；正常非空页表/物理池中 L=0 的有效行按设备空行规则输出 `O=0、LSE=-inf`。这个 host 分支本身不足以证明空表/空物理池的整条设备路径可调用，M07c3 只验收其设备校验层，Copy、attention 与公开路径仍须在 M07d/e 单独核对并验收；这些组合接通前明确拒绝，不预先套用非分页 `+inf`。CANN `CheckBlockTable` 拒绝零元素页表，FA3 所需的空值适配须与原生 CANN PA E2E 分开记录。
 
 **分层。** CPU 的 PA 地址描述优先复用 BSND/TND 的完整 storage 校验；PA 调度复用既有长度归一、源 SplitCore、无 split 端点与资源预算，仅增加源 PA 切块和逻辑容量信息。新增协议负责描述调度，消费者负责当次页表/物理 cache 校验，Kernel 负责逻辑 token 循环，Block/Tile 负责页内搬运；沿用现有 Cube/Vector 数值与同步流程。独立组件放在本仓 910 MLA 目录，保留 CANN 来源/版权，不修改 CATLASS 子模块或 CANN 源仓。
 

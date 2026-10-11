@@ -1,5 +1,5 @@
-// Private PA protocol shared by the CPU and standalone AICPU generator.
-// No device consumer or public caller uses it yet.
+// Private PA protocol shared by CPU/AICPU generation and the standalone
+// device consumer. No attention kernel or public caller uses it yet.
 // Scheduling retains its CANN source/license in mla_tnd_schedule.cpp,
 // mla_schedule.cpp and detail/cann_split_core.cpp (see LICENSE.cann).
 #pragma once
@@ -30,7 +30,7 @@ struct MlaPagedMetadataQuery {
 // Independent invocation geometry/resources, not inferred from the record.
 // Length descriptors are MlaPagedInputs, also supplied by the invocation.
 // workspaceBytes excludes the libapi reservation. Physical pool/page-table
-// geometry and all strides belong to the later device/address validation.
+// geometry and all strides belong to separate invocation/address validation.
 struct MlaPagedMetadataContext {
     uint32_t dtype, batch, heads, usedFlags;
     MlaPagedMetadataQuery query;
