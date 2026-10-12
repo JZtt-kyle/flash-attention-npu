@@ -1,6 +1,6 @@
 """Reproducible MLA checks: python -m tests.mla_validation --help.
 
-Suite selections preserve the M07e3c acceptance commands. No tests are sampled.
+Existing suite selections preserve the M07e3c acceptance commands. No tests are sampled.
 Builds, golden tensors and successful test evidence have separate identities.
 Performance remains in tests.mla_paged_profile and must always be measured.
 """
@@ -26,6 +26,7 @@ from tests.mla_validation_build import matching_files
 
 
 PUBLIC = "tests/test_flash_attn_npu_v3_mla_paged_tnd_public.py"
+CAUSAL_CPU = "tests/test_flash_attn_npu_v3_mla_causal_schedule.py"
 SUITES = {
     "public": [PUBLIC, "-k", "not public_release_trap"],
     "trap": [PUBLIC, "-k", "public_release_trap"],
@@ -72,8 +73,18 @@ SUITES = {
         "tests/test_mla_paged_reference_cache.py",
         "tests/common/test_golden_cache.py",
     ],
+    "causal-cpu": [CAUSAL_CPU],
+    "causal-sanitize": [CAUSAL_CPU],
 }
-CPU_SUITES = {"cpu", "tools"}
+CPU_SUITES = {"cpu", "tools", "causal-cpu", "causal-sanitize"}
+
+
+def suite_dependencies(suite):
+    if suite not in {"causal-cpu", "causal-sanitize"}:
+        return {}
+    from tests.mla_causal_build import toolchain_identity
+
+    return toolchain_identity(suite == "causal-sanitize")
 
 
 def save(path, value):
@@ -220,6 +231,9 @@ def environment(args, directory, suite):
     }.items():
         env[variable] = str(directory / child)
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
+    if suite in {"causal-cpu", "causal-sanitize"}:
+        env["MLA_SCHEDULE_ARTIFACT_DIR"] = str(directory / "schedule")
+        env["MLA_SCHEDULE_SANITIZE"] = "1" if suite == "causal-sanitize" else "0"
     return env
 
 
@@ -288,7 +302,9 @@ def run(args):
                         "tests.mla_validation_build",
                         "prepare",
                         str(args.artifacts),
-                    ],
+                    ]
+                    if set(args.suite) - CPU_SUITES and not args.collect_only
+                    else [],
                     suites={
                         name: pytest_command(
                             name, args.output / "attempt-N" / name, args.collect_only
@@ -399,6 +415,8 @@ def run(args):
             directory = attempt / suite
             directory.mkdir()
             env = environment(args, directory, suite)
+            dependencies = suite_dependencies(suite)
+            save(directory / "suite-dependencies.json", dependencies)
             # Omit only output locations from the identity. Runtime and all
             # inherited environment values participate without exposing secrets.
             semantic_env = {
@@ -411,6 +429,7 @@ def run(args):
                     runtime=runtime_info if suite not in CPU_SUITES else sys.version,
                     environment=semantic_env,
                     selection=SUITES[suite],
+                    dependencies=dependencies,
                     golden=args.golden,
                     build=sha256(args.artifacts / "prepare.json") if needs_npu else None,
                 )
@@ -467,6 +486,10 @@ def run(args):
                 result["status"] = "interrupted"
             if sources() != baseline:
                 result.update(status="failed", error="Source changed during validation")
+            if suite_dependencies(suite) != dependencies:
+                result.update(
+                    status="failed", error="CPU toolchain or fixed source changed during validation"
+                )
             if runtime_info and not matching_files(runtime_info["loaded_libraries"]):
                 result.update(status="failed", error="Loaded libraries changed during validation")
             if needs_npu:

@@ -367,6 +367,7 @@ PA 链路通过编译期特化复用上述任务环和 Cube/Vector：
 | 同一 parser 与 tiling：Q 累计长度、KV 非累计实际长度组合 | `mla_tnd_bsnd_schedule.h` 声明，`mla_tnd_schedule.cpp` 实现并复用变长调度 | Q 紧凑起点与 KV 的 64 位 `b*Sk` 分开，物理 KV 容量不随实际长度缩短 |
 | 同一 tiling 的 `CreateSplitInput` 非累计 Q/KV 分支及 `SplitCore` | `mla_used_schedule.h` 声明，`mla_tnd_schedule.cpp` 的 CPU/AICPU 共用 used 入口 | 分配起点/容量与实际使用长度分别保存，Q/KV 独立选择累计尾值或非累计 used，复用变长端点映射 |
 | `../common/op_host/split_core.cpp`：`SplitCore`、`CalcSplitInfo`、`CalcCostInfo`、`CalcSplitPlan`、`AssignByBatch/Row/Block`、`ForceAssign` | 调度模块私有的 `detail/cann_split_core.h/.cpp` | 枚举核数、cost、容差、遍历次序和相同 cost 时保留已有方案的规则；专用 MLA 使用此文件，不是 `split_core_v2.cpp`；保留源算法分支不表示开放对应功能 |
+| 同一 `split_core.cpp`：`CalcNextTokenLeftUp`、`CalcS2Range`、`CalcS1GCache`、`SplitCore` | 独立 CPU `mla_causal.h/.cpp`，尚未接入生产 | 右下 causal 的逐样本有效长度、块范围与成本；完整 M 块端点及全遮罩行的输出归属，见 6.2.4 |
 | `op_host/fused_infer_attention_score_tiling.h`；`op_kernel/arch22/fia_public_define.h`：`ConstInfo`、`RunInfo` | 调度字段与 Kernel 运行时参数 | 明确字段宽度、单位、端点语义和运行时状态，见 6.2 |
 | `op_kernel/arch22/fused_infer_attention_score_v3.cpp`：`INVOKE_FIA_OP_GENERAL_IMPL` 的 `BSH_KVBSH_MLA_TILING` 分支 | 独立实例化单元、launcher 和生成器 | FP16/BF16、无 PA、无 FD、BSND 输入输出、C1V1/C1V2；不带入 FIA 注册与大签名 |
 | `op_kernel/arch22/fia_kernel_nonquant_mla.h`：`Init`、`InitCalcParamsEach`、`CalcParams`、`FlashAttention`、`ExecuteTask` | `kernel/mla_dense.hpp` | 核区间解析、三项任务环、两级延迟流水、初始化及排空 |
@@ -400,7 +401,7 @@ PA 链路通过编译期特化复用上述任务环和 Cube/Vector：
 | `softmaxLseFlag/outputLayout/batchContinuous/needInit`、长度/PA/mask 标志 | 布局与功能条件；地址另传 | 按功能步骤映射；dense 保留 LSE 初始化与同步，未接通组合明确拒绝 |
 | `RunInfo.loop/bn2IdxInCurCore/isFirstSInnerLoop/isLastS2Loop/isValid` | 每次 launch、每核私有状态 | 任务环和缓冲轮换不进入可复用记录 |
 
-**FA3 禁止 split 的映射。** `num_splits=1` 先运行原 `SplitCore`；无 FD 时保留原结果，有 FD 时将端点向上对齐到完整 M 块结束处、合并空区间，重建 `s2End=0` 分区。按源 `CalcBatchCache/CalcS1GCache` 重算正常块与尾块成本。基本块、原候选算法和设备数值/事件顺序不变；映射结果与原生非 FD 输出分开验收，不称为原生 CANN 输出。
+**已接通无 mask 路径的禁止 split 映射。** `num_splits=1` 先运行原 `SplitCore`；无 FD 时保留原结果，有 FD 时将端点向上对齐到完整 M 块结束处、合并空区间，重建 `s2End=0` 分区。按源 `CalcBatchCache/CalcS1GCache` 重算正常块与尾块成本。基本块、原候选算法和设备数值/事件顺序不变；映射结果与原生非 FD 输出分开验收，不称为原生 CANN 输出。
 
 #### 6.2.2 平台与溢出
 
@@ -411,6 +412,14 @@ PA 链路通过编译期特化复用上述任务环和 Cube/Vector：
 #### 6.2.3 全局空容量
 
 `B=0`、`Sq=0` 或 `Sk=0` 时，v1/v2 保留真实形状、dtype、平台信息，使用一个校验核；基本块、端点、FD、workspace 和局部内存需求为零。生成和消费仍校验全部当次长度，不能因空输出绕过错误上报。校验后跳过 attention，不访问 Q/K/V/qv 或分配 attention workspace；空 batch/query 返回空 shape，全局空 KV 在同一 stream 填 `O=0、LSE=+inf`。非零容量中的样本零 KV 为 `O=0、LSE=-inf`，与全局空容量分开验收。
+
+#### 6.2.4 独立 CPU causal 范围与分核
+
+[`mla_causal.h/.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_causal.h) 只实现共享 512+64、Hkv=1、右下 causal、`num_splits=1` 的独立 CPU 算法。调用方先用既有长度解析器校验 allocation/used，再提供逐样本有效 Sq/Sk；位置中心为 `i+Sk-Sq`，不使用容量或 batch 最大长度。S1G 顺序仍为 query-major。块描述给出半开行/query/key/S2 区间、前导全遮罩行数，以及源 S2 正常/尾块和整块成本。Sq=0 仅接受块 0，返回空区间；Sk=0 的所有有效 Q 行都标为全遮罩。
+
+分核接受调用方选择的逻辑 M=1..256、N=1..512、1..26 个 Cube、C1V1/C1V2，沿用既有每样本字段/地址边界和保守的 uint32 总矩形 tile 上限；不在这里选择生产基本块或验设备资源。先运行原 `SplitCore`，将部分 S2 端点向上对齐到完整 M 块、合并重复端点，再逐块重算 causal 成本，不能用无 mask 的首块成本乘块数。最后端点规范为 `(B,0,0)`，包含尾部零成本 Q 块；全部有效 Q/head 行有且仅有一个所属核。全空输入保留单个零成本核；未使用数组项为零，失败保持输出不变。
+
+该组件尚未进入 setup 的生产源码清单、metadata/AICPU、Kernel 或公共入口；范围和分核验收不能证明设备 O/LSE、mask 或 causal 前向已开放。[CPU 测试](../../tests/test_flash_attn_npu_v3_mla_causal_schedule.py) 编译固定源 Git blob 对照范围/成本和全部原生 FD 字段，另用独立逐行可见 key 与每核任务枚举验完整 M 映射；布局输入对照从原始 allocation/used 直接解读，不复用待测解析器。
 
 ### 6.3 长度与布局调度
 
@@ -780,8 +789,9 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 | `device` / `bsnd` | TND PA 内部前向 / BSND PA 公开功能，均不含各自 Trap |
 | `metadata` / `ordinary` / `nonpaged` | 原 PA metadata / 普通 FA3 与入口 / 非分页及独立 TND PA 相关回归子集；确切节点和过滤条件见预览 |
 | `cpu` / `tools` | 原构建生成输入与依赖检查 / 验收执行器与 reference 缓存检查；均不构建扩展或发射 NPU |
+| `causal-cpu` / `causal-sanitize` | 同一完整 causal CPU 范围/成本/分核/长度用例集，分别普通编译和 ASan/UBSan 编译；不构建扩展或发射 NPU |
 
-现有组测试的是已开放的无 mask 能力；新增 causal 等路径必须新增用例组。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
+上述设备组测试的是已开放的无 mask 能力；新增 causal 设备路径仍须补相应测试组，CPU 组不证明前向已开放。causal CPU 两组还记录固定源 blob、CPU 编译器及相关运行库身份和 sanitizer 模式；这些依赖变化或运行期间发生变化时不能恢复为通过。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
 
 ```bash
 python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --dry-run
@@ -789,6 +799,8 @@ python3 -m tests.mla_validation --output build/mla-step --suite public ordinary 
 python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --device 6
 python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --device 6 --resume
 ```
+
+causal CPU 驱动在每组内分别复用适配器、固定源 oracle、迁移 SplitCore 三个独立进程，逐项保存 stdin/stdout，完整集合结束时检查退出码和 stderr。ASan/UBSan 组保留退出时 LeakSanitizer 检查；执行环境须允许其进程检查，不能把沙箱限制导致的失败记为通过。
 
 每次执行创建新的 `attempt-*`，保存命令/环境、完整节点清单、XML、日志、数学输入/输出、源码身份及 pytest 实际加载的扩展身份；`summary.json` 表示最近一次尝试，`state.json` 索引可继承的成功组。退出非零、没有用例、失败、跳过、实际扩展不符或运行中依赖变化都不能记为通过。某组失败后，后续组为未运行；旧成功状态先失效，原尝试目录保留。
 

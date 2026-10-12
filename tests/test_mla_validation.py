@@ -141,8 +141,12 @@ def test_lock_blocks_a_second_process(tmp_path):
         assert result.returncode != 0 and "Another validation process" in result.stderr
 
 
-def test_success_failure_interruption_and_resume(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suite", ["tools", "causal-cpu", "causal-sanitize"])
+def test_success_failure_interruption_and_resume(tmp_path, monkeypatch, suite):
     config = args(tmp_path)
+    config.suite = [suite]
+    dependencies = {"compiler": "first", "sanitize": suite == "causal-sanitize"}
+    monkeypatch.setattr(runner, "suite_dependencies", lambda _: dict(dependencies))
     mutable_sources = {"source": "first"}
     monkeypatch.setattr(runner, "sources", lambda: dict(mutable_sources))
     script = tmp_path / "child.py"
@@ -160,17 +164,17 @@ sys.exit(code)
         runner, "pytest_command", lambda *a: [sys.executable, str(script), str(exit_file)]
     )
     assert runner.run(config) == 0
-    first = json.loads((config.output / "summary.json").read_text())["groups"]["tools"]
+    first = json.loads((config.output / "summary.json").read_text())["groups"][suite]
     config.resume = True
     assert runner.run(config) == 0
     assert (
-        json.loads((config.output / "summary.json").read_text())["groups"]["tools"]["status"]
+        json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"]
         == "inherited"
     )
     Path(first["directory"], "cases.json").unlink()
     exit_file.write_text("7")
     assert runner.run(config) == 7
-    assert "tools" not in json.loads((config.output / "state.json").read_text())
+    assert suite not in json.loads((config.output / "state.json").read_text())
     exit_file.write_text("130")
     assert runner.run(config) == 130
     exit_file.write_text("0")
@@ -178,12 +182,18 @@ sys.exit(code)
     mutable_sources["source"] = "changed"
     assert runner.run(config) == 0
     assert (
-        json.loads((config.output / "summary.json").read_text())["groups"]["tools"]["status"]
+        json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"]
         == "passed"
     )
     (config.output / "state.json").write_text("interrupted index write")
     assert runner.run(config) == 0
     assert list(config.output.glob("attempt-*/invalid-state.json"))
+    dependencies["compiler"] = "changed"
+    assert runner.run(config) == 0
+    assert (
+        json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"]
+        == "passed"
+    )
 
 
 def test_environment_cannot_inherit_sampling_or_old_fixture_paths(tmp_path, monkeypatch):
@@ -205,3 +215,79 @@ def test_dry_run_does_not_write_or_import_npu(tmp_path, monkeypatch, capsys):
     assert runner.run(config) == 0
     assert "not public_release_trap" in capsys.readouterr().out
     assert not config.output.exists()
+
+
+@pytest.mark.parametrize("suite,sanitize", [("causal-cpu", "0"), ("causal-sanitize", "1")])
+def test_causal_selection_and_isolated_cpu_environment(
+    tmp_path, monkeypatch, capsys, suite, sanitize
+):
+    config = args(tmp_path)
+    config.suite = [suite]
+    config.dry_run = True
+    monkeypatch.setenv("MLA_SCHEDULE_ARTIFACT_DIR", "/old/causal")
+    monkeypatch.setenv("MLA_SCHEDULE_SANITIZE", "unexpected")
+    monkeypatch.setattr(runner, "execute", lambda *a: pytest.fail("dry-run executed"))
+    assert runner.run(config) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["prepare"] == []
+    assert runner.SUITES[suite] == [runner.CAUSAL_CPU]
+    assert runner.CAUSAL_CPU in preview["suites"][suite]
+    env = runner.environment(config, tmp_path, suite)
+    assert env["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
+    assert env["MLA_VALIDATION_NPU"] == "0"
+    assert env["MLA_SCHEDULE_SANITIZE"] == sanitize
+    assert env["MLA_SCHEDULE_ARTIFACT_DIR"] == str(tmp_path / "schedule")
+
+
+def test_causal_dependencies_changing_during_execution_fail(tmp_path, monkeypatch):
+    config = args(tmp_path)
+    config.suite = ["causal-cpu"]
+    dependencies = {"source": "original"}
+    monkeypatch.setattr(runner, "sources", lambda: {})
+    monkeypatch.setattr(runner, "suite_dependencies", lambda _: dict(dependencies))
+
+    def execute(command, env, directory, lock_fds):
+        evidence(directory)
+        dependencies["source"] = "modified"
+        return dict(returncode=0, seconds=0)
+
+    monkeypatch.setattr(runner, "execute", execute)
+    assert runner.run(config) == 1
+    group = json.loads((config.output / "summary.json").read_text())["groups"]["causal-cpu"]
+    assert group["status"] == "failed"
+    assert "fixed source changed" in group["error"]
+    assert "causal-cpu" not in json.loads((config.output / "state.json").read_text())
+
+
+@pytest.mark.parametrize("mode", ["ok", "exit", "stderr", "eof", "malformed", "extra"])
+def test_causal_driver_checks_protocol_and_final_sanitizer_exit(tmp_path, mode):
+    from tests.mla_causal_build import CpuDriver
+
+    binary = tmp_path / "driver"
+    binary.write_text(f"""#!{sys.executable}
+import json, sys
+mode = {mode!r}
+for line in sys.stdin:
+    if mode == "eof":
+        sys.exit(0)
+    print("invalid JSON" if mode == "malformed" else json.dumps(list(map(int, line.split()))), flush=True)
+if mode == "stderr":
+    print("sanitizer diagnostic", file=sys.stderr)
+if mode == "extra":
+    print("[]", flush=True)
+sys.exit(7 if mode == "exit" else 0)
+""")
+    binary.chmod(0o755)
+
+    def exercise():
+        with CpuDriver(binary) as driver:
+            assert driver.evaluate([[1, 2], [3]]) == [[1, 2], [3]]
+
+    if mode == "ok":
+        exercise()
+    else:
+        with pytest.raises((RuntimeError, ValueError)):
+            exercise()
+    record = json.loads((tmp_path / "driver-run.json").read_text())
+    assert record["returncode"] == (7 if mode == "exit" else 0)
+    assert record["requests"] == (0 if mode in {"eof", "malformed"} else 2)
