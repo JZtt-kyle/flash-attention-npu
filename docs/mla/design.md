@@ -769,3 +769,37 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 构建缓存按源码、完整编译依赖、编译参数、工具链和产物校验，运行前仍核对实际加载路径。数学 reference 缓存按输入内容及 dtype/shape、影响逻辑映射的 stride/offset/前缀/used/页表、scale/mask 等语义参数、oracle 与独立输入适配器版本校验，不能仅凭 seed 或 shape 命中。同一输入的两个独立数学结果各算一次后可供多入口比较；待测实现必须在本次相应用例中执行，oracle 的独立性及 O/LSE/空值检查不变。
 
 历史组件性能可以作为已验收记录继承，不能标为本次采样。新增公开路径或影响调用开销的变化，仍按本节与 7.1 的固定矩阵、双 dtype、R 和同步边界实测双方 E2E；构建或 reference 复用不能替代性能测量。测试工具迁移先证明测试集合、参数、失败传播及证据身份保持一致，再以独立步骤引入选择或缓存；后续缓存命中、失效和恢复规则需要实现与验收后才能使用。
+
+### 7.4 统一验收入口
+
+执行器为 [tests/mla_validation.py](../../tests/mla_validation.py)，复用 setup、已有 release probe builder、pytest 和通用 golden cache，不调用旧步骤目录的临时驱动。先按 7.3 和 plan 选择受影响组，再预览或收集；执行器不会自动判断代码影响范围。现有组保持 M07e3c 的选择条件，不开启随机抽样，也不继承环境中的 `PYTEST_ADDOPTS`。
+
+| 测试组 | 固定范围 |
+| --- | --- |
+| `public` / `trap` | TND PA 公开功能 / 其独立进程真实 Trap |
+| `device` / `bsnd` | TND PA 内部前向 / BSND PA 公开功能，均不含各自 Trap |
+| `metadata` / `ordinary` / `nonpaged` | 原 PA metadata / 普通 FA3 与入口 / 非分页及独立 TND PA 相关回归子集；确切节点和过滤条件见预览 |
+| `cpu` / `tools` | 原构建生成输入与依赖检查 / 验收执行器与 reference 缓存检查；均不构建扩展或发射 NPU |
+
+现有组测试的是已开放的无 mask 能力；新增 causal 等路径必须新增用例组。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
+
+```bash
+python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --dry-run
+python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --collect-only
+python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --device 6
+python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --device 6 --resume
+```
+
+每次执行创建新的 `attempt-*`，保存命令/环境、完整节点清单、XML、日志、数学输入/输出、源码身份及 pytest 实际加载的扩展身份；`summary.json` 表示最近一次尝试，`state.json` 索引可继承的成功组。退出非零、没有用例、失败、跳过、实际扩展不符或运行中依赖变化都不能记为通过。某组失败后，后续组为未运行；旧成功状态先失效，原尝试目录保留。
+
+`--resume` 只继承同一输出目录中身份匹配且原始证据完整的成功组，结果标为 `inherited`，不会计入本次实测；失败、中断、证据缺失或依赖变化的组重新完整执行。源码身份保守覆盖测试、共享辅助代码、910 源码和 CATLASS include，排除文档；因此可能多补测，不据文件名擅自缩小影响范围。输出、共享构建目录与同卡运行有非阻塞锁；未结束进程继续持锁时必须先核查进程，不能直接另启相同任务。锁只协调本执行器，性能测量前仍须核查其他用户的设备活动。
+
+三类复用分别管理：
+
+- 构建产物默认在 `build/mla-validation-artifacts/`，可用 `--artifacts` 指定。源码、编译设置、工具链、生成依赖和库内容都一致才复用；首次运行或身份失效会强制重建，避免原时间戳检查漏掉保留 mtime 的修改。probe 库共享，各次精度原始数据写入各自 attempt。该缓存是保守的完整构建缓存，不承诺修改任意头文件时只编译最小对象集。
+- PA 的 BSND/TND component、production 和 profile 共用 [独立页映射 reference](../../tests/common/mla_paged_reference.py)。缓存保存 FP64/低精度两套 O/LSE；键含实际 CPU 输入内容、dtype/shape/stride/offset、原始 allocation/used/页表/scale、映射与公式源码和运行栈。NPU 实现及固定源设备对照仍实际运行。损坏缓存重算；`--golden off` 禁用，`--golden refresh` 强制重算，默认 `cache`。强制刷新不可与 `--resume` 同用。每组 `golden.tsv` 与 summary 统计 hit/miss/refresh 和耗时。
+- 历史测试结果按上述成功证据规则继承。阶段收尾、新行为或需要实测的组使用新输出目录或不加 `--resume`；保留有效构建和数学缓存并不减少测试集合。旧目录的历史性能不得记为本次采样。
+
+公开性能继续使用版本管理的 `python3 -m tests.mla_paged_profile --help` 入口，矩阵、R、预热、采样及独立原生 CANN 包验证保持 7.1 的要求。可设置 `GOLDEN_CACHE_MODE=cache GOLDEN_CACHE_DIR=<artifacts>/golden` 复用昂贵的 CPU 参考预检；每次使用新的输出目录，真正的双方设备调用与同步 E2E 全部重新测量，性能任务不使用测试结果恢复。缓存只支持当前无 mask 的 PA reference；扩展新语义时必须补键与失效检查后再启用。
+
+这些证据目录与缓存均不随 Git 分发；迁机需要复制实际引用的产物、证据及 manifest 依赖，或重新构建/验收。仅有 summary 数字不能证明历史测试有效。

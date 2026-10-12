@@ -1,31 +1,41 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、每步产物与完成条件。**M00–M07 已完成；当前先完善开发流程，唯一下一步是 W02。** 当前可调用能力与最近证据见 [status](status.md)，范围、契约及验收口径见 [design](design.md)。流程改进完成后恢复 M08，不改变迁移范围。
+本页只记录实施顺序、每步产物与完成条件。**开发流程 W01–W04 及功能 M00–M07 已完成；唯一下一步是 M08a。** 当前可调用能力与最近证据见 [status](status.md)，范围、契约及验收口径见 [design](design.md)。流程工具已经接通，后续按影响范围验收，不改变迁移范围。
 
-## 下一步：W02
+## 开发流程：W01–W04 已完成
 
-用户已确认先完善开发流程。按下表逐提交实施，提交一次即停止；W01 只落地规则，统一执行器及新增缓存/恢复机制尚未实现。
+用户已确认先把开发流程完善完整。W01 已落地规则；本次将 W02–W04 合为一个可独立验收的流程工具提交，入口、复用/恢复、计划依次验证后收尾；提交后停止，不开始 M08。
 
 | 步骤 | 产物 | 完成条件 |
 | --- | --- | --- |
 | W01（已完成） | 按影响范围验收、证据继承及收尾规则 | AGENTS/design/plan/status 一致，文档与质量检查通过；原有 M08 工作保留 |
-| W02（下一步） | 版本管理中的最小验收入口，先接通 TND PA 公开功能测试组 | 复用已有构建/测试工具；支持预览命令、执行及结构化结果；与 M07e3c 的 `public` 组（历史 2,145 项，不含 Trap）核对用例集合、参数、成功/失败传播和实际产物身份；保留旧证据且不减少测试集合 |
-| W03 | 在已接通的驱动中消除昂贵重复计算 | 优先复用同输入的双数学 reference；进入时按可独立验收范围拆分缓存、证据选择与恢复；命中/失效/结果一致性有检查，待测路径仍实测，记录改进前后耗时 |
-| W04 | 调整 M08 提交边界和当前步验收清单 | 核对保留的草稿，以独立组件或可调用行为组织步骤，优先 BSND 非 PA 闭环，再扩展 TND/used 和 PA；每步标明影响路径、测试组、继承依据及完成条件 |
+| W02（已完成） | 版本管理中的统一验收入口，接入既有八个验收组 | 复用已有构建/测试工具；支持预览命令、执行及结构化结果；与 M07e3c 的 `public` 组（历史 2,145 项，不含 Trap）核对用例集合、参数、成功/失败传播和实际产物身份；保留旧证据且不减少测试集合 |
+| W03（已完成） | 在已接通的驱动中消除昂贵重复计算 | 优先复用同输入的双数学 reference；已实现分别校验的构建/reference 缓存和按组证据恢复；命中/失效/结果一致性有检查，待测路径仍实测，记录改进前后耗时 |
+| W04（已完成） | 调整 M08 提交边界和当前步验收清单 | 核对保留的草稿，以独立组件或可调用行为组织步骤，优先 BSND 非 PA 闭环，再扩展 TND/used 和 PA；每步标明影响路径、测试组、继承依据及完成条件 |
 
-W02 影响范围仅为测试执行与证据组织，不改生产接口或数值核。必跑项为清单/参数对照、执行器成功与失败路径、当前构建下的 TND PA `public` 实测及质量检查；M07e3c 的历史集合与命令只作为迁移基线，不计为本次通过。首次执行前核对源码、依赖及实际加载扩展；实现时把确切命令补入当前步。断点恢复及其他布局留待后续独立步骤。
+本次影响测试驱动、PA 数学参考的缓存适配和验收安排，不改生产接口或数值核。统一入口放在 `tests/mla_validation.py`，复用已有 setup、probe builder、pytest 和 golden cache；保持原 public 组 2,145 项及全部参数。按测试组恢复，只有成功记录、用例清单、源码、环境和产物身份均有效时才继承；失败或中断整组重跑，性能采样仍实测。缓存键覆盖实际输入、布局/used/页表/scale 和参考/适配源码，提供关闭与强制刷新。
+
+必跑命令为 `TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -m pytest -q tests/test_mla_validation.py tests/test_mla_paged_reference_cache.py tests/common/test_golden_cache.py`，以及 `python3 -m tests.mla_validation --output build/mla-workflow-tools-20261012/run --suite tools cpu public ordinary --device 6`。因本轮重建扩展，同时运行原构建基础检查和相关普通 FA3 回归。先对照旧清单与参数，再执行完整 public；检查缓存关闭/命中结果一致性、输入/源码/产物变化失效、失败/中断恢复、并发互斥和实际加载。结果与耗时见 status。缓存适配已覆盖 BSND/TND、used、空 KV 与页寻址，并记录冷/热耗时。M07e3c 仅作为集合和不受影响功能的历史基线，不计本次通过。已有 M08 十二步草稿先存入忽略目录的 `preexisting.patch`，本次 W04 明确重排它；未跟踪代码与原始数据保持原样。
 
 ## 后续功能：M08
 
-下列功能分解由 W04 复核后恢复实施；工作树中已有的 M08 拆分和代码草稿不表示该阶段已验收。
+W04 将原有十二个层次子步整理为下列独立算法或可调用行为。原草稿保存在本轮证据的 `preexisting.patch`；未跟踪 `mla_causal.h` 仍只是待复核草稿。**本轮不实现 M08；流程提交后的唯一下一步为 M08a。**
 
-仅推进 **512+64 右下 causal**。开始实现前先在本计划拆成可独立验收的提交，分别处理源 mask/调度与 metadata 表达、设备数值路径、生产和公开组合；每个子步的产物与完成条件写清后再实施。
+仅推进 **512+64 右下 causal、num_splits=1**。位置中心为 `i + Sk - Sq`，Sq/Sk 使用逐样本有效长度；分配前缀、真实 stride 和 PA 页寻址沿用现有契约。每项完成实现、适用验收、文档后提交一次并停止。
 
-| 产物 | 完成条件 |
-| --- | --- |
-| FA3 右下对齐 causal | 保留固定源 Kernel / Block / Tile 路径；位置中心为 `i + Sk - Sq`，按逐样本长度解释 |
-| BSND/TND/PA 及 metadata 组合 | 覆盖 Sq<Sk、Sq>Sk、多 query、空行、生成/复用；尚未接通的组合明确拒绝 |
-| 精度与性能证据 | Kernel 子步完成 910B 双 dtype 固定源/双数学精度与代表性能；公开接入补普通 FA3 回归及适用 E2E |
+| 子步 | 产物与影响路径 | 本步必跑与完成条件 | 可继承的证据 |
+| --- | --- | --- | --- |
+| M08a | 独立 CPU causal 块范围、全遮罩行描述与分核计划；不改生产分派 | 固定源 `CalcS2Range`/mask 成本/分核差分，独立逐行枚举；BSND/TND/used/PA 逻辑长度、不等长/头跨块/尾块/空样本/溢出，ASan/UBSan；新增 `tests/test_flash_attn_npu_v3_mla_causal_schedule.py` 后运行其完整组 | 无 mask 的设备精度和公开性能；前提是公共调用、数值核及其依赖未变 |
+| M08b | 首个 BSND 非 PA causal 可调用闭环：Kernel/Block/Tile、所需 metadata/AICPU、生产及 func/只读 cache 入口 | 新 causal 精度/Trap/真实/fake/compile、全遮罩 O=0/LSE=-inf、长度/stride/显式记录与复用签名；双 dtype 固定源/双数学、组件性能和公开 R=1/4 E2E；`ordinary` 及受共享协议影响的 metadata 回归 | M08a 已验证的 CPU 算法及未变化 PA/非 causal 数值组件；协议或公共分派变更覆盖其受影响组合 |
+| M08c | 非 PA TND、混合布局及 used causal 完整行为；包含 varlen 和 TND 只读 cache 接入 | allocation/used 决定的独立地址与逐样本对齐、尾块/空行/Trap/生命周期、真实/fake/compile、双 dtype 精度及组件/公开性能；`ordinary`，BSND 受影响回归 | M08b 中未变化的 mask 算法与 BSND 专属路径；新入口与参数传递必须实测 |
+| M08d | BSND PA causal：页 Copy、metadata、生产和公开入口一起接通 | 全部合法 P、乱序/重复页、边界/零 KV、记录重用/真实 Trap；双 dtype 精度、普通回归和 R=1/4 逐例公开 E2E | 未变化的非 PA 数值与地址组件；共用头文件/调度变化补受影响组合 |
+| M08e | TND PA causal 完整行为，并完成 M08 阶段验收 | TND 前缀和有效长度、全 P、stride/空值/复用/生命周期/Trap/compile；双 dtype 精度及公开 E2E；最后按 design 实测全部已开放 causal 组合、相关普通 FA3 回归及性能矩阵 | 可复用有效构建与数学 reference；阶段验收不继承历史运行结果冒充当次实测 |
+
+M08a 的预定最小命令为 `TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_causal_schedule.py`；该文件尚未实现，不能提前计为通过。实现前先复核草稿，并把固定源差分、逐行枚举和 sanitizer 编译/运行接入该组。当前已有 `cpu` 组仅检查生成输入和依赖跟踪，不能代替 causal 算法测试。
+
+后续进入每步时，用 `python3 -m tests.mla_validation --output build/mla-<step> --suite <已实现组> --dry-run` 核对命令，并将新 causal 用例注册为有明确集合的组。`public`/`bsnd`/`device` 等现有名称仍表示原 M07 无 mask 矩阵，不能拿它们代替新能力验收。每步新增场景先跑代表用例及最长 reference/最大内存边界，再跑约定集合；矩阵通过后立即收尾。只有独立算法或共享协议确实不能在该步验收时再拆分，并复用前一步未变组件的证据，不恢复逐层重复全矩阵的做法。
+
+所有设备数值步覆盖 Sq<Sk、Sq=Sk、Sq>Sk、多 query、部分/全部遮罩行；未接通组合继续明确拒绝。CPU 描述不绑定数据地址、mask tensor 或 scale，不表示前向已经开放。
 
 共同数学契约见 [design 3.3](design.md#33-共同契约)，代表输入见 [MS01/MS02](design.md#42-代表用例与参考实现边界)。window、split 和 prefill 仍按下表顺序实施。
 

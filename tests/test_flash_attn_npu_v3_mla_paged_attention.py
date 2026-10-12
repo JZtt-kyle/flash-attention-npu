@@ -15,7 +15,7 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from tests.common.mla_ref import mla_reference_pair
+from tests.common.mla_paged_reference import references as references
 from tests.mla_dense_build import ROOT, build_probes, sha256
 from tests.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_mla_dense import Schedule
@@ -501,47 +501,6 @@ def valid_outputs(case, outputs, *, source=False):
     return [
         torch.cat([outputs[0][b, :length] for b, length in enumerate(q)]),
         torch.cat([outputs[1][b, :, :length] for b, length in enumerate(q)], dim=1),
-    ]
-
-
-def references(case):
-    q = case["item"]["q"] if case["item"]["uq"] is None else case["item"]["uq"]
-    results = [[], [], [], []]
-    heads, page = case["context"].heads, case["config"]["page"]
-    starts = list(itertools.accumulate([0, *case["item"]["q"]]))
-    for b, (qlen, klen) in enumerate(zip(q, case["config"]["lengths"])):
-        if not qlen:
-            continue
-        if klen:
-            data = {
-                n: case["host"][n][:, starts[b] : starts[b] + qlen]
-                if case["item"]["layout"] == 2
-                else case["host"][n][b : b + 1, :qlen]
-                for n in ("q", "qv")
-            }
-            # Independent scalar token indexing, never schedule spans/Copy traces.
-            for n in ("k", "v"):
-                data[n] = torch.stack(
-                    [
-                        case["host"][n][int(case["table_host"][b, t // page]), t % page]
-                        for t in range(klen)
-                    ]
-                ).unsqueeze(0)
-            refs = [t[0] for t in mla_reference_pair(**data, softmax_scale=case["scale"])]
-        else:
-            out = torch.zeros((qlen, heads, 512), dtype=case["host"]["v"].dtype)
-            lse = torch.full((heads, qlen), -torch.inf)
-            refs = [out, lse, out, lse]
-        for dst, ref in zip(results, refs):
-            dst.append(ref)
-    return [
-        torch.cat(r, dim=i % 2)
-        if r
-        else torch.empty(
-            (heads, 0) if i % 2 else (0, heads, 512),
-            dtype=torch.float32 if i % 2 else case["host"]["v"].dtype,
-        )
-        for i, r in enumerate(results)
     ]
 
 

@@ -1,9 +1,9 @@
 # MLA 当前状态
 
-核对日期：2026-10-12；分支：`feat/mla-cann-migration`；接手提交：`a70ed66`；最近功能闭环：`29ed04f`（M07e3c）。
-**本轮完成 W01：按影响范围验收及证据继承规则；唯一下一步是 [W02：最小统一验收入口](plan.md#下一步w02)。M07 已完成，M08 草稿保留，待流程改进后恢复；本轮仅改开发约定与文档。**
+核对日期：2026-10-12；分支：`feat/mla-cann-migration`；接手提交：`c947d96`；最近功能闭环：`29ed04f`（M07e3c）。
+**本轮完成 W02–W04：统一验收入口、构建/reference/证据分别复用、按组恢复和 M08 计划重排；流程 W01–W04 已闭环。M08 尚未开始，唯一下一步为 [M08a](plan.md#后续功能m08)。**
 
-本页保存当前能力、最近闭环证据和环境差异；接口与架构见 [design](design.md)，实施顺序见 [plan](plan.md)。本次文档提交可用 `git log -1 -- docs/mla/status.md` 定位。
+本页保存当前能力、最近闭环证据和环境差异；接口与架构见 [design](design.md)，实施顺序见 [plan](plan.md)。当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
 
 ## 当前可调用能力
 
@@ -46,35 +46,42 @@
 
 该功能步未改设备数值组件；源 Kernel 组件对照由前一步对象/依赖哈希复核保留。未重跑全部历史 Trap、全部非分页/普通 FA3、NPU/CPU sanitizer 或完整图重放。中止采样、构建失败及未被 pytest 使用的快照差异保留在原目录及 `acceptance.json`，不计为通过。
 
-## 本次流程闭环与工作树
+## 本次流程工具与证据
 
-本次证据目录：`build/mla-workflow-20261012/`。改动仅为 `AGENTS.md`、design、plan、status；验收工具和缓存尚未实现，性能收益尚未实测。
+本次证据目录：`build/mla-workflow-tools-20261012/`；共享构建及数学缓存：`build/mla-validation-artifacts/`。入口为 [tests/mla_validation.py](../../tests/mla_validation.py)，参数和边界见 [design 7.4](design.md#74-统一验收入口)。
 
-- W01 落地提交粒度、必跑清单、完成后收尾、按影响范围补测及阶段验收规则；design 明确依赖核对、结果分类和 reference 复用边界。新路径精度、相关普通 FA3 回归及适用的逐例公开 E2E 门槛保持不变。
-- 编辑前执行上一轮最小文档检查 `build/mla-docs-audit-20261012/check_docs.py` 通过；复核历史 9,614 项记录、构建身份、接口与协议，结果存为 `prerequisite-docs-check.json`。这是旧证据复核，不是本轮新增 pytest。
-- 本次文档链接/锚点、表格、命令语法、改动范围及原有工作保留检查通过，结果见 `docs-check.json`；检查命令存为 `docs-command.json`。暂存质量检查和差异检查通过，见 `quality.log`。
-- 接手时已有 `docs/mla/plan.md` 的 M08 十二步拆分及未跟踪 `mla_causal.h`、`kernel_meta/`；本轮原样保留，不纳入提交。plan 只暂存本轮流程规则，提交后的工作树仍含原 M08 草稿差异。基线和保留核对见 `baseline.json`、`preexisting.patch`。
+- 八个原验收组的 9,614 个节点及全部选择条件与 M07e3c 完全一致，见 `selection-equivalence.json`。这是完整清单对照，不代表本轮执行了全部历史用例。独立页映射及数学 reference 的原函数体经 AST 对照保持一致。
+- 46 项执行器/缓存检查已通过：退出码、失败/跳过/空集合、加载身份、证据损坏、输入/布局/源码/构建依赖变化、恢复和互斥。构建依赖只取本次实际链接对象，已覆盖历史 `.d` 残留导致的误判。
+- 新入口的 `tools cpu public ordinary` 共 **3,015 项去重通过，无失败/跳过**：工具 46、构建基础 2、公开组 2,145、普通 FA3/入口 822。见 `cold-summary.json`；公开组又以有效缓存完整实测 2,145 项，548 次 reference 全部命中，见 `warm-summary.json`。后者是重复验证，不重复计入去重总数。
+- 公开组首次缓存运行 258.49 秒，命中运行 124.81 秒，整组缩短 **51.7%**；NPU 路径、节点集合和精度判定不变。有效构建核对约 1.1–1.2 秒，另有约 20 秒的实际运行栈检查。真实 `--resume` 将四组全部标为 `inherited`，继承 3,015 项、本次执行 0 项，见 `resume-summary.json`；汇总见 `acceptance.json`。
+- 初版收集/构建期间的源码变化，以及扫描历史 `.d` 导致的依赖误判，保留在 `prepare.log` 和旧 attempt 中，不计通过。依赖收集已绑定实际链接对象；最终构建核对 6,317 个依赖，实际扩展 SHA256 为 `4e2cf66ad8a507b1c3bad54bf3ab5f440ab928ffbd95041104e1c54470e3782c`。
+- 原有 3,521 个未跟踪文件内容保持不变，见 `preservation.json`。本步仅提交明确列出的流程/测试文件；文档链接、表格、命令语法和差异核对见 `docs-check.json`，暂存质量检查日志为 `quality.log`。
+- M08 由原十二个分层子步重排为 CPU 算法、BSND 非 PA、TND/used、BSND PA、TND PA 及阶段验收五个阶段。各阶段明确必跑项和可继承边界，精度、普通 FA3 回归及性能矩阵不变；原草稿存为 `preexisting.patch`，原 `mla_causal.h` 与 `kernel_meta/` 内容保留并备份在 `original-untracked/`。
 
-历史实测环境为 Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2，8 张 910B3。本次不探测设备、不导入 NPU 扩展、不构建或运行 NPU 测试；前置文档检查核对了保留扩展、CATLASS 与固定 CANN 源的历史身份。源码字节与旧产物之间已有上一轮注释/docstring 差异，下一次开发仍须按正常依赖规则重建并核对实际加载路径。
+本机长 KV CPU 参考缓存测量（Q allocation 7/0/3，KV 8193/17/1025，H=128，P=112，双数学 O/LSE）：
 
-本次与历史证据目录均被 Git 忽略，**不随提交分发**；迁机须复制所用证据及其 manifest 依赖。缺少证据时补跑相关检查，不仅凭本页数字宣布复核通过。
+| dtype | 禁用缓存 | 首次写入 | 命中读取 |
+| --- | --- | --- | --- |
+| FP16 | 182.471 秒 | 197.827 秒 | 0.069 秒 |
+| BF16 | 215.990 秒 | 216.477 秒 | 0.070 秒 |
+
+四个张量在关闭、首次计算和命中读取之间逐位一致。原始数据见 `reference-timing/timings.json`，命令快照为 `reference_timing.py`；这是本机一次 CPU 参考预检样本，不是内核性能或整个测试组的加速比。性能采样仍用现有 `tests.mla_paged_profile` 实测双方设备调用与 E2E。
+
+本次环境：Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2、910B3 第 6 卡；CATLASS `769cd40a`、固定 CANN 源 `ca18aee6`。接手状态见 `environment.json` 与 `npu-before.log`；本次实际加载身份由执行器另存到每个 attempt。当前所有改动属于流程、测试工具和 reference 复用，没有修改生产数值核或公共接口。
+
+证据和缓存均被 Git 忽略，不随提交分发；迁机须复制其实际依赖或重新验收。旧 M07 功能和性能结果仍按上表标为历史，本次未重新采样完整 E2E 性能矩阵。
 
 ## 唯一下一步与复现
 
-下一步仅为 **[W02](plan.md#下一步w02)**：先将既有 TND PA `public` 测试组接到版本管理中的最小执行入口，保持用例集合、参数、判定及实际产物核验。其余缓存/恢复和 M08 重排按 plan 后续步骤实施。本次提交成功后停止。
-
-本次最小复核（仓库根目录，非 login shell，不发射 NPU）：
+下一步仅为 [M08a](plan.md#后续功能m08)：复核 CPU causal 草稿并实现独立块范围/分核计划及其差分、边界和 sanitizer 检查。本轮流程提交后停止。不把 CPU 草稿或已编译对象计为 causal 能力已开放。
 
 ```bash
-python3 - <<'PY'
-import json, subprocess
-record = json.load(open('build/mla-workflow-20261012/docs-command.json'))
-subprocess.run(record['command'], check=True)
-PY
+python3 -m tests.mla_validation --output build/mla-workflow-tools-20261012/run \
+  --suite tools cpu public ordinary --device 6 --resume
 PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache \
 bash ci/code_quality.sh --staged
 git diff --check
 git diff --cached --check
 ```
 
-质量命令中的 `/tmp` 路径是本机已有工具环境；其他机器按 `ci/quality-requirements.txt` 准备依赖。旧 `check_acceptance.py` 和文档检查绑定各自历史快照，本次改流程文档后使用上面的文档复核命令。W02 从原 `*-command.json` 核对测试组和环境，将执行规则迁入版本管理；既有目录只作迁移基线与历史证据，不能宣称尚未实现的统一执行器已经可用。
+`--resume` 继承有效成功组，失败/中断组重新执行；需要当前实测时去掉该参数。`--dry-run` 只预览命令，`--collect-only` 只核对节点，不作为测试通过。新能力测试须另加组，现有 `public` 仍是无 mask 的 TND PA 组。质量工具的 `/tmp` 路径为本机环境，迁机按 `ci/quality-requirements.txt` 准备。
