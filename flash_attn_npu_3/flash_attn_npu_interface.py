@@ -175,10 +175,6 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
             varlen_q or not varlen_k,
             "MLA compressed forward is not implemented yet for BSND Q with TND KV",
         )
-        check(
-            not paged_kv or not varlen_q,
-            "MLA compressed paged forward is not implemented yet for TND Q",
-        )
         check(paged_kv or varlen_q or q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
         check(
             varlen_q
@@ -379,10 +375,27 @@ def _check_mla_forward_metadata(q, cache_seqlens, metadata):
             raise RuntimeError("MLA: scheduler_metadata must be contiguous")
 
 
-def _check_mla_paged_inputs(q, k, page_table, cache_seqlens, metadata, seqused_q=None):
-    # Mirror BuildPagedBsndPlan and the descriptor storage checks in
-    # PagedBsndForward. Physical pages are independent of logical batch/capacity.
+def _check_mla_paged_inputs(
+    q, k, page_table, cache_seqlens, metadata, seqused_q=None, cu_seqlens_q=None, max_seqlen_q=None
+):
+    # Mirror both paged plans and PagedForward's descriptor storage checks.
+    # Physical pages and total TND tokens are independent of logical batch.
+    tnd = cu_seqlens_q is not None
     batch, page = q.shape[0], k.shape[1]
+    if tnd:
+        if max_seqlen_q is None:
+            raise RuntimeError("MLA: TND paged forward requires max_seqlen_q")
+        if (
+            cu_seqlens_q.ndim != 1
+            or cu_seqlens_q.numel() < 1
+            or cu_seqlens_q.dtype != torch.int32
+            or not cu_seqlens_q.is_contiguous()
+            or cu_seqlens_q.device != q.device
+        ):
+            raise RuntimeError(
+                "MLA: cu_seqlens_q must be same-device contiguous int32[batch_size + 1]"
+            )
+        batch = cu_seqlens_q.numel() - 1
     if page_table.ndim != 2 or page_table.dtype != torch.int32 or page_table.shape[0] != batch:
         raise RuntimeError(
             "MLA: page_table must have shape [batch_size, max_pages] and dtype int32"
@@ -395,7 +408,17 @@ def _check_mla_paged_inputs(q, k, page_table, cache_seqlens, metadata, seqused_q
         or k.shape[0] > (1 << 31)
         or not 16 <= page <= 1024
         or page % 16 != 0
-        or not _fits_mla_dense_shape(batch, q.shape[1], q.shape[2], capacity)
+        or not _fits_mla_dense_shape(
+            0 if tnd else batch, max_seqlen_q if tnd else q.shape[1], q.shape[-2], capacity
+        )
+        or (
+            tnd
+            and (
+                q.shape[0] > (1 << 31) - 1
+                or q.shape[0] * q.shape[1] > ((1 << 63) - 1) // 1024
+                or q.shape[0] > batch * max_seqlen_q
+            )
+        )
     ):
         raise RuntimeError("MLA: paged shape bounds or page size exceeded")
     if page_table.stride(0) < 0 or page_table.stride(1) != 1:
@@ -427,7 +450,7 @@ def _check_mla_paged_inputs(q, k, page_table, cache_seqlens, metadata, seqused_q
                 "MLA: scheduler_metadata must be same-device contiguous int32[408 + 5 * batch_size]"
             )
     if not torch.compiler.is_compiling():
-        for tensor in (page_table, cache_seqlens, seqused_q, metadata):
+        for tensor in (page_table, cache_seqlens, seqused_q, metadata, cu_seqlens_q):
             if tensor is None:
                 continue
             offset = tensor.storage_offset()
@@ -444,6 +467,7 @@ def _check_mla_paged_inputs(q, k, page_table, cache_seqlens, metadata, seqused_q
                 )
             ):
                 raise RuntimeError("MLA: paged descriptor exceeds storage or signed byte bounds")
+    return batch
 
 
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_paged_bsnd_forward")
@@ -464,6 +488,31 @@ def _mla_paged_bsnd_forward_fake(
     return (
         q.new_empty((*q.shape[:-1], 512)),
         q.new_empty((q.shape[0], q.shape[2], q.shape[1]), dtype=torch.float32),
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_paged_tnd_forward")
+def _mla_paged_tnd_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    page_table,
+    cu_seqlens_q,
+    max_seqlen_q,
+    softmax_scale=None,
+    cache_seqlens=None,
+    seqused_q=None,
+    scheduler_metadata=None,
+):
+    _check_mla_inputs(q, k, v, qv, varlen_q=True, paged_kv=True)
+    _check_mla_dense_options(softmax_scale=softmax_scale)
+    _check_mla_paged_inputs(
+        q, k, page_table, cache_seqlens, scheduler_metadata, seqused_q, cu_seqlens_q, max_seqlen_q
+    )
+    return (
+        q.new_empty((*q.shape[:-1], 512)),
+        q.new_empty((q.shape[1], q.shape[0]), dtype=torch.float32),
     )
 
 
@@ -602,7 +651,16 @@ def _flash_attn_forward(
             ),
         )
         if page_table is not None:
-            _check_mla_paged_inputs(q, k, page_table, seqused_k, scheduler_metadata, seqused_q)
+            _check_mla_paged_inputs(
+                q,
+                k,
+                page_table,
+                seqused_k,
+                scheduler_metadata,
+                seqused_q,
+                cu_seqlens_q,
+                max_seqlen_q,
+            )
         elif cu_seqlens_q is not None:
             if cu_seqlens_k is None:
                 _check_mla_mixed_inputs(
@@ -755,7 +813,16 @@ def _flash_attn_forward_fake(
             ),
         )
         if page_table is not None:
-            _check_mla_paged_inputs(q, k, page_table, seqused_k, scheduler_metadata, seqused_q)
+            _check_mla_paged_inputs(
+                q,
+                k,
+                page_table,
+                seqused_k,
+                scheduler_metadata,
+                seqused_q,
+                cu_seqlens_q,
+                max_seqlen_q,
+            )
         elif cu_seqlens_q is not None:
             if cu_seqlens_k is None:
                 _check_mla_mixed_inputs(
@@ -1920,8 +1987,8 @@ def flash_attn_with_kvcache(
                 v_descale,
             ),
         )
-        if page_table is not None and cu_seqlens_q is not None:
-            raise RuntimeError("MLA compressed paged forward is not implemented yet for TND Q")
+        if page_table is not None and cu_seqlens_q is not None and max_seqlen_q is None:
+            raise RuntimeError("MLA: TND paged forward requires max_seqlen_q")
         if isinstance(cache_seqlens, int):
             # Integer convenience input needs valid geometry before creating
             # its device tensor. Tensor/None lengths go straight to the op.
@@ -1933,18 +2000,40 @@ def flash_attn_with_kvcache(
                 varlen_q=cu_seqlens_q is not None,
                 paged_kv=page_table is not None,
             )
+            batch = k_cache.shape[0]
             if page_table is not None:
-                _check_mla_paged_inputs(q, k_cache, page_table, None, scheduler_metadata)
+                batch = _check_mla_paged_inputs(
+                    q,
+                    k_cache,
+                    page_table,
+                    None,
+                    scheduler_metadata,
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                )
             capacity = k_cache.shape[1] * (page_table.shape[1] if page_table is not None else 1)
             if not 0 <= cache_seqlens <= capacity:
                 raise RuntimeError("MLA: cache_seqlens must be between zero and KV capacity")
             cache_seqlens = torch.full(
-                (q.shape[0] if page_table is not None else k_cache.shape[0],),
+                (batch,),
                 cache_seqlens,
                 dtype=torch.int32,
                 device=k_cache.device,
             )
-        if page_table is not None:
+        if page_table is not None and cu_seqlens_q is not None:
+            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_paged_tnd_forward(
+                q,
+                k_cache,
+                v_cache,
+                qv,
+                page_table,
+                cu_seqlens_q,
+                max_seqlen_q,
+                softmax_scale,
+                cache_seqlens,
+                scheduler_metadata=scheduler_metadata,
+            )
+        elif page_table is not None:
             out, softmax_lse = torch.ops.flash_attn_npu_3._mla_paged_bsnd_forward(
                 q,
                 k_cache,

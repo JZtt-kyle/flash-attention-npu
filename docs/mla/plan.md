@@ -1,30 +1,22 @@
 # MLA 迭代计划
 
-本文件只记录迭代顺序、产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。接手只需先看 [M07e3c](#下一步m07e3c)；其余内容按 [M07 剩余步骤](#m07-剩余步骤)、[后续阶段](#m07-之后)、[共同完成条件](#每步完成条件)、[已完成里程碑](#已完成步骤) 查询。
+本文件只记录迭代顺序、产物与完成条件。当前能力与证据见 [status](status.md)，契约与验收口径见 [design](design.md)。接手只需先看 [M08](#下一步m08)；其余内容按 [后续阶段](#m07-之后)、[共同完成条件](#每步完成条件)、[已完成里程碑](#已完成步骤) 查询。
 
-M06 已完成，M07 完成到 M07e3b 的 TND PA 内部生产前向；BSND 只读 PA 公开 kvcache 和 BSND/TND 公开 v6 metadata 已接通。TND PA 已具备静态计划、双 dtype 生产实例与专用内部前向；唯一下一步为 **[M07e3c：TND 只读 PA 公开 kvcache](#下一步m07e3c)**，M07 全部完成后依次推进 M08..M17。
+M07 已完成：BSND/TND 只读 PA 公开 kvcache、公开 v6 metadata、内部 Q-used 和对应公开 E2E 已接通。唯一下一步为 **[M08：512+64 右下 causal](#下一步m08)**，后续依次推进 M09..M17。
 
 ## M07：ND paged cache
 
-本阶段限 FP16/BF16、512+64 共享 KV、Hkv=1、无 mask、`num_splits=1`，接入 BSND/TND query 和内部 Q-used。接口、页大小、长度、物理地址和来源见 [design 6.4.3](design.md#643-nd-paged-cache-契约与来源)，新增记录的职责见 [metadata PA 约束](design.md#51-签名与复用规则)。64 种源页大小、两路 cache 独立 stride、页表行 stride 均在范围内；CANN 原生只支持部分外层 stride 时，测试侧转换计入公开 E2E。
+本阶段限 FP16/BF16、512+64 共享 KV、Hkv=1、无 mask、`num_splits=1`。已接入 BSND/TND query、内部 Q-used，以及只读公开 kvcache 的 None/整数/tensor KV 长度与 v6 复用。接口、页大小、长度、物理地址和来源见 [design 6.4.3](design.md#643-nd-paged-cache-契约与来源)，新增记录的职责见 [metadata PA 约束](design.md#51-签名与复用规则)。
 
-### 下一步：M07e3c
+### 下一步：M08
 
-前置产物为 [TND PA 静态计划](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_plan.cpp)、[双 dtype TND PA 内部生产前向](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 和公开 v6 metadata，最近闭环证据见 [status](status.md#本轮闭环与证据)。本步只完成 TND 只读 PA 公开接入及相应 E2E：
+仅推进 **512+64 右下 causal**，不提前开放 window、split 或 prefill。开始实现前先按独立验收边界在本计划拆分 M08：源 mask/调度与 metadata 表达、设备数值路径、生产/公开组合分别闭环；每个子步仍只提交一次。已确认的数学契约与代表用例见 [design 3.3](design.md#33-共同契约) 和 [MS01/MS02](design.md#42-代表用例与参考实现边界)。
 
-- `flash_attn_with_kvcache(page_table=...)` 接 TND Q 完整分配段；复用 `PagedTndForward`，公开不增加 Q-used 参数。
-- KV 长度接受 None/整数/tensor；None 为 C，整数验证后按 Q 前缀推导的逻辑 B 物化，不能按 Tq 或物理页数物化；支持内部生成和显式 v6 复用。
-- Python、专用/通用 dispatcher、raw C++、fake/compile 校验与返回一致，覆盖完整 storage、分配前缀、宽松 max（含 Tq=0）、当前长度/全部有效页、空值及流生命周期。
-- 完成 910B 双 dtype、全部页大小源/双数学 O/LSE 与固定矩阵 R=1/4 公开 E2E；必要源布局/used 适配计入计时，原生 FD 分派单列。
-- 回归 BSND PA、TND 内部 Q-used、非分页 MLA、PA metadata 和普通 FA3；必要验证完成后更新三份文档，只提交一次即停止。
+- 基于当前 BSND/TND/PA 的分配与实际长度，保留源 Kernel / Block / Tile 路径，实现 FA3 右下对齐的 causal。
+- 覆盖 Sq<Sk、Sq>Sk、多 query、空行和 metadata 生成/复用；未接通的布局或组合继续明确拒绝。
+- 每个 Kernel 小步完成 910B 双 dtype 源/双数学精度与代表性能，公开接入补相关普通 FA3 回归及适用 E2E。
 
-### M07 剩余步骤
-
-每行是一次独立提交；只有对应生产接入验收后才开放该组合。独立 CPU、生成器、设备消费者和 attention probe 不代表公开前向；公开生成器也不代表 PA attention 已接入。
-
-| 子步骤 | 状态 | 本步产物与接入边界 | 独立完成条件 |
-| --- | --- | --- | --- |
-| M07e3c | 唯一下一步 | TND Q 只读 PA 公开 kvcache，完成 M07 | 完整 Q 分配段、None/整数/tensor KV 长度、按逻辑 B 物化、v6 复用、Python/dispatcher/raw C++/fake/compile 一致；双 dtype 精度、公开 R=1/4 E2E、原生 FD 单列及相关全布局/普通 FA3 回归 |
+### M07 验收边界
 
 PA01/PA02 的地址、Copy 与精度覆盖全部 16..1024 的 16 倍数；代表性性能保留 P=16/128/256/1024，并加入 P=112 的基本块变化和 P=528 的跨页块。矩阵在采样前固化，含 BSND/TND、短/长 KV、单/多 query、乱序页/尾页、K/V 独立首维 padding 和零长度。固定源原生非 FD、FD 与不接受的空表等情况按分派/约束单列，不按耗时筛选；独立 probe 不能替代原生 PA E2E。
 
@@ -34,7 +26,7 @@ PA01/PA02 的地址、Copy 与精度覆盖全部 16..1024 的 16 倍数；代表
 
 | 步骤 | 状态 | 产物 | 完成条件 |
 | --- | --- | --- | --- |
-| M08 | 待开始 | 512+64 右下 causal | Sq<Sk/Sq>Sk、多 query、空行、PA/TND/metadata；精度及 E2E 通过 |
+| M08 | 唯一下一步 | 512+64 右下 causal | Sq<Sk/Sq>Sk、多 query、空行、PA/TND/metadata；精度及 E2E 通过 |
 | M09 | 待开始 | 512+64 局部窗口 | 有限/单侧窗口、causal 叠加、FA3 归一化和页边界；精度及 E2E 通过 |
 | M10 | 待开始 | 512+64 split-KV 与合并 | 源分割/合并流程，自动/1/显式 split、dense/TND/PA/空 split、O/LSE/accumulator/metadata；长 KV E2E 通过 |
 | M11 | 待开始 | 192/128 prefill BSND 前向与 metadata | 源通用非量化路径，qv=None、独立 K/V、分组头/真实 stride；O/LSE 及 E2E 通过 |
@@ -88,6 +80,7 @@ PA01/PA02 的地址、Copy 与精度覆盖全部 16..1024 的 16 倍数；代表
 | M07e2c | BSND 只读 PA 公开 kvcache；None/整数/tensor 长度、v6 复用、Python/dispatcher/raw C++/fake/compile、全部页大小/独立 stride/空值/storage/真实 Trap/生命周期、双 dtype 精度及公开 R=1/4 E2E；普通 FA3 和相关 MLA 回归 | TND PA 生产与公开前向 |
 | M07e3a | 独立 TND PA 静态计划；复用完整 storage 和 BSND 资源预算、紧凑 Tq/max Q 分离、全部 P 的双 dtype 固定源预算/v6 context、宽字段/空值/sanitizer；BSND 基线逐字段差分、生产重建及 BSND PA/公开/普通 FA3 回归 | TND PA 生产实例、内部前向和公开接入 |
 | M07e3b | TND PA 双 dtype 生产实例和专用内部前向；完整 Q 分配/used、v6 生成/复用、当前前缀/长度/有效页、完整 storage、空值及宽松 max、源/双数学精度、真实 Trap/生命周期、生产 Kernel 对照；BSND PA、非分页、PA metadata 和普通 FA3 回归 | TND 只读 PA 公开 kvcache 和公开 E2E |
+| M07e3c | TND 只读 PA 公开 kvcache；None/整数/tensor 长度按逻辑 B 物化，v6 生成/复用、Python/dispatcher/raw C++/fake/compile、完整 storage/前缀/有效页/空值/生命周期，双 dtype 全页大小精度与 R=1/4 公开 E2E；相关 MLA/普通 FA3 回归 | M07 完成，转 M08 右下 causal |
 
 查某个子步骤的历史完成条件及证据，例如：
 

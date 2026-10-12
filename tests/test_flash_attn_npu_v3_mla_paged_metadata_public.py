@@ -461,11 +461,10 @@ def test_v6_forward_protocol_boundary(dtype, layout, kind):
                 current.pop("page_table")
                 current["k"] = torch.empty(2, 32, 1, 64, dtype=dtype, device="npu")
                 current["v"] = torch.empty(2, 32, 1, 512, dtype=dtype, device="npu")
-            # Only BSND PA can consume v6; TND PA is still pending and
-            # nonpaged consumers must reject the PA protocol.
+            # Both PA query layouts consume v6; nonpaged consumers reject it.
             with (
                 nullcontext()
-                if paged and layout == 0
+                if paged
                 else pytest.raises(RuntimeError, match="not implemented yet|scheduler_metadata")
             ):
                 if kind == "public":

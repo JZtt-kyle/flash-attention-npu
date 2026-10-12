@@ -191,6 +191,11 @@ std::vector<at::Tensor> mha_fwd(
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (page_table_) {
+            if (cu_seqlens_q_) {
+                TORCH_CHECK(max_seqlen_q_, "MLA: TND paged forward requires max_seqlen_q");
+                return flash_attn::mla::PagedTndForward(q, k, v, *q_v_, *page_table_, *cu_seqlens_q_, *max_seqlen_q_,
+                                                        scale, seqused_k_, seqused_q_, scheduler_metadata_);
+            }
             return flash_attn::mla::PagedBsndForward(q, k, v, *q_v_, *page_table_, scale, seqused_k_, seqused_q_,
                                                      scheduler_metadata_);
         }

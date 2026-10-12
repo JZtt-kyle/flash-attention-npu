@@ -413,7 +413,6 @@ def test_host_rejections(entry, fault):
         "pack",
         "margin",
         "chunk",
-        "tnd",
         "append",
         "rotary",
         "remap",
@@ -426,13 +425,7 @@ def test_unconnected_options(kind, fault):
     with FakeTensorMode() if kind.endswith("fake") else nullcontext():
         args = small_inputs()
         is_public = kind.startswith("public")
-        if fault == "tnd":
-            args["q"], args["qv"] = args["q"][:, 0], args["qv"][:, 0]
-            args.update(
-                cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32, device="npu"),
-                max_seqlen_q=1,
-            )
-        elif fault == "window":
+        if fault == "window":
             args.update({"window_size": (1, -1)} if is_public else {"window_size_left": 1})
         elif fault.startswith("split"):
             args["num_splits"] = int(fault[-1])

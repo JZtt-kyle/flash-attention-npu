@@ -17,7 +17,7 @@ from tests.mla_metadata_error_probe import forbid_host_readback
 def run(kind, fault, directory, entry="internal"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[kind]
-    if entry == "tnd-internal":
+    if entry.startswith("tnd-"):
         from tests.test_flash_attn_npu_v3_mla_paged_tnd_production import (
             small_inputs,
             forward,
@@ -29,7 +29,7 @@ def run(kind, fault, directory, entry="internal"):
             forward,
             generate,
         )
-    if entry == "public":
+    if entry in ("public", "tnd-public"):
         from tests.test_flash_attn_npu_v3_mla_paged_public import public
 
         def call(args, metadata=None):

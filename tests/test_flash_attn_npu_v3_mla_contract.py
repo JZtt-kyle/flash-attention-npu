@@ -80,18 +80,19 @@ def test_mla_supported_subset_and_rejections(entry, representation, layout, dtyp
             assert args[name].stride(-1) == 1
             assert not args[name].is_contiguous()
             assert args[name].storage_offset() > 0
-    if representation == "compressed" and layout in ("dense", "tnd", "paged"):
+    if representation == "compressed":
         out, lse, *_ = _forward(entry, args)
         assert out.shape == (*args["q"].shape[:-1], 512) and out.dtype == dtype
         assert (
-            lse.shape == ((4, 4) if layout == "tnd" else (2, 4, 3)) and lse.dtype == torch.float32
+            lse.shape == ((4, 4) if layout in ("tnd", "paged_tnd") else (2, 4, 3))
+            and lse.dtype == torch.float32
         )
         if entry != "fake":
             torch.testing.assert_close(out.cpu(), torch.zeros(out.shape, dtype=out.dtype))
             expected = (
                 torch.tensor([9.0, 9.0, 9.0, 8.0]).expand(4, -1)
                 if layout == "tnd"
-                else torch.full(lse.shape, 32.0 if layout == "paged" else 17.0)
+                else torch.full(lse.shape, 32.0 if layout.startswith("paged") else 17.0)
             )
             torch.testing.assert_close(lse.cpu(), expected.log())
     else:
