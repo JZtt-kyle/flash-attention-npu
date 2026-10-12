@@ -1,71 +1,78 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、每步产物与完成条件。**开发流程 W01–W05 及功能 M00–M07 已完成；唯一下一步是 M08a。** 当前可调用能力与最近证据见 [status](status.md)，范围、契约及验收口径见 [design](design.md)。流程工具已经接通，后续按影响范围验收，不改变迁移范围。
+本页记录实施顺序、每步产物与完成条件。**流程 W01–W05 及功能 M00–M07 已完成；唯一下一步是 M08a。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。已完成步骤放在页末；功能开发按当前下一步执行，不重新启动流程优化任务。
 
-## 开发流程：W01–W05 已完成
+## 提交边界
 
-用户已确认先把开发流程完善完整。W01 已落地规则；此前将 W02–W04 合为一个可独立验收的流程工具提交，入口、复用/恢复、计划依次验证后收尾；提交后停止，不开始 M08。
+一个提交完成一个独立算法组件或一种布局的完整可调用行为。稳定组件的接入应把必要的 metadata/AICPU、生产分派、公开入口及验收一起完成；只有新算法或共享协议具有独立验收条件时才先单独闭环。不要按头文件、CPU、AICPU、Kernel、公开入口机械拆成多轮，也不以减少提交数量为由将多个尚不稳定的算法和入口塞进一轮。
 
-| 步骤 | 产物 | 完成条件 |
-| --- | --- | --- |
-| W01（已完成） | 按影响范围验收、证据继承及收尾规则 | AGENTS/design/plan/status 一致，文档与质量检查通过；原有 M08 工作保留 |
-| W02（已完成） | 版本管理中的统一验收入口，接入既有八个验收组 | 复用已有构建/测试工具；支持预览命令、执行及结构化结果；与 M07e3c 的 `public` 组（历史 2,145 项，不含 Trap）核对用例集合、参数、成功/失败传播和实际产物身份；保留旧证据且不减少测试集合 |
-| W03（已完成） | 在已接通的驱动中消除昂贵重复计算 | 优先复用同输入的双数学 reference；已实现分别校验的构建/reference 缓存和按组证据恢复；命中/失效/结果一致性有检查，待测路径仍实测，记录改进前后耗时 |
-| W04（已完成） | 调整 M08 提交边界和当前步验收清单 | 核对保留的草稿，以独立组件或可调用行为组织步骤，优先 BSND 非 PA 闭环，再扩展 TND/used 和 PA；每步标明影响路径、测试组、继承依据及完成条件 |
-
-W02–W04 影响测试驱动、PA 数学参考的缓存适配和验收安排，不改生产接口或数值核。统一入口放在 `tests/mla_validation.py`，复用已有 setup、probe builder、pytest 和 golden cache；保持原 public 组 2,145 项及全部参数。按测试组恢复，只有成功记录、用例清单、源码、环境和产物身份均有效时才继承；失败或中断整组重跑，性能采样仍实测。缓存键覆盖实际输入、布局/used/页表/scale 和参考/适配源码，提供关闭与强制刷新。
-
-必跑命令为 `TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -m pytest -q tests/test_mla_validation.py tests/test_mla_paged_reference_cache.py tests/common/test_golden_cache.py`，以及 `python3 -m tests.mla_validation --output build/mla-workflow-tools-20261012/run --suite tools cpu public ordinary --device 6`。该步因重建扩展，同时运行原构建基础检查和相关普通 FA3 回归。先对照旧清单与参数，再执行完整 public；检查缓存关闭/命中结果一致性、输入/源码/产物变化失效、失败/中断恢复、并发互斥和实际加载。结果与耗时见 status。缓存适配已覆盖 BSND/TND、used、空 KV 与页寻址，并记录冷/热耗时。M07e3c 仅作为集合和不受影响功能的历史基线，不计本次通过。已有 M08 十二步草稿先存入忽略目录的 `preexisting.patch`，本次 W04 明确重排它；未跟踪代码与原始数据保持原样。
-
-### W05：产物清理与无头接续（已完成）
-
-本步按用户要求清理无用中间产物，并完善仓库外的 `../mla_codex_loop.py`，脚本及其测试不纳入仓库版本管理。影响范围仅为外部开发驱动、忽略规则和流程文档；取消固定五轮文档审计，增加只读启动自检、过期轮次显式归档与恢复基线检查。旧会话和未提交 causal 草稿保留，已完成开发计数不变。
-
-必跑命令为 `MLA_CODEX_LOOP_PATH=/home/zhangqijia/repo/mla_codex_loop.py python3 -m unittest discover -s build/mla-cleanup-20261012 -p 'test_mla_codex_loop.py' -v`：用临时 Git 仓库和假 CLI 覆盖新轮/恢复、单提交门槛、失败传播、计数迁移、锁、归档和只读预览；再检查本机 CLI 登录/参数及原入口 `--check`、`--dry-run --max-dev-runs 1`。清理前记录文件清单，排除当前扩展、活动构建依赖、共享缓存、验收原始数据及源码快照；清理后按哈希核对构建/恢复证据。保留 W02–W04 与 M07 的有效结果，不重新执行未受影响的 NPU 数值和性能矩阵。已完成清理清单与 7,840 个受保护文件哈希核对，16 项外部脚本回归及本机启动自检通过；下一轮从当前状态推进 M08a。本步没有实际启动 M08 开发，结果见 status。
+边界依据是现有共享 `MlaTaskRing`/Vector、布局包装、metadata 路径及测试驱动。功能轮开始前，按下列当前步补齐实际改动路径、明确测试命令、继承依据和完成条件；进入远期里程碑时再细化，不另设审批或纯计划提交。
 
 ## 后续功能：M08
 
-W04 将原有十二个层次子步整理为下列独立算法或可调用行为。原草稿保存在本轮证据的 `preexisting.patch`；未跟踪 `mla_causal.h` 仍只是待复核草稿。**本轮不实现 M08；流程提交后的唯一下一步为 M08a。**
+仅推进 **512+64 右下 causal、num_splits=1**。位置中心为 `i + Sk - Sq`，Sq/Sk 取逐样本有效长度；分配前缀、真实 stride 和 PA 页寻址沿用现有契约。范围、精度门槛及性能口径不变。
 
-仅推进 **512+64 右下 causal、num_splits=1**。位置中心为 `i + Sk - Sq`，Sq/Sk 使用逐样本有效长度；分配前缀、真实 stride 和 PA 页寻址沿用现有契约。每项完成实现、适用验收、文档后提交一次并停止。
+原 M08b 同时引入新的 mask/空行/任务环语义与首次公开接入，因此分为 b1、b2；原 M08c 同时覆盖 TND varlen 和混合 cache 两种调用行为，因此分为 c1、c2。M08a、M08d 保持独立，M08e 仍承接 TND PA 与阶段收尾。下表 **七行分别是计划提交**，b/c 不再作为额外步骤；不恢复原十二个逐层子步。原始草稿仍在 `build/mla-workflow-tools-20261012/preexisting.patch`，未跟踪的 `mla_causal.h` 仅为待复核草稿。
 
 | 子步 | 产物与影响路径 | 本步必跑与完成条件 | 可继承的证据 |
 | --- | --- | --- | --- |
-| M08a | 独立 CPU causal 块范围、全遮罩行描述与分核计划；不改生产分派 | 固定源 `CalcS2Range`/mask 成本/分核差分，独立逐行枚举；BSND/TND/used/PA 逻辑长度、不等长/头跨块/尾块/空样本/溢出，ASan/UBSan；新增 `tests/test_flash_attn_npu_v3_mla_causal_schedule.py` 后运行其完整组 | 无 mask 的设备精度和公开性能；前提是公共调用、数值核及其依赖未变 |
-| M08b | 首个 BSND 非 PA causal 可调用闭环：Kernel/Block/Tile、所需 metadata/AICPU、生产及 func/只读 cache 入口 | 新 causal 精度/Trap/真实/fake/compile、全遮罩 O=0/LSE=-inf、长度/stride/显式记录与复用签名；双 dtype 固定源/双数学、组件性能和公开 R=1/4 E2E；`ordinary` 及受共享协议影响的 metadata 回归 | M08a 已验证的 CPU 算法及未变化 PA/非 causal 数值组件；协议或公共分派变更覆盖其受影响组合 |
-| M08c | 非 PA TND、混合布局及 used causal 完整行为；包含 varlen 和 TND 只读 cache 接入 | allocation/used 决定的独立地址与逐样本对齐、尾块/空行/Trap/生命周期、真实/fake/compile、双 dtype 精度及组件/公开性能；`ordinary`，BSND 受影响回归 | M08b 中未变化的 mask 算法与 BSND 专属路径；新入口与参数传递必须实测 |
-| M08d | BSND PA causal：页 Copy、metadata、生产和公开入口一起接通 | 全部合法 P、乱序/重复页、边界/零 KV、记录重用/真实 Trap；双 dtype 精度、普通回归和 R=1/4 逐例公开 E2E | 未变化的非 PA 数值与地址组件；共用头文件/调度变化补受影响组合 |
-| M08e | TND PA causal 完整行为，并完成 M08 阶段验收 | TND 前缀和有效长度、全 P、stride/空值/复用/生命周期/Trap/compile；双 dtype 精度及公开 E2E；最后按 design 实测全部已开放 causal 组合、相关普通 FA3 回归及性能矩阵 | 可复用有效构建与数学 reference；阶段验收不继承历史运行结果冒充当次实测 |
+| M08a | 独立 CPU causal 块范围、全遮罩行描述与分核计划；复用长度解析及固定源 SplitCore，不接生产分派 | 固定源范围/成本/完整端点差分和独立逐行任务枚举；有效长度、头跨块、尾块、空样本、溢出及 ASan/UBSan；命令与边界见下节 | 未变化的设备数值、公开入口与性能；共享 CPU 调度若改动则补相关无 mask 调度回归 |
+| M08b1 | 可独立调用的 BSND causal 数值组件；共享任务环、Vector mask 和全遮罩 O/LSE；本步不开放公共 causal 入口 | 先接通固定源 causal probe、独立数学输入适配及成本边界；再跑 910B 双 dtype 源/双数学精度、任务环/同步/空行和代表性组件性能；覆盖共享修改影响的无 mask 布局 | M08a CPU 算法；依赖未变的地址和 Copy。现有无 mask 精度/E2E 不能替代 causal 数值验证 |
+| M08b2 | 首个 BSND 非 PA causal 完整行为：func、只读 cache、metadata 复用及内部 BSND Q-used；必要的生成器、消费者、分派与入口同次接通 | 整容量、实际 KV、内部 Q-used、stride、空值、旧记录/参数不匹配与 Trap、真实/fake/compile/生命周期；生产精度及 `ordinary`，适用组件性能和公开 R=1/4 E2E | b1 中未变的数值组件；BSND 各实际调用路径及 metadata 传参仍须当次实测 |
+| M08c1 | 非 PA TND Q/KV causal varlen：完整分配段与 seqused 一起接通 | 两组分配前缀、used/非均匀长度、地址间隙/poison、尾部/空行、真实/fake/compile/Trap/生命周期；生产精度、适用组件/公开 E2E、`ordinary` 和共享影响回归 | 已闭环的 causal 算法、BSND 与未变的长度解析；新 TND 行映射及参数传递必须实测 |
+| M08c2 | 非 PA TND Q + BSND KV causal cache；公开只读 cache/metadata 复用和内部混合 Q-used 同次接通 | 分配起点与有效长度分离、KV 容量/stride、内部 used、记录复用、空值/Trap/compile/生命周期；生产精度、适用组件/公开 E2E、`ordinary` 和共享影响回归 | c1 中未变的 TND/used 算法和 b2 的 cache 调用契约；混合地址和原生对照转换不能沿用 TND 结果冒充 |
+| M08d | BSND PA causal：现有页 Copy、metadata、生产、公开 cache 及内部 Q-used 的完整接入 | 全部合法 P、跨页 mask 边界、乱序/重复页、零 KV/空行、stride、记录复用/真实 Trap/compile/生命周期；双 dtype 精度、普通回归和适用组件/公开 R=1/4 E2E | 未变的页 Copy 组件与非 PA 算法；优先复用 Copy，不因接入 causal 预定重写；共享代码变化须覆盖受影响布局 |
+| M08e | TND PA causal 完整行为及 M08 阶段验收；包含内部 Q-used | TND 前缀/used、全 P、stride/空值/复用/生命周期/Trap/compile、精度和适用组件/公开 E2E；在冻结实现上运行覆盖全部已开放 causal 组合、相关回归及性能的阶段矩阵，同一当次结果只运行/计数一次 | 可复用有效构建和数学 reference；阶段矩阵必须当次实测，不能拿之前提交的结果替代 |
 
-M08a 的预定最小命令为 `TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_causal_schedule.py`；该文件尚未实现，不能提前计为通过。实现前先复核草稿，并把固定源差分、逐行枚举和 sanitizer 编译/运行接入该组。当前已有 `cpu` 组仅检查生成输入和依赖跟踪，不能代替 causal 算法测试。
+BSND Q-used 明确归入 b2，TND/TND used 归入 c1，混合 Q-used 归入 c2，PA used 分别归入 d/e，避免将 used 留成没有入口归属的后置任务。它们按现有公共/内部接口边界验收，不给公开 cache 或 metadata 生成器新增 Q-used 参数。表内名称表示现有记录承担的行为，causal 如何扩展记录版本与签名在对应接入步确定；未开放布局仍须在真实与 fake 入口明确拒绝。
 
-后续进入每步时，用 `python3 -m tests.mla_validation --output build/mla-<step> --suite <已实现组> --dry-run` 核对命令，并将新 causal 用例注册为有明确集合的组。`public`/`bsnd`/`device` 等现有名称仍表示原 M07 无 mask 矩阵，不能拿它们代替新能力验收。每步新增场景先跑代表用例及最长 reference/最大内存边界，再跑约定集合；矩阵通过后立即收尾。只有独立算法或共享协议确实不能在该步验收时再拆分，并复用前一步未变组件的证据，不恢复逐层重复全矩阵的做法。
+### 当前步 M08a：CPU 算法闭环
 
-所有设备数值步覆盖 Sq<Sk、Sq=Sk、Sq>Sk、多 query、部分/全部遮罩行；未接通组合继续明确拒绝。CPU 描述不绑定数据地址、mask tensor 或 scale，不表示前向已经开放。
+- **产物和影响路径：**复核 `csrc/ascend910/flash_attn_npu_3/mla/mla_causal.h` 草稿，补实现、独立 driver/oracle 与 `tests/test_flash_attn_npu_v3_mla_causal_schedule.py`。复用 `mla_schedule.*`、`detail/cann_split_core.*` 及已有长度解析；块范围、mask 成本、完整分核端点作为同一个调度组件验收，不再分别提交接口壳、范围函数和调度接线。不在本步修改 Kernel、metadata/AICPU、公开入口或构建发射。
+- **必测边界：**从固定 CANN commit 提取的 `CalcS2Range`/mask 成本/分核差分；独立逐行枚举可见 key 和每核任务，检查无遗漏/重复；Sq 小于/等于/大于 Sk、S1G 跨头/M 尾块、零 Q/零 KV/全遮罩/尾部零样本、宽整数溢出和失败时输出不变。通过原始 BSND/TND/used/PA 逻辑长度构造输入，区分 allocation 与 effective length，不加入物理页拷贝或设备数据布局实现。
+- **共享回归：**若修改公共 SplitCore 或各布局共用调度，检查现有 dense、BSND、TND、混合、used、PA CPU 调度组的依赖，运行受影响完整组；不能仅运行新增 causal 文件。相关 driver/oracle 同样覆盖 ASan/UBSan。默认新增独立适配，保持已有生产调度行为不变；若共享修改实际影响生产 metadata 或分派，必须按 AGENTS 补对应实机/普通 FA3 验收，或先将这部分归入后续接入步，不能仍按纯 CPU 标签免测。若只新增独立组件，复核旧依赖后继承其结果。
+- **完成条件：**新增完整组及受影响回归通过，固定源差分与独立枚举均有效，sanitizer 无错误；记录源码/命令/结果到 `build/mla-m08a/` 并更新 status。公共 causal 仍拒绝；本步只证明 CPU 算法，不能记为前向已开放。
 
-共同数学契约见 [design 3.3](design.md#33-共同契约)，代表输入见 [MS01/MS02](design.md#42-代表用例与参考实现边界)。window、split 和 prefill 仍按下表顺序实施。
+预定命令如下；**测试文件尚未实现，须先完成本步实现再运行，不代表已有测试或通过结果**。新测试须接通与既有 CPU 调度检查一致的产物目录及 sanitizer 参数，保存普通和 sanitizer 两套结果。当前统一入口的 `cpu` 组仅是构建基础检查，不能代替此组。
 
-## 后续顺序
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 MLA_SCHEDULE_ARTIFACT_DIR=build/mla-m08a/cpu \
+python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_causal_schedule.py
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 MLA_SCHEDULE_SANITIZE=1 \
+MLA_SCHEDULE_ARTIFACT_DIR=build/mla-m08a/sanitize \
+python3 -m pytest -q tests/test_flash_attn_npu_v3_mla_causal_schedule.py
+```
 
-进入每项前，将过大的步骤拆成可独立验收的提交，不提前开放未验收组合。
+### M08 的验证顺序与复用边界
 
-| 步骤 | 产物 | 完成条件 |
+1. **先使本步对照可执行。**双数学核心已有 causal 语义，但现有原生 BSND 基线及 PA reference/profile 适配尚未接通 causal。b1 完成组件源 probe/数学适配；b2、c1、c2、d、e 在首次使用相应原生路径前补对照的 mask、有效长度、分派证明和固定性能用例。CANN sparse mode 不能代替合法 mask 输入；PA reference 缓存必须补 causal 语义键和命中/失效/一致性检查后才能启用。驱动与能力在对应提交内一起闭环，不另起一串工具提交。
+2. **代表用例通过后冻结实现。**先检查不等长、首个/末个有效块、全遮罩、最长 reference/最大内存及跨页边界，再启动本步必跑矩阵。构建失败、源对照未接通或成本失控先解决，不在长测期间边改相关代码边收集结果。组件与公开调用的转换/计时边界沿用 [design 7.1/7.2](design.md#71-固定性能矩阵与阶段边界)。
+3. **新增路径实测，共享影响按依赖覆盖。**所有设备数值步覆盖 Sq<Sk、Sq=Sk、Sq>Sk、多 query、部分/全部遮罩行、FP16/BF16。共享任务环和 Vector 被多布局复用，不能以“本步只开放 BSND”为由漏掉受影响的无 mask 路径。每个接入步必须实测该入口的精度、参数、复用、生命周期及适用 E2E；跨步未变的组件证据按 [design 7.3](design.md#73-增量验收与证据继承) 复核继承。
+4. **阶段收尾取必跑项并集，去掉重复执行。**M08e 冻结实现后一次定义“本步 TND PA 必跑项 ∪ 阶段矩阵”。同一最终依赖和执行条件下，本次已运行的同一用例或性能段可同时满足两个完成条件，不先把 e 跑完再原样跑第二遍；历史提交的结果不能填充阶段矩阵。组件和公开 E2E 的计时边界不同，不能相互替代。之后若改实现，只使受影响结果失效。
+
+新增组须在对应步骤注册或明确列出完整命令。原 `public`/`bsnd`/`device` 等仍为无 mask 组，不能拿来证明 causal 已实现；`--dry-run`/`--collect-only` 只用于命令和集合核对。阶段矩阵不使用 `--resume` 将旧运行结果充当本次实测；有效构建与数学缓存照常复用。
+
+## 后续里程碑：M09–M17
+
+**下表每行是能力里程碑，不是一个无头轮次或一个提交。**临近该阶段时根据已闭环组件和实际影响细化当前步，同时保留下一步；不现在为所有远期任务固定文件、测试数量或提交数。细化采用与 M08 相同的规则：新算法先独立验收，稳定布局接入一次闭环。实现和必要的测试/对照驱动一起交付，基础精度、普通回归与生命周期不推迟到阶段末。
+
+| 里程碑 | 依赖与建议提交边界 | 阶段完成条件 |
 | --- | --- | --- |
-| M09 | 512+64 局部窗口 | 有限/单侧窗口、causal 叠加、FA3 归一化和页边界；精度及 E2E 通过 |
-| M10 | 512+64 split-KV 与合并 | 源分割/合并流程，自动/1/显式 split、dense/TND/PA/空 split、O/LSE/accumulator/metadata；长 KV E2E 通过 |
-| M11 | 192/128 prefill BSND 前向与 metadata | 源通用非量化路径，qv=None、独立 K/V、分组头/真实 stride；O/LSE 及 E2E 通过 |
-| M12 | prefill TND 与实际长度 | 非均匀长度、seqused、边界/GQA 与 reference 一致，精度及 E2E 通过 |
-| M13 | prefill ND paged cache | 页寻址、内容/RoPE 真实 stride、精度及 PA E2E 通过 |
-| M14 | prefill mask 与 split 组合 | 右下 causal/window、split 合并及 metadata 组合；拆分后逐项验收 |
-| M15 | MLA softcap 与调度选项 | softcap/has_softcap、pack_gqa、sm_margin 的有效语义与资源校验；适用 E2E 通过 |
-| M16 | 图执行与 metadata 生命周期 | eager/图一致，图内更新长度并重算，跨层复用、多 stream、fake/真实输出一致 |
-| M17 | 全范围验收与用户示例 | 必迁能力均有用例，精度/逐例 metadata E2E/普通 FA3 回归通过；核对 910B/C 实现及资源兼容，实机验收仍只要求 910B；README 说明调用与边界 |
+| M09：512+64 window | 复用 causal；先闭环窗口归一化/范围和首个 BSND 行为，再按 TND、混合、PA 接入；是否需要独立算法步取决于与 causal 的共享影响 | 有限/单侧窗口、causal 叠加、非等长与页边界；已开放组合精度和适用 E2E |
+| M10：512+64 split-KV | 独立验证分区、accumulator 与合并数值；再按 BSND、TND/混合、PA 接入显式及自动调度，不把完整 split 迁移作为一轮 | 自动/1/显式 split、空分片/全空、O/LSE/accumulator/metadata 及已支持 mask 组合；长 KV E2E |
+| M11：192/128 BSND prefill | 这是新数值表示；先验证独立 K/V、分组头及 192 stride 数值组件，再完成 BSND metadata/生产/公开接入 | qv=None、源通用非量化路径、GQA、真实 stride、O/LSE 和适用 E2E |
+| M12：prefill TND/长度 | 复用 M11 数值；TND varlen 和混合 cache 按可调用行为接入，各自同时覆盖 allocation/used 与 stride | 非均匀长度、seqused、空值/边界/GQA、生产精度和适用 E2E |
+| M13：prefill PA | 复用已有页寻址；BSND PA、TND PA 各自接通 metadata/生产/入口，避免按 Copy/host/API 重复拆层 | 全部合法 P、内容/RoPE 的真实 stride、长度/复用/生命周期、精度及 PA E2E |
+| M14：prefill mask/split | causal、window、split 是不同扩展，分别闭环其受影响布局后验收组合，不一次承诺全部组合 | 右下 causal/window、自动/显式 split、metadata 和前序布局的必迁组合 |
+| M15：softcap/调度选项 | softcap 数学独立闭环；pack_gqa、sm_margin 按共享调度影响确定各自提交边界，不与 softcap 混成一轮 | softcap/has_softcap 和调度参数的有效语义、资源校验及适用 E2E；不能忽略参数 |
+| M16：图执行 | 分开闭环固定输入重放与长度更新/metadata 重生成等图内行为；基础多流/复用/生命周期在各入口接入时已验收 | eager/图一致，图内长度更新、跨层复用、多 stream、fake/真实输出一致 |
+| M17：全范围收尾 | 冻结已实现能力，按覆盖矩阵统一验收并补用户示例；发现实现问题先完成对应修复与受影响验证，再继续收尾 | 必迁组合、精度/逐例 E2E/普通 FA3 回归；核对 910B/C 实现与资源兼容，实机仍用 910B；README 说明调用及边界 |
 
 ## 每步完成条件
 
-遵循根目录 [AGENTS.md 的提交门槛](../../AGENTS.md#按影响范围验收) 和 [design 的证据继承规则](design.md#73-增量验收与证据继承)。实现前在当前步补齐改动与影响路径、必跑测试组/命令及选择依据、拟继承证据及依赖、完成条件；结果与耗时只在 status 和证据目录维护。
+遵循根目录 [AGENTS.md](../../AGENTS.md#按影响范围验收) 和 [design 第 7 节](design.md#7-验收口径)。实现前在当前步列明实际改动与影响路径、必跑测试组/命令及选择依据、拟继承证据及依赖、完成条件；结果与耗时只写 status 和忽略目录的证据，不在 plan 复制运行日志。
 
-一次一个独立组件或可调用行为，必跑检查通过后完成文档、质量检查和一个提交。新改动、失败或具体未解决风险才触发补测；阶段结束实测约定完整组合。新增公开路径、设备数值变化及公共入口/metadata 的普通 FA3 回归不能用历史记录替代。失败、未运行、独立 probe 或仅已编译的对象不能记为已开放能力。
+必跑检查通过后完成文档、质量检查和一次提交，提交后停止。除新改动、失败或具体未解决风险外，不再扩大矩阵。未完成必要验证时保留工作和交接，不提交为闭环；未开放组合继续明确拒绝。外部无头脚本保持在仓库外，不属于迁移产物。
 
 ## 已完成步骤
 
@@ -73,6 +80,7 @@ M08a 的预定最小命令为 `TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -m pytest
 
 | 阶段 | 已交付产物 |
 | --- | --- |
+| W01–W05 | 按影响范围验收；统一测试入口、构建/reference 缓存和证据恢复；产物清理与外部无头脚本接续。流程已完成，不作为后续功能轮次的待办 |
 | M00–M03 | 固定迁移交集和 FA3 契约；独立双 reference、固定源执行器/性能基线；MLA 识别、校验及未实现拦截 |
 | M04a–M04b3 | dense 来源与分层；无 gert CPU 调度；FP16/BF16 Cube、Vector、非分页 Kernel 与 BSND 生产接入 |
 | M05a–M05c2 | v1 生成/设备校验及 release Trap；官方 metadata 签名、普通 FA byte 兼容；公开只读 cache/metadata 复用及 dispatcher 验收 |
