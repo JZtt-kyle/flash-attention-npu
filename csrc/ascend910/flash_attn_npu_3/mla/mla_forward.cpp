@@ -246,7 +246,7 @@ at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_
     // AICPU derives the TND total from the prefix and reads all length values.
     // No physical pages, cache addresses or strides are part of generation.
     // Static capacity fixes blockDim, including device-only zero lengths, so
-    // a future consumer need not read the record to choose its launch size.
+    // forward consumers need not read the record to choose their launch size.
     MlaPagedMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
                               words,
                               uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),

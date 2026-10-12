@@ -1692,7 +1692,12 @@ def flash_attn_func(
     sm_margin=0,
     return_attn_probs=False,
 ):
-    """dropout_p should be set to 0.0 during evaluation
+    """Compute attention for BSND queries, keys and values.
+
+    For compressed MLA, q/k contain 64-dimensional RoPE components, qv is
+    512-dimensional query content, and v is shared content K/V with one head.
+    Current MLA options and limits are documented in docs/mla/status.md.
+
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
     For example, if Q has 6 heads and K, V have 2 heads, head 0, 1, 2 of Q will attention to head
@@ -1717,22 +1722,20 @@ def flash_attn_func(
     Arguments:
         q: (batch_size, seqlen, nheads, headdim)
         k: (batch_size, seqlen, nheads_k, headdim)
-        v: (batch_size, seqlen, nheads_k, headdim)
-        dropout_p: float. Dropout probability.
-        softmax_scale: float. The scaling of QK^T before applying softmax.
-            Default to 1 / sqrt(headdim).
+        v: (batch_size, seqlen, nheads_k, headdim_v)
+        qv [optional]: (batch_size, seqlen, nheads, headdim_v).
+        softmax_scale: float. Scales q @ k.T + qv @ v.T when qv is supplied, otherwise q @ k.T.
+            Defaults to 1 / sqrt(headdim + headdim_v) with qv, or 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
         window_size: (left, right). If not (-1, -1), implements sliding window local attention.
         deterministic: bool. Whether to use the deterministic implementation of the backward pass,
             which is slightly slower and uses more memory. The forward pass is always deterministic.
-        return_attn_probs: bool. Whether to return the attention probabilities. This option is for
-           testing only. The returned probabilities are not guaranteed to be correct
-           (they might not have the right scaling).
+        return_attn_probs: bool. Returns (out, softmax_lse) when True.
     Return:
-        out: (batch_size, seqlen, nheads, headdim).
+        out: (batch_size, seqlen, nheads, headdim_v).
         softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
-            logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
-            normalization factor).
+            FP32 natural log of each row's softmax normalization factor, including
+            the qv contribution for MLA.
     """
     return FlashAttnFunc.apply(
         q,
@@ -1780,6 +1783,20 @@ def flash_attn_varlen_func(
     sm_margin=0,
     return_attn_probs=False,
 ):
+    """Compute attention for TND inputs with int32 allocation prefixes.
+
+    cu_seqlens_q/k have shape (batch_size + 1,) and start at zero;
+    max_seqlen_q/k bound each allocated segment. Optional int32 seqused_q/k
+    have shape (batch_size,) and limit the used prefix without moving the
+    next sample's allocation. Output keeps the allocated query shape with
+    last dimension v.shape[-1]; unused query slots have no value guarantee.
+    return_attn_probs=True returns (out, lse), with FP32 lse shaped (nheads, total_q).
+
+    Compressed MLA uses q/k dimensions 64 and qv/v dimensions 512. Metadata
+    is generated internally on every call (v3 without used lengths, v5 with
+    either used array). There is no explicit metadata or page-table parameter;
+    paged MLA uses flash_attn_with_kvcache. See docs/mla/status.md for limits.
+    """
     return FlashAttnVarlenFunc.apply(
         q,
         k,
@@ -1844,6 +1861,11 @@ def flash_attn_with_kvcache(
     return_softmax_lse=False,
 ):
     """
+    NPU compressed MLA supports read-only BSND or ND paged caches with BSND/TND
+    queries. Set num_splits=1 explicitly; current MLA limits are documented in
+    docs/mla/status.md. The generic FA3 append, rotary and mask options described
+    below are rejected on the MLA path.
+
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
     k and v. This is useful for incremental decoding: you can pass in the cached keys/values from
     the previous step, and update them with the new keys/values from the current step, and do
@@ -1886,29 +1908,32 @@ def flash_attn_with_kvcache(
     Note: Does not support backward pass.
 
     Arguments:
-        q: (batch_size, seqlen, nheads, headdim)
+        q: (batch_size, seqlen, nheads, headdim), or (total_q, nheads, headdim)
+            with cu_seqlens_q and max_seqlen_q for TND queries.
         k_cache: (batch_size_cache, seqlen_cache, nheads_k, headdim) if there's no page_table,
             or (num_blocks, page_block_size, nheads_k, headdim) if there's a page_table (i.e. paged KV cache)
-            page_block_size can be arbitrary (e.g, 1, 2, 3, 64, etc.).
+            For MLA, page_block_size must be a multiple of 16 in [16, 1024].
         v_cache: (batch_size_cache, seqlen_cache, nheads_k, headdim_v) if there's no page_table,
             or (num_blocks, page_block_size, nheads_k, headdim_v) if there's a page_table (i.e. paged KV cache)
         k [optional]: (batch_size, seqlen_new, nheads_k, headdim). If not None, we concatenate
             k with k_cache, starting at the indices specified by cache_seqlens.
         v [optional]: (batch_size, seqlen_new, nheads_k, headdim_v). Similar to k.
-        qv [optional]: (batch_size, seqlen, nheads, headdim_v)
+        qv [optional]: q's layout with last dimension headdim_v.
         rotary_cos [optional]: (seqlen_ro, rotary_dim / 2). If not None, we apply rotary embedding
             to k and q. Only applicable if k and v are passed in. rotary_dim must be divisible by 16.
         rotary_sin [optional]: (seqlen_ro, rotary_dim / 2). Similar to rotary_cos.
         cache_seqlens: int, or (batch_size,), dtype torch.int32. The sequence lengths of the
-            KV cache.
+            KV cache. For MLA, None uses full logical capacity; an integer is broadcast
+            across logical batches, including TND queries. Paged capacity is
+            page_table.shape[1] * k_cache.shape[1], at most 16384 per sample.
         cache_batch_idx: (batch_size,), dtype torch.int32. The indices used to index into the KV cache.
             If None, we assume that the batch indices are [0, 1, 2, ..., batch_size - 1].
             If the indices are not distinct, and k and v are provided, the values updated in the cache
                  might come from any of the duplicate indices.
         cache_leftpad: (batch_size,), dtype torch.int32. The index that the KV cache starts. If None, assume 0.
         page_table [optional]: (batch_size, max_num_blocks_per_seq), dtype torch.int32.
-        softmax_scale: float. The scaling of QK^T before applying softmax.
-            Default to 1 / sqrt(headdim).
+        softmax_scale: float. Scales q @ k.T + qv @ v.T when qv is supplied, otherwise q @ k.T.
+            Defaults to 1 / sqrt(headdim + headdim_v) with qv, or 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for auto-regressive modeling).
         window_size: (left, right). If not (-1, -1), implements sliding window local attention.
         softcap: float. Anything > 0 activates softcapping attention.
@@ -1932,8 +1957,9 @@ def flash_attn_with_kvcache(
             softmax_scale and the numerical softcap value come from this forward
             call and may change when reusing metadata with the same has_softcap.
             MLA uses int32 v2 records for BSND queries or v4 records for TND queries
-            with a BSND cache. The device checks the current lengths and, for v4, query
-            prefixes against the record. MLA records may be cloned or passed as contiguous
+            with a BSND cache, or v6 records for either query layout with a paged cache.
+            The device checks current lengths, TND query prefixes and all used pages.
+            MLA records may be cloned or passed as contiguous
             offset views; scale is supplied to forward and is not fixed by the record.
             Reuse skips AICPU generation; host workspace budgeting still runs.
             Current MLA options and limits are documented in docs/mla/status.md.
@@ -2536,19 +2562,24 @@ def get_scheduler_metadata(
     Its legacy ``softcap`` and ``softmax_scale`` arguments are keyword-only; a
     positive legacy softcap enables softcapping even when has_softcap is omitted.
     ``has_softcap=True`` requires a positive legacy softcap for this protocol.
-    MLA returns int32 metadata with per-sample BSND KV length snapshots and
-    num_splits=1. With cu_seqlens_q it generates a v4 TND-query/BSND-cache record;
+    MLA requires headdim=64, headdim_v=512, matching qkv_dtype and explicit
+    num_splits=1. cache_seqlens must be a same-device contiguous int32 tensor
+    of shape (batch_size,); None/integer lengths are kvcache conveniences only.
+    Without page_size or cu_seqlens_q, it returns an int32 v2 BSND-cache record.
+    With cu_seqlens_q and no page_size it generates a v4 TND-query/BSND-cache record;
     max_seqlen_q is a per-query-segment bound, max_seqlen_k is cache capacity.
     Read-only flash_attn_with_kvcache accepts this v4 record with TND queries
     and a BSND cache; the current query prefixes and KV lengths must match.
     With page_size it generates v6 for BSND/TND queries: page_size must be a
     multiple of 16 in [16, 1024], and max_seqlen_k is logical capacity, divisible
     by page_size and at most 16384. No page table or physical cache is inspected.
-    Read-only MLA paged kvcache accepts v6 with BSND queries; TND paged
-    forward is not implemented yet. The record does not bind a page table
-    or physical cache; each forward validates its current lengths and pages.
-    Its scale is supplied only to forward; legacy numerical
-    keywords are not supported. Length values are checked on device.
+    Read-only MLA paged kvcache accepts v6 with BSND or TND queries; TND also
+    requires cu_seqlens_q and max_seqlen_q at forward. The record does not bind
+    a page table or physical cache; each forward validates current lengths,
+    query prefixes and all used pages. Regenerate after lengths or prefixes change.
+    There is no Q-used parameter here; public varlen accepts seqused_q/k and
+    generates its own metadata internally. Scale is supplied only to forward;
+    legacy numerical keywords are not supported. Length values are checked on device.
     """
     if headdim_v is None:
         headdim_v = headdim

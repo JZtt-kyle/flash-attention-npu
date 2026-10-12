@@ -1,5 +1,5 @@
-// Private PA protocol shared by CPU/AICPU generation and the standalone
-// device consumer. No attention kernel or public caller uses it yet.
+// Private PA protocol shared by CPU/AICPU generation and device consumers.
+// Public metadata and BSND/TND paged forward use the same v6 record.
 // Scheduling retains its CANN source/license in mla_tnd_schedule.cpp,
 // mla_schedule.cpp and detail/cann_split_core.cpp (see LICENSE.cann).
 #pragma once

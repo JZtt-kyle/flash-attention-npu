@@ -42,8 +42,8 @@ struct MlaPagedSchedule {
 };
 
 // Independent CPU/AICPU component: BSND/TND Q, optional Q-used, shared 512+64
-// KV, no mask, num_splits=1. Used by standalone v6 metadata generation;
-// no device consumer or public caller uses this API.
+// KV, no mask, num_splits=1. Shared by standalone and production v6 generation;
+// forward kernels consume the serialized record through device validation.
 // P is 16..1024 in multiples of 16; C is 0..16384 and divisible by P.
 // Q allocation/prefix/used follow ParseUsedLengths. KV lengths are mandatory
 // int32[B], always per sample, in [0,C]; nullptr/count=0 is allowed only at B=0.
