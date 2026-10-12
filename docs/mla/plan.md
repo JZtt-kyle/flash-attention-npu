@@ -1,10 +1,10 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、每步产物与完成条件。**开发流程 W01–W04 及功能 M00–M07 已完成；唯一下一步是 M08a。** 当前可调用能力与最近证据见 [status](status.md)，范围、契约及验收口径见 [design](design.md)。流程工具已经接通，后续按影响范围验收，不改变迁移范围。
+本页只记录实施顺序、每步产物与完成条件。**开发流程 W01–W05 及功能 M00–M07 已完成；唯一下一步是 M08a。** 当前可调用能力与最近证据见 [status](status.md)，范围、契约及验收口径见 [design](design.md)。流程工具已经接通，后续按影响范围验收，不改变迁移范围。
 
-## 开发流程：W01–W04 已完成
+## 开发流程：W01–W05 已完成
 
-用户已确认先把开发流程完善完整。W01 已落地规则；本次将 W02–W04 合为一个可独立验收的流程工具提交，入口、复用/恢复、计划依次验证后收尾；提交后停止，不开始 M08。
+用户已确认先把开发流程完善完整。W01 已落地规则；此前将 W02–W04 合为一个可独立验收的流程工具提交，入口、复用/恢复、计划依次验证后收尾；提交后停止，不开始 M08。
 
 | 步骤 | 产物 | 完成条件 |
 | --- | --- | --- |
@@ -13,9 +13,15 @@
 | W03（已完成） | 在已接通的驱动中消除昂贵重复计算 | 优先复用同输入的双数学 reference；已实现分别校验的构建/reference 缓存和按组证据恢复；命中/失效/结果一致性有检查，待测路径仍实测，记录改进前后耗时 |
 | W04（已完成） | 调整 M08 提交边界和当前步验收清单 | 核对保留的草稿，以独立组件或可调用行为组织步骤，优先 BSND 非 PA 闭环，再扩展 TND/used 和 PA；每步标明影响路径、测试组、继承依据及完成条件 |
 
-本次影响测试驱动、PA 数学参考的缓存适配和验收安排，不改生产接口或数值核。统一入口放在 `tests/mla_validation.py`，复用已有 setup、probe builder、pytest 和 golden cache；保持原 public 组 2,145 项及全部参数。按测试组恢复，只有成功记录、用例清单、源码、环境和产物身份均有效时才继承；失败或中断整组重跑，性能采样仍实测。缓存键覆盖实际输入、布局/used/页表/scale 和参考/适配源码，提供关闭与强制刷新。
+W02–W04 影响测试驱动、PA 数学参考的缓存适配和验收安排，不改生产接口或数值核。统一入口放在 `tests/mla_validation.py`，复用已有 setup、probe builder、pytest 和 golden cache；保持原 public 组 2,145 项及全部参数。按测试组恢复，只有成功记录、用例清单、源码、环境和产物身份均有效时才继承；失败或中断整组重跑，性能采样仍实测。缓存键覆盖实际输入、布局/used/页表/scale 和参考/适配源码，提供关闭与强制刷新。
 
-必跑命令为 `TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -m pytest -q tests/test_mla_validation.py tests/test_mla_paged_reference_cache.py tests/common/test_golden_cache.py`，以及 `python3 -m tests.mla_validation --output build/mla-workflow-tools-20261012/run --suite tools cpu public ordinary --device 6`。因本轮重建扩展，同时运行原构建基础检查和相关普通 FA3 回归。先对照旧清单与参数，再执行完整 public；检查缓存关闭/命中结果一致性、输入/源码/产物变化失效、失败/中断恢复、并发互斥和实际加载。结果与耗时见 status。缓存适配已覆盖 BSND/TND、used、空 KV 与页寻址，并记录冷/热耗时。M07e3c 仅作为集合和不受影响功能的历史基线，不计本次通过。已有 M08 十二步草稿先存入忽略目录的 `preexisting.patch`，本次 W04 明确重排它；未跟踪代码与原始数据保持原样。
+必跑命令为 `TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 -m pytest -q tests/test_mla_validation.py tests/test_mla_paged_reference_cache.py tests/common/test_golden_cache.py`，以及 `python3 -m tests.mla_validation --output build/mla-workflow-tools-20261012/run --suite tools cpu public ordinary --device 6`。该步因重建扩展，同时运行原构建基础检查和相关普通 FA3 回归。先对照旧清单与参数，再执行完整 public；检查缓存关闭/命中结果一致性、输入/源码/产物变化失效、失败/中断恢复、并发互斥和实际加载。结果与耗时见 status。缓存适配已覆盖 BSND/TND、used、空 KV 与页寻址，并记录冷/热耗时。M07e3c 仅作为集合和不受影响功能的历史基线，不计本次通过。已有 M08 十二步草稿先存入忽略目录的 `preexisting.patch`，本次 W04 明确重排它；未跟踪代码与原始数据保持原样。
+
+### W05：产物清理与无头接续（已完成）
+
+本步按用户要求清理无用中间产物，并完善仓库外的 `../mla_codex_loop.py`，脚本及其测试不纳入仓库版本管理。影响范围仅为外部开发驱动、忽略规则和流程文档；取消固定五轮文档审计，增加只读启动自检、过期轮次显式归档与恢复基线检查。旧会话和未提交 causal 草稿保留，已完成开发计数不变。
+
+必跑命令为 `MLA_CODEX_LOOP_PATH=/home/zhangqijia/repo/mla_codex_loop.py python3 -m unittest discover -s build/mla-cleanup-20261012 -p 'test_mla_codex_loop.py' -v`：用临时 Git 仓库和假 CLI 覆盖新轮/恢复、单提交门槛、失败传播、计数迁移、锁、归档和只读预览；再检查本机 CLI 登录/参数及原入口 `--check`、`--dry-run --max-dev-runs 1`。清理前记录文件清单，排除当前扩展、活动构建依赖、共享缓存、验收原始数据及源码快照；清理后按哈希核对构建/恢复证据。保留 W02–W04 与 M07 的有效结果，不重新执行未受影响的 NPU 数值和性能矩阵。已完成清理清单与 7,840 个受保护文件哈希核对，16 项外部脚本回归及本机启动自检通过；下一轮从当前状态推进 M08a。本步没有实际启动 M08 开发，结果见 status。
 
 ## 后续功能：M08
 

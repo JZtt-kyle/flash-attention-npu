@@ -1,7 +1,7 @@
 # MLA 当前状态
 
-核对日期：2026-10-12；分支：`feat/mla-cann-migration`；接手提交：`c947d96`；最近功能闭环：`29ed04f`（M07e3c）。
-**本轮完成 W02–W04：统一验收入口、构建/reference/证据分别复用、按组恢复和 M08 计划重排；流程 W01–W04 已闭环。M08 尚未开始，唯一下一步为 [M08a](plan.md#后续功能m08)。**
+核对日期：2026-10-12；分支：`feat/mla-cann-migration`；接手提交：`a70d0da`；最近功能闭环：`29ed04f`（M07e3c）。
+**本轮完成 W05：清理无用产物、核对保留证据、修复外部无头脚本接续；W01–W05 已闭环。未启动 M08 开发，唯一下一步为 [M08a](plan.md#后续功能m08)。**
 
 本页保存当前能力、最近闭环证据和环境差异；接口与架构见 [design](design.md)，实施顺序见 [plan](plan.md)。当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
 
@@ -46,42 +46,46 @@
 
 该功能步未改设备数值组件；源 Kernel 组件对照由前一步对象/依赖哈希复核保留。未重跑全部历史 Trap、全部非分页/普通 FA3、NPU/CPU sanitizer 或完整图重放。中止采样、构建失败及未被 pytest 使用的快照差异保留在原目录及 `acceptance.json`，不计为通过。
 
-## 本次流程工具与证据
+## 本次清理与无头接续
 
-本次证据目录：`build/mla-workflow-tools-20261012/`；共享构建及数学缓存：`build/mla-validation-artifacts/`。入口为 [tests/mla_validation.py](../../tests/mla_validation.py)，参数和边界见 [design 7.4](design.md#74-统一验收入口)。
+证据目录为 `build/mla-cleanup-20261012/`。本步只修改忽略规则、流程交接和仓库外脚本；没有修改内核、接口、构建或验收实现，没有重新发射 NPU 或采样性能。
 
-- 八个原验收组的 9,614 个节点及全部选择条件与 M07e3c 完全一致，见 `selection-equivalence.json`。这是完整清单对照，不代表本轮执行了全部历史用例。独立页映射及数学 reference 的原函数体经 AST 对照保持一致。
-- 46 项执行器/缓存检查已通过：退出码、失败/跳过/空集合、加载身份、证据损坏、输入/布局/源码/构建依赖变化、恢复和互斥。构建依赖只取本次实际链接对象，已覆盖历史 `.d` 残留导致的误判。
-- 新入口的 `tools cpu public ordinary` 共 **3,015 项去重通过，无失败/跳过**：工具 46、构建基础 2、公开组 2,145、普通 FA3/入口 822。见 `cold-summary.json`；公开组又以有效缓存完整实测 2,145 项，548 次 reference 全部命中，见 `warm-summary.json`。后者是重复验证，不重复计入去重总数。
-- 公开组首次缓存运行 258.49 秒，命中运行 124.81 秒，整组缩短 **51.7%**；NPU 路径、节点集合和精度判定不变。有效构建核对约 1.1–1.2 秒，另有约 20 秒的实际运行栈检查。真实 `--resume` 将四组全部标为 `inherited`，继承 3,015 项、本次执行 0 项，见 `resume-summary.json`；汇总见 `acceptance.json`。
-- 初版收集/构建期间的源码变化，以及扫描历史 `.d` 导致的依赖误判，保留在 `prepare.log` 和旧 attempt 中，不计通过。依赖收集已绑定实际链接对象；最终构建核对 6,317 个依赖，实际扩展 SHA256 为 `4e2cf66ad8a507b1c3bad54bf3ab5f440ab928ffbd95041104e1c54470e3782c`。
-- 原有 3,521 个未跟踪文件内容保持不变，见 `preservation.json`。本步仅提交明确列出的流程/测试文件；文档链接、表格、命令语法和差异核对见 `docs-check.json`，暂存质量检查日志为 `quality.log`。
-- M08 由原十二个分层子步重排为 CPU 算法、BSND 非 PA、TND/used、BSND PA、TND PA 及阶段验收五个阶段。各阶段明确必跑项和可继承边界，精度、普通 FA3 回归及性能矩阵不变；原草稿存为 `preexisting.patch`，原 `mla_causal.h` 与 `kernel_meta/` 内容保留并备份在 `original-untracked/`。
+- 删除 **7,269 个文件、1,203 个空目录**，文件逻辑大小约 1.95 GiB，释放文件实际占用约 **1.46 GiB**：两份过期 core 转储、7,040 个空 runtime 日志（含旧备份）、12 个已删除源对应的编译残留、215 个未纳入验收的 pytest 临时文件。每个文件的路径、原因和 SHA256 见 `cleanup-manifest.json`，结果见 `cleanup-result.json`。
+- 清理前后 **7,840 个受保护文件**逐项哈希一致，包括共享构建的 6,317 个依赖与 11 个输出、冷热验收原始证据以及 causal 草稿。验收源码闭包 793 个文件与上轮冷测一致，见 `readiness.json`。保留在用 `.so`、有效增量构建对象、共享数学缓存、历史数值输入/输出、性能原始数据和固定源快照；剩余 `build/` 约 88.3 GiB，主要是这些证据。`kernel_meta/` 新增忽略规则，避免空 runtime 日志污染工作树。
+- 无头脚本仍为 **`/home/zhangqijia/repo/mla_codex_loop.py`**，按用户要求放在仓库外，脚本及其测试均未纳入 Git。旧版、新版及差异保存在本步证据目录的 `loop-before.py`、`loop-after.py`、`loop-change.patch`，外部文件哈希见 `external-update.json`。
+- 脚本取消固定五轮文档审计，默认每轮按当前 status/plan 完成一个提交；仍用明确会话 ID 恢复中断。新增 `--check` 启动自检、`--review-docs` 单次文档核验、`--retire-pending 原因` 归档已被替代的未完成轮次。恢复基线偏离时在调用模型前报错；归档不计成功、不删除源码或会话日志。
+- 原待恢复轮次起点为 `a70ed66`，已被后续流程提交替代，现已显式归档在 `build/mla-codex-loop/20261012-015617-development-8punhjk7/retired.json`。开发和文档覆盖计数均保持 45，`pending=null`；原 `mla_causal.h` 草稿和会话日志保留。下一次启动会以当时 HEAD 新建 M08a 开发轮，不再恢复旧计划。
+- 外部脚本 **16 项回归通过**，覆盖真实临时 Git 提交、失败/中断恢复、成功回执补计数、错误会话、过期基线、归档、互斥、只读预览与计数迁移，见 `external-loop-tests.log`。本机 CLI `0.162.1` 已登录，实际 `exec/resume` 参数解析、原入口 `--check` 和一轮 `--dry-run` 均通过，见 `headless-check.json`、`cli-resume-help.txt`、`headless-preview.txt`。这些是本地启动与模拟回归检查，**未调用真实模型执行开发**。
 
-本机长 KV CPU 参考缓存测量（Q allocation 7/0/3，KV 8193/17/1025，H=128，P=112，双数学 O/LSE）：
+## 可继承的流程证据
 
-| dtype | 禁用缓存 | 首次写入 | 命中读取 |
-| --- | --- | --- | --- |
-| FP16 | 182.471 秒 | 197.827 秒 | 0.069 秒 |
-| BF16 | 215.990 秒 | 216.477 秒 | 0.070 秒 |
+W02–W04 的记录位于 `build/mla-workflow-tools-20261012/`；共享构建和数学缓存为 `build/mla-validation-artifacts/`。入口及缓存边界仍见 [design 7.4](design.md#74-统一验收入口)。以下均是前一步实测，本步只复核依赖与证据：
 
-四个张量在关闭、首次计算和命中读取之间逐位一致。原始数据见 `reference-timing/timings.json`，命令快照为 `reference_timing.py`；这是本机一次 CPU 参考预检样本，不是内核性能或整个测试组的加速比。性能采样仍用现有 `tests.mla_paged_profile` 实测双方设备调用与 E2E。
+- 八组原验收节点及选择条件与 M07e3c 的 9,614 项一致，见 `selection-equivalence.json`；不表示本步执行了这些测试。
+- `tools cpu public ordinary` 历史去重通过 3,015 项：46、2、2,145、822；无失败/跳过。冷热公开组分别耗时 258.49 / 124.81 秒，后者 548 次 reference 命中，整组缩短 51.7%。历史恢复继承 3,015 项、当次执行 0 项。见 `cold-summary.json`、`warm-summary.json`、`resume-summary.json` 与 `acceptance.json`。
+- 构建核对约 1.1–1.2 秒，实际运行栈检查另约 20 秒。当前扩展 SHA256 仍为 `4e2cf66ad8a507b1c3bad54bf3ab5f440ab928ffbd95041104e1c54470e3782c`。长 KV CPU 参考缓存的逐位一致性与耗时见 `reference-timing/timings.json`；不是内核或整个测试组的加速比。
+- 上轮环境为 Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2、910B3 第 6 卡；CATLASS `769cd40a`、固定 CANN 源 `ca18aee6`。环境原始记录仍在该目录；本步没有重新探测设备，不据此推断下一次运行时设备空闲。
+- 原 M08 十二步草稿保存在 `preexisting.patch`，原 causal 头文件备份保留；上轮 `preservation.json` 记录的是当时的 3,521 个未跟踪文件。本步按用户要求移除了其中 3,520 个空日志及其重复备份，代码草稿内容未变。
 
-本次环境：Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2、910B3 第 6 卡；CATLASS `769cd40a`、固定 CANN 源 `ca18aee6`。接手状态见 `environment.json` 与 `npu-before.log`；本次实际加载身份由执行器另存到每个 attempt。当前所有改动属于流程、测试工具和 reference 复用，没有修改生产数值核或公共接口。
-
-证据和缓存均被 Git 忽略，不随提交分发；迁机须复制其实际依赖或重新验收。旧 M07 功能和性能结果仍按上表标为历史，本次未重新采样完整 E2E 性能矩阵。
+证据和缓存均被 Git 忽略，不随提交分发；迁机须复制实际依赖或重新验收。清理清单与外部脚本测试同样保存在本机忽略目录，不是仓库交付文件。
 
 ## 唯一下一步与复现
 
-下一步仅为 [M08a](plan.md#后续功能m08)：复核 CPU causal 草稿并实现独立块范围/分核计划及其差分、边界和 sanitizer 检查。本轮流程提交后停止。不把 CPU 草稿或已编译对象计为 causal 能力已开放。
+下一步仅为 [M08a](plan.md#后续功能m08)：复核 CPU causal 草稿，实现独立块范围/分核计划及其差分、边界和 sanitizer 检查。本轮流程提交后停止。不把 CPU 草稿或已编译对象计为 causal 能力已开放。
+
+本步最小检查（不调用模型、不执行 NPU 测试）：
 
 ```bash
-python3 -m tests.mla_validation --output build/mla-workflow-tools-20261012/run \
-  --suite tools cpu public ordinary --device 6 --resume
+python3 /home/zhangqijia/repo/mla_codex_loop.py --check
+python3 /home/zhangqijia/repo/mla_codex_loop.py --dry-run --max-dev-runs 1
+MLA_CODEX_LOOP_PATH=/home/zhangqijia/repo/mla_codex_loop.py \
+python3 -m unittest discover -s build/mla-cleanup-20261012 -p 'test_mla_codex_loop.py' -v
 PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache \
 bash ci/code_quality.sh --staged
 git diff --check
 git diff --cached --check
 ```
 
-`--resume` 继承有效成功组，失败/中断组重新执行；需要当前实测时去掉该参数。`--dry-run` 只预览命令，`--collect-only` 只核对节点，不作为测试通过。新能力测试须另加组，现有 `public` 仍是无 mask 的 TND PA 组。质量工具的 `/tmp` 路径为本机环境，迁机按 `ci/quality-requirements.txt` 准备。
+正式启动一轮使用 `python3 /home/zhangqijia/repo/mla_codex_loop.py --max-dev-runs 1`；省略次数参数则持续运行，失败时保留本轮会话并停止。脚本沿用本机模型/登录配置和自动审批，`codex exec/resume` 的接口见 [官方无头模式文档](https://learn.chatgpt.com/docs/non-interactive-mode)。启动检查不保证远端服务或未来设备可用；实际开发仍须满足 AGENTS 的本步验收门槛。
+
+MLA 验收继续使用统一入口，`--resume` 只继承有效成功组。新能力须补相应测试，现有 `public` 仍是无 mask 的 TND PA 组。质量工具的 `/tmp` 路径为本机环境，迁机按 `ci/quality-requirements.txt` 准备。
