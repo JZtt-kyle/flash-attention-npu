@@ -70,12 +70,51 @@ SUITES = {
     ],
     "tools": [
         "tests/test_mla_validation.py",
+        "tests/test_mla_source_compare.py",
+        "tests/test_mla_codex_loop.py",
         "tests/test_mla_paged_reference_cache.py",
         "tests/common/test_golden_cache.py",
+    ],
+    "causal-smoke": [
+        "tests/test_flash_attn_npu_v3_mla_causal_attention.py",
+        "-k",
+        "cost_and_mask_smoke or amla_and_masked_max_changes",
+    ],
+    "causal-attention": ["tests/test_flash_attn_npu_v3_mla_causal_attention.py"],
+    "causal-profile": ["tests/test_mla_causal_profile.py"],
+    "shared-profile": ["tests/test_mla_shared_profile.py"],
+    "shared-dense": [
+        f"tests/test_flash_attn_npu_v3_mla_{name}.py"
+        for name in ("dense", "multiblock", "kvblocks", "longkv")
+    ],
+    "shared-nonpaged": [
+        *[
+            f"tests/test_flash_attn_npu_v3_mla_{name}.py"
+            for name in (
+                "bsnd_attention",
+                "tnd_attention",
+                "tnd_bsnd_attention",
+                "used_attention",
+                "bsnd_stride",
+                "tnd_stride",
+            )
+        ],
+        "-k",
+        "not runtime and not trap",
+    ],
+    "shared-paged": [
+        *[
+            f"tests/test_flash_attn_npu_v3_mla_{name}.py"
+            for name in ("paged_attention", "tnd_paged_attention")
+        ],
+        "-k",
+        "task_ring or strides or empty or zero or scale_halves or reuse_with_new or stream_and_allocator",
     ],
     "causal-cpu": [CAUSAL_CPU],
     "causal-sanitize": [CAUSAL_CPU],
 }
+PERFORMANCE_SUITES = {"causal-profile", "shared-profile"}
+CAUSAL_DEVICE_SUITES = {"causal-smoke", "causal-attention", "causal-profile"}
 CPU_SUITES = {"cpu", "tools", "causal-cpu", "causal-sanitize"}
 
 
@@ -100,7 +139,7 @@ def digest(value):
 def sources():
     # Conservative closure, deliberately excluding docs and evidence directories.
     # Shared helpers, setup flags, fixtures and untracked source changes count.
-    paths = [ROOT / "setup.py", ROOT / "pyproject.toml"]
+    paths = [ROOT / "setup.py", ROOT / "pyproject.toml", ROOT / "scripts/mla_codex_loop.py"]
     for directory in ("tests", "csrc/ascend910", "csrc/catlass/include", "flash_attn_npu_3"):
         paths.extend(
             p
@@ -231,6 +270,8 @@ def environment(args, directory, suite):
     }.items():
         env[variable] = str(directory / child)
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
+    if suite in {"causal-smoke", "causal-attention", "causal-profile"}:
+        env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {"causal-cpu", "causal-sanitize"}:
         env["MLA_SCHEDULE_ARTIFACT_DIR"] = str(directory / "schedule")
         env["MLA_SCHEDULE_SANITIZE"] = "1" if suite == "causal-sanitize" else "0"
@@ -264,6 +305,27 @@ def validate_result(directory, returncode, runtime_info=None):
         collected=len(cases),
         cases_sha256=digest(cases),
     )
+
+
+def validate_causal_builds(directory):
+    """Check both fresh probes and their actual loaded identities after execution."""
+    for dtype in ("fp16", "bf16"):
+        base = directory / "probes" / dtype
+        manifest = json.loads((base / "build-manifest.json").read_text())
+        if not manifest.get("causal") or manifest.get("dtype") != dtype:
+            raise RuntimeError("Expected a causal probe build for " + dtype)
+        sources = {str(ROOT / p): h for p, h in manifest["sources"].items()}
+        libraries = {r["path"]: r["sha256"] for r in manifest["libraries"].values()}
+        loaded = json.loads((base / "loaded.json").read_text())
+        if (
+            not manifest["dependencies"]
+            or not libraries
+            or loaded != manifest["libraries"]
+            or not all(matching_files(x) for x in (sources, manifest["dependencies"], libraries))
+        ):
+            raise RuntimeError(
+                "Causal probe sources, dependencies, outputs or loaded identities changed"
+            )
 
 
 def reusable(record, identity):
@@ -303,7 +365,9 @@ def run(args):
                         "prepare",
                         str(args.artifacts),
                     ]
-                    if set(args.suite) - CPU_SUITES and not args.collect_only
+                    if set(args.suite) - CPU_SUITES
+                    and not args.collect_only
+                    and args.suite != ["causal-smoke"]
                     else [],
                     suites={
                         name: pytest_command(
@@ -324,6 +388,10 @@ def run(args):
     with contextlib.ExitStack() as stack:
         lock_fds = [stack.enter_context(locked(args.output / ".lock"))]
         needs_npu = bool(set(args.suite) - CPU_SUITES) and not args.collect_only
+        # The representative component probe builds itself from source. It
+        # does not call the production extension or PA producer. Full device
+        # acceptance still prepares production and checks its actual runtime.
+        needs_build = needs_npu and args.suite != ["causal-smoke"]
         if needs_npu:
             lock_fds += [
                 stack.enter_context(
@@ -388,6 +456,8 @@ def run(args):
                     env,
                 ),
             ):
+                if name == "build" and not needs_build:
+                    continue
                 print(f"{name}: running; log {attempt / name / 'output.log'}", flush=True)
                 result = execute(command, step_env, attempt / name, lock_fds)
                 if sources() != baseline:
@@ -406,7 +476,13 @@ def run(args):
                 line.strip() for line in driver_info.splitlines() if "npu-smi" in line
             )
             runtime_info["host_kernel"] = os.uname().release
-            shutil.copyfile(args.artifacts / "prepare.json", attempt / "build-manifest.json")
+            if needs_build:
+                shutil.copyfile(args.artifacts / "prepare.json", attempt / "build-manifest.json")
+            else:
+                summary["build"] = dict(
+                    status="not_required",
+                    scope="Fresh independent causal smoke probes; no production execution",
+                )
             summary["runtime_identity"] = runtime_info
         packages = {
             n: importlib.metadata.version(n) for n in ("pytest", "torch", "torch_npu", "numpy")
@@ -431,10 +507,15 @@ def run(args):
                     selection=SUITES[suite],
                     dependencies=dependencies,
                     golden=args.golden,
-                    build=sha256(args.artifacts / "prepare.json") if needs_npu else None,
+                    build=sha256(args.artifacts / "prepare.json") if needs_build else None,
                 )
             )
-            if args.resume and not args.collect_only and reusable(state.get(suite, {}), identity):
+            if (
+                args.resume
+                and not args.collect_only
+                and suite not in PERFORMANCE_SUITES
+                and reusable(state.get(suite, {}), identity)
+            ):
                 summary["groups"][suite] = dict(
                     status="inherited",
                     from_directory=state[suite]["directory"],
@@ -451,7 +532,7 @@ def run(args):
                 state.pop(suite, None)
                 save(state_path, state)
             command = pytest_command(suite, directory, args.collect_only)
-            if needs_npu and suite not in CPU_SUITES:
+            if needs_build and suite not in CPU_SUITES:
                 # Probe libraries are shared; numerical outputs and loaded
                 # manifests belong to this attempt, not the mutable cache.
                 for relative in ("probes/fp16", "probes/bf16", "producer"):
@@ -492,7 +573,7 @@ def run(args):
                 )
             if runtime_info and not matching_files(runtime_info["loaded_libraries"]):
                 result.update(status="failed", error="Loaded libraries changed during validation")
-            if needs_npu:
+            if needs_build:
                 prepared = json.loads((args.artifacts / "prepare.json").read_text())
                 if not matching_files(prepared["outputs"]) or not matching_files(
                     prepared["dependencies"]
@@ -501,6 +582,15 @@ def run(args):
                         status="failed",
                         error="Build artifacts or dependencies changed during validation",
                     )
+            if (
+                suite in CAUSAL_DEVICE_SUITES
+                and not args.collect_only
+                and result["returncode"] == 0
+            ):
+                try:
+                    validate_causal_builds(directory)
+                except (OSError, ValueError, KeyError, RuntimeError) as exc:
+                    result.update(status="failed", error=str(exc))
             summary["groups"][suite] = result
             if result["status"] == "passed":
                 result["evidence"] = {

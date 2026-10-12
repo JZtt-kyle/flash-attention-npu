@@ -1,9 +1,6 @@
 # MLA 当前状态
 
-核对日期：2026-10-12；分支：`feat/mla-cann-migration`；接手提交：`7cb4ef8`；最近前向闭环：`29ed04f`（M07e3c）。
-**本轮完成 M08a：独立 CPU 右下 causal 范围、全遮罩行描述和完整 M 分核；公共 causal 仍拒绝。唯一下一步为 [M08b1](plan.md#当前步-m08b1bsnd-独立数值组件)，本次提交后停止。**
-
-本页保存当前能力、最近闭环证据和环境差异；接口与架构见 [design](design.md)，实施顺序见 [plan](plan.md)。当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
+**M08b1 已完成。** 分支 `feat/mla-cann-migration`。独立 BSND causal 组件完成固定源/双数学对照、共享回归和逐例组件性能；公共 causal 接入为 [plan 的唯一下一步 M08b2](plan.md)。精度冲突按用户确认的源逐元素一致优先级验收，条件见 [design 第 7 节](design.md#7-验收口径)。本次提交后停止，不启动 M08b2。
 
 ## 当前可调用能力
 
@@ -29,63 +26,79 @@
 
 真实/fake 入口及公开 fullgraph compile 已有验收；完整图重放仍在 M16。尚未开放：causal/window、自动或多 split、192/128 prefill、非零 softcap、非默认调度选项和 910C。追加 KV、内置 rotary、量化、backward 等范围排除项见 [design 第 4 节](design.md#4-功能边界)。
 
-## 本次闭环：M08a
+## 最近一次闭环证据
 
-独立实现为 `csrc/ascend910/flash_attn_npu_3/mla/mla_causal.h/.cpp`，来源和算法契约见 [design 6.2.4](design.md#624-独立-cpu-causal-范围与分核)。保留原草稿的接口含义和版权，原文件备份为 `build/mla-m08a/mla_causal.h.draft`。
+证据根目录 **`build/mla-m08b1-closeout/`**；汇总为 `validation-complete.json`，最终质量及无头接续记录汇入 `acceptance.json`。本次 **2,928 项通过，0 项失败、0 项跳过、0 项必跑未运行**；历史 CPU/sanitizer 证据另外继承 136 次执行。代表组 20 项是完整 causal 的子集，不重复计数。
 
-- 块范围使用逐样本有效 Sq/Sk，给出 S1G 行/query/key/S2 半开区间、前导全遮罩行和源成本；覆盖跨头、尾块、空 Q/KV 与宽整数边界，失败保持输出不变。
-- 复用未修改的固定源 SplitCore，将候选端点映射到完整 M 块并逐块重算 causal 成本。最终端点为 `(B,0,0)`，所有有效 Q/head 行都有唯一所属核，包括零成本尾部；不把首块成本乘块数用于 causal。
-- 测试从原始 BSND/TND/混合/PA allocation 与 used 构造长度，迁移侧复用既有解析器，独立对照自行解读原始输入。固定源 oracle 不链接迁移适配器；另比较迁移 SplitCore 的全部原生 FD 字段，再以逐行可见 key 和每核任务枚举检查完整分区。
-- 本步未修改共享调度、长度解析、Kernel/Block/Tile、metadata/AICPU、公共入口或生产构建清单。新增组件没有被生产路径引用，见 `production-isolation.json`；不据此宣称 causal 前向已开放。
+| 检查 | 本次通过 | 耗时（秒） | 证据位置 |
+| --- | ---: | ---: | --- |
+| 工具 | 99 | 10.79 | 独立 tools attempt / `tools` |
+| 独立 causal | 324 | 1221.89 | 首次完整 attempt / `causal-attention` |
+| 共享 dense | 547 | 2903.72 | 最终设备 attempt / `shared-dense` |
+| 共享非分页 | 776 | 1224.15 | 最终设备 attempt / `shared-nonpaged` |
+| 共享分页 | 352 | 2480.62 | 最终设备 attempt / `shared-paged` |
+| 普通 FA3 | 822 | 27.97 | 最终设备 attempt / `ordinary` |
+| causal 组件性能 | 2 | 251.56 | 最终设备 attempt / `causal-profile` |
+| 共享组件性能 | 6 | 369.89 | 最终设备 attempt / `shared-profile` |
 
-证据根目录为 **`build/mla-m08a/`**；最终完整实测在 `attempt-1791780656927232530/`，汇总为 `acceptance.json` 和 `summary.json`。保存统一入口命令/环境、完整节点清单、XML、固定源 blob、18 个本步/直接依赖源码快照、编译命令、全部输入输出及进程退出记录。
+- 独立 tools attempt：`build/mla-m08b1-closeout-tools/attempt-1791789418929188940/`，原 69 项保留，新增源优先比较 20 项及无头循环 10 项。
+- 首次完整 attempt：`build/mla-m08b1-closeout/attempt-1791791056385446200/`；最终设备 attempt：`build/mla-m08b1-closeout/attempt-1791792938821447230/`。各组保存命令、完整节点、XML、日志及实际加载身份；两次运行日志分别为 `validation.log` 和 `remaining-validation.log`。
+- 代表与成本边界：`build/mla-m08b1-closeout-smoke/attempt-1791789569820075770/`，20 项通过，506.73 秒，包含双 dtype 最大 reference 和原最大值变化输入。
+- 集合复核：`selection-audit.json` / `remaining-selection-audit.json`。没有删减输入或性能形状；仅将 dense 的 12 个边界节点改名，输入和顺序保留。
 
-| 本次检查 | 结果 | 耗时 |
-| --- | --- | --- |
-| `tools` | 57 项通过；原执行器/缓存检查及新组选择、依赖失效、进程协议、异常退出与 stderr 传播 | 8.45 秒 |
-| `causal-cpu` | 68 项通过；1,713 组块几何、1,450 组分核输入（含重复调用）、32 组拒绝输入 | 21.95 秒 |
-| `causal-sanitize` | 同一 68 项完整通过；适配器、固定源、迁移 SplitCore 均启用 ASan/UBSan，退出时 LeakSanitizer 无错误 | 61.40 秒 |
+首次共享 dense 在 173 项通过后遇到旧空容量拒绝断言；M04c4 已支持空 batch/Q/KV，本次按既有契约修正为检查单核、零 tile/端点/workspace，零 heads 和越界仍拒绝。完整 547 项重跑通过。修改仅在该测试函数，causal 使用的共享定义及其余源码不变；`retained-causal.json` 核对全部 871 个原始证据文件，保留本次已实测的 324 项结果，没有改写统一入口的恢复身份。初始工具收集的同名 `scripts` 包冲突已改为明确文件加载；沙箱内设备收集失败后在设备可见环境完整重收集，失败日志均保留。
 
-本次共 **193 次 pytest 通过，对应 125 个去重节点**；最终失败/跳过均为 0。前置 smoke 属于完整集合，不重复计数。普通/sanitizer 两组的节点与输入输出逐项一致，见 `selection-equivalence.json` 和 `acceptance.json`。三个驱动在每组内分别复用独立进程，输入/输出逐项落盘，完整集合结束后仍检查退出码和 stderr；工具测试包含 EOF、错误 JSON、额外输出、非零退出及退出时 sanitizer 诊断。
+### 精度结果
 
-保留的失败和中断不计为通过：
+完整 causal 记录包含 **646 个 O/LSE 数学比较通过、2 个源精度限制**；条目数与 pytest 节点数分别统计。两个限制均为 FP16、`B=2,Sq=129,Hq=3,Sk=1025`、有效 KV `[17,1025]`、最大值变化下 amplitude=4/8 的 O：最大数学误差均为 0.015625，迁移与固定源逐元素相同。配置、原阈值、双数学误差、输入/输出 `.pt` 路径及哈希见 `source-precision-limits.json`；逐次记录在 `accuracy.jsonl`。
 
-- `smoke.log`：驱动缺少 `<algorithm>` 导致编译失败，补头文件后代表用例通过，后续完整组包含这些用例。
-- `attempt-1791780126583958760/`：对照与枚举结果一致，但覆盖断言误要求固定源必须遗漏零成本尾部；改为断言测试包含真实零成本尾部，继续严格验证全部行的唯一归属。
-- `attempt-1791780231653664210/`：普通组通过，sanitizer 被沙箱的 LeakSanitizer 进程检查限制阻断，未关闭 sanitizer；转到宿主执行。
-- `attempt-1791780323894592770/`：原驱动反复启动进程使 LeakSanitizer 扫描成本过高，181.8 秒时主动中断；调整为每组复用进程。新旧 causal 集合各 68 项完全一致，代表用例和协议失败传播检查后再次冻结实现，最终完整组全部重跑通过。
+这些结果单列为 `source_precision_limit`，不记为数学通过。`tests/mla_source_compare.py` 保持原数学阈值，拒绝源不一致、NaN、shape/inf 契约错误；FA3 空行 LSE 适配先独立检查再归一化。历史数学失败及原失败的 `build/mla-m08b1/acceptance.json` 保持原样，未改成通过。
 
-## 继承证据与环境
+### 组件性能
 
-本轮继承 **4,100 项历史 pytest**，与本次 193 次执行分别计数。核对脚本、结果和适用边界在 `audit_inheritance.py` / `inheritance.json`，核对耗时约 5.7 秒：
+固定矩阵共 **158 个逐例对照**，原始样本、调度、Kernel/raw CANN CSV 和逐例汇总均保留在两个 profile 组中；汇总索引为 `component-performance.json`。双方同调度，预热 5 次、五轮 wall 20 次/kernel 10 次，固定相同 CPU 亲和性；`performance-isolation.json` 核对全部 16 份设备前后快照，第 6 卡健康且无其他并发进程。
 
-| 继承项 | 历史结果与依据 | 本步匹配范围 |
-| --- | --- | --- |
-| 旧 CPU 调度 | M07b2 `8fb46d7`；`build/mla-m07b2-paged-schedule/`，1,131 项，另有 31,836 组 sanitizer replay 输入 | 20 个调度/driver/oracle 依赖；唯一历史差异为 PA 声明头的生产使用说明注释，去注释后相同；3,120 个原始证据产物哈希一致 |
-| 原构建基础、TND PA 公开及普通入口 | W02–W04 `build/mla-workflow-tools-20261012/cold-summary.json`；分别 2、2,145、822 项 | 原组选择、用例和生产依赖未变，原始证据完整；执行器新增 CPU 组的影响由本次 `tools` 实测覆盖 |
+下表为迁移/固定源的当次中位数耗时比。Kernel 最大比值约 **1.155**，逐例差异如实保留；预分配 probe 调用耗时是组件诊断，公开 R=1/4 E2E 仍须在 M08b2 接入时按 design 实测，不能据此宣称公开不劣化。
 
-生产构建记录的 **6,317 个依赖、11 个产物**哈希一致；现有输入中只有未接入生产的 causal 草稿发生改变，新文件未进入 setup 显式源码清单。实际加载路径仍为本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 为 `4e2cf66ad8a507b1c3bad54bf3ab5f440ab928ffbd95041104e1c54470e3782c`。本轮 `runtime.json` 与上轮实测记录逐字段相同，含 230 个实际加载库；不能把新增 CPU 文件误认为已经编入此扩展。
+| 组件与 dtype | 对照数 | Kernel 比值范围 | Kernel 比值 >1 的例数 | probe 调用比值范围 |
+| --- | ---: | ---: | ---: | ---: |
+| causal FP16 | 29 | 0.892–1.062 | 5 | 0.973–1.014 |
+| causal BF16 | 29 | 0.894–1.055 | 5 | 0.969–1.020 |
+| dense FP16 | 26 | 0.907–1.048 | 7 | 0.970–1.030 |
+| dense BF16 | 26 | 0.740–1.000 | 1 | 0.928–1.008 |
+| BSND PA FP16 | 12 | 1.009–1.155 | 12 | 1.002–1.034 |
+| BSND PA BF16 | 12 | 1.014–1.145 | 12 | 1.005–1.023 |
+| TND PA FP16 | 12 | 1.008–1.148 | 12 | 1.008–1.031 |
+| TND PA BF16 | 12 | 1.004–1.142 | 12 | 1.003–1.027 |
 
-本次实查环境为 Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2、910B3；CATLASS `769cd40a`，只读固定 CANN 源 `ca18aee6`。开始时第 6 卡无运行进程；本步只探测/加载环境，未重建扩展或运行 NPU 数值/性能。进程检查没有发现需恢复的旧验收任务；本轮中断进程已收尾。
+### 依赖和运行环境
 
-旧前向闭环的完整 9,614 项及双 dtype 各 36 个适用非 FD 公开 E2E 段仍保存在 `build/mla-m07e3c-tnd-paged-public/acceptance.json`。其历史比值 FP16 0.348..0.683、BF16 0.353..0.677；原生 FD 各 6 例仍单列。**本轮没有重测这些完整矩阵或性能，也不再将该旧整组加入上述继承计数。** 本步未改设备/公开行为，NPU 数值、组件性能、公开 E2E、普通入口额外实测和完整图重放不属于本步必跑项。
+本次代码已固定：最初 `frozen-sources.json`，边界测试修正后 `final-frozen-sources.json`（809 个文件）；快照在 `source-snapshot/`。最终汇总逐文件核对执行证据及 36 份实际独立 probe 构建记录，12.37 秒。工具组故意损坏身份的模拟 fixture 不作为真实 probe 证据，相关失败/失效行为由工具测试验证。
 
-证据、缓存和本轮源码快照都在 Git 忽略目录，不随提交分发，迁机须复制依赖或重新验收。流程 W01–W05 的其他记录仍在 `build/mla-workflow-tools-20261012/`、`build/mla-cleanup-20261012/`；外部无头脚本 `/home/zhangqijia/repo/mla_codex_loop.py` 本步未改，不纳入 Git。
+`inheritance.json` 修正后复核通过，3.36 秒：6,318 个生产依赖、11 个产物和 230 个实际加载库匹配；复用的 `.so` 与本次源码构建身份一致。M08a 两组各 68 项、共 136 次 CPU/ASan/UBSan 执行按源码、工具链及每组 98 个证据文件继承，原目录 `build/mla-m08a/attempt-1791780656927232530/`。这些历史执行不计入本次 2,928 项。
 
-## 唯一下一步与复现
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2、910B3 第 6 卡；CATLASS `769cd40a`、固定 CANN 源 `ca18aee6`。实际扩展为本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `f3d8373c94ac3aaf32aa54949d4ed7126adbeb3d960c677ab27abbde6baffd36`。运行栈见 `runtime-initial.json` 及最终 attempt 的 runtime 记录。
 
-下一步仅为 [M08b1：BSND 独立 causal 数值组件](plan.md#当前步-m08b1bsnd-独立数值组件)：补固定源 causal probe/数学适配，再接任务环、Vector mask 与全遮罩 O/LSE，完成受影响设备路径和代表组件性能。不得用本次 CPU 结果或旧无 mask 矩阵代替设备验收；首次公开 BSND 行为在 M08b2。
+## 无头接续与唯一下一步
 
-本步最小闭环命令：
+循环实现位于 `scripts/mla_codex_loop.py`，原 `/home/zhangqijia/repo/mla_codex_loop.py` 已保留为兼容入口；旧脚本备份在证据根目录。正常结束无提交会输出最终说明并记为 blocked，原因处理后用 `--retry-blocked` 明确恢复；网络/进程中断后普通重启恢复同一会话。工具测试使用隔离 Git 仓库和模拟 CLI，不调用模型。
+
+旧失败轮 `build/mla-codex-loop/20261012-045849-development-ycpv3j1x/` 已按“本交互收尾替代”归档，记录为其中的 `retired.json`；14 个原有日志/结果文件全部保持原样。pending 已清空，成功计数仍为 46，不把交互收尾计为无头成功。实际兼容入口的 `--check` 返回 ready，CLI 0.162.1 已登录；`--dry-run --max-dev-runs 1` 确认下一轮新建会话，不恢复旧失败会话。证据为 `headless-check-after.json`、`headless-preview.log`、`headless-preserved-files.json`，检查均在本次提交前执行，实际启动时重新读取当前 HEAD。
+
+本次提交后可直接运行：
 
 ```bash
-python3 -m tests.mla_validation --output build/mla-m08a --suite tools causal-cpu causal-sanitize --dry-run
-python3 -m tests.mla_validation --output build/mla-m08a --suite tools causal-cpu causal-sanitize --collect-only
-python3 -m tests.mla_validation --output build/mla-m08a --suite tools causal-cpu causal-sanitize --resume
-PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-m01-precommit-cache \
-bash ci/code_quality.sh --staged
-git diff --check
-git diff --cached --check
+python3 /home/zhangqijia/repo/mla_codex_loop.py
 ```
 
-`--resume` 只继承依赖和证据仍匹配的成功组；新实测使用新输出目录或去掉 `--resume`。sanitizer 须在允许 LeakSanitizer 进程检查的环境执行，本机最终组使用宿主环境。文档按新增 CPU 契约及统一入口的影响核对，本轮不是 M08 阶段结束，不启动全面文档审计或下一功能步。
+唯一下一步为 **M08b2：BSND 非 PA causal 的 metadata、生产和公开接入**；具体边界见 plan。本步独立组件和组件性能不能代替下一步真实调用、协议校验及公开 E2E。
+
+完整复现使用版本管理中的统一入口，先核对 dry-run/collect-only，再运行：
+
+```bash
+python3 -m tests.mla_validation --output build/mla-m08b1-closeout --suite tools causal-attention shared-dense shared-nonpaged shared-paged ordinary causal-profile shared-profile --device 6
+```
+
+中断恢复先检查已有进程、锁及依赖；只对未完成或失效部分运行，`--resume` 仅继承有效成功组，性能重新采样。本次 causal 在无关 dense 测试修正后的保留依据已单列，不能靠改写旧 identity 使恢复命中。
+
+本次只暂存 22 个本步文件；提交前核对差异、链接与表格，执行 `ci/code_quality.sh --staged` 和 `git diff --check`。质量记录见 `quality-before-handoff.log` / `quality-final.log` 及 `acceptance.json`。闭环提交可用 `git log -1 -- docs/mla/status.md` 定位；原始日志/产物在 Git 忽略的 build 中，迁机须复制真实依赖和证据或重新验证。

@@ -13,7 +13,7 @@
 // attention/fused_infer_attention_score/op_kernel/arch22/fia_kernel_nonquant_mla.h:
 // Init, InitOutputSingleCore, InitCalcParamsEach, CalcParams, UpdateAxisInfo,
 // FlashAttention, CreateTask, ShouldExecuteTask and ExecuteTask.
-// Specialization: nonempty BSND capacity, Hkv=1, no mask/FD,
+// Default specialization: nonempty BSND capacity, Hkv=1, no mask/FD,
 // Sq*Hq>0, 1<=Sk<=16384. The caller validates source field/address bounds and
 // supplies the source M-block partition, including cross-core and tail blocks.
 // MlaTaskRing shares the task ring with typed nonpaged and BSND/TND PA wrappers.
@@ -24,6 +24,7 @@
 // Default BSND addressing is uint64(b)*capacity; TND uses validated starts.
 // HasStrides selects independent BSND/TND input layouts, without changing the
 // task ring, output layout, metadata or numerical/synchronization order.
+// IsCausal specializes S2 ranges/masking at compile time; all existing wrappers default to false.
 // IsPaged selects validated v6 five-word spans and the PA Copy Tile. Query
 // allocation/used stay separate; the source S2 is not a physical cache stride.
 // Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
@@ -36,7 +37,7 @@ namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
 template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false, bool HasUsed = false,
-          bool HasStrides = false, bool IsPaged = false>
+          bool HasStrides = false, bool IsPaged = false, bool IsCausal = false>
 class MlaTaskRing {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
@@ -123,7 +124,7 @@ class MlaTaskRing {
     using RunInfo = Block::RunInfo;
     static constexpr uint32_t kTaskCount = 3;
     Block::MlaCube<InputT, IsTnd, HasStrides, IsPaged> cube;
-    Block::MlaVector<InputT, IsTnd> vector;
+    Block::MlaVector<InputT, IsTnd, IsCausal> vector;
     MlaDenseKernelSchedule params;
     GlobalTensor<uint32_t> lengths;
     uint32_t actualKvLength = 0, actualQueryLength = 0;
@@ -141,9 +142,11 @@ class MlaTaskRing {
         uint64_t total =
             IsTnd ? uint64_t(queryTokens) * params.heads : uint64_t(params.batch) * params.sq * params.heads;
         if constexpr (HasKvLengths) {
-            bool needInit = false;
-            for (uint32_t b = 0; b < params.batch; ++b) {
-                needInit |= lengths.GetValue(kQueryLengths ? kSpanWords * b + kSpanWords - 1 : b) == 0;
+            bool needInit = IsCausal;
+            if constexpr (!IsCausal) {
+                for (uint32_t b = 0; b < params.batch; ++b) {
+                    needInit |= lengths.GetValue(kQueryLengths ? kSpanWords * b + kSpanWords - 1 : b) == 0;
+                }
             }
             // Like source needInit, cover every output, including zero-KV
             // samples beyond the last compute endpoint. Never read their Q/KV.
@@ -167,7 +170,9 @@ class MlaTaskRing {
         uint64_t count = tail < single ? tail : single;
         WaitFlag<HardEvent::MTE3_V>(event);
         if (start < total && count > 0) {
-            matmul::InitOutput<float>(lseGm[start], count, HasKvLengths ? -float(1.0 / 0.0) : float(1.0 / 0.0));
+            matmul::InitOutput<float>(lseGm[start], count,
+                                      (HasKvLengths && !(IsCausal && params.sk == 0)) ? -float(1.0 / 0.0)
+                                                                                      : float(1.0 / 0.0));
         }
         SetFlag<HardEvent::MTE3_V>(event);
         WaitFlag<HardEvent::MTE3_V>(event);
@@ -196,22 +201,43 @@ class MlaTaskRing {
             info.actualSingleProcessSInnerSize = kvLength - s * params.s2BaseSize;
         }
         info.actualSingleProcessSInnerSizeAlign = Tile::Align(info.actualSingleProcessSInnerSize, 32U);
-        // Every non-FD M block starts at S2=0 and consumes all of its S2 blocks.
+        // Every non-FD M block starts at S2=0 and consumes its visible S2 range.
         info.isFirstSInnerLoop = (loop == 0 || s == 0);
         if (info.isFirstSInnerLoop) {
             ++bn2IdxInCurCore;
         }
         info.bn2IdxInCurCore = bn2IdxInCurCore - 1;
-        info.isLastS2Loop = (s + 1 == (kvLength + params.s2BaseSize - 1) / params.s2BaseSize);
+        info.isLastS2Loop = (s + 1 == S2Loops(m));
+        if constexpr (IsCausal) {
+            info.nextToken = int64_t(kvLength) - (kQueryLengths ? actualQueryLength : params.sq);
+        }
         info.s2BatchOffset = s * params.s2BaseSize;
+    }
+
+    // Pinned CalcCurS2StartEndWithSparse, specialized to right-down causal.
+    // The last query touched by this S1G block determines its union of keys.
+    // Keep full S2 tiles; Vector still masks each row within the boundary tile.
+    __aicore__ inline uint32_t S2Loops(uint32_t m)
+    {
+        const uint32_t kvLength = HasKvLengths ? actualKvLength : params.sk;
+        if constexpr (IsCausal) {
+            const uint32_t sq = kQueryLengths ? actualQueryLength : params.sq;
+            const uint64_t end = Min(uint64_t(m + 1) * params.mBaseSize, uint64_t(sq) * params.heads);
+            if (end == 0 || kvLength == 0) {
+                return 0;
+            }
+            const int64_t keys = int64_t((end - 1) / params.heads) + int64_t(kvLength) - sq + 1;
+            return keys <= 0 ? 0
+                             : (Min(uint64_t(keys), uint64_t(kvLength)) + params.s2BaseSize - 1) / params.s2BaseSize;
+        }
+        return (kvLength + params.s2BaseSize - 1) / params.s2BaseSize;
     }
 
     __aicore__ inline void UpdateAxisInfo(uint32_t& b, uint32_t& m, uint32_t& s)
     {
         uint32_t mLoops =
             ((kQueryLengths ? actualQueryLength : params.sq) * params.heads + params.mBaseSize - 1) / params.mBaseSize;
-        uint32_t kvLength = HasKvLengths ? actualKvLength : params.sk;
-        uint32_t sLoops = (kvLength + params.s2BaseSize - 1) / params.s2BaseSize;
+        uint32_t sLoops = S2Loops(m);
         if (s + 1 < sLoops) {
             ++s;
             return;
@@ -312,6 +338,14 @@ class MlaTaskRing {
                         continue;
                     }
                 }
+                if constexpr (IsCausal) {
+                    if (S2Loops(m) == 0) {
+                        // Initialization owns entirely masked blocks. Do not
+                        // consume ring slots or change ping-pong counters.
+                        UpdateAxisInfo(b, m, s);
+                        continue;
+                    }
+                }
                 CalcParams(created, b, m, s, tasks[created % kTaskCount]);
                 ++created;
                 UpdateAxisInfo(b, m, s);
@@ -337,6 +371,19 @@ class MlaDense : private MlaNonPaged<InputT, HasKvLengths, false, false, false, 
                                       const MlaBsndInputLayouts* layouts = nullptr)
     {
         this->Run(schedule, scale, qc, qr, kv, kr, output, lse, workspace, pipe, kvLengths, 0, layouts);
+    }
+};
+// Independent causal component: contiguous BSND, complete Q allocation,
+// validated uint32[B] effective KV lengths and a whole-M M08a partition.
+// This wrapper is not referenced by production metadata or dispatch.
+template <typename InputT>
+class MlaCausalBsnd : private MlaTaskRing<InputT, true, false, false, false, false, false, true> {
+  public:
+    __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
+                                      GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
+                                      TPipe* pipe, GM_ADDR kvLengths)
+    {
+        this->Run(schedule, scale, qc, qr, kv, kr, output, lse, workspace, pipe, kvLengths);
     }
 };
 } // namespace flash_attn::mla::Kernel

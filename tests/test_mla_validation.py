@@ -291,3 +291,151 @@ sys.exit(7 if mode == "exit" else 0)
     record = json.loads((tmp_path / "driver-run.json").read_text())
     assert record["returncode"] == (7 if mode == "exit" else 0)
     assert record["requests"] == (0 if mode in {"eof", "malformed"} else 2)
+
+
+@pytest.mark.parametrize("suite", ("causal-smoke", "causal-attention", "causal-profile"))
+def test_causal_device_groups_use_new_probe_and_device_identity(tmp_path, capsys, suite):
+    config = args(tmp_path)
+    config.suite = [suite]
+    config.dry_run = True
+    assert runner.run(config) == 0
+    preview = json.loads(capsys.readouterr().out)
+    assert bool(preview["prepare"]) == (suite != "causal-smoke")
+    assert suite not in runner.CPU_SUITES
+    selection = preview["suites"][suite]
+    assert any("causal" in path and path.endswith(".py") for path in selection)
+    assert runner.CAUSAL_CPU not in selection
+    env = runner.environment(config, tmp_path, suite)
+    assert env["MLA_VALIDATION_NPU"] == "1"
+    assert env["MLA_CAUSAL_ATTENTION_DIR"] == str(tmp_path / "probes")
+    assert env["ASCEND_RT_VISIBLE_DEVICES"] == "6"
+
+
+def test_shared_regression_preserves_each_layout():
+    selected = {
+        path
+        for suite in ("shared-dense", "shared-nonpaged", "shared-paged")
+        for path in runner.SUITES[suite]
+        if path.endswith(".py")
+    }
+    assert selected == {
+        f"tests/test_flash_attn_npu_v3_mla_{name}.py"
+        for name in (
+            "dense",
+            "multiblock",
+            "kvblocks",
+            "longkv",
+            "bsnd_attention",
+            "tnd_attention",
+            "tnd_bsnd_attention",
+            "used_attention",
+            "bsnd_stride",
+            "tnd_stride",
+            "paged_attention",
+            "tnd_paged_attention",
+        )
+    }
+    assert "task_ring" in runner.SUITES["shared-paged"][-1]
+    assert "zero" in runner.SUITES["shared-paged"][-1]
+
+
+def test_standalone_causal_smoke_never_requires_old_production_artifacts(tmp_path, monkeypatch):
+    config = args(tmp_path)
+    config.suite = ["causal-smoke"]
+    # This is a simulated device run. The outer acceptance process may hold
+    # the actual card lock, so exercise real file locks in an isolated tree.
+    real_locked = runner.locked
+    monkeypatch.setattr(
+        runner, "locked", lambda path: real_locked(tmp_path / "locks" / str(path).lstrip("/"))
+    )
+    monkeypatch.setattr(runner, "sources", lambda: {"source": "fixed"})
+    monkeypatch.setattr(runner.subprocess, "check_output", lambda *a, **kw: "npu-smi test\n")
+    checked = []
+    monkeypatch.setattr(runner, "validate_causal_builds", lambda d: checked.append(d))
+    calls = []
+    fail = False
+
+    def execute(command, env, directory, lock_fds=()):
+        calls.append(command)
+        if "runtime" in command:
+            runner.save(
+                Path(command[-1]),
+                dict(extension="test.so", extension_sha256="hash", loaded_libraries={}),
+            )
+        else:
+            evidence(directory, code=int(fail))
+            runner.save(directory / "loaded.json", dict(path="test.so", sha256="hash"))
+        code = int(fail and "runtime" not in command)
+        return dict(returncode=code, seconds=0, status="failed" if code else "passed")
+
+    monkeypatch.setattr(runner, "execute", execute)
+    assert runner.run(config) == 0
+    assert checked and not (config.artifacts / "prepare.json").exists()
+    assert all("prepare" not in command for command in calls)
+    summary = json.loads((config.output / "summary.json").read_text())
+    assert summary["build"]["status"] == "not_required"
+    assert summary["groups"]["causal-smoke"]["status"] == "passed"
+    fail = True
+    assert runner.run(config) == 1
+    assert "causal-smoke" not in json.loads((config.output / "state.json").read_text())
+
+
+@pytest.mark.parametrize("fault", ("source", "dependency", "library", "loaded", "missing"))
+def test_causal_probe_identity_change_is_not_accepted(tmp_path, fault):
+    paths = {}
+    for dtype in ("fp16", "bf16"):
+        base = tmp_path / "probes" / dtype
+        base.mkdir(parents=True)
+        parts = {}
+        for name in ("source", "dependency", "library"):
+            path = base / name
+            path.write_text("before")
+            parts[name] = path
+        paths[dtype] = parts
+        libs = {
+            "migrated": dict(path=str(parts["library"]), sha256=runner.sha256(parts["library"]))
+        }
+        runner.save(base / "loaded.json", libs)
+        runner.save(
+            base / "build-manifest.json",
+            dict(
+                causal=True,
+                dtype=dtype,
+                libraries=libs,
+                sources={str(parts["source"]): runner.sha256(parts["source"])},
+                dependencies={str(parts["dependency"]): runner.sha256(parts["dependency"])},
+            ),
+        )
+    runner.validate_causal_builds(tmp_path)
+    base = tmp_path / "probes" / "bf16"
+    if fault == "loaded":
+        runner.save(base / "loaded.json", {})
+    elif fault == "missing":
+        paths["bf16"]["library"].unlink()
+    else:
+        paths["bf16"][fault].write_text("after")
+    with pytest.raises(RuntimeError):
+        runner.validate_causal_builds(tmp_path)
+
+
+@pytest.mark.parametrize("suite", ("causal-profile", "shared-profile"))
+def test_performance_always_executes_on_resume(tmp_path, monkeypatch, suite):
+    config = args(tmp_path)
+    config.suite = [suite]
+    monkeypatch.setattr(runner, "CPU_SUITES", runner.CPU_SUITES | {suite})
+    monkeypatch.setattr(runner, "sources", lambda: {"source": "fixed"})
+    monkeypatch.setattr(runner, "validate_causal_builds", lambda _: None)
+    calls = []
+
+    def execute(command, env, directory, lock_fds=()):
+        calls.append(command)
+        evidence(directory)
+        return dict(returncode=0, seconds=0)
+
+    monkeypatch.setattr(runner, "execute", execute)
+    assert runner.run(config) == 0
+    config.resume = True
+    assert runner.run(config) == 0
+    assert len(calls) == 2
+    summary = json.loads((config.output / "summary.json").read_text())
+    assert summary["groups"][suite]["status"] == "passed"

@@ -419,7 +419,15 @@ PA 链路通过编译期特化复用上述任务环和 Cube/Vector：
 
 分核接受调用方选择的逻辑 M=1..256、N=1..512、1..26 个 Cube、C1V1/C1V2，沿用既有每样本字段/地址边界和保守的 uint32 总矩形 tile 上限；不在这里选择生产基本块或验设备资源。先运行原 `SplitCore`，将部分 S2 端点向上对齐到完整 M 块、合并重复端点，再逐块重算 causal 成本，不能用无 mask 的首块成本乘块数。最后端点规范为 `(B,0,0)`，包含尾部零成本 Q 块；全部有效 Q/head 行有且仅有一个所属核。全空输入保留单个零成本核；未使用数组项为零，失败保持输出不变。
 
-该组件尚未进入 setup 的生产源码清单、metadata/AICPU、Kernel 或公共入口；范围和分核验收不能证明设备 O/LSE、mask 或 causal 前向已开放。[CPU 测试](../../tests/test_flash_attn_npu_v3_mla_causal_schedule.py) 编译固定源 Git blob 对照范围/成本和全部原生 FD 字段，另用独立逐行可见 key 与每核任务枚举验完整 M 映射；布局输入对照从原始 allocation/used 直接解读，不复用待测解析器。
+该 CPU 组件由 M08b1 的独立 probe 调用，尚未进入 setup 的生产源码清单、metadata/AICPU 或公共入口；范围和分核验收本身不能证明设备 O/LSE、mask 或 causal 前向已开放。[CPU 测试](../../tests/test_flash_attn_npu_v3_mla_causal_schedule.py) 编译固定源 Git blob 对照范围/成本和全部原生 FD 字段，另用独立逐行可见 key 与每核任务枚举验完整 M 映射；布局输入对照从原始 allocation/used 直接解读，不复用待测解析器。
+
+#### 6.2.5 独立 BSND causal 数值组件
+
+M08b1 在 [`MlaTaskRing`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_dense.hpp) / `MlaVector` 增加默认关闭的编译期 causal 特化；独立 `MlaCausalBsnd` 包装只接受连续 BSND、完整 Q 分配段和调用方已校验的逐样本 uint32 KV 有效长度，以及 M08a 的完整 M 分核。此包装未接生产分派或 metadata，公共 causal 仍拒绝；Q-used 和首次公开 BSND 接入留在 M08b2。
+
+任务环按每个 M 块最后一个 query 和有效 `Sk-Sq` 计算 S2 半开范围，边界 tile 保留实际 KV 尾长度，逐行 mask 在 Vector 中执行。完全没有可见 key 的 M 块不消耗任务环槽位，O/LSE 初始化覆盖这些行；部分遮罩块保留 Cube/Vector 的原事件、softmax/aMLA、双缓冲与排空顺序。任务描述保存有效长度差，不能用容量或其他样本的长度。迁移侧生成隐式 causal mask，沿用固定源的有限负值哨兵；最终全遮罩行显式写 O=0、LSE=-inf，全局空非 PA KV 容量仍为 +inf。
+
+独立设备 probe 从固定 Git blob 编译原 CANN Kernel，传真实 2048×2048 bool 三角 mask、sparse mode 3 和原始 int64 有效 KV 长度，双方使用同一非 FD 调度。数学对照按原始长度切片并传 causal=True，不读取迁移调度或长度快照。源全遮罩 LSE=+inf 与 FA3 的符号差异单独检查；非空行 O/LSE 逐元素源一致，并接受双数学精度检查；源精度冲突按第 7 节优先级记录。组件验收状态只在 status 记录，不能把实现代码或 CPU 证据写成已通过实机验收。
 
 ### 6.3 长度与布局调度
 
@@ -554,7 +562,7 @@ B/Tq/Sq 为零的合法调用保留空输出 shape，但仍验长度、页表描
 
 两种 Q 布局的独立 attention 都为空 query 保留空输出；非零 Q 的零 KV 有效行输出 `O=0、LSE=-inf`，合法空页表或空物理池也使用该 PA 设备空行语义。所有样本 KV 长度为零时使用已校验的单工作 C1V2、零 workspace 调度，不建立计算缓冲或读取 Q/cache。静态非空容量可保持全核发射，其余核不访问输出或预留 workspace；预算兼容见 [6.7.4](#674-bsndtnd-pa-静态发射计划)。设备组件与公开调用分别按 [第 7 节](#7-验收口径) 验收。
 
-[`BSND`](../../tests/test_flash_attn_npu_v3_mla_paged_attention.py) / [`TND 独立 attention 测试`](../../tests/test_flash_attn_npu_v3_mla_tnd_paged_attention.py) 比较未修改的固定源 PA/non-FD Kernel 和双数学 reference；数学侧从原始分配前缀、Q-used、长度和页表逐 token 索引，不读取 metadata span。固定源保留可原生表示的 K/V 独立页间距，其他 Q/cache 行/页表 stride 在测试侧计时前物化。源 TND Q 按原始 used 独立压紧并提交累计尾值，源 PA KV 仍接收非累计长度，源 `[Tused,Hq]` LSE 转为 `[Hq,Tused]` 后比较；迁移侧保留完整分配间隙和 poison。此转换不能解释为原生 FIA host 支持所有视图。非空有效行 O/LSE 要求与固定源逐元素一致，零 KV 的源 `+inf` 与 FA3 `-inf` 分开检查；零工作调度/空表由数学对照验收，不伪造源可调用结果。独立 probe 的调用耗时不是公开 PA E2E。
+[`BSND`](../../tests/test_flash_attn_npu_v3_mla_paged_attention.py) / [`TND 独立 attention 测试`](../../tests/test_flash_attn_npu_v3_mla_tnd_paged_attention.py) 比较未修改的固定源 PA/non-FD Kernel 和双数学 reference；数学侧从原始分配前缀、Q-used、长度和页表逐 token 索引，不读取 metadata span。固定源保留可原生表示的 K/V 独立页间距，其他 Q/cache 行/页表 stride 在测试侧计时前物化。源 TND Q 按原始 used 独立压紧并提交累计尾值，源 PA KV 仍接收非累计长度，源 `[Tused,Hq]` LSE 转为 `[Hq,Tused]` 后比较；迁移侧保留完整分配间隙和 poison。此转换不能解释为原生 FIA host 支持所有视图。非空有效行 O/LSE 要求与固定源逐元素一致，数学超限按第 7 节源精度优先级记录；零 KV 的源 `+inf` 与 FA3 `-inf` 分开检查；零工作调度/空表由数学对照验收，不伪造源可调用结果。独立 probe 的调用耗时不是公开 PA E2E。
 
 ##### CPU/AICPU 调度
 
@@ -684,7 +692,9 @@ Tq=0 而 B/maxQ/C 均非零时，生产适配器将静态计划的单核发射�
 
 **源实现对照：** 每个迁移模块须能追溯到固定 CANN 的文件/函数，注明结构重构和必要接口适配的对应关系。风格重构须经过构建、精度、边界、重复执行和相关性能检查；迁移结果以本仓实际构建和测试为依据。保留源级执行行为不承诺编译后二进制或耗时完全相同。
 
-**功能和精度：** 对同一逻辑输入同时检查独立高精度 reference、低精度 PyTorch 对照和原 CANN。CANN 对照先统一 scale、mask、布局与共享 KV 语义；本次按 FA3 调整的差异以官方为准，不要求重现源不兼容行为。reference 不能调用待测 kernel，也不能在两个实现中共用同一个错误的长度/页表解析。复用仓库双 reference 精度准则，单独检查 LSE、inf 符号、NaN、空行和 padding；阈值在基线步骤固定，不为通过用例而放宽。
+**功能和精度：** 对同一逻辑输入同时检查独立高精度 reference、低精度 PyTorch 对照和原 CANN。CANN 对照先统一 scale、mask、布局与共享 KV 语义；本次按 FA3 调整的差异以官方为准，不要求重现源不兼容行为。reference 不能调用待测 kernel，也不能在两个实现中共用同一个错误的长度/页表解析。复用仓库双 reference 精度准则，单独检查 LSE、inf 符号、NaN、空行和 padding；数学阈值保持固定。
+
+**精度冲突优先级：**数学精度不满足时，以迁移结果与未修改的固定 CANN 源逐元素一致为准。必须在同一原始输入、dtype、scale、mask 与同调度源路径上实际执行双方，核对源代码/库身份，严格比较 O 和非空 LSE（`rtol=0, atol=0`）。保留双数学 reference、原阈值、误差、源与迁移输出和输入证据；源也超限时记为“源精度限制下通过”，与数学通过分别统计，不能把超限写成数学通过。源不一致、源证据缺失、NaN、shape/inf/空行契约错误仍失败；无可比源路径的输入仍按数学与 FA3 契约验收。必要的 FA3 空行 LSE 符号适配先独立检查，再归一化后比较。该规则不放宽普通 FA3 测试，不改变源算法、中间 dtype 或舍入。
 
 **阶段范围：** 性能只验收本步已迁移的能力和执行路径。在 FD 迁移完成前，全部约定形状均用固定 CANN 源的非 FD Kernel、相同逻辑输入/基本块/核数/端点，与迁移 Kernel 对照；布局转换的边界按 [7.1](#71-固定性能矩阵与阶段边界) 和 [7.2](#72-参考工具与对照边界) 单列。记录逐例 Kernel 耗时及独立 probe 调用耗时，不能把预分配 probe 的调用时间当成公开 E2E。原生 CANN 自动调度同样不启用 FD 的用例，另按下述公开 metadata E2E 门槛验收。原生 CANN 会启用尚未迁移 FD 的用例，其原生 E2E 仅记录能力差距，不作为非 FD 迁移的阻塞项；不因此前置 FD、开放 `num_splits=0` 或改变 `num_splits=1` 语义。
 
@@ -711,6 +721,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 范围 | 固定矩阵定义 | 采样驱动与计量边界 |
 | --- | --- | --- |
 | 整容量 BSND、S1G 多块、长 KV | [`mla_profile_cases.py`](../../tests/mla_profile_cases.py)：`CASES/S1G_CASES/KV_CASES/LONG_KV_CASES` | [`mla_dense_profile.py`](../../tests/mla_dense_profile.py) 同调度组件；[`mla_forward_profile.py`](../../tests/mla_forward_profile.py) 公开 E2E |
+| 独立 BSND causal | [causal attention](../../tests/test_flash_attn_npu_v3_mla_causal_attention.py) 的 `PERFORMANCE_CASES`：保留上述四组的 causal 变体，增加有效 KV、部分/全遮罩代表例 | `tests.mla_validation --suite causal-profile` 同调度固定源 non-FD 组件；mask 准备、host 调度、分配和 H2D 在计时外，kernel 与预分配 probe wall 分列，无公开 E2E 声明 |
 | BSND 实际 KV 长度 | [同一清单](../../tests/mla_profile_cases.py) 的 `BSND_CASES`；[BSND attention](../../tests/test_flash_attn_npu_v3_mla_bsnd_attention.py) 的 `PERFORMANCE_CASES` | [`mla_forward_profile.py`](../../tests/mla_forward_profile.py) 公开 E2E；[`mla_bsnd_profile.py`](../../tests/mla_bsnd_profile.py) 同调度组件 |
 | 紧凑 TND | [TND attention](../../tests/test_flash_attn_npu_v3_mla_tnd_attention.py) 与 [`mla_varlen_profile.py`](../../tests/mla_varlen_profile.py) 的 `PERFORMANCE_CASES` | 组件由 [`mla_tnd_attention_probe.cpp`](../../tests/mla_tnd_attention_probe.cpp) 验收；公开驱动计入每次内部 v3 生成与 R=1/4 调用段 |
 | TND Q + BSND KV | [混合 attention](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_attention.py) 与 [`mla_mixed_profile.py`](../../tests/mla_mixed_profile.py) 的 `PERFORMANCE_CASES` | [`mla_tnd_bsnd_profile.py`](../../tests/mla_tnd_bsnd_profile.py) 同调度组件；公开驱动计量复用、生成加前向、内部生成及原生转换 |
@@ -732,7 +743,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 调度验收比较固定源的基本块、完整端点、使用核数、FD 字段与 workspace，并独立枚举任务，检查无遗漏/重复及每核成本。覆盖 B=0/1/多 batch、平台核数两侧、C1V1/C1V2、M 的 16/128/256 边界及尾块、KV 的 16/32/128/256/512 边界；实际长度增加 0/1/511/512/513/8193/16384、等长短序列、非均匀/全零长度及端点外零尾部。对应 [dense 调度检查](../../tests/test_flash_attn_npu_v3_mla_schedule.py) 与 [BSND 长度调度检查](../../tests/test_flash_attn_npu_v3_mla_bsnd_schedule.py)；oracle 从固定 commit 提取，不调用待测调度。
 
-功能检查另覆盖 M 的 16/128/256 边界、非整齐 M=129/255、KV 对齐两侧及长 KV、内容/RoPE 各半独立扰动、非零 offset、scale 默认/零/负/显式值、跨块最大值变化（含 aMLA `-30` 截断）、双缓冲/任务环、重复执行和多流复用。固定源同调度非 FD Kernel 的 O 和非空行 LSE 要逐元素一致，再通过独立双 reference；零 KV 行单独检查源 LSE=`+inf`、迁移 LSE=`-inf` 的 FA3 适配，不把它判为数值误差。全局空容量另按 3.3 验收。原生自动 FD 数值顺序不同时分别检查数学精度，不强求非 FD 与 FD 逐元素一致。
+功能检查另覆盖 M 的 16/128/256 边界、非整齐 M=129/255、KV 对齐两侧及长 KV、内容/RoPE 各半独立扰动、非零 offset、scale 默认/零/负/显式值、跨块最大值变化（含 aMLA `-30` 截断）、双缓冲/任务环、重复执行和多流复用。固定源同调度非 FD Kernel 的 O 和非空行 LSE 要逐元素一致，并执行独立双 reference；数学超限按第 7 节源精度优先级记录；零 KV 行单独检查源 LSE=`+inf`、迁移 LSE=`-inf` 的 FA3 适配，不把它判为数值误差。全局空容量另按 3.3 验收。原生自动 FD 数值顺序不同时分别检查数学精度，不强求非 FD 与 FD 逐元素一致。
 
 公开性能采样采用双 dtype、预热 5 次、五轮各 20 个 wall 样本、R=1/4，同一进程对双方固定相同 CPU 亲和性；单列 metadata 生成、Kernel 和分派证据。varlen 当前没有独立公开 v3/v5 生成/复用入口，逐次生成计入前向，AICPU 时间由 profiler 单列。噪声不确定时保留原数据并补测。全局空容量在固定 dense CANN 基线之外，耗时只作诊断；独立 ctypes 生成器或记录校验驱动的调用耗时也不代表 attention 或公开 E2E。独立 TND 与混合布局的同调度 Kernel 与 probe 调用时间分别报告；公开入口的验收必须包含公开调用段。
 
@@ -758,7 +769,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 混合 stride 沿用表中的 `CannMixedCall`：K/V 的 batch/token 轴可零拷贝合并时用扁平索引，否则按原视图作两轴 gather；准备阶段不物化完整 cache。双方接收相同 tensor，记录 shape/stride/offset/storage；profiler 按完整任务序列区分 attention 与同名 API 前缀下的转换任务。[生产混合验收](../../tests/test_flash_attn_npu_v3_mla_mixed_stride_production.py) 另验完整 storage、metadata 跨视图复用、前缀/used 更新、流生命周期与真实 Trap。
 
-CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv 维输出，避免 torch_npu 2.7.1 默认包装器把 combined 192/128 输出分配为 192。O/LSE 有限值沿用 `assert_fa_close`；无 softcap 时阈值固定为 `max(2 * max|pt-ref| + 2 * ULP(ref), 1e-5)`。inf 符号按 [3.3](#33-共同契约) 单独检查，不能为通过测试放宽阈值。
+CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv 维输出，避免 torch_npu 2.7.1 默认包装器把 combined 192/128 输出分配为 192。O/LSE 有限值沿用 `assert_fa_close`；无 softcap 时阈值固定为 `max(2 * max|pt-ref| + 2 * ULP(ref), 1e-5)`。inf 符号按 [3.3](#33-共同契约) 单独检查，不能为通过测试放宽阈值。数学超限与源逐元素一致同时成立时，按第 7 节记录源精度限制；独立 causal 驱动使用 `tests/mla_source_compare.py` 保存比较状态，输入/输出/reference 与固定源身份随用例归档。
 
 原生非 FD、FD 和空容量按固定源调度及实际 runtime tiling key 判定，不按耗时筛选。每次保存实际加载的 vendor/host/device 库、SHA256、输入描述、event span 与同步 E2E；event span 可能含 host 发射间隙，不当作纯 Kernel 时间。来源和 profiler 核验分别见 [provenance 测试](../../tests/test_flash_attn_npu_v3_mla_provenance.py)、[profile 测试](../../tests/test_flash_attn_npu_v3_mla_profile.py)。
 
@@ -788,10 +799,13 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 | `public` / `trap` | TND PA 公开功能 / 其独立进程真实 Trap |
 | `device` / `bsnd` | TND PA 内部前向 / BSND PA 公开功能，均不含各自 Trap |
 | `metadata` / `ordinary` / `nonpaged` | 原 PA metadata / 普通 FA3 与入口 / 非分页及独立 TND PA 相关回归子集；确切节点和过滤条件见预览 |
-| `cpu` / `tools` | 原构建生成输入与依赖检查 / 验收执行器与 reference 缓存检查；均不构建扩展或发射 NPU |
+| `cpu` / `tools` | 原构建生成输入与依赖检查 / 验收执行器、reference 缓存、源精度优先规则与无头循环检查；均不构建扩展或发射 NPU |
 | `causal-cpu` / `causal-sanitize` | 同一完整 causal CPU 范围/成本/分核/长度用例集，分别普通编译和 ASan/UBSan 编译；不构建扩展或发射 NPU |
+| `causal-smoke` / `causal-attention` / `causal-profile` | BSND 独立 causal 代表及成本边界 / 完整数值及同步用例 / 固定组件性能；必须使用新的 causal probe 和数学适配 |
+| `shared-profile` | 无 mask 代表组件性能：原整容量四组及 BSND/TND PA 各完整 `PERFORMANCE_CASES`；双 dtype、同调度固定源对照 |
+| `shared-dense` / `shared-nonpaged` / `shared-paged` | 共用任务环/Vector 的无 mask 回归：整容量多块和长 KV / 非 PA 各布局 / BSND 与 TND PA 的任务环、stride、空值、scale 和复用；完整选择见 dry-run/collect-only |
 
-上述设备组测试的是已开放的无 mask 能力；新增 causal 设备路径仍须补相应测试组，CPU 组不证明前向已开放。causal CPU 两组还记录固定源 blob、CPU 编译器及相关运行库身份和 sanitizer 模式；这些依赖变化或运行期间发生变化时不能恢复为通过。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
+原有设备组及 `shared-*` 组测试无 mask 能力；独立 causal 设备路径只由新增的 `causal-attention`/`causal-profile` 验收，CPU 组不证明前向已开放。causal CPU 两组还记录固定源 blob、CPU 编译器及相关运行库身份和 sanitizer 模式；这些依赖变化或运行期间发生变化时不能恢复为通过。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
 
 ```bash
 python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --dry-run
@@ -800,11 +814,13 @@ python3 -m tests.mla_validation --output build/mla-step --suite public ordinary 
 python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --device 6 --resume
 ```
 
+单独选择 `causal-smoke` 时只新编独立 causal probe，检查源码、传递依赖、库及实际加载身份；仍记录设备运行栈，但不构建或执行生产路径。混选其他设备组或完整验收时保留生产准备和实际扩展加载检查。
+
 causal CPU 驱动在每组内分别复用适配器、固定源 oracle、迁移 SplitCore 三个独立进程，逐项保存 stdin/stdout，完整集合结束时检查退出码和 stderr。ASan/UBSan 组保留退出时 LeakSanitizer 检查；执行环境须允许其进程检查，不能把沙箱限制导致的失败记为通过。
 
 每次执行创建新的 `attempt-*`，保存命令/环境、完整节点清单、XML、日志、数学输入/输出、源码身份及 pytest 实际加载的扩展身份；`summary.json` 表示最近一次尝试，`state.json` 索引可继承的成功组。退出非零、没有用例、失败、跳过、实际扩展不符或运行中依赖变化都不能记为通过。某组失败后，后续组为未运行；旧成功状态先失效，原尝试目录保留。
 
-`--resume` 只继承同一输出目录中身份匹配且原始证据完整的成功组，结果标为 `inherited`，不会计入本次实测；失败、中断、证据缺失或依赖变化的组重新完整执行。源码身份保守覆盖测试、共享辅助代码、910 源码和 CATLASS include，排除文档；因此可能多补测，不据文件名擅自缩小影响范围。输出、共享构建目录与同卡运行有非阻塞锁；未结束进程继续持锁时必须先核查进程，不能直接另启相同任务。锁只协调本执行器，性能测量前仍须核查其他用户的设备活动。
+`causal-profile` 和 `shared-profile` 每次重新采样，不恢复历史性能。其他组的 `--resume` 只继承同一输出目录中身份匹配且原始证据完整的成功组，结果标为 `inherited`，不会计入本次实测；失败、中断、证据缺失或依赖变化的组重新完整执行。源码身份保守覆盖测试、共享辅助代码、910 源码和 CATLASS include，排除文档；因此可能多补测，不据文件名擅自缩小影响范围。输出、共享构建目录与同卡运行有非阻塞锁；未结束进程继续持锁时必须先核查进程，不能直接另启相同任务。锁只协调本执行器，性能测量前仍须核查其他用户的设备活动。
 
 三类复用分别管理：
 
@@ -815,3 +831,6 @@ causal CPU 驱动在每组内分别复用适配器、固定源 oracle、迁移 S
 公开性能继续使用版本管理的 `python3 -m tests.mla_paged_profile --help` 入口，矩阵、R、预热、采样及独立原生 CANN 包验证保持 7.1 的要求。可设置 `GOLDEN_CACHE_MODE=cache GOLDEN_CACHE_DIR=<artifacts>/golden` 复用昂贵的 CPU 参考预检；每次使用新的输出目录，真正的双方设备调用与同步 E2E 全部重新测量，性能任务不使用测试结果恢复。缓存只支持当前无 mask 的 PA reference；扩展新语义时必须补键与失效检查后再启用。
 
 这些证据目录与缓存均不随 Git 分发；迁机需要复制实际引用的产物、证据及 manifest 依赖，或重新构建/验收。仅有 summary 数字不能证明历史测试有效。
+
+
+无头开发使用版本管理的 `python3 scripts/mla_codex_loop.py`；本机原 `/home/zhangqijia/repo/mla_codex_loop.py` 作为兼容入口。`--check` 只核对状态、锁、CLI 和登录，`--dry-run` 只预览命令；两者不启动模型。正常结束而没有提交的开发轮记为 `blocked`，始终打印并保存最终说明，重启时不会自动重试；原因解决后用 `--retry-blocked` 明确恢复同一会话。进程中断或 CLI 错误保留原会话供普通重启恢复。`--retire-pending '原因'` 只归档已被其他工作替代的失败轮，保留源码/日志且不计成功；已有成功回执仍按原提交/会话核对后只补计数一次。脚本的提交计数不替代本节验收。

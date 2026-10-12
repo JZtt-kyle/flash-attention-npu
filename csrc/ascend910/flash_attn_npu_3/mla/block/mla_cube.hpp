@@ -42,6 +42,7 @@ struct RunInfo {
     uint32_t bn2IdxInCurCore = 0, s2BatchOffset = 0;
     uint32_t queryStart = 0; // Compact query token offset, captured per task.
     uint64_t kvStart = 0;    // Compact TND or physical BSND token offset; never truncate b*Sk.
+    int64_t nextToken = 0;   // Effective Sk - Sq for the causal task, independent of capacities.
     bool isFirstSInnerLoop = true;
     bool isLastS2Loop = true, isValid = false;
 };

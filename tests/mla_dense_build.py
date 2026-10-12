@@ -31,9 +31,10 @@ def build_probes(
     stride=False,
     tnd_stride=False,
     paged=False,
+    causal=False,
 ):
     assert dtype in ("fp16", "bf16")
-    assert sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride, paged)) <= 1
+    assert sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride, paged, causal)) <= 1
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
@@ -150,7 +151,9 @@ def build_probes(
         ROOT
         / "tests"
         / (
-            "mla_paged_attention_probe.cpp"
+            "mla_causal_attention_probe.cpp"
+            if causal
+            else "mla_paged_attention_probe.cpp"
             if paged
             else "mla_tnd_stride_probe.cpp"
             if tnd_stride
@@ -298,6 +301,11 @@ def build_probes(
         "-o",
         str(host_output),
     ]
+    if causal:
+        host_cmd += [
+            str(ROOT / "tests/mla_causal_attention_schedule.cpp"),
+            str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.cpp"),
+        ]
     (artifacts / "schedule-command.json").write_text(json.dumps(host_cmd, indent=2) + "\n")
     with (artifacts / "schedule-compile.log").open("w") as log:
         subprocess.run(host_cmd, stdout=log, stderr=subprocess.STDOUT, timeout=120, check=True)
@@ -329,7 +337,14 @@ def build_probes(
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata_consumer.h",
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("*/*.hpp")),
     ]
+    if causal:
+        current += [
+            ROOT / "tests/mla_causal_attention_schedule.cpp",
+            ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.h",
+            ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.cpp",
+        ]
     manifest = {
+        "causal": causal,
         "dtype": dtype,
         "bsnd": bsnd,
         "tnd": tnd,
@@ -350,7 +365,7 @@ def build_probes(
             ["git", "-C", str(ROOT / "csrc/catlass"), "rev-parse", "HEAD"], text=True
         ).strip(),
     }
-    if paged:
+    if paged or causal:
         dependencies = set()
         for depfile in artifacts.glob("*-device.d"):
             dependencies.update(

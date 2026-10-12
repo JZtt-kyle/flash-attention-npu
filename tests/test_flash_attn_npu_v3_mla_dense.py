@@ -339,6 +339,18 @@ def test_interleaved_shapes_and_runtime_scale(probes):
     "shape",
     [(0, 1, 1, 1), (1, 0, 1, 1), (1, 1, 0, 1), (1, 1, 1, 0), (1, 1, 2**23, 1), (1, 1, 1, 16385)],
 )
-def test_unsupported_schedule(probes, shape):
+def test_schedule_boundaries(probes, shape):
     schedule, details = Schedule(), (ctypes.c_uint64 * 16)()
-    assert probes[0]["schedule"].prepare_dense(*shape, ctypes.byref(schedule), details) != 0
+    status = probes[0]["schedule"].prepare_dense(*shape, ctypes.byref(schedule), details)
+    batch, sq, heads, sk = shape
+    if heads and (batch == 0 or sq == 0 or sk == 0):
+        # M04c4 accepts global empty capacities as validation-only schedules.
+        # They reserve one launch core, with no attention tiles or scratch.
+        assert status == 0
+        assert (schedule.batch, schedule.sq, schedule.heads, schedule.sk) == shape
+        assert schedule.cores == 1 and schedule.block_dim == 1
+        assert schedule.m_base == schedule.s2_base == schedule.r1 == schedule.r2 == 0
+        assert not any((*schedule.b_end, *schedule.m_end, *schedule.s_end))
+        assert not any((details[0], details[1], *details[9:14], details[15]))
+    else:
+        assert status != 0
