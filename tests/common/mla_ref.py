@@ -237,8 +237,19 @@ def mla_reference(
     return out, lse
 
 
-def mla_reference_pair(q, k, v, qv=None, **kwargs):
-    """Return (out_ref, lse_ref, out_pt, lse_pt) for assert_fa_close."""
+def mla_reference_pair_uncached(q, k, v, qv=None, **kwargs):
+    """Compute both equations; used when the caller already owns a raw-input cache."""
     out_ref, lse_ref = mla_reference(q, k, v, qv, upcast=True, **kwargs)
     out_pt, lse_pt = mla_reference(q, k, v, qv, upcast=False, **kwargs)
     return out_ref, lse_ref, out_pt, lse_pt
+
+
+def mla_reference_pair(q, k, v, qv=None, **kwargs):
+    """Return (out_ref, lse_ref, out_pt, lse_pt) for assert_fa_close."""
+    from tests.common.mla_reference_cache import reference_pair
+
+    # Validate before looking up a CPU value, including on cache hits.
+    _check_fa3(q, k, v, qv)
+    if q.device.type != "cpu":
+        raise ValueError("mla_reference is a CPU oracle; move logical inputs to CPU explicitly")
+    return reference_pair(mla_reference, dict(q=q, k=k, v=v, qv=qv), kwargs)

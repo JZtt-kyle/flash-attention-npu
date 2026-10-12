@@ -777,6 +777,8 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 
 每步按改动影响选择测试，提交门槛见 [AGENTS.md](../../AGENTS.md#按影响范围验收)。选择必须包含共享依赖、调度/地址语义、生产分派、编译实例和运行参数的影响；源码文件未变或单个对象哈希相同，不能单独证明某条执行路径不受影响。新能力及受影响路径在当前提交完成必要实测，未变化组件可复核既有证据。阶段结束仍实测约定的已开放组合及性能矩阵，可复用有效构建和 reference，不能用历史通过记录替代阶段实测。
 
+日常共享回归按下节固定 `regression-*` 清单覆盖双 dtype、布局和关键边界，不重复运行所有历史参数组合。当前步须说明选中组的覆盖理由；若改动涉及清单未覆盖的调度、页 Copy、协议、地址、发射或公开语义，补相应用例或完整专项组。精简的是重复组合，新增算法/入口的精度、协议、真实/fake/compile/Trap/生命周期及适用逐例 E2E 仍在本步验收。阶段矩阵保持完整；性能矩阵、R、预热和采样次数保持原规定。只有缺少证据、依赖变化或具体风险才扩大日常回归。
+
 继承一项组件证据须能定位原提交、命令、用例集合、结果及原始产物，并核对该项依赖的源码（含测试与独立 oracle/适配器）、构建参数、工具链/运行栈、芯片类型、实际加载产物和执行条件。记录匹配依据和本步影响分析；无关文档变化不使组件证据自动失效，相关依赖变化、失败、缺失或无法解释的差异使该项失效，重跑受影响检查。只有完整依赖可确认的证据才能继承，不要求每步重新生成全仓源码/文档快照。
 
 | 结果状态 | 报告含义 |
@@ -804,8 +806,10 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 | `causal-smoke` / `causal-attention` / `causal-profile` | BSND 独立 causal 代表及成本边界 / 完整数值及同步用例 / 固定组件性能；必须使用新的 causal probe 和数学适配 |
 | `shared-profile` | 无 mask 代表组件性能：原整容量四组及 BSND/TND PA 各完整 `PERFORMANCE_CASES`；双 dtype、同调度固定源对照 |
 | `shared-dense` / `shared-nonpaged` / `shared-paged` | 共用任务环/Vector 的无 mask 回归：整容量多块和长 KV / 非 PA 各布局 / BSND 与 TND PA 的任务环、stride、空值、scale 和复用；完整选择见 dry-run/collect-only |
+| `regression-dense` / `regression-nonpaged` / `regression-paged` | 日常共享回归固定子集；分别覆盖 M/N 尾块与 16K KV、实际长度/三布局 used/stride、BSND/TND 页任务环与空值/生命周期。逐项理由和节点见 [选择清单](../../tests/mla_validation_selection.py)，需要时补专项 |
+| `causal-check` / `reference` | 独立 causal 快速检查（长成本矩阵另选 `causal-smoke`）/ 原双数学 CPU 契约与独立标量对照；快速组不代替新行为或阶段验收 |
 
-原有设备组及 `shared-*` 组测试无 mask 能力；独立 causal 设备路径只由新增的 `causal-attention`/`causal-profile` 验收，CPU 组不证明前向已开放。causal CPU 两组还记录固定源 blob、CPU 编译器及相关运行库身份和 sanitizer 模式；这些依赖变化或运行期间发生变化时不能恢复为通过。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
+原有设备组、`shared-*` 及 `regression-*` 组测试无 mask 能力；独立 causal 的完整验收使用 `causal-attention`/`causal-profile`，`causal-check` 用于自检和按影响回归。CPU 组不证明前向已开放。causal CPU 两组还记录固定源 blob、CPU 编译器及相关运行库身份和 sanitizer 模式；这些依赖变化或运行期间发生变化时不能恢复为通过。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
 
 ```bash
 python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --dry-run
@@ -814,21 +818,22 @@ python3 -m tests.mla_validation --output build/mla-step --suite public ordinary 
 python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --device 6 --resume
 ```
 
-单独选择 `causal-smoke` 时只新编独立 causal probe，检查源码、传递依赖、库及实际加载身份；仍记录设备运行栈，但不构建或执行生产路径。混选其他设备组或完整验收时保留生产准备和实际扩展加载检查。
+只选择 `causal-smoke` / `causal-check` 时只新编独立 causal probe，检查源码、传递依赖、库及实际加载身份；仍记录设备运行栈，但不构建或执行生产路径。混选其他设备组或完整验收时保留生产准备和实际扩展加载检查。长成本代表组用于成本边界或执行策略变化的检查，不作为每次编辑后的默认自检。
 
 causal CPU 驱动在每组内分别复用适配器、固定源 oracle、迁移 SplitCore 三个独立进程，逐项保存 stdin/stdout，完整集合结束时检查退出码和 stderr。ASan/UBSan 组保留退出时 LeakSanitizer 检查；执行环境须允许其进程检查，不能把沙箱限制导致的失败记为通过。
 
 每次执行创建新的 `attempt-*`，保存命令/环境、完整节点清单、XML、日志、数学输入/输出、源码身份及 pytest 实际加载的扩展身份；`summary.json` 表示最近一次尝试，`state.json` 索引可继承的成功组。退出非零、没有用例、失败、跳过、实际扩展不符或运行中依赖变化都不能记为通过。某组失败后，后续组为未运行；旧成功状态先失效，原尝试目录保留。
 
-`causal-profile` 和 `shared-profile` 每次重新采样，不恢复历史性能。其他组的 `--resume` 只继承同一输出目录中身份匹配且原始证据完整的成功组，结果标为 `inherited`，不会计入本次实测；失败、中断、证据缺失或依赖变化的组重新完整执行。源码身份保守覆盖测试、共享辅助代码、910 源码和 CATLASS include，排除文档；因此可能多补测，不据文件名擅自缩小影响范围。输出、共享构建目录与同卡运行有非阻塞锁；未结束进程继续持锁时必须先核查进程，不能直接另启相同任务。锁只协调本执行器，性能测量前仍须核查其他用户的设备活动。
+`causal-profile` 和 `shared-profile` 每次重新采样，不恢复历史性能。其他组的 `--resume` 只继承同一输出目录中身份匹配且原始证据完整的成功组，结果标为 `inherited`，不会计入本次实测；失败、中断、证据缺失或依赖变化的组重新执行。每组 `sources.json` 保守覆盖全部原生源码/测试驱动/公共辅助代码，以及所选测试的递归 Python 导入、包初始化和 conftest；未知动态模块导入退回完整闭包。无关测试模块和无头脚本修改不再使数值组失效，未知原生影响仍保守扩大；无头脚本属于 tools 的依赖。新身份格式不继承旧身份记录。恢复仍为成功组粒度，不能跳过失败组内的单个节点。输出、共享构建目录与同卡运行有非阻塞锁；未结束进程继续持锁时必须先核查进程，不能直接另启相同任务。锁只协调本执行器，性能测量前仍须核查其他用户的设备活动。
 
 三类复用分别管理：
 
 - 构建产物默认在 `build/mla-validation-artifacts/`，可用 `--artifacts` 指定。源码、编译设置、工具链、生成依赖和库内容都一致才复用；首次运行或身份失效会强制重建，避免原时间戳检查漏掉保留 mtime 的修改。probe 库共享，各次精度原始数据写入各自 attempt。该缓存是保守的完整构建缓存，不承诺修改任意头文件时只编译最小对象集。
 - PA 的 BSND/TND component、production 和 profile 共用 [独立页映射 reference](../../tests/common/mla_paged_reference.py)。缓存保存 FP64/低精度两套 O/LSE；键含实际 CPU 输入内容、dtype/shape/stride/offset、原始 allocation/used/页表/scale、映射与公式源码和运行栈。NPU 实现及固定源设备对照仍实际运行。损坏缓存重算；`--golden off` 禁用，`--golden refresh` 强制重算，默认 `cache`。强制刷新不可与 `--resume` 同用。每组 `golden.tsv` 与 summary 统计 hit/miss/refresh 和耗时。
+- dense、非分页及 causal 的 `mla_reference_pair` 在独立映射之后复用 [逻辑 reference 缓存](../../tests/common/mla_reference_cache.py)。键含实际逻辑 tensor 的内容/dtype/shape/stride/offset、全部 scale/causal/window/softcap 参数、双数学公式与缓存源码、Python/torch/CPU 及线程设置。同一逻辑输入可跨测试节点复用；每次仍执行原始长度/前缀/used 的独立映射和真实设备/固定源对照，逻辑缓存不证明映射正确或允许继承设备结果。PA 保留外层原始描述缓存，冷算直接执行双数学公式，避免双层保存。命中/关闭/刷新/损坏规则沿用上项；公式或缓存身份首次改变时仍须冷算。
 - 历史测试结果按上述成功证据规则继承。阶段收尾、新行为或需要实测的组使用新输出目录或不加 `--resume`；保留有效构建和数学缓存并不减少测试集合。旧目录的历史性能不得记为本次采样。
 
-公开性能继续使用版本管理的 `python3 -m tests.mla_paged_profile --help` 入口，矩阵、R、预热、采样及独立原生 CANN 包验证保持 7.1 的要求。可设置 `GOLDEN_CACHE_MODE=cache GOLDEN_CACHE_DIR=<artifacts>/golden` 复用昂贵的 CPU 参考预检；每次使用新的输出目录，真正的双方设备调用与同步 E2E 全部重新测量，性能任务不使用测试结果恢复。缓存只支持当前无 mask 的 PA reference；扩展新语义时必须补键与失效检查后再启用。
+公开性能继续使用版本管理的 `python3 -m tests.mla_paged_profile --help` 入口，矩阵、R、预热、采样及独立原生 CANN 包验证保持 7.1 的要求。可设置 `GOLDEN_CACHE_MODE=cache GOLDEN_CACHE_DIR=<artifacts>/golden` 复用昂贵的 CPU 参考预检；每次使用新的输出目录，真正的双方设备调用与同步 E2E 全部重新测量，性能任务不使用测试结果恢复。PA 外层 reference 缓存仍只支持无 mask；逻辑缓存已有 causal/window 参数键不代表 PA 掩码映射已接通，扩展 PA 时仍须补原始语义键与失效检查。
 
 这些证据目录与缓存均不随 Git 分发；迁机需要复制实际引用的产物、证据及 manifest 依赖，或重新构建/验收。仅有 summary 数字不能证明历史测试有效。
 

@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-本页记录实施顺序、每步产物与完成条件。**流程 W01–W05、功能 M00–M07、独立 CPU 步 M08a 及数值组件 M08b1 已完成；唯一下一步是 M08b2。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。已完成步骤放在页末；功能开发按当前下一步执行，不重新启动流程优化任务。
+本页记录实施顺序、每步产物与完成条件。**流程 W01–W05、功能 M00–M07、M08a、M08b1 及用户确认的增量验收提速已完成；唯一下一步是 M08b2。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。功能开发按当前下一步执行，不重新启动流程优化任务。
 
 ## 提交边界
 
@@ -35,6 +35,7 @@ BSND Q-used 明确归入 b2，TND/TND used 归入 c1，混合 Q-used 归入 c2�
 - **实施前补齐：**在本节列出实际修改文件、新增测试文件及统一组/命令，再开始实现。新增 BSND causal 的组必须独立注册，先 dry-run/collect-only 核对集合；现有无 mask `bsnd`/`public` 组不能证明新增 causal 能力。先跑代表用例、最大内存和最长 reference 边界，再冻结实现运行完整必跑组。
 - **必跑检查：**记录协议与调度变化对应的固定源 CPU 差分、边界/溢出及 sanitizer；910B 新入口及受影响共享路径的固定源与双数学对照，精度优先级遵循 design 第 7 节；真实/fake/compile/Trap、相关普通 FA3 回归和逐例性能。首次接通原生 BSND causal 对照时须核对 mask、有效长度、源分派及计时边界，完成适用的公开 R=1/4 E2E，逐例满足约定门槛。
 - **可继承：**依赖未变且原始证据完整的 M08a 调度、b1 mask/任务环与地址/Copy 组件。b1 的组件精度和性能不替代本步 metadata 传参、生产分派、公开调用及 E2E；status 已保留源精度限制和逐例组件耗时差异，不能写成数学或公开不劣化通过。
+- **增量选择：**若数值组件保持不变，复核其闭环证据，把本次实测放在新增 BSND 调用及协议上；不默认重跑 `causal-attention` 和全部 `shared-*`。共享数值路径变化时按布局选择 `regression-*`，并为新增 mask/调度边界补明确用例。公共协议变化仍补受影响旧入口的真实/fake/compile/Trap 等专项，数值快速组不能替代这些检查；完整参数组合留到 M08e 阶段矩阵。
 - **完成条件：**新行为及共享影响的必要检查、适用逐例公开 E2E、文档和质量检查通过后提交一次并停止，下一步为 M08c1。遇到失败先在本步解决，不越过它开放后续布局。
 
 M08b1 已交付独立连续 BSND causal 包装、有效 KV、mask/全遮罩 O/LSE、固定源 probe、双 reference、成本代表及完整共享回归和组件性能。源精度优先比较保留原阈值和全部输入/输出证据；旧 dense 空容量测试已按 M04c4 契约修正，原输入保留。无头循环实现纳入版本管理，阻塞与中断分别处理。实现契约见 [design 6.2.5](design.md#625-独立-bsnd-causal-数值组件)，本次结果与复现命令只在 [status](status.md) 维护。
@@ -79,6 +80,7 @@ M08a 的 CPU 闭环入口仍为 `python3 -m tests.mla_validation --output build/
 | 阶段 | 已交付产物 |
 | --- | --- |
 | W01–W05 | 按影响范围验收；统一测试入口、构建/reference 缓存和证据恢复；产物清理与外部无头脚本接续。流程已完成，不作为后续功能轮次的待办 |
+| 增量验收提速 | dense/非分页/causal 双数学内容缓存、固定 `regression-*` 和 `causal-check`、按组 Python 依赖恢复；原完整组保留，新行为与阶段验收门槛不变。执行结果见 status，不作为后续待办 |
 | M00–M03 | 固定迁移交集和 FA3 契约；独立双 reference、固定源执行器/性能基线；MLA 识别、校验及未实现拦截 |
 | M04a–M04b3 | dense 来源与分层；无 gert CPU 调度；FP16/BF16 Cube、Vector、非分页 Kernel 与 BSND 生产接入 |
 | M05a–M05c2 | v1 生成/设备校验及 release Trap；官方 metadata 签名、普通 FA byte 兼容；公开只读 cache/metadata 复用及 dispatcher 验收 |

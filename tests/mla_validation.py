@@ -23,6 +23,8 @@ import xml.etree.ElementTree as ET
 
 from tests.mla_dense_build import ROOT, sha256
 from tests.mla_validation_build import matching_files
+from tests.mla_validation_dependencies import suite_sources
+from tests.mla_validation_selection import INCREMENTAL_SUITES
 
 
 PUBLIC = "tests/test_flash_attn_npu_v3_mla_paged_tnd_public.py"
@@ -72,9 +74,12 @@ SUITES = {
         "tests/test_mla_validation.py",
         "tests/test_mla_source_compare.py",
         "tests/test_mla_codex_loop.py",
+        "tests/test_mla_reference_cache.py",
+        "tests/test_mla_validation_dependencies.py",
         "tests/test_mla_paged_reference_cache.py",
         "tests/common/test_golden_cache.py",
     ],
+    "reference": ["tests/test_flash_attn_npu_v3_mla_reference.py"],
     "causal-smoke": [
         "tests/test_flash_attn_npu_v3_mla_causal_attention.py",
         "-k",
@@ -113,9 +118,10 @@ SUITES = {
     "causal-cpu": [CAUSAL_CPU],
     "causal-sanitize": [CAUSAL_CPU],
 }
+SUITES.update(INCREMENTAL_SUITES)
 PERFORMANCE_SUITES = {"causal-profile", "shared-profile"}
-CAUSAL_DEVICE_SUITES = {"causal-smoke", "causal-attention", "causal-profile"}
-CPU_SUITES = {"cpu", "tools", "causal-cpu", "causal-sanitize"}
+CAUSAL_DEVICE_SUITES = {"causal-smoke", "causal-attention", "causal-profile", "causal-check"}
+CPU_SUITES = {"cpu", "tools", "reference", "causal-cpu", "causal-sanitize"}
 
 
 def suite_dependencies(suite):
@@ -270,7 +276,7 @@ def environment(args, directory, suite):
     }.items():
         env[variable] = str(directory / child)
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
-    if suite in {"causal-smoke", "causal-attention", "causal-profile"}:
+    if suite in CAUSAL_DEVICE_SUITES:
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {"causal-cpu", "causal-sanitize"}:
         env["MLA_SCHEDULE_ARTIFACT_DIR"] = str(directory / "schedule")
@@ -367,7 +373,7 @@ def run(args):
                     ]
                     if set(args.suite) - CPU_SUITES
                     and not args.collect_only
-                    and args.suite != ["causal-smoke"]
+                    and not set(args.suite) <= {"causal-smoke", "causal-check"}
                     else [],
                     suites={
                         name: pytest_command(
@@ -391,7 +397,7 @@ def run(args):
         # The representative component probe builds itself from source. It
         # does not call the production extension or PA producer. Full device
         # acceptance still prepares production and checks its actual runtime.
-        needs_build = needs_npu and args.suite != ["causal-smoke"]
+        needs_build = needs_npu and not set(args.suite) <= {"causal-smoke", "causal-check"}
         if needs_npu:
             lock_fds += [
                 stack.enter_context(
@@ -493,6 +499,8 @@ def run(args):
             env = environment(args, directory, suite)
             dependencies = suite_dependencies(suite)
             save(directory / "suite-dependencies.json", dependencies)
+            group_sources = suite_sources(ROOT, SUITES[suite], baseline, headless=suite == "tools")
+            save(directory / "sources.json", group_sources)
             # Omit only output locations from the identity. Runtime and all
             # inherited environment values participate without exposing secrets.
             semantic_env = {
@@ -500,7 +508,8 @@ def run(args):
             }
             identity = digest(
                 dict(
-                    sources=baseline,
+                    source_schema=2,
+                    sources=group_sources,
                     packages=packages,
                     runtime=runtime_info if suite not in CPU_SUITES else sys.version,
                     environment=semantic_env,
@@ -565,7 +574,10 @@ def run(args):
                 result.update(status="collected" if cases else "failed", collected=len(cases))
             if result["returncode"] == 130:
                 result["status"] = "interrupted"
-            if sources() != baseline:
+            if (
+                suite_sources(ROOT, SUITES[suite], sources(), headless=suite == "tools")
+                != group_sources
+            ):
                 result.update(status="failed", error="Source changed during validation")
             if suite_dependencies(suite) != dependencies:
                 result.update(

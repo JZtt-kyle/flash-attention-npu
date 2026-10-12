@@ -12,7 +12,7 @@ import sys
 import torch
 
 from tests.common import golden_cache
-from tests.common.mla_ref import mla_reference_pair
+from tests.common.mla_ref import mla_reference_pair_uncached as mla_reference_pair
 
 
 def uncached_references(case):
