@@ -63,7 +63,7 @@ MlaPagedPlanStatus BuildPagedBsndPlan(const MlaBsndTensorView& q, const MlaBsndT
 // used values enter this API. Sample starts remain allocationPrefix[b].
 // Static B/T/C selects one or all C1V2 cores, independently of physical pages
 // or Q-used. All other BSND plan guarantees and caller obligations apply.
-// This standalone plan does not enable TND PA production/public attention.
+// The internal TND PA forward uses this plan; public TND PA remains disabled.
 MlaPagedPlanStatus BuildPagedTndPlan(const MlaTndTensorView& q, const MlaTndTensorView& qv, const MlaBsndTensorView& k,
                                      const MlaBsndTensorView& v, const MlaPageTableView& table, int64_t maxQueryLength,
                                      const MlaPlatformInfo& platform, uint32_t dtype, bool hasUsedQuery,

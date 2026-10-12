@@ -17,4 +17,6 @@ struct MlaPagedLaunchArgs {
 };
 aclError LaunchPagedBsndFp16(const MlaPagedLaunchArgs& args);
 aclError LaunchPagedBsndBf16(const MlaPagedLaunchArgs& args);
+aclError LaunchPagedTndFp16(const MlaPagedLaunchArgs& args);
+aclError LaunchPagedTndBf16(const MlaPagedLaunchArgs& args);
 } // namespace flash_attn::mla

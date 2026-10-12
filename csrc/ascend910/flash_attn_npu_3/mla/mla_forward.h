@@ -20,6 +20,13 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
                                          const std::optional<at::Tensor>& cacheSeqlens,
                                          const std::optional<at::Tensor>& usedQuery,
                                          const std::optional<at::Tensor>& schedulerMetadata);
+// Internal TND PA only. Allocation prefixes determine sample starts even
+// with Q-used; public TND PA entry points remain disabled.
+std::vector<at::Tensor> PagedTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                        const at::Tensor& qv, const at::Tensor& pageTable, const at::Tensor& cuQ,
+                                        int64_t maxQ, float scale, const std::optional<at::Tensor>& cacheSeqlens,
+                                        const std::optional<at::Tensor>& usedQuery,
+                                        const std::optional<at::Tensor>& schedulerMetadata);
 std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
                                    const at::Tensor& cuQ, const at::Tensor& cuK, int64_t maxQ, int64_t maxK,
                                    float scale, const std::optional<at::Tensor>& usedQuery = std::nullopt,

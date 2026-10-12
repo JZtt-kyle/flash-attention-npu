@@ -1,4 +1,4 @@
-"""One real release Trap through the production BSND PA forward per process."""
+"""One real release Trap through a production BSND/TND PA forward per process."""
 
 import hashlib
 import json
@@ -12,12 +12,23 @@ import torch
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla_metadata_error_probe import forbid_host_readback
-from tests.test_flash_attn_npu_v3_mla_paged_bsnd_production import small_inputs, forward, generate
 
 
 def run(kind, fault, directory, entry="internal"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[kind]
+    if entry == "tnd-internal":
+        from tests.test_flash_attn_npu_v3_mla_paged_tnd_production import (
+            small_inputs,
+            forward,
+            generate,
+        )
+    else:
+        from tests.test_flash_attn_npu_v3_mla_paged_bsnd_production import (
+            small_inputs,
+            forward,
+            generate,
+        )
     if entry == "public":
         from tests.test_flash_attn_npu_v3_mla_paged_public import public
 
@@ -42,10 +53,26 @@ def run(kind, fault, directory, entry="internal"):
         args["page_table"][0, 1] = 7 if fault == "page_over" else -1
         if fault == "unused_q_page":
             args["seqused_q"].zero_()
-    elif fault == "stale_k":
+    elif fault in ("stale_k", "stale_prefix"):
         record = generate(args)
         torch.npu.synchronize()
-        args["cache_seqlens"][0] = 17
+        if fault == "stale_k":
+            args["cache_seqlens"][0] = 17
+        else:
+            args["cu_seqlens_q"][1] = 2
+    elif fault.startswith("prefix_") or fault == "zero_k_prefix":
+        prefix = args["cu_seqlens_q"]
+        if fault == "prefix_start":
+            prefix[0] = 1
+        elif fault == "prefix_end":
+            prefix[-1] = 4
+        elif fault == "prefix_descending":
+            prefix[2] = 2
+        elif fault == "prefix_max":
+            prefix[1:3] = 4
+        else:
+            args["cache_seqlens"].zero_()
+            prefix[0] = -1
     elif fault in ("bad_q", "zero_k_bad_q"):
         args["seqused_q"][0] = 4
         if fault == "zero_k_bad_q":
@@ -69,6 +96,8 @@ def run(kind, fault, directory, entry="internal"):
             record[407] = 224
         elif fault == "empty_payload":
             record[385] = 16
+        elif fault == "bsnd_record":
+            record[401] = 0
         else:
             raise ValueError(fault)
     start = time.monotonic()

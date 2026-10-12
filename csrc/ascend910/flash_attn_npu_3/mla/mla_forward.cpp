@@ -168,10 +168,11 @@ MetadataSubmission<MlaTndBsndMetadataArgs> PrepareTndBsndMetadata(uint32_t words
     return PrepareSubmission(metadata, args, lengths, cuQ, true);
 }
 
-MlaBsndTensorView PagedTensorView(const at::Tensor& t)
+template <typename View = MlaBsndTensorView>
+View PagedTensorView(const at::Tensor& t)
 {
-    MlaBsndTensorView view{};
-    for (int64_t i = 0; i < 4; ++i) {
+    View view{};
+    for (int64_t i = 0; i < t.dim(); ++i) {
         view.sizes[i] = t.size(i);
         view.strides[i] = t.stride(i);
     }
@@ -262,21 +263,25 @@ at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_
     return metadata;
 }
 
-std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
-                                         const at::Tensor& qv, const at::Tensor& pageTable, float scale,
-                                         const std::optional<at::Tensor>& cacheSeqlens,
-                                         const std::optional<at::Tensor>& usedQuery,
-                                         const std::optional<at::Tensor>& schedulerMetadata)
+namespace {
+std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                     const at::Tensor& qv, const at::Tensor& pageTable, float scale,
+                                     const std::optional<at::Tensor>& cacheSeqlens,
+                                     const std::optional<at::Tensor>& usedQuery,
+                                     const std::optional<at::Tensor>& schedulerMetadata,
+                                     const std::optional<at::Tensor>& cuQ, int64_t maxQ)
 {
+    const bool tnd = cuQ.has_value();
     TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
                 "MLA: inputs must have FP16 or BF16 dtype");
     TORCH_CHECK(q.device().type() == at::kPrivateUse1, "MLA: inputs must be NPU tensors");
     for (const auto& t : {q, k, v, qv}) {
-        TORCH_CHECK(t.dim() == 4, "MLA: paged forward requires BSND Q and rank-4 KV");
         TORCH_CHECK(t.scalar_type() == q.scalar_type(), "MLA: all inputs must have the same dtype");
         TORCH_CHECK(t.device() == q.device(), "MLA: all inputs must be on the same NPU device");
         TORCH_CHECK(!t.requires_grad(), "MLA compressed forward is not implemented yet for gradients");
     }
+    TORCH_CHECK(q.dim() == (tnd ? 3 : 4) && qv.dim() == q.dim() && k.dim() == 4 && v.dim() == 4,
+                "MLA: paged forward requires matching BSND/TND Q and rank-4 KV");
     TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
     TORCH_CHECK(pageTable.dim() == 2 && pageTable.scalar_type() == at::kInt, "MLA: page_table must be rank-2 int32");
     TORCH_CHECK(pageTable.device() == q.device(), "MLA: page_table must be on the same NPU device");
@@ -287,23 +292,44 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
                                  pageTable.storage_offset(),
                                  pageTable.storage().nbytes()};
     const auto dtype = uint32_t(q.scalar_type() == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16);
-    MlaPagedBsndPlan plan{};
-    const auto status = BuildPagedBsndPlan(PagedTensorView(q), PagedTensorView(qv), PagedTensorView(k),
-                                           PagedTensorView(v), table, DensePlatform(), dtype, bool(usedQuery), plan);
+    const auto platform = DensePlatform();
+    MlaPagedPlan plan{};
+    const auto status = tnd ? BuildPagedTndPlan(PagedTensorView<MlaTndTensorView>(q),
+                                                PagedTensorView<MlaTndTensorView>(qv), PagedTensorView(k),
+                                                PagedTensorView(v), table, maxQ, platform, dtype, bool(usedQuery), plan)
+                            : BuildPagedBsndPlan(PagedTensorView(q), PagedTensorView(qv), PagedTensorView(k),
+                                                 PagedTensorView(v), table, platform, dtype, bool(usedQuery), plan);
     TORCH_CHECK(status == MlaPagedPlanStatus::Success,
                 "MLA: paged shape, stride, storage or platform bounds exceeded (status ", int(status), ")");
+    if (tnd && q.size(0) == 0 && plan.shape.batch != 0 && maxQ != 0 && plan.shape.logicalKvCapacity != 0) {
+        // Public v6 generation only knows B/maxQ/C on the host. Match its
+        // full validation launch even when the actual TND allocation is empty;
+        // keep the plan's zero workspace and validate every current KV page.
+        const auto blocks = platform.blockDims[platform.aicNum - 1];
+        TORCH_CHECK(blocks == platform.aicNum, "MLA: paged C1V2 launch bounds exceeded");
+        plan.context.blockDim = blocks;
+        plan.platform.blockDims.fill(blocks);
+    }
     const auto qr = PagedTensorArray(q, plan.layouts.q.spanElements);
     const auto qc = PagedTensorArray(qv, plan.layouts.qv.spanElements);
     const MlaPagedCacheInputs cache{plan.cache, PagedTensorArray(pageTable, plan.cache.tableSpanElements),
                                     PagedTensorArray(k, plan.cache.k.spanElements),
                                     PagedTensorArray(v, plan.cache.v.spanElements)};
+    const int64_t batch = plan.shape.batch;
+    if (cuQ) {
+        TORCH_CHECK(cuQ->scalar_type() == at::kInt && cuQ->dim() == 1 && cuQ->numel() == batch + 1 &&
+                        cuQ->is_contiguous(),
+                    "MLA: cu_seqlens_q must be contiguous int32[batch_size + 1]");
+        TORCH_CHECK(cuQ->device() == q.device(), "MLA: cu_seqlens_q must be on the same NPU device");
+        PagedTensorArray(*cuQ, cuQ->numel());
+    }
     if (cacheSeqlens) {
-        CheckCacheLengths(*cacheSeqlens, q.size(0), q.device());
+        CheckCacheLengths(*cacheSeqlens, batch, q.device());
         PagedTensorArray(*cacheSeqlens, cacheSeqlens->numel());
     }
     if (usedQuery) {
         // Use v6's word bound from the plan, not the nonpaged v5 bound.
-        TORCH_CHECK(usedQuery->scalar_type() == at::kInt && usedQuery->dim() == 1 && usedQuery->numel() == q.size(0) &&
+        TORCH_CHECK(usedQuery->scalar_type() == at::kInt && usedQuery->dim() == 1 && usedQuery->numel() == batch &&
                         usedQuery->is_contiguous(),
                     "MLA: seqused_q must be contiguous int32[batch_size]");
         TORCH_CHECK(usedQuery->device() == q.device(), "MLA: seqused_q must be on the same NPU device");
@@ -318,12 +344,14 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
         PagedTensorArray(*schedulerMetadata, plan.metadataWords);
     }
 
-    auto out = at::empty({q.size(0), q.size(1), q.size(2), 512}, q.options());
-    auto lse = at::empty({q.size(0), q.size(2), q.size(1)}, q.options().dtype(at::kFloat));
+    auto out = tnd ? at::empty({q.size(0), q.size(1), 512}, q.options())
+                   : at::empty({q.size(0), q.size(1), q.size(2), 512}, q.options());
+    auto lse = tnd ? at::empty({q.size(1), q.size(0)}, q.options().dtype(at::kFloat))
+                   : at::empty({q.size(0), q.size(2), q.size(1)}, q.options().dtype(at::kFloat));
     auto workspace = at::empty({int64_t(plan.totalWorkspaceBytes)}, q.options().dtype(at::kByte));
     // None means logical capacity M*P, independent of physical pool size.
     auto lengths =
-        cacheSeqlens ? *cacheSeqlens : at::full({q.size(0)}, plan.shape.logicalKvCapacity, q.options().dtype(at::kInt));
+        cacheSeqlens ? *cacheSeqlens : at::full({batch}, plan.shape.logicalKvCapacity, q.options().dtype(at::kInt));
     auto metadata =
         schedulerMetadata ? *schedulerMetadata : at::empty({plan.metadataWords}, q.options().dtype(at::kInt));
     for (const auto& t : {out, lse, workspace, metadata}) {
@@ -335,12 +363,18 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
         // that is never read and does not overlap the metadata output extent.
         used.address = reinterpret_cast<uint64_t>(metadata.data_ptr());
     }
-    MlaPagedMetadataArgs args{
-        reinterpret_cast<uint64_t>(metadata.data_ptr()), plan.metadataWords, dtype, plan.shape, plan.platform, {}, used,
-        PagedTensorArray(lengths, lengths.numel())};
+    const auto prefix = cuQ ? PagedTensorArray(*cuQ, cuQ->numel()) : MlaPagedMetadataArray{};
+    MlaPagedMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
+                              plan.metadataWords,
+                              dtype,
+                              plan.shape,
+                              plan.platform,
+                              prefix,
+                              used,
+                              PagedTensorArray(lengths, lengths.numel())};
     std::optional<MetadataSubmission<MlaPagedMetadataArgs>> producer;
     if (!schedulerMetadata) {
-        producer = PrepareSubmission(metadata, args, lengths, std::nullopt, true, usedQuery);
+        producer = PrepareSubmission(metadata, args, lengths, cuQ, true, usedQuery);
     }
     auto stream = c10_npu::getCurrentNPUStream();
     for (const auto& t : {q, k, v, qv, pageTable, lengths, metadata}) {
@@ -350,6 +384,9 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
     }
     if (usedQuery && usedQuery->numel() != 0) {
         c10_npu::NPUCachingAllocator::recordStream(usedQuery->storage().data_ptr(), stream);
+    }
+    if (cuQ) {
+        c10_npu::NPUCachingAllocator::recordStream(cuQ->storage().data_ptr(), stream);
     }
     MlaPagedLaunchArgs a{};
     uint32_t fftsLength = 0;
@@ -369,16 +406,53 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
     a.layouts = plan.layouts;
     a.scale = scale;
     at_npu::native::OpCommand::RunOpApiV2(
-        "ascendc_mla_paged_bsnd",
-        [a, producer, q, k, v, qv, pageTable, lengths, usedQuery, metadata, out, lse, workspace]() mutable -> int {
+        tnd ? "ascendc_mla_paged_tnd" : "ascendc_mla_paged_bsnd",
+        [a, producer, tnd, q, k, v, qv, pageTable, lengths, cuQ, usedQuery, metadata, out, lse,
+         workspace]() mutable -> int {
             if (producer) {
                 producer->Enqueue();
             }
-            const auto error = q.scalar_type() == at::kBFloat16 ? LaunchPagedBsndBf16(a) : LaunchPagedBsndFp16(a);
+            const auto error =
+                tnd ? (q.scalar_type() == at::kBFloat16 ? LaunchPagedTndBf16(a) : LaunchPagedTndFp16(a))
+                    : (q.scalar_type() == at::kBFloat16 ? LaunchPagedBsndBf16(a) : LaunchPagedBsndFp16(a));
             TORCH_CHECK(error == ACL_SUCCESS, "MLA: paged BATCH_MODE kernel launch failed (", error, ")");
             return 0;
         });
     return {out, lse, at::Tensor(), at::Tensor()};
+}
+} // namespace
+
+std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                         const at::Tensor& qv, const at::Tensor& pageTable, float scale,
+                                         const std::optional<at::Tensor>& cacheSeqlens,
+                                         const std::optional<at::Tensor>& usedQuery,
+                                         const std::optional<at::Tensor>& schedulerMetadata)
+{
+    return PagedForward(q, k, v, qv, pageTable, scale, cacheSeqlens, usedQuery, schedulerMetadata, std::nullopt, 0);
+}
+
+std::vector<at::Tensor> PagedTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                        const at::Tensor& qv, const at::Tensor& pageTable, const at::Tensor& cuQ,
+                                        int64_t maxQ, float scale, const std::optional<at::Tensor>& cacheSeqlens,
+                                        const std::optional<at::Tensor>& usedQuery,
+                                        const std::optional<at::Tensor>& schedulerMetadata)
+{
+    return PagedForward(q, k, v, qv, pageTable, scale, cacheSeqlens, usedQuery, schedulerMetadata, cuQ, maxQ);
+}
+
+std::tuple<at::Tensor, at::Tensor>
+PagedTndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
+                  const at::Tensor& pageTable, const at::Tensor& cuQ, int64_t maxQ, std::optional<double> softmaxScale,
+                  const std::optional<at::Tensor>& cacheSeqlens, const std::optional<at::Tensor>& usedQuery,
+                  const std::optional<at::Tensor>& schedulerMetadata)
+{
+    TORCH_CHECK(!softmaxScale ||
+                    (std::isfinite(*softmaxScale) && std::abs(*softmaxScale) <= std::numeric_limits<float>::max()),
+                "MLA: softmax_scale must be finite in FP32");
+    auto result = PagedTndForward(q, k, v, qv, pageTable, cuQ, maxQ,
+                                  softmaxScale ? float(*softmaxScale) : 1.0f / std::sqrt(576.0f), cacheSeqlens,
+                                  usedQuery, schedulerMetadata);
+    return {result[0], result[1]};
 }
 
 std::tuple<at::Tensor, at::Tensor> PagedBsndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -890,6 +964,9 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
     m.def("_mla_paged_bsnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor page_table, "
           "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? seqused_q=None, "
           "Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
+    m.def("_mla_paged_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor page_table, "
+          "Tensor cu_seqlens_q, int max_seqlen_q, float? softmax_scale=None, Tensor? cache_seqlens=None, "
+          "Tensor? seqused_q=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
     m.def("_mla_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
           "int max_seqlen_q, int max_seqlen_k, float? softmax_scale=None, Tensor? seqused_q=None, "
           "Tensor? seqused_k=None) -> (Tensor, Tensor)");
@@ -922,6 +999,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
     m.impl("_mla_tnd_forward", &flash_attn::mla::TndForwardOp);
     m.impl("_mla_tnd_bsnd_forward", &flash_attn::mla::TndBsndForwardOp);
     m.impl("_mla_paged_bsnd_forward", &flash_attn::mla::PagedBsndForwardOp);
+    m.impl("_mla_paged_tnd_forward", &flash_attn::mla::PagedTndForwardOp);
 }
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, AutogradPrivateUse1, m)
@@ -932,4 +1010,5 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, AutogradPrivateUse1, m)
     m.impl("_mla_tnd_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_tnd_bsnd_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_paged_bsnd_forward", torch::CppFunction::makeFallthrough());
+    m.impl("_mla_paged_tnd_forward", torch::CppFunction::makeFallthrough());
 }
