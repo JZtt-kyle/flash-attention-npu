@@ -26,7 +26,10 @@ FUNC_SEGMENTS = {
 
 
 def input_identity(row):
-    return {name: row[name] for name in ("shape", "scale", "lengths", "stride_profile")}
+    keys = ("shape", "scale", "lengths", "stride_profile") + (
+        ("window", "causal") if "window" in row else ()
+    )
+    return {name: row[name] for name in keys}
 
 
 def summarize(reports, cases_per_dtype):
@@ -40,12 +43,16 @@ def summarize(reports, cases_per_dtype):
     segments = defaultdict(list)
     for report in reports:
         if (
-            not report["causal"]
+            not (report["causal"] or report.get("window"))
             or len(report["results"]) != cases_per_dtype
             or (report["warmup"], report["rounds"], report["wall_iterations"]) != (5, 5, 20)
             or report["metadata_lifecycle"]["complete_segments"] != [1, 4]
         ):
             raise ValueError("Incomplete matrix or changed timing protocol")
+        if report.get("window") and any(
+            "window" not in row or "causal" not in row for row in report["results"]
+        ):
+            raise ValueError("Missing window input identity")
         identities.append([input_identity(row) for row in report["results"]])
         for index, row in enumerate(report["results"]):
             applicable = row["native_template"] == 5 and not row["native_fd"]

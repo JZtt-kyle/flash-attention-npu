@@ -1,84 +1,83 @@
 # MLA 当前状态
 
-**M09b1 必要验收已闭环。** 分支 `feat/mla-cann-migration`，接手基线 `e58150c4fdf19cbfbe88dd9e74773915a5bd33fb`。本步交付独立连续 BSND window 数值组件；只提交一次，提交后停止。唯一下一步为 [M09b2：BSND window 完整公开行为](plan.md#唯一下一步-m09b2bsnd-window-完整公开行为)，本次未启动。
+**M09b2 必要验收已闭环。** 分支 `feat/mla-cann-migration`，接手基线 `55db0466645d65db06902c37cf6ee3511a96add4`。本步只完成一个独立可调用行为、提交一次后停止。唯一下一步为 [M09c1：非 PA TND Q/KV window varlen](plan.md#唯一下一步-m09c1非-pa-tnd-qkv-window-varlen)，本次未启动。
 
 ## 当前能力与本步边界
 
-生产能力仍为 512+64、FP16/BF16、Hkv=1、`num_splits=1` 下 BSND、TND varlen、混合 cache、BSND PA、TND PA 的无 mask/右下 causal；v7–v11、只读 cache、metadata 生成/复用和内部 Q-used 边界不变。公开有限/单侧窗口、split-KV 等后续能力继续明确拒绝。
+新增 512+64、FP16/BF16、Hkv=1、`num_splits=1` 下 **非 PA BSND window** 的 func、只读 cache、metadata 生成/复用及内部 Q-used；支持有限/单侧窗口、causal 叠加和四路合法 stride。v12 使用 `413+8B` 字，尾部保存归一化 kind/left/right，调用容量与实际 used 分离；归一化成 causal/无 mask 的非默认窗口仍用 v12，旧版本互斥。内部 Q-used 仍拒绝显式 metadata，公开 cache/生成器不增加 Q-used 参数。
 
-新增 `MlaWindowBsnd` 独立组件与 `MlaWindowKernelParams`；复用 M09a CPU window 分核及现有 Kernel / Block / Tile，在任务环接入非零 S2 起点，在 Vector 接双侧 mask。首块、任务环槽位、softmax/aMLA、空行和排空同步均有设备证据。CPU window/causal 算法、地址/Copy、metadata 协议、公开入口、CATLASS 和 CANN 未改。接口与来源见 [design 6.2.7](design.md#627-独立-bsnd-window-数值组件)，实际影响路径和验收选择见 [plan](plan.md#最近完成-m09b1独立-bsnd-window-数值组件)。
+复用 M09a CPU window 分核与 M09b1 window 任务环、Block/Tile；新增 AICPU、used 消费窗口分支及 Python/C++ real/fake 分派，沿用当前 stream 与 allocator 生命周期。其他布局的 window、split-KV 等未开放能力继续明确拒绝。CPU window/causal 算法、地址/Copy、Block/Tile、CATLASS 和 CANN 未改。契约见 [design 5.14](design.md#514-v12bsnd-window-记录)，实际影响路径和验收选择见 [plan](plan.md#最近完成-m09b2bsnd-window-完整公开行为)。
 
 ## 最近一次闭环证据
 
-证据根 `build/mla-m09b1/`。`acceptance.json` 核验 **17 组、702 次本次 pytest 执行**，有效验收失败/跳过/未运行均为 0；核验 **5565 个原始产物**、固定源码和当前生产构建身份，耗时 6.2 秒。组运行合计 **2688.0 秒**，不含收集、构建/runtime 和被替代的工具开发检查；生产构建 **471.9 秒**、正式加载核验 **20.0 秒**。工具专项与 tools 的重叠按组分别计数。
+证据根 `build/mla-m09b2/`。`acceptance.json` 核验 **23 组、990 次本次 pytest 执行**，有效验收失败/跳过/未运行均为 0；核验 **4707 个原始产物**、885 个冻结源文件及当前构建身份，耗时 33.0 秒。组运行合计 **3422.3 秒**，不含收集、构建/runtime 和被替代的开发检查；工具专项与 tools 的重叠按组计数。
 
 | 必跑组 | 本次通过 | 秒数 |
 | --- | ---: | ---: |
-| `window-check` | 16 | 507.0 |
-| `window-attention` | 66 | 200.0 |
-| `window-profile` | 2 | 134.1 |
-| `regression-dense` | 84 | 314.6 |
-| `regression-nonpaged` | 86 | 734.5 |
-| `regression-paged` | 100 | 38.3 |
-| `causal-check` | 36 | 119.5 |
-| `causal-bsnd-check` | 56 | 107.3 |
-| `causal-tnd-check` | 6 | 99.3 |
-| `causal-mixed-check` | 6 | 99.2 |
-| `causal-paged-check` | 6 | 133.4 |
-| `causal-paged-tnd-check` | 6 | 133.3 |
-| `ordinary` | 100 | 24.0 |
-| `causal-mixed-boundary` | 10 | 21.1 |
-| `window-device-tools` | 20 | 5.0 |
-| `tools` | 100 | 13.4 |
-| `cpu` | 2 | 3.9 |
+| `causal-bsnd-cpu` | 100 | 55.3 |
+| `causal-bsnd-sanitize` | 100 | 166.9 |
+| `causal-mixed-cpu` | 76 | 24.5 |
+| `causal-mixed-sanitize` | 76 | 95.6 |
+| `causal-tnd-cpu` | 41 | 24.0 |
+| `causal-tnd-sanitize` | 41 | 91.7 |
+| `window-bsnd-cpu` | 34 | 27.1 |
+| `window-bsnd-sanitize` | 34 | 90.9 |
+| `cpu` | 2 | 4.2 |
+| `tools` | 100 | 14.2 |
+| `window-bsnd-tools` | 23 | 7.2 |
+| `window-bsnd-check` | 10 | 334.7 |
+| `causal-bsnd-check` | 56 | 107.2 |
+| `causal-mixed-boundary` | 10 | 20.0 |
+| `causal-mixed-check` | 6 | 98.2 |
+| `causal-paged-check` | 6 | 135.2 |
+| `causal-paged-tnd-check` | 6 | 131.3 |
+| `causal-tnd-check` | 6 | 99.2 |
+| `ordinary` | 100 | 23.0 |
+| `regression-nonpaged` | 86 | 729.3 |
+| `window-bsnd-public` | 50 | 115.9 |
+| `window-bsnd-trap` | 26 | 363.0 |
+| `window-bsnd-profile` | 1 | 663.6 |
 
-窗口两组共 **82 个节点、80 个含 dtype 独立输入、84 条数值记录**，stream 节点再次执行代表输入。覆盖有限双侧/单侧无限/causal 叠加、无 mask/causal 归一化特例、调用级上界与 used、Sq<Sk/=/>、非零 S2 起点、M/N/头尾块、零 KV/全遮罩/空容量、scale、任务环复用与 stream。固定源实际传 2048×2048 bool mask、band sparse mode 4 和独立归一化的 pre/next；causal/无 mask 特例分别传 3/0，没有用旧无 mask 组冒充窗口验收。
+窗口 metadata、生产前向和公开 func/cache 的新行为，以及固定非分页、五布局 causal、普通 FA3 与未开放边界，均有本次证据；其余布局的 window 仍拒绝。本步不是 M09 阶段收尾，不把尚未开放的布局纳入已完成范围。
 
-`selection-audit.json` 保存候选、选中、未选中及节点清单。窗口 16+66 互斥且全选；regression-dense/nonpaged 为 84/86 全选，paged 120 中选 100，未选主要为空值组合变体及两个已有跨 dtype 对应的任务环变体。ordinary 816 中固定选 100。工具候选由 M09a 的 217 增至 228，差异为新增窗口注册及既有失败/身份/恢复检查参数化，仍选 100；新增窗口工具专项 20 全选。固定选择策略、旧设备命令与数学阈值不变，未启用 full-matrix。
-
-有效原始记录：
-
-- 窗口代表：`check/attempt-1791916484641757720/summary.json`。
-- 工具与构建 CPU：`tools/attempt-1791916715269854040/summary.json`。
-- 其余正式组及性能：`acceptance/attempt-1791917044266747720/summary.json`。
-- 固定实现身份：`frozen-sources.json`；独立代表的源/库/实际加载核验：`check-audit.json`。代表没有调用生产前向，后续生产重建不使其独立 probe 证据失效。
+有效记录：CPU `cpu/attempt-1791921996635527540/summary.json`；工具 `tools/attempt-1791923566605849980/summary.json`；代表/成本 `check/attempt-1791923659576328130/summary.json`；正式集合 `acceptance/attempt-1791924039360930890/summary.json`；性能 `performance/attempt-1791926039539574900/summary.json`。完整日志为 `acceptance-resume-reference.log` / `performance-run.log`。冻结实现为 `frozen-sources.json`。下列命令供复现；接手时核对依赖与证据，不无条件重跑有效组。
 
 ```bash
-python3 -m tests.mla_validation --output build/mla-m09b1/check --device 6 --suite window-check
-python3 -m tests.mla_validation --output build/mla-m09b1/tools --suite window-device-tools tools cpu --resume
-python3 -m tests.mla_validation --output build/mla-m09b1/acceptance --device 6 --suite window-attention regression-dense regression-nonpaged regression-paged causal-check causal-bsnd-check causal-tnd-check causal-mixed-check causal-paged-check causal-paged-tnd-check ordinary causal-mixed-boundary window-profile --resume
+python3 -m tests.mla_validation --output build/mla-m09b2/cpu --suite window-bsnd-cpu window-bsnd-sanitize causal-bsnd-cpu causal-bsnd-sanitize causal-tnd-cpu causal-tnd-sanitize causal-mixed-cpu causal-mixed-sanitize --resume
+python3 -m tests.mla_validation --output build/mla-m09b2/tools --suite window-bsnd-tools tools cpu --resume
+python3 -m tests.mla_validation --output build/mla-m09b2/check --device 6 --suite window-bsnd-check --resume
+python3 -m tests.mla_validation --output build/mla-m09b2/acceptance --device 6 --suite window-bsnd-public window-bsnd-trap regression-nonpaged causal-bsnd-check causal-tnd-check causal-mixed-check causal-paged-check causal-paged-tnd-check ordinary causal-mixed-boundary --resume
+python3 -m tests.mla_validation --output build/mla-m09b2/performance --device 6 --suite window-bsnd-profile
 ```
 
-各批次先 dry-run/collect 并核对集合；性能组始终重新采样，其他组恢复需核对依赖与原始证据。上述命令用于复现，不需要下一步接手时无条件重跑全部组。
+各批次先 dry-run/collect；`selection-audit.json` 保存候选、选中、未选中及清单路径。代表/成本 10 与公开 50 互斥，总计 46 个数值节点及 14 个 metadata/空值/边界/compile/生命周期节点。ordinary 候选由 816 减至 804：移除已经开放的两个 BSND 窗口拒绝参数（两 dtype×三个入口），窗口正向由本步专项覆盖；仍固定选 100。没有启用 full-matrix。
 
-## 数学精度与组件性能
+## 数学精度与公开性能
 
-窗口 84 条记录的 O/非空 LSE 均与固定 CANN 源逐元素一致；77 个独立输入双数学通过，3 个输入的 O 单列 `source_precision_limit`，LSE 均数学通过。`window-accuracy.json` 保存完整误差及原始 `.pt` 路径，阈值未改变：
+`window-accuracy.json` 核验 **98 条原始数值记录、44 个含有效 Q 的 dtype/输入配置、298 组 O/LSE 比较**，全部逐元素等于固定 CANN 源并通过双数学。另两个配置全部 Q-used=0，没有有效数值行。固定源真实传 band sparse 4、压缩三角 mask 和归一化 pre/next，causal/无 mask 特例为 3/0；没有用旧无 mask 验收替代窗口。公开 func/cache/internal/raw、metadata 复用及四路 stride 均实际执行。
 
-| dtype / 输入 | O 最大误差 | 原数学阈值 |
-| --- | ---: | ---: |
-| FP16，B=2/Sq=129/H=3/Sk=1025、窗口 (513,7)、used=[17,1025]，max-change 幅度 4 | 0.015625 | 0.00390625 |
-| 同上，幅度 8 | 0.015625 | 0.005859375 |
-| BF16，B=41/Sq=7/H=73/Sk=513、窗口 (2,1)、used 循环 [0,1,3,513] 后接 0 | 1.7578125 | 0.09375 |
+继承 M09b1 的三条 O 源精度限制，不能记为数学通过；原误差与输入在 `build/mla-m09b1/source-precision-limits.json`。本次窗口数值组未新增源精度限制；原生性能预检的 24 个配置另有 116 次 O/LSE 数学比较，均通过，原生 FD 的运算次序差异按约定单列。
 
-三例源也同样超限，按经确认的源一致性优先规则验收，不能记为数学通过。causal-check 另当次复现原有两条 FP16 O 源精度限制，源仍逐元素一致；与新增窗口三条分别保存在 `source-precision-limits.json`。
+`public-performance.json` 汇总预定 **12 个输入×双 dtype，共 24 个配置**；真实原生分派全部为 MLA template 5，其中 6 个原生 FD 配置保留计时与数值结果并单列。其余 **18 个适用配置的平均公开 E2E 比为 0.623719 ≤1**，退化配置/分段均为 0。FP16/BF16 各 9 个适用配置，均值分别为 **0.624081 / 0.623358**。每个配置内先对适用的 func/cache、生成/复用/内部生成及 R=1/4 等权平均，再跨配置等权平均；不按耗时筛选输入。
 
-`component-performance.json` 汇总预定 8 个输入 × 双 dtype 的 **16 个配置**；保留逐例/分 dtype、全部 wall 样本、profiler CSV 和原始 source/migration kernel 对应。平均 kernel 比 **0.995162**，其中 6 个配置退化；预分配 probe 调用 wall 平均比 **1.003150**，其中 10 个配置退化。FP16 kernel/wall 均值为 **1.002464/1.003525**，BF16 为 **0.987860/1.002774**。保持 5 次预热、5 轮×20 次 wall 与 5 轮×10 次 profiler、交替顺序及完成同步，不按耗时筛选。
+保持 5 次预热、5 轮×20 次 wall 采样及原 profiler/同步边界；所有单例、分段、wall 样本、profiler CSV、固定源包和实际分派证明均在性能 attempt 的 `public-profile/` 下。`npu-before-profile.log` / `npu-after-profile.log` 及采样内快照确认第 6 卡仅有本次活动；预检结束后才启动绑定单 CPU 的计时子进程。M09b1 不变的数值组件性能单列继承，没有用其 probe wall 代替本步公开 E2E。
 
-这是同调度非 FD 的组件对照，包含 ctypes/发射/同步的 probe wall 略有退化；**不是公开或 metadata E2E，也不声称公开窗口已满足平均性能门槛**。公开窗口及其适用 R=1/4 E2E 由 M09b2 独立验收。采样前/后的设备和进程证据表明第 6 卡只有本次验收活动。
+## 缓存、继承与环境
 
-## 继承、缓存与环境
+数学缓存继续使用 `build/mla-validation-artifacts/golden`，不改公式、阈值或缓存键，不刷新 reference。新公开参考最初串行；排障后改用已有组件的最多四样本并行、保持 intra-op 线程数，并将两个长 KV 配置移到代表/成本组，原总集合不变。成本四例全部通过；冷算最长 149.7 秒，主机峰值约 14.8 GiB、NPU 峰值分配约 303.7 MiB，原始 `public-cost-*.json` 在代表组 probes 下。修正后的代表缓存命中 21、冷算/写入 11，前一轮结果没有重复冷算。有效验收数值记录合计 **328 次命中、101 次冷算/写入**，无缓存错误或刷新；开发失败/被替代组的参考通过命中复用，未重复计入上述有效组执行数。工具的刷新/损坏注入另计。
 
-`baseline-audit.json` / `inheritance.json` 核验 M09a window/causal 普通及 sanitizer **4 组、282 项、430 个原始产物**，单列继承，不计入本次 702。CPU 源/头/驱动、固定 FA3/CANN 与工具链全部匹配；宽快照中的差异仅为设备 `.hpp`、设备 builder 和 runner 注册，它们不属于这四组的 CPU 编译路径。新增 window 设备文件不进入这些 CPU 驱动。地址/Copy 与原数学公式不变；已开放设备路径用上述当次回归验收，没有用旧设备结果填充本次计数。
+`baseline-audit.json`、`inheritance.json` 核验 M09a CPU window/causal 普通与 sanitizer，以及 M09b1 独立 window check/attention/profile，合计 **7 组、366 项、2354 个原始产物**，单列继承。CPU 算法/驱动/工具链、固定 FA3/CANN、独立组件编译依赖与实际加载库均有效；新增 v12/used/stride 及公开入口由本步实测。
 
-数学缓存仍为 `build/mla-validation-artifacts/golden`。数值组 **575 次命中、258 次冷算/写入**，无数值缓存错误或刷新；stream 复用代表 reference，性能不重复计算数学结果。两个新窗口成本边界为 `(1,1,128,16384)` / `(10,3,86,8193)`；双 dtype 单例最长 134.9 秒，主机峰值约 14.3 GiB，NPU 峰值分配约 178.2 MiB。工具组的刷新/损坏注入另计，不当作数值缓存故障。
+旧设备参考 helper 只增加 `<-1` 的归一化分支，调用已与固定 FA3 对照的独立 CPU oracle；`inheritance-helper.json` 确认移除该分支后旧模块 AST 完全相同，旧目录 46 个用例描述全部使用 ≥-1 的窗口。本步 CPU 验收后仅修改 runner 的设备成本过滤和公开用例分组；CPU 命令、源/头/驱动、输入和工具链不变，不因此重跑八个 CPU 组。
 
-Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；第 6 卡 Ascend910B3。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`、CANN 固定源 `ca18aee610729ca5270a44e2d84c751bc687fbf0`。接手分支/工作树/进程与 M09a 一致，无未完成 MLA 验收；外部进程、CANN 其他目录和 CATLASS 保持原状。
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；第 6 卡 Ascend910B3。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`、CANN 固定源 `ca18aee610729ca5270a44e2d84c751bc687fbf0`。接手工作树干净，无遗留 MLA 验收；其他进程、CANN 源仓及 CATLASS 保持原状。
 
-原生产构建的 6324 个依赖和 11 个产物在接手时匹配；共享头修改后强制重建，当前 **6325 个依赖、11 个产物全部匹配**。正式实际加载扩展为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 **`639175c3de536dd84ceb172b6d3eb36a2e1977eb0d2333456e55863452dcfee0`**；完整构建/运行栈/loaded 身份在正式 attempt。初始环境快照在 `environment.json`，不能将其中的旧扩展 SHA 当作当前产物。
+当前生产构建 **6330 个依赖、11 个产物**；实际加载 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `dcb7e46f8d893ee8d50e9dd8d65c6ab607845aaa74e33fa5b0134c9dffe1c151`。重建耗时 571.8 秒（含父进程等待收集核对），正式复用构建约 1.1 秒、加载核验约 21 秒；各 attempt 保存完整构建/runtime/loaded 身份。最初环境快照中的旧扩展不能作为当前产物身份。
 
-## 已解决尝试与收尾
+## 已解决尝试与收尾要求
 
-初次共享回归收集因沙箱无法访问 NPU 而失败，未执行数值；在主机只续收集失败及未收集组后通过。原始记录保留在 `acceptance/attempt-1791916527975538590/`，前后日志为 `acceptance-collect.log` / `acceptance-collect-host.log`。工具开发结果在格式/探针空容量边界修正后被最终工具组替代；正式数值实现自代表开始未变，无数值失败或中断，不重跑有效组。
+初次 sanitizer 在沙箱退出阶段因 ptrace/LeakSanitizer 限制失败，主机续跑后通过；开发期间源码变化导致的结果失效均被最终组替代。第一次扩展虽链接成功，但导入发现 `WindowMetadataWords` 仅有 AICPU 定义；改为头文件 inline 并重建后完成实际加载和实机核验，原始失败日志保留。
 
-shell 使用 `login=false`，实机与隔离检查使用主机可见性；pre-commit 使用已有 `PYTHONPATH=/tmp/mla-m01-precommit` 安装。按本步契约核对相关文档、链接/锚点和表格；差异及质量记录为 `doc-links.json`、`quality-development.log` / `quality-staged.log`。只暂存本步 18 个文件，`git diff --check` 与 `ci/code_quality.sh --staged` 均通过，不绕过提交钩子；一次提交后停止。
+窗口正式组首次在 `(-2,-2)` 的参考构造处失败：旧数学适配器只接受 ≥-1，未执行该用例的生产前向。保留该轮 18 个通过、1 个失败节点的原始记录，修正参考归一化及串行成本后重跑受影响组，已全部通过；旧记录不重复计入有效验收，reference 通过内容缓存复用。静态边界测试的参数覆盖合并也已修正，output-only 返回路径补入同组。生产实现自成功重建后未再改变。
+
+本步相关契约、三份文档、链接/锚点和表格已经核对；链接与质量记录为 `doc-links.json`、`quality-staged.log`。只暂存本步 34 个文件，以 `git diff --check` 与 `ci/code_quality.sh --staged` 为提交门槛，不绕过提交钩子；一次提交后立即停止。使用 `login=false`；实机与 sanitizer 需主机可见性，pre-commit 复用 `PYTHONPATH=/tmp/mla-m01-precommit`。未完成必要验证不得提交为闭环。

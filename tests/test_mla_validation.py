@@ -146,6 +146,9 @@ def test_lock_blocks_a_second_process(tmp_path):
     [
         "tools",
         "window-device-tools",
+        "window-bsnd-tools",
+        "window-bsnd-cpu",
+        "window-bsnd-sanitize",
         "window-cpu",
         "window-sanitize",
         "causal-cpu",
@@ -277,7 +280,10 @@ def test_causal_selection_and_isolated_cpu_environment(
     assert env["MLA_SCHEDULE_ARTIFACT_DIR"] == str(tmp_path / "schedule")
 
 
-@pytest.mark.parametrize("suite", ["causal-cpu", "window-cpu", "window-sanitize"])
+@pytest.mark.parametrize(
+    "suite",
+    ["causal-cpu", "window-cpu", "window-sanitize", "window-bsnd-cpu", "window-bsnd-sanitize"],
+)
 def test_causal_dependencies_changing_during_execution_fail(tmp_path, monkeypatch, suite):
     config = args(tmp_path)
     config.suite = [suite]
@@ -382,6 +388,8 @@ for line in sys.stdin:
         "window-check",
         "window-attention",
         "window-profile",
+        "window-bsnd-check",
+        "window-bsnd-public",
     ),
 )
 def test_causal_device_groups_use_new_probe_and_device_identity(tmp_path, capsys, suite):
@@ -513,7 +521,9 @@ def test_causal_probe_identity_change_is_not_accepted(tmp_path, fault, kind):
         runner.validate_causal_builds(tmp_path, kind=kind)
 
 
-@pytest.mark.parametrize("suite", ("causal-profile", "shared-profile", "window-profile"))
+@pytest.mark.parametrize(
+    "suite", ("causal-profile", "shared-profile", "window-profile", "window-bsnd-profile")
+)
 def test_performance_always_executes_on_resume(tmp_path, monkeypatch, suite):
     config = args(tmp_path)
     config.suite = [suite]

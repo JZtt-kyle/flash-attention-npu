@@ -434,7 +434,7 @@ def test_empty(dtype, batch, sq, sk, used):
         "length-shape",
         "length-stride",
         "scale",
-        "window",
+        "split",
     ],
 )
 def test_static_rejections(dtype, fake, fault):
@@ -454,8 +454,8 @@ def test_static_rejections(dtype, fake, fault):
                     seqused_q=lengths,
                     scheduler_metadata=generate(device, lengths),
                 )
-            elif fault == "window":
-                api.flash_attn_func(**device, causal=True, window_size=(0, 0))
+            elif fault == "split":
+                api.flash_attn_func(**device, causal=True, num_splits=2)
             elif fault == "scale":
                 cached(device, lengths, scale=float("inf"))
             else:

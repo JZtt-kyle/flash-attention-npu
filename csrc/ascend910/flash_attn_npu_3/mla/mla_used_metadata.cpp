@@ -16,15 +16,17 @@ bool UsedMetadataWords(int64_t batch, uint32_t& words)
 
 bool BuildUsedMetadataWithSchedule(const MlaUsedShape& inputShape, const MlaPlatformInfo& inputPlatform, uint32_t dtype,
                                    uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
-                                   MlaUsedScheduleBuilder builder, const void* context, bool queryTotalFromPrefix)
+                                   MlaUsedScheduleBuilder builder, const void* context, bool queryTotalFromPrefix,
+                                   uint32_t trailingWords)
 {
     auto shape = inputShape;
     auto platform = inputPlatform;
     uint32_t expectedWords;
     const uintptr_t outAddress = reinterpret_cast<uintptr_t>(output);
     constexpr auto maxAddress = std::numeric_limits<uintptr_t>::max();
-    if (!UsedMetadataWords(shape.batch, expectedWords) || outputWords != expectedWords || output == nullptr ||
-        outAddress % alignof(int32_t) != 0 || outputWords > (maxAddress - outAddress) / sizeof(int32_t)) {
+    if (!UsedMetadataWords(shape.batch, expectedWords) || trailingWords > UINT32_MAX - expectedWords ||
+        outputWords != expectedWords + trailingWords || output == nullptr || outAddress % alignof(int32_t) != 0 ||
+        outputWords > (maxAddress - outAddress) / sizeof(int32_t)) {
         return false;
     }
     const size_t outputBytes = size_t(outputWords) * sizeof(int32_t);

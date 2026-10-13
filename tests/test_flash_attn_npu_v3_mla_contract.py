@@ -230,13 +230,13 @@ def test_public_rejects_before_metadata_or_dispatch(
 
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
-@pytest.mark.parametrize("option", ["split", "mask", "softcap", "schedule", "append", "grad"])
+@pytest.mark.parametrize("option", ["split", "chunk", "softcap", "schedule", "append", "grad"])
 def test_mla_options_cannot_fall_through(entry, representation, option, dtype):
     args = _inputs(representation, dtype=dtype)
     if option == "split":
         args["num_splits"] = 256
-    elif option == "mask":
-        args.update(causal=True, window_size_left=2, window_size_right=0)
+    elif option == "chunk":
+        args.update(causal=True, attention_chunk=1)
     elif option == "softcap":
         args["softcap"] = 15.0
     elif option == "schedule":
@@ -320,8 +320,6 @@ def test_mla_metadata_rejected(entry, dims, dtype, has_softcap):
         "k_descale",
         "v_descale",
         "rotary_interleaved",
-        "window_size_left",
-        "window_size_right",
         "attention_chunk",
         "softcap",
         "num_splits",
@@ -337,7 +335,7 @@ def test_each_unsupported_dense_option(entry, option, dtype):
         args[option] = False
     elif option == "causal":
         args[option] = True
-    elif option in ("window_size_left", "window_size_right", "num_splits"):
+    elif option == "num_splits":
         args[option] = 0
     elif option in ("attention_chunk", "softcap", "sm_margin"):
         args[option] = 1

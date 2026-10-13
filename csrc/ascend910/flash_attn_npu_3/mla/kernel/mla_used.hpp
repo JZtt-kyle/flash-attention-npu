@@ -6,14 +6,15 @@
 #include "../mla_used_metadata_consumer.h"
 
 namespace flash_attn::mla::Kernel {
-template <typename InputT, bool IsTnd, bool HasStrides = false, bool IsCausal = false>
-class MlaUsed : private MlaTaskRing<InputT, true, IsTnd, false, true, HasStrides, false, IsCausal> {
+template <typename InputT, bool IsTnd, bool HasStrides = false, bool IsCausal = false, bool IsWindow = false>
+class MlaUsed : private MlaTaskRing<InputT, true, IsTnd, false, true, HasStrides, false, IsCausal, IsWindow> {
   public:
     // Validate v5 and all four current arrays on every core before TPipe,
     // synchronization or writes. IsTnd must match the validated Q layout.
     __aicore__ inline void operator()(const MlaUsedKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
                                       GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
-                                      TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts* layouts = nullptr)
+                                      TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts* layouts = nullptr,
+                                      MlaWindowKernelParams window = {})
     {
         const uint64_t totalQuery = UsedMetadataTotal(schedule.query);
         if (totalQuery == 0) {
@@ -43,7 +44,8 @@ class MlaUsed : private MlaTaskRing<InputT, true, IsTnd, false, true, HasStrides
             return;
         }
         this->Run(schedule.tiling, scale, qc, qr, kv, kr, output, lse, workspace, pipe, spans,
-                  IsTnd ? uint32_t(totalQuery) : 0, layouts, schedule.kv.layout == uint32_t(MlaSequenceLayout::Tnd));
+                  IsTnd ? uint32_t(totalQuery) : 0, layouts, schedule.kv.layout == uint32_t(MlaSequenceLayout::Tnd),
+                  nullptr, nullptr, window);
     }
 };
 } // namespace flash_attn::mla::Kernel

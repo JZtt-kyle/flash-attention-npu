@@ -4,11 +4,20 @@
 namespace flash_attn::mla {
 // v7 BSND causal, including internal Q-used. Explicit reuse is read-only cache
 // only; Q-used with an explicit record remains unsupported.
+std::vector<at::Tensor> WindowBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                          const at::Tensor& qv, float scale, int64_t windowLeft, int64_t windowRight,
+                                          bool causal, const std::optional<at::Tensor>& cacheSeqlens,
+                                          const std::optional<at::Tensor>& usedQuery,
+                                          const std::optional<at::Tensor>& schedulerMetadata);
+
 std::vector<at::Tensor> CausalBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                           const at::Tensor& qv, float scale,
                                           const std::optional<at::Tensor>& cacheSeqlens,
                                           const std::optional<at::Tensor>& usedQuery,
                                           const std::optional<at::Tensor>& schedulerMetadata);
+at::Tensor WindowBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, at::ScalarType dtype,
+                                const at::Tensor& cacheSeqlens, int64_t windowLeft, int64_t windowRight, bool causal);
+
 at::Tensor CausalBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, at::ScalarType dtype,
                                 const at::Tensor& cacheSeqlens);
 std::vector<at::Tensor> CausalMixedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,

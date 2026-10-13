@@ -14,6 +14,7 @@
 #pragma once
 #include "mla_used_metadata.h"
 #include "mla_causal_metadata.h"
+#include "mla_window_metadata.h"
 #include "mla_used_metadata_args.h"
 #include "mla_metadata_consumer.h"
 
@@ -78,14 +79,17 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadataAxis(const Reader& read, c
 // Readers return uint32 bits, so negative int32 lengths exceed their validated
 // nonnegative capacity before subtraction or indexing. Check every descriptor
 // before reading any length, and never write output until all checks succeed.
-template <bool IsCausal = false, bool IsTndCausal = false, bool IsMixedCausal = false, typename Reader, typename Arrays>
+template <bool IsCausal = false, bool IsTndCausal = false, bool IsMixedCausal = false, bool IsWindow = false,
+          typename Reader, typename Arrays>
 MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint32_t words,
                                                        const MlaUsedMetadataContext& c,
                                                        const MlaUsedMetadataInputs& inputs, const Arrays& arrays,
-                                                       MlaUsedKernelSchedule& output)
+                                                       MlaUsedKernelSchedule& output, MlaWindowKernelParams window = {})
 {
     using Status = MlaMetadataReadStatus;
-    if (c.batch > (UINT32_MAX - kMlaUsedMetadataPrefixWords) / kMlaUsedMetadataSequenceWords) {
+    constexpr uint32_t tail = IsWindow ? kMlaWindowMetadataTailWords : 0;
+    static_assert(!IsWindow || (!IsCausal && !IsTndCausal && !IsMixedCausal));
+    if (c.batch > (UINT32_MAX - kMlaUsedMetadataPrefixWords - tail) / kMlaUsedMetadataSequenceWords) {
         return Status::InvalidBuffer;
     }
     static_assert(!IsTndCausal || IsCausal);
@@ -97,15 +101,31 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
     constexpr auto causalKind = IsMixedCausal ? kMlaMetadataCausalMixed
                                 : IsTndCausal ? kMlaMetadataCausalTnd
                                               : kMlaMetadataCausalBsnd;
-    auto status = ReadMetadataHeader(read, words, kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * c.batch,
-                                     IsCausal ? causalVersion : kMlaUsedMetadataVersion,
-                                     IsCausal ? causalKind : kMlaMetadataUsed, c.dtype);
+    auto status =
+        ReadMetadataHeader(read, words, kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * c.batch + tail,
+                           IsWindow   ? kMlaWindowBsndMetadataVersion
+                           : IsCausal ? causalVersion
+                                      : kMlaUsedMetadataVersion,
+                           IsWindow   ? kMlaMetadataWindowBsnd
+                           : IsCausal ? causalKind
+                                      : kMlaMetadataUsed,
+                           c.dtype);
     if (status != Status::Success) {
         return status;
     }
+    if constexpr (IsWindow) {
+        // Match the invocation's host-normalized identity before any geometry,
+        // empty shortcut, synchronization or write. Old records never reach here.
+        if (window.kind > 2 || window.left < -1 || window.right < -1 || window.left > int64_t(c.kv.maxLength) - 1 ||
+            window.right > (c.query.maxLength == 0 ? 0 : int64_t(c.query.maxLength) - 1) ||
+            read(words - 3) != window.kind || int64_t(int32_t(read(words - 2))) != window.left ||
+            int64_t(int32_t(read(words - 1))) != window.right) {
+            return Status::ShapeMismatch;
+        }
+    }
 #define MLA_USED_WORD(field) read(offsetof(MlaUsedMetadataPrefix, field) / sizeof(uint32_t))
     const uint64_t totalQ = UsedMetadataTotal(c.query);
-    if (IsCausal &&
+    if ((IsCausal || IsWindow) &&
         (c.query.layout != uint32_t(IsTndCausal || IsMixedCausal) || c.kv.layout != uint32_t(IsTndCausal))) {
         return Status::ShapeMismatch;
     }
@@ -183,7 +203,7 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
     // Non-FD generators zero inactive bookkeeping and unused endpoint slots.
     constexpr uint32_t fdBegin = offsetof(MlaUsedMetadataPrefix, schedule.bN2IdxOfFdHead) / sizeof(uint32_t);
     constexpr uint32_t fdEnd = offsetof(MlaUsedMetadataPrefix, schedule.workspace) / sizeof(uint32_t);
-    if constexpr (IsCausal) {
+    if constexpr (IsCausal || IsWindow) {
         // All words lie in the validated fixed prefix. Independent loads avoid
         // a scalar branch after every GM read while retaining every zero check.
         uint32_t bits0 = 0, bits1 = 0, bits2 = 0, bits3 = 0;
@@ -248,7 +268,7 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
         s.s2End[i] = n;
     }
     // Causal schedules own every M block, including the zero-cost suffix.
-    if (IsCausal && (previousBatch != c.batch || previousM != 0)) {
+    if ((IsCausal || IsWindow) && (previousBatch != c.batch || previousM != 0)) {
         return Status::InvalidEndpoints;
     }
     // Check the whole omitted suffix, including a partially omitted sample.

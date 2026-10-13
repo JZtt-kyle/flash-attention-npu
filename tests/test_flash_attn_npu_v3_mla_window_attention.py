@@ -37,6 +37,13 @@ class WindowParams(ct.Structure):
 def normalized_window(spec):
     _, sq, _, sk = spec["shape"]
     max_q, max_k = spec.get("max_q", sq), spec.get("max_k", sk)
+    if min(spec["window"]) < -1:
+        # This CPU oracle is already checked against both pinned FA3 host
+        # normalizers. Preserve the distinction between -1 and other negative
+        # bounds in the single-query causal optimization.
+        from tests.test_flash_attn_npu_v3_mla_window_schedule import normalized
+
+        return WindowParams(*normalized((max_q, max_k, *spec["window"], spec.get("causal", False))))
     left, right = normalize_fa3_window(
         max_q, max_k, causal=spec.get("causal", False), window_size=spec["window"]
     )

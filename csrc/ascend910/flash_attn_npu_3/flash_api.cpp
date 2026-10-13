@@ -185,11 +185,17 @@ std::vector<at::Tensor> mha_fwd(
                         !rotary_sin_ && !seqlens_rotary_ && !q_descale_ && !k_descale_ && !v_descale_ &&
                         is_rotary_interleaved,
                     "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
-        TORCH_CHECK(window_size_left == -1 && window_size_right == -1 && attention_chunk == 0 && softcap == 0.0f &&
-                        num_splits == 1 && !pack_gqa_.has_value() && sm_margin == 0,
+        TORCH_CHECK(attention_chunk == 0 && softcap == 0.0f && num_splits == 1 && !pack_gqa_.has_value() &&
+                        sm_margin == 0,
                     "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
+        if (window_size_left != -1 || window_size_right != -1) {
+            TORCH_CHECK(!page_table_ && !cu_seqlens_q_ && !cu_seqlens_k_,
+                        "MLA window forward is not implemented yet outside nonpaged BSND");
+            return flash_attn::mla::WindowBsndForward(q, k, v, *q_v_, scale, window_size_left, window_size_right,
+                                                      is_causal, seqused_k_, seqused_q_, scheduler_metadata_);
+        }
         if (is_causal) {
             if (page_table_) {
                 if (cu_seqlens_q_) {
@@ -781,11 +787,17 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
     if (flash_attn::mla::CheckMetadataBoundary(headdim, headdim_v)) {
         TORCH_CHECK(num_heads_kv == 1, "MLA scheduler metadata is not implemented yet outside the dense shape bounds");
         TORCH_CHECK(!cu_seqlens_k && !cu_seqlens_k_new && !seqused_q && !cache_leftpad && max_seqlen_k_new == 0 &&
-                        window_size_left == -1 && window_size_right == -1 && attention_chunk == 0 && !has_softcap &&
-                        num_splits == 1 && !pack_gqa.has_value() && sm_margin == 0 && !softcap_ && !softmax_scale,
+                        attention_chunk == 0 && !has_softcap && num_splits == 1 && !pack_gqa.has_value() &&
+                        sm_margin == 0 && !softcap_ && !softmax_scale,
                     "MLA scheduler metadata is not implemented yet for these length, mask, split, scheduling or "
                     "legacy numerical options");
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
+        if (window_size_left != -1 || window_size_right != -1) {
+            TORCH_CHECK(!page_size && !cu_seqlens_q,
+                        "MLA window metadata is not implemented yet outside nonpaged BSND");
+            return flash_attn::mla::WindowBsndMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, dtype,
+                                                         cache_seqlens, window_size_left, window_size_right, causal);
+        }
         if (causal) {
             if (page_size) {
                 return flash_attn::mla::PagedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, *page_size,

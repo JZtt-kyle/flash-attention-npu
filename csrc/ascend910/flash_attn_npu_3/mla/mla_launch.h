@@ -6,6 +6,7 @@
 #include "mla_tnd_metadata.h"
 #include "mla_tnd_bsnd_metadata.h"
 #include "mla_used_metadata.h"
+#include "mla_window_params.h"
 #include "mla_bsnd_layout.h"
 
 namespace flash_attn::mla {
@@ -57,6 +58,8 @@ struct MlaUsedLaunchArgs {
     MlaBsndInputLayouts layouts{};
     bool hasStrides = false;
     bool causal = false;
+    bool isWindow = false;
+    MlaWindowKernelParams window{};
 };
 aclError LaunchBsndUsedFp16(const MlaUsedLaunchArgs& args);
 aclError LaunchBsndUsedBf16(const MlaUsedLaunchArgs& args);

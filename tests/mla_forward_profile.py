@@ -95,7 +95,22 @@ def profile(
     stride_profiles=None,
     dispatch_only=False,
     causal=False,
+    window_specs=None,
 ):
+    masked = causal or window_specs is not None
+    if window_specs is not None:
+        assert len(window_specs) == len(cases)
+
+    def mask_options(index):
+        return (
+            dict(causal=causal)
+            if window_specs is None
+            else dict(
+                causal=window_specs[index].get("causal", False),
+                window_size=window_specs[index]["window"],
+            )
+        )
+
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     timed_cpu_threads = torch.get_num_threads()
     reference_cpu_threads = int(os.environ.get("MLA_FORWARD_REFERENCE_THREADS", timed_cpu_threads))
@@ -126,7 +141,7 @@ def profile(
             qkv_dtype=dtype,
             headdim_v=512,
             num_splits=1,
-            causal=causal,
+            **mask_options(index),
         )
 
     def cached(index, record):
@@ -140,7 +155,7 @@ def profile(
             scheduler_metadata=record,
             softmax_scale=cases[index][1],
             num_splits=1,
-            causal=causal,
+            **mask_options(index),
             return_softmax_lse=True,
         )
 
@@ -163,7 +178,18 @@ def profile(
                     overlap=profile_name in ("broadcast", "overlap"),
                 )
         inputs.append(device)
-        native.append(CannCall(device, scale=scale, kv_lengths=kv_lengths[index], causal=causal))
+        if window_specs is None:
+            native.append(
+                CannCall(device, scale=scale, kv_lengths=kv_lengths[index], causal=causal)
+            )
+        else:
+            from tests.mla_window_public_profile import WindowCannCall
+
+            native.append(
+                WindowCannCall(
+                    device, scale=scale, kv_lengths=kv_lengths[index], spec=window_specs[index]
+                )
+            )
         if metadata_reuse:
             lengths.append(
                 torch.tensor(
@@ -176,7 +202,11 @@ def profile(
             actual = cached(len(inputs) - 1, metadata[-1])
         else:
             actual = api.flash_attn_func(
-                **device, softmax_scale=scale, num_splits=1, return_attn_probs=True, causal=causal
+                **device,
+                softmax_scale=scale,
+                num_splits=1,
+                return_attn_probs=True,
+                **mask_options(index),
             )
         if dispatch_only:
             torch.npu.synchronize()
@@ -185,7 +215,16 @@ def profile(
         if dispatch_only:
             torch.npu.synchronize()
             print(f"MLA_STRIDE_NATIVE_END {dtype_name} {index}", flush=True)
-        if causal:
+        if window_specs is not None:
+            from tests.mla_window_public_profile import check_window_accuracy
+
+            accuracy.append(
+                check_window_accuracy(
+                    actual, source, cpu, shape, scale, kv_lengths[index], window_specs[index]
+                )
+            )
+            continue
+        if masked:
             accuracy.append(
                 check_causal_accuracy(actual, source, cpu, shape, scale, kv_lengths[index])
             )
@@ -255,7 +294,7 @@ def profile(
         return
 
     dispatch = None
-    if causal:
+    if masked:
         from tests.mla_native_dispatch import sha256
 
         dispatch = json.loads(Path(os.environ["MLA_FORWARD_NATIVE_DISPATCH"]).read_text())
@@ -282,7 +321,7 @@ def profile(
                     softmax_scale=cases[index][1],
                     num_splits=1,
                     return_attn_probs=True,
-                    causal=True,
+                    **mask_options(index),
                 )
                 for _ in range(4 if name == "func_4" else 1)
             ]
@@ -306,7 +345,7 @@ def profile(
             softmax_scale=cases[index][1],
             num_splits=1,
             return_attn_probs=True,
-            causal=causal,
+            **mask_options(index),
         )
 
     names = ("fa3", "native_cann")
@@ -315,18 +354,18 @@ def profile(
         if metadata_reuse
         else names
     )
-    if causal and metadata_reuse:
+    if masked and metadata_reuse:
         wall_names += ("reuse_4", "implicit_4")
 
     def case_modes(index):
         return (
-            wall_names + ("func", "func_4") if causal and kv_lengths[index] is None else wall_names
+            wall_names + ("func", "func_4") if masked and kv_lengths[index] is None else wall_names
         )
 
     # Causal references use the existing bounded sample pool before this point.
     # Pin only the timed section; parent orchestration preserves all CPU cores
     # for untimed reference generation and cache verification.
-    if causal:
+    if masked:
         os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
     snapshot("npu-before.log")
     assert torch.get_num_threads() == timed_cpu_threads
@@ -404,6 +443,7 @@ def profile(
                 "ComputeMlaDenseMetadata",
                 "ComputeMlaBsndKvLengthMetadata",
                 "ComputeMlaCausalBsndMetadata",
+                "ComputeMlaWindowBsndMetadata",
             )
         )
 
@@ -430,7 +470,7 @@ def profile(
     conversion_index = 0
     for row, label in zip(rows, labels):
         expected_name = (
-            f"mla_{'bsnd_used' if causal else 'dense'}_{dtype_name}"
+            f"mla_{'bsnd_used' if masked else 'dense'}_{dtype_name}"
             if label["name"] == "fa3"
             else "FusedInferAttentionScore"
         )
@@ -483,6 +523,11 @@ def profile(
             native_call=native[index].description(),
             stride_profile=None if stride_profiles is None else stride_profiles[index],
         )
+        if window_specs is not None:
+            item.update(
+                window=window_specs[index]["window"],
+                causal=window_specs[index].get("causal", False),
+            )
         for name in case_modes(index):
             kernels = [x for x in labels if x["case"] == index and x["name"] == name]
             walls = [x for x in wall if x["case"] == index and x["name"] == name]
@@ -512,7 +557,7 @@ def profile(
             item["generate_4_ratio"] = (
                 item["generate_4"]["median_e2e_us"] / item["native_cann_4"]["median_e2e_us"]
             )
-        if causal:
+        if masked:
             item.update(
                 {
                     name: dispatch["cases"][index][name]
@@ -546,6 +591,7 @@ def profile(
     report = dict(
         dtype=dtype_name,
         causal=causal,
+        window=window_specs is not None,
         stride_boundary=(
             None
             if stride_profiles is None
@@ -615,6 +661,14 @@ if __name__ == "__main__":
         cases = [(s["shape"], s.get("scale")) for s in specs]
         lengths = [s.get("lengths") for s in specs]
         strides = [s.get("stride", "contiguous") for s in specs]
+    window_specs = None
+    if os.environ.get("MLA_FORWARD_WINDOW") == "1":
+        from tests.mla_window_public_cases import PERFORMANCE_CASES
+
+        window_specs = PERFORMANCE_CASES
+        cases = [(s["shape"], s.get("scale")) for s in window_specs]
+        lengths = [s.get("lengths") for s in window_specs]
+        strides = [s.get("stride", "contiguous") for s in window_specs]
     profile(
         os.environ["MLA_FORWARD_ARTIFACT_DIR"],
         os.environ["MLA_CANN_VENDOR"],
@@ -625,4 +679,5 @@ if __name__ == "__main__":
         strides,
         os.environ.get("MLA_FORWARD_DISPATCH_ONLY") == "1",
         causal=causal,
+        window_specs=window_specs,
     )
