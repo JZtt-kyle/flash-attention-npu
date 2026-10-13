@@ -13,7 +13,7 @@ struct UsedMetadataReaders {
     }
 };
 
-template <typename InputT, bool IsCausal = false, bool IsTndCausal = false>
+template <typename InputT, bool IsCausal = false, bool IsTndCausal = false, bool IsMixedCausal = false>
 __aicore__ inline MlaMetadataReadStatus
 ReadUsedMetadata(GM_ADDR address, uint32_t words, const MlaUsedMetadataContext& context,
                  const MlaUsedMetadataInputs& inputs, MlaUsedKernelSchedule& output)
@@ -41,14 +41,15 @@ ReadUsedMetadata(GM_ADDR address, uint32_t words, const MlaUsedMetadataContext& 
             arrays.data[i].data.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(addresses[i]));
         }
     }
-    return flash_attn::mla::ReadUsedMetadata<IsCausal, IsTndCausal>(read, words, context, inputs, arrays, output);
+    return flash_attn::mla::ReadUsedMetadata<IsCausal, IsTndCausal, IsMixedCausal>(read, words, context, inputs, arrays,
+                                                                                   output);
 }
 
-template <typename InputT, bool IsCausal = false, bool IsTndCausal = false>
+template <typename InputT, bool IsCausal = false, bool IsTndCausal = false, bool IsMixedCausal = false>
 __aicore__ inline bool LoadUsedMetadata(GM_ADDR address, uint32_t words, const MlaUsedMetadataContext& context,
                                         const MlaUsedMetadataInputs& inputs, MlaUsedKernelSchedule& output)
 {
-    if (ReadUsedMetadata<InputT, IsCausal, IsTndCausal>(address, words, context, inputs, output) !=
+    if (ReadUsedMetadata<InputT, IsCausal, IsTndCausal, IsMixedCausal>(address, words, context, inputs, output) !=
         MlaMetadataReadStatus::Success) {
         AscendC::Trap();
         return false;

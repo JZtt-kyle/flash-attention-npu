@@ -43,6 +43,31 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "causal-mixed-boundary": [
+        "tests/test_flash_attn_npu_v3_mla_causal_public.py",
+        "tests/test_flash_attn_npu_v3_mla_mixed_used.py",
+        "-k",
+        "(static_rejections and paged) or (unconnected_combinations and window)",
+    ],
+    "causal-mixed-tools": ["tests/test_mla_validation_policy.py", "-k", "mixed_average"],
+    "causal-mixed-cpu": ["tests/test_flash_attn_npu_v3_mla_causal_mixed_metadata.py"],
+    "causal-mixed-sanitize": ["tests/test_flash_attn_npu_v3_mla_causal_mixed_metadata.py"],
+    "causal-mixed-check": [
+        "tests/test_flash_attn_npu_v3_mla_causal_mixed_public.py",
+        "-k",
+        "representative",
+    ],
+    "causal-mixed-public": [
+        "tests/test_flash_attn_npu_v3_mla_causal_mixed_public.py",
+        "-k",
+        "not representative and not release_trap",
+    ],
+    "causal-mixed-trap": [
+        "tests/test_flash_attn_npu_v3_mla_causal_mixed_public.py",
+        "-k",
+        "release_trap",
+    ],
+    "causal-mixed-profile": ["tests/test_mla_causal_mixed_profile.py"],
     "causal-tnd-cpu": ["tests/test_flash_attn_npu_v3_mla_causal_tnd_metadata.py"],
     "causal-tnd-sanitize": ["tests/test_flash_attn_npu_v3_mla_causal_tnd_metadata.py"],
     "causal-tnd-check": [
@@ -64,7 +89,7 @@ SUITES = {
     "causal-tnd-boundary": [
         "tests/test_flash_attn_npu_v3_mla_causal_public.py",
         "-k",
-        "static_rejections and (mixed or paged)",
+        "static_rejections and paged",
     ],
     "used-shared-cpu": USED_SHARED_CPU,
     "used-shared-sanitize": USED_SHARED_CPU,
@@ -188,6 +213,7 @@ SUITES = {
 SUITES.update(INCREMENTAL_SUITES)
 PERFORMANCE_SUITES = {
     "causal-tnd-profile",
+    "causal-mixed-profile",
     "causal-profile",
     "shared-profile",
     "causal-bsnd-profile",
@@ -195,8 +221,11 @@ PERFORMANCE_SUITES = {
 }
 CAUSAL_DEVICE_SUITES = {
     "causal-tnd-check",
+    "causal-mixed-check",
+    "causal-mixed-public",
     "causal-tnd-public",
     "causal-tnd-profile",
+    "causal-mixed-profile",
     "causal-smoke",
     "causal-attention",
     "causal-profile",
@@ -206,7 +235,10 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "causal-mixed-tools",
     "causal-tnd-cpu",
+    "causal-mixed-cpu",
+    "causal-mixed-sanitize",
     "causal-tnd-sanitize",
     "used-shared-cpu",
     "used-shared-sanitize",
@@ -225,6 +257,8 @@ def suite_dependencies(suite):
         "causal-cpu",
         "causal-sanitize",
         "causal-tnd-cpu",
+        "causal-mixed-cpu",
+        "causal-mixed-sanitize",
         "causal-tnd-sanitize",
         "causal-bsnd-cpu",
         "causal-bsnd-sanitize",
@@ -388,6 +422,8 @@ def environment(args, directory, suite):
         "causal-cpu",
         "causal-sanitize",
         "causal-tnd-cpu",
+        "causal-mixed-cpu",
+        "causal-mixed-sanitize",
         "causal-tnd-sanitize",
         "causal-bsnd-cpu",
         "causal-bsnd-sanitize",

@@ -292,7 +292,6 @@ def test_static_rejections(entry, dtype, fault, match):
     [
         "max_missing",
         "max_k",
-        "causal",
         "window",
         "split0",
         "split2",
@@ -338,7 +337,6 @@ def test_unconnected_options(entry, fault):
             args["k_new"] = args["k"][:, :1]
         else:
             key, value = {
-                "causal": ("causal", True),
                 "softcap": ("softcap", 1.0),
                 "pack": ("pack_gqa", False),
                 "margin": ("sm_margin", 1),

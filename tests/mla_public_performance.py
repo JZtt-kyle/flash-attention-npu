@@ -154,6 +154,53 @@ def summarize_varlen(reports, specs):
     )
 
 
+def summarize_mixed(reports, specs):
+    """Reuse the fixed input/dtype gate with six equally weighted cache segments."""
+    entries = ("implicit", "generate", "reuse")
+    if any(
+        r.get("entries") != list(entries)
+        or r.get("metadata_lifecycle", {}).get("complete_segments") != [1, 4]
+        for r in reports
+    ):
+        raise ValueError("Incomplete mixed metadata lifecycle")
+    per_entry = {}
+    for entry in entries:
+        converted = []
+        for report in reports:
+            rows = []
+            for row in report["results"]:
+                if set(row["entries"]) != set(entries):
+                    raise ValueError("Incomplete mixed entry segments")
+                segments = row["entries"][entry]
+                if set(segments) != {"r1", "r4"}:
+                    raise ValueError("Incomplete mixed R segments")
+                rows.append(dict(row, **segments))
+            converted.append(dict(report, results=rows))
+        per_entry[entry] = summarize_varlen(converted, specs)
+    result = dict(per_entry[entries[0]])
+    cases = []
+    for index, first in enumerate(result["cases"]):
+        ratios = {
+            f"{entry}_r{r}": per_entry[entry]["cases"][index]["ratios"][i]
+            for entry in entries
+            for i, r in enumerate((1, 4))
+        }
+        cases.append(dict(first, ratios=ratios, mean_ratio=statistics.fmean(ratios.values())))
+    mean = statistics.fmean(c["mean_ratio"] for c in cases)
+    result.update(
+        cases=cases,
+        mean_ratio=mean,
+        passed=mean <= 1,
+        weighting="equal input/dtype weight; equal implicit/generate/reuse and R=1/4 weight",
+        regressed_cases=sum(c["mean_ratio"] > 1 for c in cases),
+        regressed_segments=sum(x > 1 for c in cases for x in c["ratios"].values()),
+        segment_means={
+            key: statistics.fmean(c["ratios"][key] for c in cases) for key in cases[0]["ratios"]
+        },
+    )
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("reports", type=Path, nargs=2)

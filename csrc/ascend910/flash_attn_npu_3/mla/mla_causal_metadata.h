@@ -8,6 +8,8 @@ constexpr uint32_t kMlaCausalBsndMetadataVersion = 7;
 constexpr uint32_t kMlaMetadataCausalBsnd = 7;
 constexpr uint32_t kMlaCausalTndMetadataVersion = 8;
 constexpr uint32_t kMlaMetadataCausalTnd = 8;
+constexpr uint32_t kMlaCausalMixedMetadataVersion = 9;
+constexpr uint32_t kMlaMetadataCausalMixed = 9;
 
 // Immutable host-generated candidate for full allocation lengths. The AICPU
 // producer validates current inputs and geometry before using this partition.
@@ -41,4 +43,9 @@ bool BuildCausalBsndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& p
 // rectangular full-length candidate is valid for these device-owned spans.
 bool BuildCausalTndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                             uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs);
+// TND Q + BSND KV. Public metadata derives Q allocation size from its prefix
+// after descriptor validation; forward generation uses the tensor's size.
+bool BuildCausalMixedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                              uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
+                              bool queryTotalFromPrefix = false);
 } // namespace flash_attn::mla

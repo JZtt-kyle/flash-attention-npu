@@ -244,3 +244,54 @@ def test_varlen_average_rejects_incomplete_evidence(fault):
                 row.update(native_fd=True, e2e_applicable=False)
     with pytest.raises(ValueError):
         summarize_varlen(reports, specs)
+
+
+def mixed_reports(ratios=(0.5, 1.2)):
+    import copy
+
+    specs, values = varlen_reports(ratios)
+    for report in values:
+        report.update(
+            entries=["implicit", "generate", "reuse"],
+            metadata_lifecycle=dict(complete_segments=[1, 4]),
+        )
+        for row in report["results"]:
+            row["entries"] = {
+                e: {k: copy.deepcopy(row[k]) for k in ("r1", "r4")} for e in report["entries"]
+            }
+    return specs, values
+
+
+def test_mixed_average_weights_entries_and_keeps_regressions():
+    from tests.mla_public_performance import summarize_mixed
+
+    specs, values = mixed_reports()
+    result = summarize_mixed(values, specs)
+    assert (
+        result["passed"] and result["regressed_cases"] == 2 and result["regressed_segments"] == 12
+    )
+    # A generation segment participates equally even when reuse is fast.
+    values[0]["results"][0]["entries"]["generate"]["r4"].update(fa3=800, ratio=8)
+    assert not summarize_mixed(values, specs)["passed"]
+
+
+@pytest.mark.parametrize("fault", ["entry", "segment", "lifecycle", "ratio", "dispatch", "input"])
+def test_mixed_average_rejects_incomplete_evidence(fault):
+    from tests.mla_public_performance import summarize_mixed
+
+    specs, values = mixed_reports()
+    row = values[0]["results"][0]
+    if fault == "entry":
+        row["entries"].pop("generate")
+    elif fault == "segment":
+        row["entries"]["generate"].pop("r4")
+    elif fault == "lifecycle":
+        values[0]["metadata_lifecycle"]["complete_segments"] = [1]
+    elif fault == "ratio":
+        row["entries"]["reuse"]["r1"]["ratio"] = 2
+    elif fault == "dispatch":
+        row["native_fd"] = True
+    elif fault == "input":
+        row["spec"] = {"q": [1]}
+    with pytest.raises(ValueError):
+        summarize_mixed(values, specs)

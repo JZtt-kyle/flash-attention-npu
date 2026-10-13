@@ -191,8 +191,12 @@ std::vector<at::Tensor> mha_fwd(
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (is_causal) {
-            TORCH_CHECK(!page_table_ && cu_seqlens_q_.has_value() == cu_seqlens_k_.has_value(),
-                        "MLA causal forward is not implemented yet for mixed or paged layouts");
+            TORCH_CHECK(!page_table_, "MLA causal forward is not implemented yet for paged layouts");
+            if (cu_seqlens_q_ && !cu_seqlens_k_) {
+                TORCH_CHECK(max_seqlen_q_, "MLA: mixed TND/BSND requires max_seqlen_q");
+                return flash_attn::mla::CausalMixedForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_, scale,
+                                                           seqused_k_, seqused_q_, scheduler_metadata_);
+            }
             if (cu_seqlens_q_) {
                 TORCH_CHECK(!scheduler_metadata_, "MLA causal TND explicit metadata is not implemented yet");
                 TORCH_CHECK(max_seqlen_q_ && max_seqlen_k_, "MLA: causal TND requires max_seqlen_q/k");
@@ -774,8 +778,11 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                     "legacy numerical options");
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
         if (causal) {
-            TORCH_CHECK(!cu_seqlens_q && !page_size,
-                        "MLA causal metadata is not implemented yet outside nonpaged BSND");
+            TORCH_CHECK(!page_size, "MLA causal metadata is not implemented yet for paged layouts");
+            if (cu_seqlens_q) {
+                return flash_attn::mla::CausalMixedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q,
+                                                              dtype, cache_seqlens, *cu_seqlens_q);
+            }
             return flash_attn::mla::CausalBsndMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, dtype,
                                                          cache_seqlens);
         }

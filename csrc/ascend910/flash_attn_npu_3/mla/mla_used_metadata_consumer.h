@@ -78,7 +78,7 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadataAxis(const Reader& read, c
 // Readers return uint32 bits, so negative int32 lengths exceed their validated
 // nonnegative capacity before subtraction or indexing. Check every descriptor
 // before reading any length, and never write output until all checks succeed.
-template <bool IsCausal = false, bool IsTndCausal = false, typename Reader, typename Arrays>
+template <bool IsCausal = false, bool IsTndCausal = false, bool IsMixedCausal = false, typename Reader, typename Arrays>
 MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint32_t words,
                                                        const MlaUsedMetadataContext& c,
                                                        const MlaUsedMetadataInputs& inputs, const Arrays& arrays,
@@ -89,9 +89,14 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
         return Status::InvalidBuffer;
     }
     static_assert(!IsTndCausal || IsCausal);
+    static_assert(!IsMixedCausal || (IsCausal && !IsTndCausal));
     // The launching kernel fixes its layout and protocol before reading GM.
-    constexpr auto causalVersion = IsTndCausal ? kMlaCausalTndMetadataVersion : kMlaCausalBsndMetadataVersion;
-    constexpr auto causalKind = IsTndCausal ? kMlaMetadataCausalTnd : kMlaMetadataCausalBsnd;
+    constexpr auto causalVersion = IsMixedCausal ? kMlaCausalMixedMetadataVersion
+                                   : IsTndCausal ? kMlaCausalTndMetadataVersion
+                                                 : kMlaCausalBsndMetadataVersion;
+    constexpr auto causalKind = IsMixedCausal ? kMlaMetadataCausalMixed
+                                : IsTndCausal ? kMlaMetadataCausalTnd
+                                              : kMlaMetadataCausalBsnd;
     auto status = ReadMetadataHeader(read, words, kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * c.batch,
                                      IsCausal ? causalVersion : kMlaUsedMetadataVersion,
                                      IsCausal ? causalKind : kMlaMetadataUsed, c.dtype);
@@ -100,7 +105,8 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
     }
 #define MLA_USED_WORD(field) read(offsetof(MlaUsedMetadataPrefix, field) / sizeof(uint32_t))
     const uint64_t totalQ = UsedMetadataTotal(c.query);
-    if (IsCausal && (c.query.layout != uint32_t(IsTndCausal) || c.kv.layout != uint32_t(IsTndCausal))) {
+    if (IsCausal &&
+        (c.query.layout != uint32_t(IsTndCausal || IsMixedCausal) || c.kv.layout != uint32_t(IsTndCausal))) {
         return Status::ShapeMismatch;
     }
     if (c.query.layout > 1 || c.kv.layout > 1 || (c.query.layout == 0 && c.kv.layout != 0) || c.usedFlags > 3 ||

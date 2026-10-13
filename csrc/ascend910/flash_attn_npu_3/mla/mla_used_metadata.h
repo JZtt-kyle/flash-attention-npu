@@ -84,6 +84,7 @@ using MlaUsedScheduleBuilder = MlaScheduleStatus (*)(const MlaUsedShape&, const 
                                                      MlaUsedSchedule&, const void*);
 bool BuildUsedMetadataWithSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                                    uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
-                                   MlaUsedScheduleBuilder builder, const void* context = nullptr);
+                                   MlaUsedScheduleBuilder builder, const void* context = nullptr,
+                                   bool queryTotalFromPrefix = false);
 
 } // namespace flash_attn::mla

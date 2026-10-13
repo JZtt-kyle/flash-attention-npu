@@ -14,10 +14,12 @@ bool UsedMetadataWords(int64_t batch, uint32_t& words)
     return true;
 }
 
-bool BuildUsedMetadataWithSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+bool BuildUsedMetadataWithSchedule(const MlaUsedShape& inputShape, const MlaPlatformInfo& inputPlatform, uint32_t dtype,
                                    uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
-                                   MlaUsedScheduleBuilder builder, const void* context)
+                                   MlaUsedScheduleBuilder builder, const void* context, bool queryTotalFromPrefix)
 {
+    auto shape = inputShape;
+    auto platform = inputPlatform;
     uint32_t expectedWords;
     const uintptr_t outAddress = reinterpret_cast<uintptr_t>(output);
     constexpr auto maxAddress = std::numeric_limits<uintptr_t>::max();
@@ -62,9 +64,19 @@ bool BuildUsedMetadataWithSchedule(const MlaUsedShape& shape, const MlaPlatformI
     if (dtype != uint32_t(MlaMetadataDtype::Fp16) && dtype != uint32_t(MlaMetadataDtype::Bf16)) {
         prefix.status = uint32_t(MlaUsedMetadataStatus::UnsupportedDtype);
     } else if (!validAxis(shape.query, inputs.cuQuery, inputs.usedQuery) ||
-               !validAxis(shape.kv, inputs.cuKv, inputs.usedKv)) {
+               !validAxis(shape.kv, inputs.cuKv, inputs.usedKv) ||
+               (queryTotalFromPrefix && shape.query.layout != MlaSequenceLayout::Tnd)) {
         prefix.status = uint32_t(MlaUsedMetadataStatus::InvalidLengths);
     } else {
+        if (queryTotalFromPrefix) {
+            // Only the AICPU producer reads device-owned prefix values. All
+            // descriptors and output overlap were checked before this load.
+            shape.query.totalTokens = inputs.cuQuery.data[shape.batch];
+            if (shape.batch != 0 && shape.query.totalTokens > 0 && shape.kv.totalTokens > 0 && platform.aicNum > 0 &&
+                platform.aicNum <= kMlaMaxAic) {
+                platform.blockDims.fill(platform.blockDims[platform.aicNum - 1]);
+            }
+        }
         const auto status = builder(shape, platform, inputs, result, context);
         prefix.scheduleStatus = uint32_t(status);
         if (status == MlaScheduleStatus::Success) {

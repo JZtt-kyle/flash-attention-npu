@@ -107,7 +107,15 @@ def accuracy(case, actual, source):
     return reports
 
 
-def sample_kernels(call_one, count, output, names, production_name, source_name):
+def sample_kernels(
+    call_one,
+    count,
+    output,
+    names,
+    production_name,
+    source_name,
+    metadata_name="ComputeMlaCausalTndMetadata",
+):
     """Original 5 x 10 alternating profiler protocol; retain every task."""
     labels = []
     p = torch_npu.profiler
@@ -156,7 +164,7 @@ def sample_kernels(call_one, count, output, names, production_name, source_name)
     for label in labels:
         if label["name"] == names[0]:
             group = rows[pos : pos + 2]
-            assert len(group) == 2 and "ComputeMlaCausalTndMetadata" in group[0]["Op Name"]
+            assert len(group) == 2 and metadata_name in group[0]["Op Name"]
             assert production_name in group[1]["Op Name"]
             label["generation_us"] = float(group[0]["Task Duration(us)"])
             kernel = group[1]

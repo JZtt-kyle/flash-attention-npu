@@ -434,7 +434,6 @@ def test_empty(dtype, batch, sq, sk, used):
         "length-stride",
         "scale",
         "window",
-        "mixed",
         "paged",
     ],
 )
@@ -442,16 +441,11 @@ def test_static_rejections(dtype, fake, fault):
     with FakeTensorMode() if fake else nullcontext():
         args = _inputs(
             dtype=dtype,
-            layout="tnd" if fault == "mixed" else "paged" if fault == "paged" else "dense",
+            layout="paged" if fault == "paged" else "dense",
         )
         device = {name: args[name] for name in ("q", "k", "v", "qv")}
         lengths = torch.full((2,), 17, dtype=torch.int32, device="npu")
-        if fault == "mixed":
-            args.pop("cu_seqlens_k")
-            args.pop("max_seqlen_k")
-            cache = _inputs(dtype=dtype)
-            args.update(k=cache["k"], v=cache["v"])
-        if fault in ("mixed", "paged"):
+        if fault == "paged":
             for entry in ("fake",) if fake else ("eager", "cpp"):
                 with pytest.raises(RuntimeError, match="MLA"):
                     _forward(entry, dict(args, causal=True))

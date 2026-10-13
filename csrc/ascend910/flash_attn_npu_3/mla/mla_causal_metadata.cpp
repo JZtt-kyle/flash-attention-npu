@@ -25,12 +25,12 @@ bool MatchesFullSchedule(const MlaCausalFullSchedule* full, const MlaUsedShape& 
     return true;
 }
 
-template <MlaSequenceLayout Layout>
+template <MlaSequenceLayout Layout, MlaSequenceLayout KvLayout = Layout>
 MlaScheduleStatus BuildCausalAllocationSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
                                                 const MlaUsedInputs& inputs, MlaUsedSchedule& output,
                                                 const void* context)
 {
-    if (shape.query.layout != Layout || shape.kv.layout != Layout) {
+    if (shape.query.layout != Layout || shape.kv.layout != KvLayout) {
         return MlaScheduleStatus::UnsupportedShape;
     }
     try {
@@ -111,6 +111,20 @@ bool BuildCausalTndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& pl
     }
     output[1] = kMlaCausalTndMetadataVersion;
     output[2] = kMlaMetadataCausalTnd;
+    return true;
+}
+
+bool BuildCausalMixedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                              uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
+                              bool queryTotalFromPrefix)
+{
+    if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs,
+                                       BuildCausalAllocationSchedule<MlaSequenceLayout::Tnd, MlaSequenceLayout::Bsnd>,
+                                       nullptr, queryTotalFromPrefix)) {
+        return false;
+    }
+    output[1] = kMlaCausalMixedMetadataVersion;
+    output[2] = kMlaMetadataCausalMixed;
     return true;
 }
 } // namespace flash_attn::mla

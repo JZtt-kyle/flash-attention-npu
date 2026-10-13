@@ -11,6 +11,13 @@ std::vector<at::Tensor> CausalBsndForward(const at::Tensor& q, const at::Tensor&
                                           const std::optional<at::Tensor>& schedulerMetadata);
 at::Tensor CausalBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, at::ScalarType dtype,
                                 const at::Tensor& cacheSeqlens);
+std::vector<at::Tensor> CausalMixedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                           const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ, float scale,
+                                           const std::optional<at::Tensor>& cacheSeqlens,
+                                           const std::optional<at::Tensor>& usedQuery,
+                                           const std::optional<at::Tensor>& schedulerMetadata);
+at::Tensor CausalMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,
+                                 const at::Tensor& cacheSeqlens, const at::Tensor& cuQ);
 // Call only after the common Python/C++ dense boundary has validated inputs.
 std::vector<at::Tensor> DenseForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                      const at::Tensor& qv, float scale,
