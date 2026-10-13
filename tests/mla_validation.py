@@ -25,7 +25,12 @@ from tests.mla_dense_build import ROOT, sha256
 from tests.mla_validation_build import matching_files
 from tests.mla_validation_dependencies import suite_sources
 from tests.mla_validation_selection import INCREMENTAL_SUITES
-from tests.mla_validation_policy import DEFAULT_MAX_CASES, POLICY_VERSION
+from tests.mla_validation_policy import (
+    DEFAULT_MAX_CASES,
+    POLICY_VERSION,
+    CAUSAL_STAGE_POLICY,
+    CAUSAL_STAGE_SUITES,
+)
 
 
 PUBLIC = "tests/test_flash_attn_npu_v3_mla_paged_tnd_public.py"
@@ -43,6 +48,25 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "causal-stage-tools": ["tests/test_mla_causal_stage_performance.py"],
+    "causal-paged-tnd-cpu": ["tests/test_flash_attn_npu_v3_mla_causal_paged_tnd_metadata.py"],
+    "causal-paged-tnd-sanitize": ["tests/test_flash_attn_npu_v3_mla_causal_paged_tnd_metadata.py"],
+    "causal-paged-tnd-check": [
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_tnd_public.py",
+        "-k",
+        "representative",
+    ],
+    "causal-paged-tnd-public": [
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_tnd_public.py",
+        "-k",
+        "not representative and not release_trap",
+    ],
+    "causal-paged-tnd-trap": [
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_tnd_public.py",
+        "-k",
+        "release_trap",
+    ],
+    "causal-paged-tnd-profile": ["tests/test_mla_causal_paged_tnd_profile.py"],
     "causal-paged-cpu": ["tests/test_flash_attn_npu_v3_mla_causal_paged_metadata.py"],
     "causal-paged-sanitize": ["tests/test_flash_attn_npu_v3_mla_causal_paged_metadata.py"],
     "paged-shared-cpu": [
@@ -54,6 +78,7 @@ SUITES = {
         for name in ("paged_schedule", "paged_metadata", "paged_metadata_consumer")
     ],
     "causal-paged-tools": [
+        "tests/test_mla_causal_paged_profile_driver.py",
         "tests/test_mla_paged_reference_cache.py",
         "tests/test_mla_native_dispatch.py",
         "tests/test_mla_validation_policy.py::test_mixed_average_weights_entries_and_keeps_regressions",
@@ -244,6 +269,7 @@ SUITES = {
 }
 SUITES.update(INCREMENTAL_SUITES)
 PERFORMANCE_SUITES = {
+    "causal-paged-tnd-profile",
     "causal-paged-profile",
     "causal-tnd-profile",
     "causal-mixed-profile",
@@ -268,7 +294,10 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "causal-stage-tools",
     "causal-paged-tools",
+    "causal-paged-tnd-cpu",
+    "causal-paged-tnd-sanitize",
     "causal-paged-cpu",
     "causal-paged-sanitize",
     "paged-shared-cpu",
@@ -292,6 +321,8 @@ CPU_SUITES = {
 
 def suite_dependencies(suite):
     if suite not in {
+        "causal-paged-tnd-cpu",
+        "causal-paged-tnd-sanitize",
         "causal-paged-cpu",
         "causal-paged-sanitize",
         "paged-shared-cpu",
@@ -456,11 +487,15 @@ def environment(args, directory, suite):
         "MLA_TND_PAGED_KVCACHE_DIR": "kvcache",
     }.items():
         env[variable] = str(directory / child)
+    if getattr(args, "causal_stage_performance", False) and suite in CAUSAL_STAGE_SUITES:
+        env["MLA_CAUSAL_STAGE_PERFORMANCE"] = "1"
     env["MLA_VALIDATION_MAX_CASES"] = str(getattr(args, "max_cases", DEFAULT_MAX_CASES))
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
     if suite in CAUSAL_DEVICE_SUITES:
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "causal-paged-tnd-cpu",
+        "causal-paged-tnd-sanitize",
         "causal-paged-cpu",
         "causal-paged-sanitize",
         "paged-shared-cpu",
@@ -554,6 +589,11 @@ def cache_stats(path):
 
 
 def run(args):
+    args.causal_stage_performance = getattr(args, "causal_stage_performance", False)
+    if args.causal_stage_performance and not set(args.suite) <= set(CAUSAL_STAGE_SUITES) | {
+        "causal-profile"
+    }:
+        raise ValueError("--causal-stage-performance requires causal performance suites")
     args.max_cases = getattr(args, "max_cases", DEFAULT_MAX_CASES)
     if not 0 <= args.max_cases <= DEFAULT_MAX_CASES:
         raise ValueError("--max-cases must be 1..100; use --full-matrix for all cases")
@@ -568,6 +608,8 @@ def run(args):
                 dict(
                     max_cases_per_suite=args.max_cases,
                     selection_policy=POLICY_VERSION,
+                    causal_stage_performance=args.causal_stage_performance,
+                    causal_stage_policy=CAUSAL_STAGE_POLICY,
                     prepare=[
                         sys.executable,
                         "-m",
@@ -624,6 +666,8 @@ def run(args):
         summary = dict(
             max_cases_per_suite=args.max_cases,
             selection_policy=POLICY_VERSION,
+            causal_stage_performance=args.causal_stage_performance,
+            causal_stage_policy=CAUSAL_STAGE_POLICY,
             attempt=str(attempt),
             groups={name: dict(status="not_run") for name in args.suite},
         )
@@ -723,6 +767,8 @@ def run(args):
                     selection=SUITES[suite],
                     case_limit=args.max_cases,
                     selection_policy=POLICY_VERSION,
+                    causal_stage_performance=args.causal_stage_performance,
+                    causal_stage_policy=CAUSAL_STAGE_POLICY,
                     dependencies=dependencies,
                     golden=args.golden,
                     build=sha256(args.artifacts / "prepare.json") if needs_build else None,
@@ -846,6 +892,11 @@ def main():
         help="Evidence directory; attempts are never overwritten",
     )
     parser.add_argument("--suite", nargs="+", choices=SUITES, required=True)
+    parser.add_argument(
+        "--causal-stage-performance",
+        action="store_true",
+        help="Limit five causal layouts to 100 total dtype/input configurations; requires stage aggregate acceptance",
+    )
     limits = parser.add_mutually_exclusive_group()
     limits.add_argument(
         "--max-cases",

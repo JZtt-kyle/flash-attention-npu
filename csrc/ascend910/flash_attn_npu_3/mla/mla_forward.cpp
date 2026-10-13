@@ -37,6 +37,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaCausalMixedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalMixedMetadataFromPrefix(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalPagedBsndMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaCausalPagedTndMetadata(void* args);
 
 namespace flash_attn::mla {
 namespace {
@@ -170,7 +171,11 @@ struct MetadataSubmission {
         }
         if constexpr (std::is_same_v<Args, MlaPagedMetadataArgs>) {
             if (causal) {
-                ComputeMlaCausalPagedBsndMetadata<<<1, nullptr, current>>>(&args, sizeof(args));
+                if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
+                    ComputeMlaCausalPagedTndMetadata<<<1, nullptr, current>>>(&args, sizeof(args));
+                } else {
+                    ComputeMlaCausalPagedBsndMetadata<<<1, nullptr, current>>>(&args, sizeof(args));
+                }
                 return;
             }
         }
@@ -412,7 +417,6 @@ at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_
                            at::ScalarType dtype, const at::Tensor& cacheSeqlens, const std::optional<at::Tensor>& cuQ,
                            bool causal)
 {
-    TORCH_CHECK(!causal || !cuQ, "MLA causal metadata is not implemented yet for TND paged layouts");
     const auto words = CheckPagedMetadataInputs(batch, maxQ, capacity, heads, pageSize, dtype, cacheSeqlens, cuQ);
     const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
     auto metadata = at::empty({words}, cacheSeqlens.options().dtype(at::kInt));
@@ -454,7 +458,6 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
                                      const std::optional<at::Tensor>& cuQ, int64_t maxQ, bool causal = false)
 {
     const bool tnd = cuQ.has_value();
-    TORCH_CHECK(!causal || !tnd, "MLA causal forward is not implemented yet for TND paged layouts");
     TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
                 "MLA: inputs must have FP16 or BF16 dtype");
     TORCH_CHECK(q.device().type() == at::kPrivateUse1, "MLA: inputs must be NPU tensors");
@@ -600,7 +603,7 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
         return 0;
     };
     if (causal) {
-        RunCausalLaunch("ascendc_mla_causal_paged_bsnd", enqueue);
+        RunCausalLaunch(tnd ? "ascendc_mla_causal_paged_tnd" : "ascendc_mla_causal_paged_bsnd", enqueue);
     } else {
         at_npu::native::OpCommand::RunOpApiV2(tnd ? "ascendc_mla_paged_tnd" : "ascendc_mla_paged_bsnd", enqueue);
     }
@@ -622,23 +625,23 @@ std::vector<at::Tensor> PagedTndForward(const at::Tensor& q, const at::Tensor& k
                                         const at::Tensor& qv, const at::Tensor& pageTable, const at::Tensor& cuQ,
                                         int64_t maxQ, float scale, const std::optional<at::Tensor>& cacheSeqlens,
                                         const std::optional<at::Tensor>& usedQuery,
-                                        const std::optional<at::Tensor>& schedulerMetadata)
+                                        const std::optional<at::Tensor>& schedulerMetadata, bool causal)
 {
-    return PagedForward(q, k, v, qv, pageTable, scale, cacheSeqlens, usedQuery, schedulerMetadata, cuQ, maxQ);
+    return PagedForward(q, k, v, qv, pageTable, scale, cacheSeqlens, usedQuery, schedulerMetadata, cuQ, maxQ, causal);
 }
 
 std::tuple<at::Tensor, at::Tensor>
 PagedTndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
                   const at::Tensor& pageTable, const at::Tensor& cuQ, int64_t maxQ, std::optional<double> softmaxScale,
                   const std::optional<at::Tensor>& cacheSeqlens, const std::optional<at::Tensor>& usedQuery,
-                  const std::optional<at::Tensor>& schedulerMetadata)
+                  const std::optional<at::Tensor>& schedulerMetadata, bool causal)
 {
     TORCH_CHECK(!softmaxScale ||
                     (std::isfinite(*softmaxScale) && std::abs(*softmaxScale) <= std::numeric_limits<float>::max()),
                 "MLA: softmax_scale must be finite in FP32");
     auto result = PagedTndForward(q, k, v, qv, pageTable, cuQ, maxQ,
                                   softmaxScale ? float(*softmaxScale) : 1.0f / std::sqrt(576.0f), cacheSeqlens,
-                                  usedQuery, schedulerMetadata);
+                                  usedQuery, schedulerMetadata, causal);
     return {result[0], result[1]};
 }
 
@@ -1299,7 +1302,7 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
           "Tensor? scheduler_metadata=None, bool causal=False) -> (Tensor, Tensor)");
     m.def("_mla_paged_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor page_table, "
           "Tensor cu_seqlens_q, int max_seqlen_q, float? softmax_scale=None, Tensor? cache_seqlens=None, "
-          "Tensor? seqused_q=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
+          "Tensor? seqused_q=None, Tensor? scheduler_metadata=None, bool causal=False) -> (Tensor, Tensor)");
     m.def("_mla_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
           "int max_seqlen_q, int max_seqlen_k, float? softmax_scale=None, Tensor? seqused_q=None, "
           "Tensor? seqused_k=None) -> (Tensor, Tensor)");

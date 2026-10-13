@@ -1,4 +1,4 @@
-// CPU/sanitizer bridge to the production v10 AICPU entry and release reader.
+// CPU/sanitizer bridge to the production v10/v11 AICPU entry and release reader.
 #include "mla_paged_metadata_consumer.h"
 #include <algorithm>
 #include <cassert>
@@ -7,12 +7,19 @@
 #include <vector>
 using namespace flash_attn::mla;
 constexpr uint32_t guard = 0x12345678;
+#ifdef MLA_TEST_TND
+#define ComputeMlaCausalPagedBsndMetadata ComputeMlaCausalPagedTndMetadata
+#define BuildCausalPagedBsndMetadata BuildCausalPagedTndMetadata
+constexpr uint32_t version = 11;
+#else
+constexpr uint32_t version = 10;
+#endif
 extern uint32_t ComputeMlaCausalPagedBsndMetadata(void*);
 
 void CheckRecord(MlaPagedMetadataArgs& args, const MlaPagedInputs& source, std::vector<uint32_t>& storage)
 {
     auto* data = storage.data() + 1;
-    assert(data[1] == 10 && data[2] == 10);
+    assert(data[1] == version && data[2] == version);
     const auto original = storage;
     auto* output = data;
     for (uint32_t words : {0U, args.outputWords - 1, args.outputWords + 1, UINT32_MAX}) {
@@ -30,6 +37,18 @@ void CheckRecord(MlaPagedMetadataArgs& args, const MlaPagedInputs& source, std::
             assert(data[i] == 0);
         return;
     }
+#ifdef MLA_TEST_TND
+    // Independently supply the CPU total, then compare with the AICPU's
+    // prefix-derived total; an incorrect explicit total must fail safely.
+    auto shape = args.shape;
+    shape.query.totalTokens = source.cuQuery.data[shape.batch];
+    std::vector<uint32_t> host(args.outputWords);
+    assert(BuildCausalPagedTndMetadata(shape, args.platform, args.dtype, host.data(), args.outputWords, source));
+    assert(std::equal(host.begin(), host.end(), data));
+    shape.query.totalTokens += 1;
+    assert(BuildCausalPagedTndMetadata(shape, args.platform, args.dtype, host.data(), args.outputWords, source));
+    assert(host[5] != 0 && std::all_of(host.begin() + 8, host.end(), [](uint32_t x) { return x == 0; }));
+#endif
     MlaPagedMetadataPrefix prefix;
     std::memcpy(&prefix, data, sizeof(prefix));
     MlaPagedMetadataContext c{args.dtype,
@@ -99,7 +118,9 @@ void CheckRecord(MlaPagedMetadataArgs& args, const MlaPagedInputs& source, std::
     }
     data[1] = data[2] = 6;
     consume(false);
-    data[1] = data[2] = 10;
+    data[1] = data[2] = version == 11 ? 10 : 11;
+    consume(false);
+    data[1] = data[2] = version;
     for (uint32_t b = 0; b < c.batch; ++b) {
         const uint32_t count = (source.kvLengths.data[b] + c.pageSize - 1) / c.pageSize;
         if (count) {

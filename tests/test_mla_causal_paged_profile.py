@@ -12,6 +12,7 @@ import torch
 
 from tests.mla_dense_build import ROOT, build_probes
 from tests.mla_native_dispatch import parse_dispatch, sha256
+from tests.mla_validation_policy import check_public_performance
 from tests.mla_public_performance import summarize_mixed
 from tests.mla_causal_tnd_profile import sample_kernels
 from tests.test_flash_attn_npu_v3_mla_causal_paged_public import (
@@ -112,7 +113,7 @@ def test_native_public_profile(profile_probes, paged_probe):
     (Path(os.environ["MLA_VALIDATION_RESULT"]) / "public-profile/average.json").write_text(
         json.dumps(result, indent=2) + "\n"
     )
-    assert result["passed"], result["mean_ratio"]
+    check_public_performance(result)
 
 
 @pytest.mark.parametrize("dtype", ["fp16", "bf16"])

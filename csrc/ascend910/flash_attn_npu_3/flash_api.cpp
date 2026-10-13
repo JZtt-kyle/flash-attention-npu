@@ -192,7 +192,12 @@ std::vector<at::Tensor> mha_fwd(
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (is_causal) {
             if (page_table_) {
-                TORCH_CHECK(!cu_seqlens_q_, "MLA causal forward is not implemented yet for TND paged layouts");
+                if (cu_seqlens_q_) {
+                    TORCH_CHECK(max_seqlen_q_, "MLA: TND paged forward requires max_seqlen_q");
+                    return flash_attn::mla::PagedTndForward(q, k, v, *q_v_, *page_table_, *cu_seqlens_q_,
+                                                            *max_seqlen_q_, scale, seqused_k_, seqused_q_,
+                                                            scheduler_metadata_, true);
+                }
                 return flash_attn::mla::PagedBsndForward(q, k, v, *q_v_, *page_table_, scale, seqused_k_, seqused_q_,
                                                          scheduler_metadata_, true);
             }
@@ -783,9 +788,8 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
         if (causal) {
             if (page_size) {
-                TORCH_CHECK(!cu_seqlens_q, "MLA causal metadata is not implemented yet for TND paged layouts");
                 return flash_attn::mla::PagedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, *page_size,
-                                                        dtype, cache_seqlens, std::nullopt, true);
+                                                        dtype, cache_seqlens, cu_seqlens_q, true);
             }
             if (cu_seqlens_q) {
                 return flash_attn::mla::CausalMixedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q,

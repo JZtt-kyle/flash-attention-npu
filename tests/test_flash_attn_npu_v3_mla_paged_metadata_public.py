@@ -1,4 +1,4 @@
-"""Public v6/v10 generation: geometry, device lengths and consumer boundary."""
+"""Public v6/v10/v11 generation: geometry, device lengths and consumer boundary."""
 
 from contextlib import nullcontext
 import inspect
@@ -287,7 +287,6 @@ def test_generator_requires_tensor_lengths(dtype, layout, value):
         ("num_heads_kv", 2),
         ("num_splits", 0),
         ("num_splits", 2),
-        ("causal", True),
         ("window_size", (0, -1)),
         ("attention_chunk", 1),
         ("has_softcap", True),
@@ -341,7 +340,7 @@ def test_causal_bsnd_all_metadata_entries(dtype):
                     assert rows[0][408:] == [0, 0, 7, 7, kv[0], 7, 0, 7, 7, kv[1]]
 
 
-def test_causal_metadata_failure_and_tnd_boundary(dtype):
+def test_causal_metadata_failure(dtype):
     for kv in ([-1, 0], [337, 0]):
         args = dict(arguments(dtype, 0, [7, 7], kv, capacity=336), causal=True)
         with forbid_host_readback():
@@ -358,8 +357,10 @@ def test_causal_metadata_failure_and_tnd_boundary(dtype):
                 else ("public", "op", "cpp", "dispatch")
             )
             for entry in entries:
-                with pytest.raises(RuntimeError, match="not implemented"):
-                    call(entry, args)
+                record = call(entry, args)
+                assert record.shape == (408 + 5 * args["batch_size"],)
+                if not fake:
+                    assert record[1].item() == record[2].item() == 11
 
 
 @pytest.mark.parametrize("extra", ["cu_seqlens_k", "seqused_q"])
@@ -611,3 +612,43 @@ def test_generation_timing(dtype, layout, evidence):
         )
         + "\n"
     )
+
+
+def test_causal_tnd_metadata_entries_prefix_updates(dtype):
+    for fake in (False, True):
+        with FakeTensorMode() if fake else nullcontext():
+            args = dict(arguments(dtype, 2, [7, 0, 3], [3, 17, 225], capacity=336), causal=True)
+            entries = (
+                ("public_fake", "op_fake", "dispatch_fake")
+                if fake
+                else ("public", "op", "cpp", "dispatch")
+            )
+            for prefix in (
+                [0, 7, 7, 10],
+                [0, 3, 10, 10],
+                [0, 0, 0, 0],
+                [0, 7, 6, 10],
+                [1, 7, 7, 10],
+                [0, 7, 7, 15],
+            ):
+                args["cu_seqlens_q"].copy_(torch.tensor(prefix, dtype=torch.int32))
+                with forbid_host_readback():
+                    records = [call(entry, args) for entry in entries]
+                if fake:
+                    assert all(r.shape == (423,) for r in records)
+                    continue
+                rows = [[x & 0xFFFFFFFF for x in r.cpu().tolist()] for r in records]
+                assert all(row == rows[0] for row in rows)
+                row = rows[0]
+                assert row[1:3] == [11, 11]
+                valid = prefix[0] == 0 and all(0 <= b - a <= 7 for a, b in zip(prefix, prefix[1:]))
+                if valid:
+                    assert row[5] == 0 and row[401:408] == [1, prefix[-1], 0, 7, 0, 112, 336]
+                    expected = [
+                        x
+                        for b, (a, z) in enumerate(zip(prefix, prefix[1:]))
+                        for x in (a, 0, z - a, z - a, (3, 17, 225)[b])
+                    ]
+                    assert row[408:] == expected
+                else:
+                    assert row[5] != 0 and not any(row[8:])

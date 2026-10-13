@@ -1,4 +1,4 @@
-// BSND PA causal adapter. CANN-derived algorithms and their license remain in
+// BSND/TND PA causal adapter. CANN-derived algorithms and their license remain in
 // mla_causal.cpp, mla_tnd_schedule.cpp and LICENSE.cann; page Copy is unchanged.
 #include "mla_paged_metadata.h"
 #include "mla_causal.h"
@@ -7,10 +7,11 @@
 
 namespace flash_attn::mla {
 namespace {
+template <MlaSequenceLayout Layout>
 MlaScheduleStatus BuildCausalPagedSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
                                            const MlaPagedInputs& inputs, MlaPagedSchedule& output)
 {
-    if (shape.query.layout != MlaSequenceLayout::Bsnd) {
+    if (shape.query.layout != Layout) {
         return MlaScheduleStatus::UnsupportedShape;
     }
     try {
@@ -62,11 +63,23 @@ bool BuildCausalPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatformI
                                   uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs)
 {
     if (!BuildPagedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs, false,
-                                        BuildCausalPagedSchedule)) {
+                                        BuildCausalPagedSchedule<MlaSequenceLayout::Bsnd>)) {
         return false;
     }
     output[1] = kMlaCausalPagedBsndMetadataVersion;
     output[2] = kMlaMetadataCausalPagedBsnd;
+    return true;
+}
+bool BuildCausalPagedTndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                                 uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs,
+                                 bool fromQueryPrefix)
+{
+    if (!BuildPagedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs, fromQueryPrefix,
+                                        BuildCausalPagedSchedule<MlaSequenceLayout::Tnd>)) {
+        return false;
+    }
+    output[1] = kMlaCausalPagedTndMetadataVersion;
+    output[2] = kMlaMetadataCausalPagedTnd;
     return true;
 }
 } // namespace flash_attn::mla

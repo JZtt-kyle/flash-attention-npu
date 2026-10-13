@@ -8,6 +8,7 @@ import sys
 
 from tests.mla_dense_build import ROOT
 from tests.mla_native_dispatch import parse_dispatch, sha256
+from tests.mla_validation_policy import check_public_performance
 from tests.mla_public_performance import summarize_varlen
 from tests.test_flash_attn_npu_v3_mla_causal_tnd_public import PERFORMANCE_CASES
 from tests.test_flash_attn_npu_v3_mla_causal_attention import causal_attention as causal_attention
@@ -86,7 +87,7 @@ def test_native_public_profile():
     (Path(os.environ["MLA_VALIDATION_RESULT"]) / "public-profile/average.json").write_text(
         json.dumps(result, indent=2) + "\n"
     )
-    assert result["passed"], result["mean_ratio"]
+    check_public_performance(result)
 
 
 def test_component_profile(causal_attention, tnd_metadata_driver, used_oracle):

@@ -60,7 +60,8 @@ PERFORMANCE_CASES = public_cases(
         spec(stride="ntd", h=128),
         spec(q=(5, 1), k=(17, 7), capacity=33, h=5, stride="combined_65536"),
         spec(q=(513, 257), k=(257, 129), capacity=513, h=3),
-    ]
+    ],
+    group="mixed",
 )
 ACCURACY_CASES = [s for s in PERFORMANCE_CASES if s not in REPRESENTATIVES] + [
     spec(q=(7, 7, 7), k=(3, 7, 33), h=257),

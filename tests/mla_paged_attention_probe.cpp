@@ -148,7 +148,7 @@ __global__ __aicore__ __mix__(1, 2) void PAGED_ENTRY(uint64_t ffts, GM_ADDR qc, 
 #else
     GM_ADDR spans = metadata + kMlaPagedMetadataPrefixWords * sizeof(uint32_t);
     if (context.query.layout == 1) {
-        Kernel::MlaPagedTnd<InputT> op;
+        Kernel::MlaPagedTnd<InputT, IsCausal> op;
         op(schedule, scale, qc, qr, cache, output, lse, workspace, &pipe, spans, layouts);
     } else {
         Kernel::MlaPagedBsnd<InputT, IsCausal> op;

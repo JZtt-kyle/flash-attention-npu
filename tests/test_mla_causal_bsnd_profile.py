@@ -10,6 +10,7 @@ import pytest
 
 from tests.mla_dense_build import ROOT
 from tests.mla_native_dispatch import parse_dispatch, sha256
+from tests.mla_validation_policy import check_public_performance
 from tests.mla_public_performance import summarize
 from tests.test_flash_attn_npu_v3_mla_causal_public import (
     NATIVE_PREFLIGHT_CASES,
@@ -105,7 +106,7 @@ def test_native_public_profile():
     result = summarize(reports, len(PERFORMANCE_CASES))
     path = Path(os.environ["MLA_VALIDATION_RESULT"]) / "public-profile" / "average.json"
     path.write_text(json.dumps(result, indent=2) + "\n")
-    assert result["passed"], result["mean_ratio"]
+    check_public_performance(result)
 
 
 @pytest.mark.parametrize("dtype", ("fp16", "bf16"))

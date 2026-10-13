@@ -41,3 +41,21 @@ __global__ __aicpu__ uint32_t ComputeMlaCausalPagedBsndMetadata(void* args)
     AscendC::DataStoreBarrier();
     return 0;
 }
+
+__global__ __aicpu__ uint32_t ComputeMlaCausalPagedTndMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        AscendC::DataStoreBarrier();
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaPagedMetadataArgs*>(args);
+    if (!BuildCausalPagedTndMetadata(input.shape, input.platform, input.dtype,
+                                     reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
+                                     PagedMetadataInputs(input), true)) {
+        AscendC::DataStoreBarrier();
+        return 2;
+    }
+    AscendC::DataStoreBarrier();
+    return 0;
+}

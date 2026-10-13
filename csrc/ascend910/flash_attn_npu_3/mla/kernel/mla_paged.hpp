@@ -1,7 +1,7 @@
 // BSND/TND PA specializations of the CANN nonquant MLA task ring.
-// Source and license: mla_dense.hpp and ../LICENSE.cann. v6 validates current
+// Source and license: mla_dense.hpp and ../LICENSE.cann. v6/v10/v11 validate current
 // lengths, all effective pages and complete cache spans before TPipe/events.
-// This independent component does not enable a public PA forward entry.
+// Production launchers explicitly select the query layout and mask specialization.
 #pragma once
 #include "mla_dense.hpp"
 #include "mla_paged_metadata.hpp"
@@ -54,6 +54,6 @@ class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, tr
 };
 template <typename InputT, bool IsCausal = false>
 using MlaPagedBsnd = MlaPaged<InputT, false, IsCausal>;
-template <typename InputT>
-using MlaPagedTnd = MlaPaged<InputT, true>;
+template <typename InputT, bool IsCausal = false>
+using MlaPagedTnd = MlaPaged<InputT, true, IsCausal>;
 } // namespace flash_attn::mla::Kernel

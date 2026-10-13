@@ -1,4 +1,4 @@
-"""BSND PA causal public E2E, with native layout conversions inside each call."""
+"""BSND/TND PA causal public E2E, with native layout conversions inside each call."""
 
 import hashlib
 import json
@@ -16,16 +16,8 @@ from tests.mla_cann_baseline import check_vendor_configuration, environment, fil
 from tests.mla_causal_tnd_profile import sample_kernels
 from tests.mla_paged_profile import CannPagedCall
 from tests.test_flash_attn_npu_v3_mla_metadata import load_probe
-from tests.test_flash_attn_npu_v3_mla_causal_paged_public import (
-    PERFORMANCE_CASES,
-    make_case,
-    metadata,
-    call,
-    compare,
-    forward_args,
-    component,
-    masked_rows,
-)
+from tests import test_flash_attn_npu_v3_mla_causal_paged_public as bsnd
+from tests import test_flash_attn_npu_v3_mla_causal_paged_tnd_public as tnd
 
 
 class CausalPagedCall(CannPagedCall):
@@ -54,7 +46,13 @@ def identity(case):
     )
 
 
-def profile(dtype_name, output, vendor, probe_dir, producer_manifest, dispatch=None):
+def profile(
+    dtype_name, output, vendor, probe_dir, producer_manifest, dispatch=None, *, layout="bsnd"
+):
+    suite = {"bsnd": bsnd, "tnd": tnd}[layout]
+    component, call, metadata = suite.component, suite.call, suite.metadata
+    make_case, compare, forward_args = suite.make_case, suite.compare, suite.forward_args
+    masked_rows, PERFORMANCE_CASES = suite.masked_rows, suite.PERFORMANCE_CASES
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     vendor = check_vendor_configuration(vendor)
@@ -193,9 +191,11 @@ def profile(dtype_name, output, vendor, probe_dir, producer_manifest, dispatch=N
         len(cases),
         output,
         names,
-        "mla_paged_bsnd_",
+        "mla_paged_tnd_" if layout == "tnd" else "mla_paged_bsnd_",
         "FusedInferAttentionScore",
-        "ComputeMlaCausalPagedBsndMetadata",
+        "ComputeMlaCausalPagedTndMetadata"
+        if layout == "tnd"
+        else "ComputeMlaCausalPagedBsndMetadata",
     )
     results = []
     for index, case in enumerate(cases):
@@ -239,6 +239,7 @@ def profile(dtype_name, output, vendor, probe_dir, producer_manifest, dispatch=N
     report = dict(
         dtype=dtype_name,
         causal=True,
+        layout=layout,
         warmup=5,
         rounds=5,
         wall_iterations=20,

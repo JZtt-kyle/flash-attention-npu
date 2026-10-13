@@ -34,7 +34,8 @@ PERFORMANCE_CASES = public_cases(
         *[dict(c, uq=None) for c in production.PERFORMANCE_CASES],
         *REPRESENTATIVES[:2],
         component.config(112, "independent", q=(7, 7), lengths=(3, 7), uq=None),
-    ]
+    ],
+    group="paged-bsnd",
 )
 ACCURACY_CASES = [s for s in PERFORMANCE_CASES if s not in REPRESENTATIVES] + [
     component.config(112, q=(513, 513), lengths=(257, 129), uq=(513, 257), heads=3),
@@ -344,31 +345,6 @@ def test_static_and_unopened_boundaries(dtype, fake):
                     ),
                     entry,
                 )
-        tnd = dict(
-            args,
-            q=args["q"].reshape(-1, 8, 64),
-            qv=args["qv"].reshape(-1, 8, 512),
-            cu_seqlens_q=torch.tensor([0, 3, 6], dtype=torch.int32, device="npu"),
-            max_seqlen_q=3,
-        )
-        with pytest.raises(RuntimeError, match="not implemented"):
-            call(tnd)
-        with pytest.raises(RuntimeError, match="not implemented"):
-            api.get_scheduler_metadata(
-                2,
-                3,
-                448,
-                8,
-                1,
-                64,
-                args["cache_seqlens"],
-                headdim_v=512,
-                qkv_dtype=dtype,
-                page_size=112,
-                cu_seqlens_q=tnd["cu_seqlens_q"],
-                causal=True,
-                num_splits=1,
-            )
 
 
 @pytest.mark.parametrize("fake", [False, True])

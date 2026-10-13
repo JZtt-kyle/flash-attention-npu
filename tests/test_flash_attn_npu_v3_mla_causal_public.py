@@ -51,12 +51,13 @@ PERFORMANCE_CASES += [
     dict(shape=s, scale=scale, lengths=k, stride=p) for s, scale, k, p in STRIDE_CASES
 ]
 PERFORMANCE_CASES += [dict(shape=(2, 513, 3, 257), lengths=[257, 129])]
-PERFORMANCE_CASES = public_cases(PERFORMANCE_CASES)
+FULL_PERFORMANCE_CASES = public_cases(PERFORMANCE_CASES)
+PERFORMANCE_CASES = public_cases(FULL_PERFORMANCE_CASES, group="bsnd")
 NATIVE_PREFLIGHT_CASES = [
     dict(shape=(2, 7, 16, 33), lengths=[3, 0]),
     dict(shape=(1, 7, 16, 8193)),
-    PERFORMANCE_CASES[4],
-    PERFORMANCE_CASES[24],
+    FULL_PERFORMANCE_CASES[4],
+    FULL_PERFORMANCE_CASES[24],
 ]
 USED_CASES = [
     dict(shape=(2, 7, 16, 33), used=[5, 3], lengths=[3, 0]),
