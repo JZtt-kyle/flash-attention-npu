@@ -50,6 +50,43 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "window-tnd-cpu": ["tests/test_flash_attn_npu_v3_mla_window_tnd_metadata.py"],
+    "window-tnd-sanitize": ["tests/test_flash_attn_npu_v3_mla_window_tnd_metadata.py"],
+    "window-tnd-check": [
+        "tests/test_flash_attn_npu_v3_mla_window_tnd_public.py",
+        "-k",
+        "representative or cost_boundary",
+    ],
+    "window-tnd-public": [
+        "tests/test_flash_attn_npu_v3_mla_window_tnd_public.py",
+        "-k",
+        "not representative and not cost_boundary and not release_trap",
+    ],
+    "window-tnd-trap": [
+        "tests/test_flash_attn_npu_v3_mla_window_tnd_public.py",
+        "-k",
+        "release_trap",
+    ],
+    "window-tnd-profile": ["tests/test_mla_window_tnd_profile.py"],
+    "window-tnd-tools": [
+        "tests/test_mla_window_tnd_tools.py",
+        "tests/test_mla_validation_policy.py::test_varlen_average_retains_regressions_and_failure",
+        "tests/test_mla_validation_policy.py::test_varlen_average_rejects_incomplete_evidence",
+        *[
+            f"tests/test_mla_validation.py::test_success_failure_interruption_and_resume[{suite}]"
+            for suite in ("window-tnd-tools", "window-tnd-cpu", "window-tnd-sanitize")
+        ],
+        *[
+            f"tests/test_mla_validation.py::test_causal_dependencies_changing_during_execution_fail[{suite}]"
+            for suite in ("window-tnd-cpu", "window-tnd-sanitize")
+        ],
+        *[
+            f"tests/test_mla_validation.py::test_causal_device_groups_use_new_probe_and_device_identity[{suite}]"
+            for suite in ("window-tnd-check", "window-tnd-public")
+        ],
+        "tests/test_mla_validation.py::test_performance_always_executes_on_resume[window-tnd-profile]",
+        "tests/test_mla_validation.py::test_evidence_missing_changed_failed_or_different_identity_cannot_resume",
+    ],
     "window-bsnd-cpu": ["tests/test_flash_attn_npu_v3_mla_window_metadata.py"],
     "window-bsnd-sanitize": ["tests/test_flash_attn_npu_v3_mla_window_metadata.py"],
     "window-bsnd-check": [
@@ -340,6 +377,7 @@ SUITES = {
 }
 SUITES.update(INCREMENTAL_SUITES)
 PERFORMANCE_SUITES = {
+    "window-tnd-profile",
     "window-bsnd-profile",
     "window-profile",
     "causal-paged-tnd-profile",
@@ -352,6 +390,8 @@ PERFORMANCE_SUITES = {
     "causal-bsnd-native-check",
 }
 WINDOW_DEVICE_SUITES = {
+    "window-tnd-check",
+    "window-tnd-public",
     "window-check",
     "window-attention",
     "window-profile",
@@ -375,6 +415,9 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "window-tnd-cpu",
+    "window-tnd-sanitize",
+    "window-tnd-tools",
     "window-bsnd-cpu",
     "window-bsnd-sanitize",
     "window-bsnd-tools",
@@ -408,7 +451,14 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
-    if suite in {"window-cpu", "window-sanitize", "window-bsnd-cpu", "window-bsnd-sanitize"}:
+    if suite in {
+        "window-cpu",
+        "window-sanitize",
+        "window-bsnd-cpu",
+        "window-bsnd-sanitize",
+        "window-tnd-cpu",
+        "window-tnd-sanitize",
+    }:
         from tests.mla_window_build import window_toolchain_identity
 
         return window_toolchain_identity(suite.endswith("sanitize"))
@@ -591,6 +641,8 @@ def environment(args, directory, suite):
     if suite in WINDOW_DEVICE_SUITES:
         env["MLA_WINDOW_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "window-tnd-cpu",
+        "window-tnd-sanitize",
         "window-bsnd-cpu",
         "window-bsnd-sanitize",
         "window-cpu",

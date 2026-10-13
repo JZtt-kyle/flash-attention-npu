@@ -191,8 +191,15 @@ std::vector<at::Tensor> mha_fwd(
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (window_size_left != -1 || window_size_right != -1) {
-            TORCH_CHECK(!page_table_ && !cu_seqlens_q_ && !cu_seqlens_k_,
-                        "MLA window forward is not implemented yet outside nonpaged BSND");
+            TORCH_CHECK(!page_table_ && (cu_seqlens_q_.has_value() == cu_seqlens_k_.has_value()),
+                        "MLA window forward is not implemented yet outside nonpaged BSND or TND Q/KV");
+            if (cu_seqlens_q_) {
+                TORCH_CHECK(!scheduler_metadata_, "MLA window TND explicit metadata is not implemented yet");
+                TORCH_CHECK(max_seqlen_q_ && max_seqlen_k_, "MLA: window TND requires max_seqlen_q/k");
+                return flash_attn::mla::WindowTndForward(q, k, v, *q_v_, *cu_seqlens_q_, *cu_seqlens_k_, *max_seqlen_q_,
+                                                         *max_seqlen_k_, scale, window_size_left, window_size_right,
+                                                         is_causal, seqused_q_, seqused_k_);
+            }
             return flash_attn::mla::WindowBsndForward(q, k, v, *q_v_, scale, window_size_left, window_size_right,
                                                       is_causal, seqused_k_, seqused_q_, scheduler_metadata_);
         }

@@ -327,7 +327,6 @@ def test_boundaries(dtype, fake):
                 with pytest.raises(RuntimeError, match="MLA|FlashAttention"):
                     call(dict(args, **{name: value}), entry)
         for option in (
-            dict(window_size=(0, 0)),
             dict(num_splits=2),
             dict(softcap=1.0),
             dict(pack_gqa=True),

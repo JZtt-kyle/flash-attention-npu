@@ -146,6 +146,9 @@ def test_lock_blocks_a_second_process(tmp_path):
     [
         "tools",
         "window-device-tools",
+        "window-tnd-tools",
+        "window-tnd-cpu",
+        "window-tnd-sanitize",
         "window-bsnd-tools",
         "window-bsnd-cpu",
         "window-bsnd-sanitize",
@@ -282,7 +285,15 @@ def test_causal_selection_and_isolated_cpu_environment(
 
 @pytest.mark.parametrize(
     "suite",
-    ["causal-cpu", "window-cpu", "window-sanitize", "window-bsnd-cpu", "window-bsnd-sanitize"],
+    [
+        "causal-cpu",
+        "window-cpu",
+        "window-sanitize",
+        "window-bsnd-cpu",
+        "window-bsnd-sanitize",
+        "window-tnd-cpu",
+        "window-tnd-sanitize",
+    ],
 )
 def test_causal_dependencies_changing_during_execution_fail(tmp_path, monkeypatch, suite):
     config = args(tmp_path)
@@ -388,6 +399,8 @@ for line in sys.stdin:
         "window-check",
         "window-attention",
         "window-profile",
+        "window-tnd-check",
+        "window-tnd-public",
         "window-bsnd-check",
         "window-bsnd-public",
     ),
@@ -522,7 +535,14 @@ def test_causal_probe_identity_change_is_not_accepted(tmp_path, fault, kind):
 
 
 @pytest.mark.parametrize(
-    "suite", ("causal-profile", "shared-profile", "window-profile", "window-bsnd-profile")
+    "suite",
+    (
+        "causal-profile",
+        "shared-profile",
+        "window-profile",
+        "window-bsnd-profile",
+        "window-tnd-profile",
+    ),
 )
 def test_performance_always_executes_on_resume(tmp_path, monkeypatch, suite):
     config = args(tmp_path)

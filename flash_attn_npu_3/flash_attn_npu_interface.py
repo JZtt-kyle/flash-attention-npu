@@ -751,6 +751,41 @@ def _mla_causal_tnd_forward_fake(
     return result
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_window_tnd_forward")
+def _mla_window_tnd_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    window_left,
+    window_right,
+    causal,
+    softmax_scale=None,
+    seqused_q=None,
+    seqused_k=None,
+):
+    result = _mla_causal_tnd_forward_fake(
+        q,
+        k,
+        v,
+        qv,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        softmax_scale,
+        seqused_q,
+        seqused_k,
+    )
+    _mla_window_bsnd_words(cu_seqlens_q.numel() - 1)
+    _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
+    return result
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_causal_mixed_forward")
 def _mla_causal_mixed_forward_fake(
     q,
@@ -873,7 +908,7 @@ def _flash_attn_forward(
             softmax_scale=softmax_scale,
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None and cu_seqlens_q is None and cu_seqlens_k is None,
+            allow_window=page_table is None and ((cu_seqlens_q is None) == (cu_seqlens_k is None)),
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -922,6 +957,11 @@ def _flash_attn_forward(
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
                 if causal or seqused_q is not None or seqused_k is not None:
                     _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
+                if (window_size_left, window_size_right) != (-1, -1):
+                    _mla_window_bsnd_words(cu_seqlens_q.numel() - 1)
+                    _normalize_mla_window(
+                        max_seqlen_q, max_seqlen_k, window_size_left, window_size_right, causal
+                    )
         elif (window_size_left, window_size_right) != (-1, -1):
             _check_mla_window_bsnd_metadata(
                 q,
@@ -1050,7 +1090,7 @@ def _flash_attn_forward_fake(
             softmax_scale=softmax_scale,
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None and cu_seqlens_q is None and cu_seqlens_k is None,
+            allow_window=page_table is None and ((cu_seqlens_q is None) == (cu_seqlens_k is None)),
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -1099,6 +1139,11 @@ def _flash_attn_forward_fake(
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
                 if causal or seqused_q is not None or seqused_k is not None:
                     _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
+                if (window_size_left, window_size_right) != (-1, -1):
+                    _mla_window_bsnd_words(cu_seqlens_q.numel() - 1)
+                    _normalize_mla_window(
+                        max_seqlen_q, max_seqlen_k, window_size_left, window_size_right, causal
+                    )
         elif (window_size_left, window_size_right) != (-1, -1):
             _check_mla_window_bsnd_metadata(
                 q,
@@ -2094,13 +2139,14 @@ def flash_attn_varlen_func(
     return_attn_probs=True returns (out, lse), with FP32 lse shaped (nheads, total_q).
 
     Compressed MLA uses q/k dimensions 64 and qv/v dimensions 512. Metadata
-    is generated internally on every call (v8 for right-down causal; otherwise
+    is generated internally on every call (v13 for nondefault windows, v8 for right-down causal; otherwise
     v3 without used lengths, v5 with either used array). There is no explicit metadata or page-table parameter;
     paged MLA uses flash_attn_with_kvcache. See docs/mla/status.md for limits.
     """
-    if causal and qv is not None and q.device.type == "npu":
+    if (causal or window_size != (-1, -1)) and qv is not None and q.device.type == "npu":
         _check_mla_dense_options(
-            causal=True,
+            causal=causal,
+            allow_window=True,
             allow_causal=True,
             softmax_scale=softmax_scale,
             window_size=window_size,
@@ -2111,6 +2157,24 @@ def flash_attn_varlen_func(
             sm_margin=sm_margin,
             optional_tensors=(q_descale, k_descale, v_descale),
         )
+        if window_size != (-1, -1):
+            out, lse = torch.ops.flash_attn_npu_3._mla_window_tnd_forward(
+                q,
+                k,
+                v,
+                qv,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                window_size[0],
+                window_size[1],
+                causal,
+                softmax_scale,
+                seqused_q,
+                seqused_k,
+            )
+            return (out, lse) if return_attn_probs else out
         out, lse = torch.ops.flash_attn_npu_3._mla_causal_tnd_forward(
             q,
             k,

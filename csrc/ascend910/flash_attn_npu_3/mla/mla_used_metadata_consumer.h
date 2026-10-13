@@ -80,7 +80,7 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadataAxis(const Reader& read, c
 // nonnegative capacity before subtraction or indexing. Check every descriptor
 // before reading any length, and never write output until all checks succeed.
 template <bool IsCausal = false, bool IsTndCausal = false, bool IsMixedCausal = false, bool IsWindow = false,
-          typename Reader, typename Arrays>
+          bool IsTndWindow = false, typename Reader, typename Arrays>
 MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint32_t words,
                                                        const MlaUsedMetadataContext& c,
                                                        const MlaUsedMetadataInputs& inputs, const Arrays& arrays,
@@ -88,6 +88,7 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
 {
     using Status = MlaMetadataReadStatus;
     constexpr uint32_t tail = IsWindow ? kMlaWindowMetadataTailWords : 0;
+    static_assert(!IsTndWindow || IsWindow);
     static_assert(!IsWindow || (!IsCausal && !IsTndCausal && !IsMixedCausal));
     if (c.batch > (UINT32_MAX - kMlaUsedMetadataPrefixWords - tail) / kMlaUsedMetadataSequenceWords) {
         return Status::InvalidBuffer;
@@ -103,10 +104,10 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
                                               : kMlaMetadataCausalBsnd;
     auto status =
         ReadMetadataHeader(read, words, kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * c.batch + tail,
-                           IsWindow   ? kMlaWindowBsndMetadataVersion
+                           IsWindow   ? (IsTndWindow ? kMlaWindowTndMetadataVersion : kMlaWindowBsndMetadataVersion)
                            : IsCausal ? causalVersion
                                       : kMlaUsedMetadataVersion,
-                           IsWindow   ? kMlaMetadataWindowBsnd
+                           IsWindow   ? (IsTndWindow ? kMlaMetadataWindowTnd : kMlaMetadataWindowBsnd)
                            : IsCausal ? causalKind
                                       : kMlaMetadataUsed,
                            c.dtype);
@@ -125,8 +126,8 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
     }
 #define MLA_USED_WORD(field) read(offsetof(MlaUsedMetadataPrefix, field) / sizeof(uint32_t))
     const uint64_t totalQ = UsedMetadataTotal(c.query);
-    if ((IsCausal || IsWindow) &&
-        (c.query.layout != uint32_t(IsTndCausal || IsMixedCausal) || c.kv.layout != uint32_t(IsTndCausal))) {
+    if ((IsCausal || IsWindow) && (c.query.layout != uint32_t(IsTndCausal || IsMixedCausal || IsTndWindow) ||
+                                   c.kv.layout != uint32_t(IsTndCausal || IsTndWindow))) {
         return Status::ShapeMismatch;
     }
     if (c.query.layout > 1 || c.kv.layout > 1 || (c.query.layout == 0 && c.kv.layout != 0) || c.usedFlags > 3 ||

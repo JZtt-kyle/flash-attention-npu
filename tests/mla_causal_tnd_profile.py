@@ -198,25 +198,38 @@ def sample_kernels(
     return labels, dict(kernel_csv=str(csvs[0]), raw_csv=str(raws[0]))
 
 
-def profile(dtype_name, output, vendor, dispatch=None):
+def profile(
+    dtype_name,
+    output,
+    vendor,
+    dispatch=None,
+    *,
+    specs=PERFORMANCE_CASES,
+    prepare_case=prepare,
+    call_forward=call,
+    native_class=CausalTndCall,
+    check_accuracy=accuracy,
+    mask="causal",
+    metadata_name="ComputeMlaCausalTndMetadata",
+):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     vendor = check_vendor_configuration(vendor)
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     torch.npu.set_device(0)
-    cases = [prepare(dtype, s) for s in PERFORMANCE_CASES]
-    natives = [CausalTndCall(c) for c in cases]
+    cases = [prepare_case(dtype, s) for s in specs]
+    natives = [native_class(c) for c in cases]
     identities = [identity(c) for c in cases]
     if dispatch is None:
         checks = []
         for index, (case, native) in enumerate(zip(cases, natives)):
-            actual = call(case["args"])
+            actual = call_forward(case["args"])
             torch.npu.synchronize()
             os.write(1, f"MLA_STRIDE_NATIVE_BEGIN {dtype_name} {index}\n".encode())
             source = native()
             torch.npu.synchronize()
             os.write(1, f"MLA_STRIDE_NATIVE_END {dtype_name} {index}\n".encode())
-            checks.append(accuracy(case, actual, source))
+            checks.append(check_accuracy(case, actual, source))
         (output / "accuracy.json").write_text(
             json.dumps(dict(inputs=identities, comparisons=checks), indent=2) + "\n"
         )
@@ -236,7 +249,7 @@ def profile(dtype_name, output, vendor, dispatch=None):
     torch.set_num_threads(1)
 
     def run(index, name, repeats=1):
-        function = natives[index] if name == "cann" else lambda: call(cases[index]["args"])
+        function = natives[index] if name == "cann" else lambda: call_forward(cases[index]["args"])
         return [function() for _ in range(repeats)]
 
     names = ("fa3", "cann")
@@ -268,7 +281,13 @@ def profile(dtype_name, output, vendor, dispatch=None):
     del result
     (output / "wall.json").write_text(json.dumps(wall, indent=2) + "\n")
     samples, paths = sample_kernels(
-        run, len(cases), output, names, "mla_tnd_used_", "FusedInferAttentionScore"
+        run,
+        len(cases),
+        output,
+        names,
+        "mla_tnd_used_",
+        "FusedInferAttentionScore",
+        metadata_name=metadata_name,
     )
     results = []
     for index, case in enumerate(cases):
@@ -299,10 +318,13 @@ def profile(dtype_name, output, vendor, dispatch=None):
         row["conversion_kernel_us"] = statistics.median(
             v["conversion_us"] for v in samples if v["case"] == index and v["name"] == "cann"
         )
+        if mask == "window":
+            row["native_call"] = natives[index].description()
         results.append(row)
     report = dict(
         dtype=dtype_name,
-        causal=True,
+        causal=mask == "causal",
+        window=mask == "window",
         warmup=5,
         rounds=5,
         wall_iterations=20,

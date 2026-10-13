@@ -108,13 +108,15 @@ def summarize_varlen(reports, specs):
         raise ValueError("Both dtypes are required")
     cases, excluded = [], []
     for report in reports:
-        if not report["causal"] or (
+        if not (report["causal"] or report.get("window")) or (
             report["warmup"],
             report["rounds"],
             report["wall_iterations"],
             report["repeats"],
         ) != (5, 5, 20, [1, 4]):
             raise ValueError("Changed varlen timing protocol")
+        if report.get("window") and any("window" not in spec for spec in specs):
+            raise ValueError("Missing varlen window identity")
         if [row["spec"] for row in report["results"]] != specs:
             raise ValueError("Incomplete or changed varlen input matrix")
         for index, row in enumerate(report["results"]):

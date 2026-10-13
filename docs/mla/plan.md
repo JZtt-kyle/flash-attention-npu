@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-本页记录实施顺序、每步产物与完成条件。**流程 W01–W05、功能 M00–M08（含阶段限量平均验收）、M09a/M09b1/M09b2 已完成；唯一下一步是 M09c1。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。功能开发按当前下一步执行，不重新启动流程优化任务。
+本页记录实施顺序、每步产物与完成条件。**流程 W01–W05、功能 M00–M08（含阶段限量平均验收）、M09a/M09b1/M09b2/M09c1 已完成；唯一下一步是 M09c2。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。功能开发按当前下一步执行，不重新启动流程优化任务。
 
 ## 提交边界
 
@@ -68,7 +68,7 @@ M09a 已完成独立 CPU 窗口归一化、逐样本范围和完整 M 分核；�
 - 共享头文件影响全部 MLA 实例，重建并核验实际扩展。回归采用 `regression-dense/nonpaged/paged`，覆盖双 dtype、M/N/长 KV、任务环、三种非分页 allocation/used、stride、页边界及生命周期；补 `causal-check` 和五布局 `causal-bsnd-check/causal-tnd-check/causal-mixed-check/causal-paged-check/causal-paged-tnd-check`，覆盖真实生产 masked 分派及空行；运行 `ordinary` 与 `causal-mixed-boundary` 检查普通入口及未开放窗口边界。没有新增公开能力或 host 调用开销改动，本步只要求代表组件性能。
 - 继承 M09a 的 `window-cpu/window-sanitize/causal-cpu/causal-sanitize`：复核完整原始证据、CPU 源/驱动、固定 FA3/CANN 与工具链；共享设备头的变化不作为这些 CPU 组件失效的依据。既有地址/Copy 算法及最长无 mask/causal reference 成本边界按有效依赖继承；构建产物在共享头变更后必须重建，不继承旧设备结果替代上述必跑组。新增 reference 边界先实测并记录耗时/峰值，复用默认 golden 目录，不重复冷算。
 
-### 最近完成 M09b2：BSND window 完整公开行为
+### 已完成 M09b2：BSND window 完整公开行为
 
 以 M09b1 的稳定连续 BSND window 数值组件为依赖，在一个提交中接通 **非 PA BSND** 的 metadata、生产分派和公开 func/cache；必要正确性、共享回归与平均公开 E2E 已闭环，证据见 [status](status.md)。
 
@@ -85,13 +85,30 @@ M09a 已完成独立 CPU 窗口归一化、逐样本范围和完整 M 分核；�
 - 统一命令：`python3 -m tests.mla_validation --output build/mla-m09b2/<批次> --device 6 --suite <组>`；先 dry-run/collect 核对候选、选中和未选中，默认每组最多 100。先工具/CPU 和窗口代表，再冻结实现并运行正式集合。生产重建后核验实际加载；共享回归选 `regression-nonpaged`（BSND/TND/混合 used、stride、空值）、五布局 `causal-*-check`、`ordinary` 和 `causal-mixed-boundary`。独立 dense/PA 数值环未改，不因 host/协议接入重跑全部组件矩阵。
 - 继承经原始产物和依赖核验的 M09a `window-cpu/window-sanitize/causal-cpu/causal-sanitize` 与 M09b1 独立 `window-check/window-attention/window-profile`；不把新增 `MlaUsed` window stride/used 接入视为已由连续 probe 证明。保留源精度限制；最长 reference/内存成本边界与公式不变时继承。统一复用 `build/mla-validation-artifacts/golden`，开发、代表及正式验收不刷新相同 reference。必要组全部通过且平均公开性能达标后更新相关契约/状态、质量检查并提交一次；失败或中断保留证据，只续未完成或失效组。
 
-### 唯一下一步 M09c1：非 PA TND Q/KV window varlen
+### 最近完成 M09c1：非 PA TND Q/KV window varlen
 
-以 M09b2 的稳定 window 数值路径和 M08c1 的 TND allocation/used 接入为基础，在一个提交中完成 **非 PA TND Q/KV** 的窗口 varlen 行为；本次未启动。混合 cache 与 PA window 留在后续布局步骤，M09 阶段组合验收在该阶段收尾实测。
+以 M09b2 的稳定 window 数值路径和 M08c1 的 TND allocation/used 接入为基础，已完成 **非 PA TND Q/KV** 的窗口 varlen 行为、必要正确性、共享回归和平均公开 E2E，证据见 [status](status.md)。混合 cache 与 PA window 留在后续布局步骤，M09 阶段组合验收在该阶段收尾实测。
 
 - 接通双分配前缀、调用级 max Q/K、可选 `seqused_q/k`、四路 stride 与 window/causal 归一化；新记录绑定 TND 布局、容量/used 和窗口身份，不能冒用 BSND v12。公开 varlen 保持内部生成和现有无显式 metadata 复用的签名边界；必要的生成器、消费者、launcher、Python/C++ real/fake 一次接通。
 - 实现前列出实际影响路径与统一组/命令。新增非均匀前缀、used 间隙/poison、非零 S2 起点、空段/空行、长度与窗口更新、stride、compile/生命周期及真实 Trap；本步实测双 dtype 固定源/双数学、适用 varlen R=1/4 平均公开 E2E，以及按影响选择的 `regression-*`/普通 FA3 和未开放边界。继承经依赖核验的 CPU window、连续数值组件及不变的地址/Copy，复用 reference 缓存。
 - 完成条件：该 TND 可调用行为和必要回归/平均性能通过，其他未开放窗口布局继续明确拒绝；更新相关契约、状态和唯一下一步，质量检查后只提交一次并停止。必要验收未完成则保留工作与交接，不提交为闭环。
+
+**M09c1 实施边界与验收选择：**
+
+- 新增 `version=kind=13` 的 TND window 记录，复用 `413+8B` 编码、双分配前缀/used 快照和三字窗口尾部；调用级 maxQ/maxK 与观测容量分离。扩展 window 生成器/AICPU、共享消费者的默认关闭 TND window 特化、TND used launcher、host 和 Python/C++ real/fake 分派。公开 varlen 每次内部生成，不增加显式 metadata 参数；BSND v12 与 TND v13 互斥。CPU window/causal 算法、地址/Copy、Block/Tile、CATLASS 和 CANN 保持既有实现。
+- 新增 `window-tnd-cpu/window-tnd-sanitize`：真实 AICPU 源的 CPU 桥核对固定源分块/window 分核、非均匀与空前缀、used/poison、max/总量、归一化身份、失败清零/重叠/溢出、版本互斥与消费者当次长度校验。共享生成器/消费者回归为 `window-bsnd-cpu/window-bsnd-sanitize` 及三个非分页布局的 `causal-bsnd/tnd/mixed-cpu/sanitize`，覆盖 v5/v7/v8/v9/v12。
+- 新增 `window-tnd-check/window-tnd-public/window-tnd-trap/window-tnd-profile/window-tnd-tools`；check 与 public 节点互斥。双 dtype 覆盖双前缀、独立 used 间隙、非零 S2 起点、有限/单侧/causal 叠加、调用上界与 used 分离、四路 stride/offset、空段/空行/空容量、scale、长度/窗口更新、公开/专用/raw、fake/compile/多流/生命周期及隔离 release Trap。固定源实际执行 band 参数；双数学直接按原始分配/有效长度和调用窗口映射，复用默认 golden 内容缓存。数学按已有最多四样本并行策略执行，不改 intra-op 线程数；变更执行策略后复测两个成本边界，已完成 reference 命中复用。先工具、CPU、小代表及新增成本边界，再冻结实现运行正式集合。
+- 统一命令为 `python3 -m tests.mla_validation --output build/mla-m09c1/<批次> --device 6 --suite <组>`，每批先 dry-run/collect 核对候选、选中及未选中，默认每组最多 100。生产重建并核对实际加载；共享设备选择 `regression-nonpaged`、`window-bsnd-check`、五布局 `causal-*-check`、`ordinary` 和 `causal-mixed-boundary`，分别检查 used/stride/空值、已有 window、masked 分派、普通入口及未开放混合/PA window。固定输入的 TND varlen R=1/4 E2E 保持 5 次预热、5 轮×20 次 wall 与既有同步/转换边界，原生 FD 单列，适用配置等权平均 ≤1。
+- 继承 M09a window/causal CPU 算法及 M09b1 独立连续 window 数值/性能证据，核验原始产物、执行输入、编译依赖/参数、工具链和实际加载身份；M09b2 的 BSND window 新入口记录作为基线。未变的 reference 最长成本边界可继承；新增 TND 输入成本边界先实测且不重复冷算。必要组全部通过后核对相关契约/文档、质量检查并提交一次；失败只续未完成或失效部分，不能提交为闭环。
+
+### 唯一下一步 M09c2：非 PA 混合 window cache
+
+以 M09c1 的稳定 TND/window 接入和 M08c2 的混合 cache 契约为基础，在一个提交中接通 **TND Q + BSND KV** 的非 PA 窗口只读 cache，当前未启动。PA window 留在后续布局步骤，M09 的已开放组合在阶段收尾实测。
+
+- 保持 Q 分配前缀/调用级 maxQ 与实际 Q-used 分离，KV 使用 BSND 容量及实际长度；接通有限/单侧窗口、causal 叠加、非零 S2 起点和四路 stride。窗口记录绑定混合布局、allocation/used 与归一化窗口，不能冒用 v12/v13 或旧 causal 记录。
+- 公开只读 cache、metadata 生成/复用及内部 Q-used 一次接通。内部 Q-used 仍每次生成且拒绝显式 metadata；公开 cache/生成器不增加 Q-used 参数。复用稳定 CPU 分核和数值核，按实际影响完成 host/AICPU、消费者、launcher、Python/C++ real/fake。
+- 实现前列明实际统一组/命令、共享调用路径和继承依赖。新增前缀间隙/poison、非均匀 used、空段/空行、窗口与长度更新、记录复用/互斥、stride、compile/生命周期及真实 Trap；当步实测双 dtype 固定源/双数学、适用 R=1/4 平均公开 E2E。日常共享回归优先 `regression-*`，清单缺口补明确边界。
+- 继承经原始证据与依赖核验的稳定 CPU/连续数值/地址组件，复用数学内容缓存；新混合入口和原生转换不能由 TND varlen 结果替代。必要正确性与平均性能通过后更新相关契约、状态和唯一下一步，质量检查后只提交一次并停止；验收未完成则如实交接，不提交为闭环。
 
 ## 后续里程碑：M09–M17
 
@@ -146,6 +163,7 @@ M09a 已完成独立 CPU 窗口归一化、逐样本范围和完整 M 分核；�
 | M09a | 独立 CPU window 归一化、band/全遮罩范围与完整 M 分核；固定 FA3/CANN、逐行/任务差分、五布局原始长度、溢出和 ASan/UBSan；生产窗口仍拒绝 |
 | M09b1 | 独立连续 BSND window 数值组件；非零 S2 起点、双侧 mask、任务环/空值、固定源/双数学与源精度限制、共享回归及代表组件性能；公共窗口仍拒绝 |
 | M09b2 | 非 PA BSND window func/只读 cache、v12 metadata 生成/复用及内部 Q-used；四路 stride、真实/fake/compile/Trap/生命周期、固定源/双数学、共享回归和平均公开 E2E |
+| M09c1 | 非 PA TND Q/KV window varlen、v13 双前缀/used 与调用级窗口身份；四路 stride、真实/fake/compile/Trap/生命周期、固定源/双数学、共享回归及平均公开 E2E |
 
 M07 的页大小精度覆盖全部 16..1024 的 16 倍数；性能矩阵及原生非 FD/FD 的边界见 [design 7.1](design.md#71-固定性能矩阵与阶段边界)。公开接入包含 None/整数/tensor KV 长度、v6 复用及相关 MLA/普通 FA3 回归，结果只在 status 维护。
 
