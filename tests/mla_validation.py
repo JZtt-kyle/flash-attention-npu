@@ -34,6 +34,7 @@ from tests.mla_validation_policy import (
 
 
 PUBLIC = "tests/test_flash_attn_npu_v3_mla_paged_tnd_public.py"
+WINDOW_CPU = "tests/test_flash_attn_npu_v3_mla_window_schedule.py"
 CAUSAL_CPU = "tests/test_flash_attn_npu_v3_mla_causal_schedule.py"
 USED_SHARED_CPU = [
     f"tests/test_flash_attn_npu_v3_mla_{name}.py"
@@ -48,6 +49,22 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "window-cpu": [WINDOW_CPU],
+    "window-sanitize": [WINDOW_CPU],
+    "window-tools": [
+        "tests/test_mla_window_build.py",
+        *[
+            f"tests/test_mla_validation.py::{name}[{suite}]"
+            for name in (
+                "test_success_failure_interruption_and_resume",
+                "test_causal_dependencies_changing_during_execution_fail",
+            )
+            for suite in ("window-cpu", "window-sanitize")
+        ],
+        "tests/test_mla_validation.py::test_causal_selection_and_isolated_cpu_environment[window-cpu-0]",
+        "tests/test_mla_validation.py::test_causal_selection_and_isolated_cpu_environment[window-sanitize-1]",
+        "tests/test_mla_validation.py::test_causal_driver_checks_protocol_and_final_sanitizer_exit",
+    ],
     "causal-stage-tools": ["tests/test_mla_causal_stage_performance.py"],
     "causal-paged-tnd-cpu": ["tests/test_flash_attn_npu_v3_mla_causal_paged_tnd_metadata.py"],
     "causal-paged-tnd-sanitize": ["tests/test_flash_attn_npu_v3_mla_causal_paged_tnd_metadata.py"],
@@ -294,6 +311,9 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "window-cpu",
+    "window-sanitize",
+    "window-tools",
     "causal-stage-tools",
     "causal-paged-tools",
     "causal-paged-tnd-cpu",
@@ -320,6 +340,10 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
+    if suite in {"window-cpu", "window-sanitize"}:
+        from tests.mla_window_build import window_toolchain_identity
+
+        return window_toolchain_identity(suite.endswith("sanitize"))
     if suite not in {
         "causal-paged-tnd-cpu",
         "causal-paged-tnd-sanitize",
@@ -457,7 +481,10 @@ def environment(args, directory, suite):
     # Inherited pytest/plugin or old step-directory settings must not silently
     # change coverage or redirect fixtures to unrelated artifacts.
     for key in list(env):
-        if key.startswith(("MLA_", "GOLDEN_CACHE_", "PYTEST_")) and key != "MLA_CANN_SOURCE_ROOT":
+        if key.startswith(("MLA_", "GOLDEN_CACHE_", "PYTEST_")) and key not in {
+            "MLA_CANN_SOURCE_ROOT",
+            "MLA_FA3_SOURCE_ROOT",
+        }:
             env.pop(key)
     env.update(
         OMP_NUM_THREADS="2",
@@ -494,6 +521,8 @@ def environment(args, directory, suite):
     if suite in CAUSAL_DEVICE_SUITES:
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "window-cpu",
+        "window-sanitize",
         "causal-paged-tnd-cpu",
         "causal-paged-tnd-sanitize",
         "causal-paged-cpu",

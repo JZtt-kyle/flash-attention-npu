@@ -145,6 +145,8 @@ def test_lock_blocks_a_second_process(tmp_path):
     "suite",
     [
         "tools",
+        "window-cpu",
+        "window-sanitize",
         "causal-cpu",
         "causal-sanitize",
         "causal-bsnd-cpu",
@@ -238,6 +240,8 @@ def test_dry_run_does_not_write_or_import_npu(tmp_path, monkeypatch, capsys):
 @pytest.mark.parametrize(
     "suite,sanitize",
     [
+        ("window-cpu", "0"),
+        ("window-sanitize", "1"),
         ("causal-cpu", "0"),
         ("causal-sanitize", "1"),
         ("used-shared-cpu", "0"),
@@ -256,7 +260,13 @@ def test_causal_selection_and_isolated_cpu_environment(
     assert runner.run(config) == 0
     preview = json.loads(capsys.readouterr().out)
     assert preview["prepare"] == []
-    expected = runner.USED_SHARED_CPU if suite.startswith("used-shared") else [runner.CAUSAL_CPU]
+    expected = (
+        runner.USED_SHARED_CPU
+        if suite.startswith("used-shared")
+        else [runner.WINDOW_CPU]
+        if suite.startswith("window-")
+        else [runner.CAUSAL_CPU]
+    )
     assert runner.SUITES[suite] == expected
     assert all(path in preview["suites"][suite] for path in expected)
     env = runner.environment(config, tmp_path, suite)
@@ -266,9 +276,10 @@ def test_causal_selection_and_isolated_cpu_environment(
     assert env["MLA_SCHEDULE_ARTIFACT_DIR"] == str(tmp_path / "schedule")
 
 
-def test_causal_dependencies_changing_during_execution_fail(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suite", ["causal-cpu", "window-cpu", "window-sanitize"])
+def test_causal_dependencies_changing_during_execution_fail(tmp_path, monkeypatch, suite):
     config = args(tmp_path)
-    config.suite = ["causal-cpu"]
+    config.suite = [suite]
     dependencies = {"source": "original"}
     monkeypatch.setattr(runner, "sources", lambda: {})
     monkeypatch.setattr(runner, "suite_dependencies", lambda _: dict(dependencies))
@@ -280,10 +291,10 @@ def test_causal_dependencies_changing_during_execution_fail(tmp_path, monkeypatc
 
     monkeypatch.setattr(runner, "execute", execute)
     assert runner.run(config) == 1
-    group = json.loads((config.output / "summary.json").read_text())["groups"]["causal-cpu"]
+    group = json.loads((config.output / "summary.json").read_text())["groups"][suite]
     assert group["status"] == "failed"
     assert "fixed source changed" in group["error"]
-    assert "causal-cpu" not in json.loads((config.output / "state.json").read_text())
+    assert suite not in json.loads((config.output / "state.json").read_text())
 
 
 @pytest.mark.parametrize("mode", ["ok", "exit", "stderr", "eof", "malformed", "extra"])
