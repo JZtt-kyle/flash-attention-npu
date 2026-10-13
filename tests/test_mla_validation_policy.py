@@ -179,3 +179,68 @@ def test_average_cli_propagates_failure_and_preserves_diagnostics(tmp_path):
     saved = json.loads(output.read_text())
     assert not saved["passed"] and saved["regressed_cases"] == 2
     assert len(saved["reports"]) == 2
+
+
+def varlen_reports(ratios=(0.5, 1.2)):
+    specs = [{"q": [3], "kv": [17]}, {"q": [7], "kv": [33]}]
+    return specs, [
+        dict(
+            dtype=dtype,
+            causal=True,
+            warmup=5,
+            rounds=5,
+            wall_iterations=20,
+            repeats=[1, 4],
+            results=[
+                dict(
+                    case=i,
+                    spec=spec,
+                    native_template=5,
+                    native_fd=False,
+                    e2e_applicable=True,
+                    **{f"r{r}": dict(fa3=ratio * 100, cann=100, ratio=ratio) for r in (1, 4)},
+                )
+                for i, (spec, ratio) in enumerate(zip(specs, ratios))
+            ],
+        )
+        for dtype in ("fp16", "bf16")
+    ]
+
+
+def test_varlen_average_retains_regressions_and_failure():
+    from tests.mla_public_performance import summarize_varlen
+
+    specs, reports = varlen_reports()
+    result = summarize_varlen(reports, specs)
+    assert result["passed"] and result["regressed_cases"] == 2 and result["regressed_segments"] == 4
+    specs, reports = varlen_reports((0.9, 1.3))
+    assert not summarize_varlen(reports, specs)["passed"]
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing", "dtype", "protocol", "dispatch", "input", "zero", "ratio", "fd"]
+)
+def test_varlen_average_rejects_incomplete_evidence(fault):
+    from tests.mla_public_performance import summarize_varlen
+
+    specs, reports = varlen_reports()
+    if fault == "missing":
+        reports[0]["results"].pop()
+    elif fault == "dtype":
+        reports[0]["dtype"] = "bf16"
+    elif fault == "protocol":
+        reports[0]["repeats"] = [1]
+    elif fault == "dispatch":
+        reports[0]["results"][0]["native_fd"] = True
+    elif fault == "input":
+        reports[0]["results"][0]["spec"] = {"q": [2]}
+    elif fault == "zero":
+        reports[0]["results"][0]["r1"]["cann"] = 0
+    elif fault == "ratio":
+        reports[0]["results"][0]["r1"]["ratio"] = 99
+    elif fault == "fd":
+        for report in reports:
+            for row in report["results"]:
+                row.update(native_fd=True, e2e_applicable=False)
+    with pytest.raises(ValueError):
+        summarize_varlen(reports, specs)

@@ -603,6 +603,38 @@ def _mla_tnd_forward_fake(
     )
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_causal_tnd_forward")
+def _mla_causal_tnd_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    softmax_scale=None,
+    seqused_q=None,
+    seqused_k=None,
+):
+    result = _mla_tnd_forward_fake(
+        q,
+        k,
+        v,
+        qv,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        softmax_scale,
+        seqused_q,
+        seqused_k,
+    )
+    # v8 always has allocation/used spans, including when used is implicit.
+    _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
+    return result
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_tnd_bsnd_forward")
 def _mla_tnd_bsnd_forward_fake(
     q,
@@ -675,7 +707,7 @@ def _flash_attn_forward(
         _check_mla_dense_options(
             softmax_scale=softmax_scale,
             causal=causal,
-            allow_causal=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
+            allow_causal=page_table is None and (cu_seqlens_q is None) == (cu_seqlens_k is None),
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -722,7 +754,7 @@ def _flash_attn_forward(
                         "MLA compressed forward is not implemented yet for TND explicit metadata"
                     )
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
-                if seqused_q is not None or seqused_k is not None:
+                if causal or seqused_q is not None or seqused_k is not None:
                     _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
         elif causal:
             _check_mla_causal_bsnd_metadata(q, seqused_k, seqused_q, scheduler_metadata)
@@ -840,7 +872,7 @@ def _flash_attn_forward_fake(
         _check_mla_dense_options(
             softmax_scale=softmax_scale,
             causal=causal,
-            allow_causal=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
+            allow_causal=page_table is None and (cu_seqlens_q is None) == (cu_seqlens_k is None),
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -887,7 +919,7 @@ def _flash_attn_forward_fake(
                         "MLA compressed forward is not implemented yet for TND explicit metadata"
                     )
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
-                if seqused_q is not None or seqused_k is not None:
+                if causal or seqused_q is not None or seqused_k is not None:
                     _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
         elif causal:
             _check_mla_causal_bsnd_metadata(q, seqused_k, seqused_q, scheduler_metadata)
@@ -1867,10 +1899,37 @@ def flash_attn_varlen_func(
     return_attn_probs=True returns (out, lse), with FP32 lse shaped (nheads, total_q).
 
     Compressed MLA uses q/k dimensions 64 and qv/v dimensions 512. Metadata
-    is generated internally on every call (v3 without used lengths, v5 with
-    either used array). There is no explicit metadata or page-table parameter;
+    is generated internally on every call (v8 for right-down causal; otherwise
+    v3 without used lengths, v5 with either used array). There is no explicit metadata or page-table parameter;
     paged MLA uses flash_attn_with_kvcache. See docs/mla/status.md for limits.
     """
+    if causal and qv is not None and q.device.type == "npu":
+        _check_mla_dense_options(
+            causal=True,
+            allow_causal=True,
+            softmax_scale=softmax_scale,
+            window_size=window_size,
+            attention_chunk=attention_chunk,
+            softcap=softcap,
+            num_splits=num_splits,
+            pack_gqa=pack_gqa,
+            sm_margin=sm_margin,
+            optional_tensors=(q_descale, k_descale, v_descale),
+        )
+        out, lse = torch.ops.flash_attn_npu_3._mla_causal_tnd_forward(
+            q,
+            k,
+            v,
+            qv,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            softmax_scale,
+            seqused_q,
+            seqused_k,
+        )
+        return (out, lse) if return_attn_probs else out
     return FlashAttnVarlenFunc.apply(
         q,
         k,

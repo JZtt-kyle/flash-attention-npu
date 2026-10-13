@@ -25,10 +25,12 @@ bool MatchesFullSchedule(const MlaCausalFullSchedule* full, const MlaUsedShape& 
     return true;
 }
 
-MlaScheduleStatus BuildCausalBsndSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
-                                          const MlaUsedInputs& inputs, MlaUsedSchedule& output, const void* context)
+template <MlaSequenceLayout Layout>
+MlaScheduleStatus BuildCausalAllocationSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
+                                                const MlaUsedInputs& inputs, MlaUsedSchedule& output,
+                                                const void* context)
 {
-    if (shape.query.layout != MlaSequenceLayout::Bsnd || shape.kv.layout != MlaSequenceLayout::Bsnd) {
+    if (shape.query.layout != Layout || shape.kv.layout != Layout) {
         return MlaScheduleStatus::UnsupportedShape;
     }
     try {
@@ -37,10 +39,10 @@ MlaScheduleStatus BuildCausalBsndSchedule(const MlaUsedShape& shape, const MlaPl
         if (status != MlaScheduleStatus::Success) {
             return status;
         }
-        if (shape.batch != 0 && shape.query.maxLength != 0 && shape.kv.maxLength != 0) {
+        if (shape.batch != 0 && result.schedule.s1Size != 0 && result.schedule.s2Size != 0) {
             auto& s = result.schedule;
             const auto* full = static_cast<const MlaCausalFullSchedule*>(context);
-            if (MatchesFullSchedule(full, shape, result)) {
+            if (Layout == MlaSequenceLayout::Bsnd && MatchesFullSchedule(full, shape, result)) {
                 s.usedCoreNum = full->usedCoreNum;
                 s.bN2End = full->bN2End;
                 s.gS1End = full->gS1End;
@@ -89,14 +91,26 @@ bool BuildCausalBsndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& p
                              uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
                              const MlaCausalFullSchedule* full)
 {
-    if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs, BuildCausalBsndSchedule,
-                                       full)) {
+    if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs,
+                                       BuildCausalAllocationSchedule<MlaSequenceLayout::Bsnd>, full)) {
         return false;
     }
     // Shared serialization has already zeroed failed payloads. The v7 identity
     // is the only wire change; consumers still validate all current lengths.
     output[1] = kMlaCausalBsndMetadataVersion;
     output[2] = kMlaMetadataCausalBsnd;
+    return true;
+}
+
+bool BuildCausalTndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                            uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs)
+{
+    if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs,
+                                       BuildCausalAllocationSchedule<MlaSequenceLayout::Tnd>, nullptr)) {
+        return false;
+    }
+    output[1] = kMlaCausalTndMetadataVersion;
+    output[2] = kMlaMetadataCausalTnd;
     return true;
 }
 } // namespace flash_attn::mla

@@ -39,7 +39,7 @@ std::vector<at::Tensor> PagedTndForward(const at::Tensor& q, const at::Tensor& k
 std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
                                    const at::Tensor& cuQ, const at::Tensor& cuK, int64_t maxQ, int64_t maxK,
                                    float scale, const std::optional<at::Tensor>& usedQuery = std::nullopt,
-                                   const std::optional<at::Tensor>& usedKv = std::nullopt);
+                                   const std::optional<at::Tensor>& usedKv = std::nullopt, bool causal = false);
 std::vector<at::Tensor> TndBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                        const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ, float scale,
                                        const std::optional<at::Tensor>& cacheSeqlens,

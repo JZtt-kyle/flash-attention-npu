@@ -43,6 +43,29 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "causal-tnd-cpu": ["tests/test_flash_attn_npu_v3_mla_causal_tnd_metadata.py"],
+    "causal-tnd-sanitize": ["tests/test_flash_attn_npu_v3_mla_causal_tnd_metadata.py"],
+    "causal-tnd-check": [
+        "tests/test_flash_attn_npu_v3_mla_causal_tnd_public.py",
+        "-k",
+        "representative",
+    ],
+    "causal-tnd-public": [
+        "tests/test_flash_attn_npu_v3_mla_causal_tnd_public.py",
+        "-k",
+        "not representative and not release_trap",
+    ],
+    "causal-tnd-trap": [
+        "tests/test_flash_attn_npu_v3_mla_causal_tnd_public.py",
+        "-k",
+        "release_trap",
+    ],
+    "causal-tnd-profile": ["tests/test_mla_causal_tnd_profile.py"],
+    "causal-tnd-boundary": [
+        "tests/test_flash_attn_npu_v3_mla_causal_public.py",
+        "-k",
+        "static_rejections and (mixed or paged)",
+    ],
     "used-shared-cpu": USED_SHARED_CPU,
     "used-shared-sanitize": USED_SHARED_CPU,
     "causal-bsnd-cpu": [
@@ -164,12 +187,16 @@ SUITES = {
 }
 SUITES.update(INCREMENTAL_SUITES)
 PERFORMANCE_SUITES = {
+    "causal-tnd-profile",
     "causal-profile",
     "shared-profile",
     "causal-bsnd-profile",
     "causal-bsnd-native-check",
 }
 CAUSAL_DEVICE_SUITES = {
+    "causal-tnd-check",
+    "causal-tnd-public",
+    "causal-tnd-profile",
     "causal-smoke",
     "causal-attention",
     "causal-profile",
@@ -179,6 +206,8 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "causal-tnd-cpu",
+    "causal-tnd-sanitize",
     "used-shared-cpu",
     "used-shared-sanitize",
     "cpu",
@@ -195,6 +224,8 @@ def suite_dependencies(suite):
     if suite not in {
         "causal-cpu",
         "causal-sanitize",
+        "causal-tnd-cpu",
+        "causal-tnd-sanitize",
         "causal-bsnd-cpu",
         "causal-bsnd-sanitize",
         "used-shared-cpu",
@@ -356,6 +387,8 @@ def environment(args, directory, suite):
     if suite in {
         "causal-cpu",
         "causal-sanitize",
+        "causal-tnd-cpu",
+        "causal-tnd-sanitize",
         "causal-bsnd-cpu",
         "causal-bsnd-sanitize",
         "used-shared-cpu",

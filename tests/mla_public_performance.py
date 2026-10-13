@@ -93,6 +93,67 @@ def summarize(reports, cases_per_dtype):
     )
 
 
+def summarize_varlen(reports, specs):
+    """Varlen has one public entry; average R=1/4 within each fixed input/dtype."""
+    if not 0 < len(specs) <= PUBLIC_MAX_CASES // 2:
+        raise ValueError("Expected 1..50 fixed varlen inputs")
+    if len(reports) != 2 or {r["dtype"] for r in reports} != {"fp16", "bf16"}:
+        raise ValueError("Both dtypes are required")
+    cases, excluded = [], []
+    for report in reports:
+        if not report["causal"] or (
+            report["warmup"],
+            report["rounds"],
+            report["wall_iterations"],
+            report["repeats"],
+        ) != (5, 5, 20, [1, 4]):
+            raise ValueError("Changed varlen timing protocol")
+        if [row["spec"] for row in report["results"]] != specs:
+            raise ValueError("Incomplete or changed varlen input matrix")
+        for index, row in enumerate(report["results"]):
+            if row["case"] != index:
+                raise ValueError("Inconsistent case index")
+            item = dict(dtype=report["dtype"], case=index, spec=row["spec"])
+            applicable = row["native_template"] == 5 and not row["native_fd"]
+            if applicable != row["e2e_applicable"]:
+                raise ValueError("Inconsistent native dispatch classification")
+            if not applicable:
+                excluded.append(
+                    dict(item, native_fd=row["native_fd"], native_template=row["native_template"])
+                )
+                continue
+            ratios = []
+            for repeats in (1, 4):
+                segment = row[f"r{repeats}"]
+                a, b, recorded = (segment[k] for k in ("fa3", "cann", "ratio"))
+                if not all(math.isfinite(x) and x > 0 for x in (a, b, recorded)):
+                    raise ValueError("Non-finite or nonpositive timing")
+                ratio = a / b
+                if not math.isclose(ratio, recorded, rel_tol=1e-12):
+                    raise ValueError("Recorded ratio differs from measured timings")
+                ratios.append(ratio)
+            cases.append(dict(item, ratios=ratios, mean_ratio=statistics.fmean(ratios)))
+    if not cases:
+        raise ValueError("No applicable public E2E cases")
+    mean = statistics.fmean(c["mean_ratio"] for c in cases)
+    return dict(
+        passed=mean <= 1,
+        threshold=1.0,
+        mean_ratio=mean,
+        weighting="equal input/dtype weight; equal R=1/4 weight within each input",
+        measured_cases=2 * len(specs),
+        applicable_cases=len(cases),
+        excluded_cases=len(excluded),
+        regressed_cases=sum(c["mean_ratio"] > 1 for c in cases),
+        regressed_segments=sum(x > 1 for c in cases for x in c["ratios"]),
+        segment_means={
+            f"r{r}": statistics.fmean(c["ratios"][i] for c in cases) for i, r in enumerate((1, 4))
+        },
+        cases=cases,
+        excluded=excluded,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("reports", type=Path, nargs=2)

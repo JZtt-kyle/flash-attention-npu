@@ -6,6 +6,8 @@
 namespace flash_attn::mla {
 constexpr uint32_t kMlaCausalBsndMetadataVersion = 7;
 constexpr uint32_t kMlaMetadataCausalBsnd = 7;
+constexpr uint32_t kMlaCausalTndMetadataVersion = 8;
+constexpr uint32_t kMlaMetadataCausalTnd = 8;
 
 // Immutable host-generated candidate for full allocation lengths. The AICPU
 // producer validates current inputs and geometry before using this partition.
@@ -35,4 +37,8 @@ bool BuildCausalFullSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& p
 bool BuildCausalBsndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                              uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
                              const MlaCausalFullSchedule* full = nullptr);
+// TND Q/KV retain both allocation prefixes and optional used arrays. No
+// rectangular full-length candidate is valid for these device-owned spans.
+bool BuildCausalTndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                            uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs);
 } // namespace flash_attn::mla

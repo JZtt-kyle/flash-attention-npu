@@ -32,6 +32,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadataFromPrefix(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalBsndMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaCausalTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args);
 
 namespace flash_attn::mla {
@@ -144,10 +145,14 @@ struct MetadataSubmission {
     {
         if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs>) {
             if (causal) {
-                // v7 is followed by its consumer on the caller's stream.
+                // v7/v8 is followed by its consumer on the caller's stream.
                 // The producer's DataStoreBarrier completes before that task.
-                MlaCausalMetadataArgs causalArgs{args, fullSchedule ? *fullSchedule : MlaCausalFullSchedule{}};
-                ComputeMlaCausalBsndMetadata<<<1, nullptr, current>>>(&causalArgs, sizeof(causalArgs));
+                if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
+                    ComputeMlaCausalTndMetadata<<<1, nullptr, current>>>(&args, sizeof(args));
+                } else {
+                    MlaCausalMetadataArgs causalArgs{args, fullSchedule ? *fullSchedule : MlaCausalFullSchedule{}};
+                    ComputeMlaCausalBsndMetadata<<<1, nullptr, current>>>(&causalArgs, sizeof(causalArgs));
+                }
                 return;
             }
         }
@@ -182,7 +187,7 @@ MetadataSubmission<Args> PrepareSubmission(const at::Tensor& metadata, const Arg
     if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs>) {
         if (causal) {
             c10_npu::NPUCachingAllocator::recordStream(metadata.storage().data_ptr(), stream);
-            for (const auto* input : {&usedQuery, &usedKv}) {
+            for (const auto* input : {&lengths, &query, &usedQuery, &usedKv}) {
                 if (*input && (*input)->numel() != 0) {
                     c10_npu::NPUCachingAllocator::recordStream((*input)->storage().data_ptr(), stream);
                 }
@@ -763,7 +768,7 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     std::optional<MetadataSubmission<MlaUsedMetadataArgs>> producer;
     if (!schedulerMetadata) {
         producer = PrepareSubmission(metadata, args, cuK, cuQ, true, usedQuery, usedKv, causal);
-        if (causal) {
+        if (causal && !tnd) {
             producer->fullSchedule = CausalFullSchedule(shape, p, q.device().index(), dtype);
         }
     }
@@ -824,7 +829,7 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
         return 0;
     };
     if (causal) {
-        RunCausalLaunch("ascendc_mla_bsnd_used", launch);
+        RunCausalLaunch(tnd ? "ascendc_mla_tnd_used" : "ascendc_mla_bsnd_used", launch);
     } else {
         at_npu::native::OpCommand::RunOpApiV2(tnd ? "ascendc_mla_tnd_used" : "ascendc_mla_bsnd_used", launch);
     }
@@ -905,15 +910,15 @@ CausalBsndCacheOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
 std::vector<at::Tensor> TndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
                                    const at::Tensor& cuQ, const at::Tensor& cuK, int64_t maxQ, int64_t maxK,
                                    float scale, const std::optional<at::Tensor>& usedQuery,
-                                   const std::optional<at::Tensor>& usedKv)
+                                   const std::optional<at::Tensor>& usedKv, bool causal)
 {
     const uint32_t words = CheckTndInputs(q, k, cuQ, cuK, maxQ, maxK);
     const int64_t batch = cuQ.numel() - 1;
-    if (usedQuery || usedKv) {
+    if (causal || usedQuery || usedKv) {
         return UsedForward(
             q, k, v, qv,
             {batch, q.size(1), {MlaSequenceLayout::Tnd, q.size(0), maxQ}, {MlaSequenceLayout::Tnd, k.size(0), maxK}},
-            cuQ, cuK, usedQuery, usedKv, scale);
+            cuQ, cuK, usedQuery, usedKv, scale, causal);
     }
     const auto layouts = CheckTndInputLayouts(q, k, v, qv);
     const bool nonempty = batch != 0 && q.size(0) != 0 && k.size(0) != 0;
@@ -1106,19 +1111,20 @@ std::tuple<at::Tensor, at::Tensor> TndBsndForwardOp(const at::Tensor& q, const a
     return {result[0], result[1]};
 }
 
-std::tuple<at::Tensor, at::Tensor> TndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
-                                                const at::Tensor& qv, const at::Tensor& cuQ, const at::Tensor& cuK,
-                                                int64_t maxQ, int64_t maxK, std::optional<double> softmaxScale,
-                                                const std::optional<at::Tensor>& usedQuery,
-                                                const std::optional<at::Tensor>& usedKv)
+template <bool IsCausal = false>
+std::tuple<at::Tensor, at::Tensor>
+TndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv, const at::Tensor& cuQ,
+             const at::Tensor& cuK, int64_t maxQ, int64_t maxK, std::optional<double> softmaxScale,
+             const std::optional<at::Tensor>& usedQuery, const std::optional<at::Tensor>& usedKv)
 {
     CheckForwardBoundary(q, k, v, qv, true, true, false);
     TORCH_CHECK(!softmaxScale ||
                     (std::isfinite(*softmaxScale) && std::abs(*softmaxScale) <= std::numeric_limits<float>::max()),
                 "MLA: softmax_scale must be finite in FP32");
     const c10::OptionalDeviceGuard deviceGuard(device_of(q));
-    auto result = TndForward(q, k, v, qv, cuQ, cuK, maxQ, maxK,
-                             softmaxScale ? float(*softmaxScale) : 1.0f / std::sqrt(576.0f), usedQuery, usedKv);
+    auto result =
+        TndForward(q, k, v, qv, cuQ, cuK, maxQ, maxK, softmaxScale ? float(*softmaxScale) : 1.0f / std::sqrt(576.0f),
+                   usedQuery, usedKv, IsCausal);
     return {result[0], result[1]};
 }
 
@@ -1171,6 +1177,9 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
     m.def("_mla_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
           "int max_seqlen_q, int max_seqlen_k, float? softmax_scale=None, Tensor? seqused_q=None, "
           "Tensor? seqused_k=None) -> (Tensor, Tensor)");
+    m.def("_mla_causal_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
+          "int max_seqlen_q, int max_seqlen_k, float? softmax_scale=None, Tensor? seqused_q=None, "
+          "Tensor? seqused_k=None) -> (Tensor, Tensor)");
     m.def(
         "_mla_tnd_bsnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, int max_seqlen_q, "
         "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
@@ -1201,7 +1210,8 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
     m.impl("_mla_causal_bsnd_forward", &flash_attn::mla::CausalBsndForwardOp);
     m.impl("_mla_causal_bsnd_cache", &flash_attn::mla::CausalBsndCacheOp);
     m.impl("_mla_dense_forward", &flash_attn::mla::DenseForwardOp);
-    m.impl("_mla_tnd_forward", &flash_attn::mla::TndForwardOp);
+    m.impl("_mla_tnd_forward", &flash_attn::mla::TndForwardOp<false>);
+    m.impl("_mla_causal_tnd_forward", &flash_attn::mla::TndForwardOp<true>);
     m.impl("_mla_tnd_bsnd_forward", &flash_attn::mla::TndBsndForwardOp);
     m.impl("_mla_paged_bsnd_forward", &flash_attn::mla::PagedBsndForwardOp);
     m.impl("_mla_paged_tnd_forward", &flash_attn::mla::PagedTndForwardOp);
@@ -1215,6 +1225,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, AutogradPrivateUse1, m)
     // reject requires_grad before allocating or submitting forward-only MLA.
     m.impl("_mla_dense_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_tnd_forward", torch::CppFunction::makeFallthrough());
+    m.impl("_mla_causal_tnd_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_tnd_bsnd_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_paged_bsnd_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_paged_tnd_forward", torch::CppFunction::makeFallthrough());
