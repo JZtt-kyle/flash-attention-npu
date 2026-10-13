@@ -141,7 +141,18 @@ def test_lock_blocks_a_second_process(tmp_path):
         assert result.returncode != 0 and "Another validation process" in result.stderr
 
 
-@pytest.mark.parametrize("suite", ["tools", "causal-cpu", "causal-sanitize"])
+@pytest.mark.parametrize(
+    "suite",
+    [
+        "tools",
+        "causal-cpu",
+        "causal-sanitize",
+        "causal-bsnd-cpu",
+        "causal-bsnd-sanitize",
+        "used-shared-cpu",
+        "used-shared-sanitize",
+    ],
+)
 def test_success_failure_interruption_and_resume(tmp_path, monkeypatch, suite):
     config = args(tmp_path)
     config.suite = [suite]
@@ -194,6 +205,13 @@ sys.exit(code)
         json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"]
         == "passed"
     )
+    if suite == "tools":
+        config.max_cases = 7
+        assert runner.run(config) == 0
+        assert (
+            json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"]
+            == "passed"
+        )
 
 
 def test_environment_cannot_inherit_sampling_or_old_fixture_paths(tmp_path, monkeypatch):
@@ -217,7 +235,15 @@ def test_dry_run_does_not_write_or_import_npu(tmp_path, monkeypatch, capsys):
     assert not config.output.exists()
 
 
-@pytest.mark.parametrize("suite,sanitize", [("causal-cpu", "0"), ("causal-sanitize", "1")])
+@pytest.mark.parametrize(
+    "suite,sanitize",
+    [
+        ("causal-cpu", "0"),
+        ("causal-sanitize", "1"),
+        ("used-shared-cpu", "0"),
+        ("used-shared-sanitize", "1"),
+    ],
+)
 def test_causal_selection_and_isolated_cpu_environment(
     tmp_path, monkeypatch, capsys, suite, sanitize
 ):
@@ -230,8 +256,9 @@ def test_causal_selection_and_isolated_cpu_environment(
     assert runner.run(config) == 0
     preview = json.loads(capsys.readouterr().out)
     assert preview["prepare"] == []
-    assert runner.SUITES[suite] == [runner.CAUSAL_CPU]
-    assert runner.CAUSAL_CPU in preview["suites"][suite]
+    expected = runner.USED_SHARED_CPU if suite.startswith("used-shared") else [runner.CAUSAL_CPU]
+    assert runner.SUITES[suite] == expected
+    assert all(path in preview["suites"][suite] for path in expected)
     env = runner.environment(config, tmp_path, suite)
     assert env["TORCH_DEVICE_BACKEND_AUTOLOAD"] == "0"
     assert env["MLA_VALIDATION_NPU"] == "0"
@@ -260,8 +287,10 @@ def test_causal_dependencies_changing_during_execution_fail(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("mode", ["ok", "exit", "stderr", "eof", "malformed", "extra"])
-def test_causal_driver_checks_protocol_and_final_sanitizer_exit(tmp_path, mode):
+@pytest.mark.parametrize("pooled", [False, True])
+def test_causal_driver_checks_protocol_and_final_sanitizer_exit(tmp_path, mode, pooled):
     from tests.mla_causal_build import CpuDriver
+    from tests.mla_cpu_driver import CpuDriverPool
 
     binary = tmp_path / "driver"
     binary.write_text(f"""#!{sys.executable}
@@ -280,6 +309,11 @@ sys.exit(7 if mode == "exit" else 0)
     binary.chmod(0o755)
 
     def exercise():
+        if pooled:
+            with CpuDriverPool() as pool:
+                assert pool.evaluate(binary, [[1, 2]]) == [[1, 2]]
+                assert pool.evaluate(binary, [[3]]) == [[3]]
+            return
         with CpuDriver(binary) as driver:
             assert driver.evaluate([[1, 2], [3]]) == [[1, 2], [3]]
 
@@ -288,9 +322,43 @@ sys.exit(7 if mode == "exit" else 0)
     else:
         with pytest.raises((RuntimeError, ValueError)):
             exercise()
-    record = json.loads((tmp_path / "driver-run.json").read_text())
+    records = list(tmp_path.glob("driver*-run.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text())
     assert record["returncode"] == (7 if mode == "exit" else 0)
     assert record["requests"] == (0 if mode in {"eof", "malformed"} else 2)
+
+
+def test_cpu_pool_reuses_only_matching_executable_arguments_and_environment(tmp_path):
+    from tests.mla_cpu_driver import CpuDriverPool
+
+    binary = tmp_path / "driver"
+    source = f"""#!{sys.executable}
+import json, os, sys
+for line in sys.stdin:
+    print(json.dumps([int(sys.argv[1]), int(os.environ['MLA_TEST_MODE']),
+                      *[int(x) for x in line.split()]]), flush=True)
+"""
+    binary.write_text(source)
+    binary.chmod(0o755)
+    with CpuDriverPool() as pool:
+        env = {"MLA_TEST_MODE": "1", "PYTEST_CURRENT_TEST": "first"}
+        assert pool.evaluate(binary, [[3]], args=[1], env=env) == [[1, 1, 3]]
+        env["PYTEST_CURRENT_TEST"] = "second"
+        assert pool.evaluate(binary, [[4]], args=[1], env=env) == [[1, 1, 4]]
+        assert len(pool.drivers) == 1
+        assert pool.evaluate(binary, [[5]], args=[2], env=env) == [[2, 1, 5]]
+        env["MLA_TEST_MODE"] = "2"
+        assert pool.evaluate(binary, [[6]], args=[2], env=env) == [[2, 2, 6]]
+        replacement = tmp_path / "replacement"
+        replacement.write_text(source.replace("int(x)", "2 * int(x)"))
+        replacement.chmod(0o755)
+        replacement.replace(binary)
+        assert pool.evaluate(binary, [[7]], args=[2], env=env) == [[2, 2, 14]]
+        assert len(pool.drivers) == 4
+    records = [json.loads(p.read_text()) for p in tmp_path.glob("driver*-run.json")]
+    assert sorted(row["requests"] for row in records) == [1, 1, 1, 2]
+    assert all(row["returncode"] == 0 for row in records)
 
 
 @pytest.mark.parametrize("suite", ("causal-smoke", "causal-attention", "causal-profile"))

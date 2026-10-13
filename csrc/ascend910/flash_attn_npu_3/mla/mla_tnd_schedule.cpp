@@ -336,7 +336,7 @@ void SplitWithoutFlashDecode(const detail::BaseInfo& base, const detail::SplitPa
 template <typename Lengths>
 MlaScheduleStatus Calculate(uint32_t batch, uint32_t heads, uint32_t queryCapacity, uint32_t kvCapacity,
                             bool compactQuery, bool compactKv, const MlaPlatformInfo& platform, const Lengths& lengths,
-                            MlaSchedule& s, uint32_t pageSize = 0)
+                            MlaSchedule& s, uint32_t pageSize = 0, bool geometryOnly = false)
 {
     // Reuse existing platform/local-memory validation and static geometry.
     // B=0 deliberately avoids the rectangular B*maxQ address/tile bound: TND
@@ -399,6 +399,10 @@ MlaScheduleStatus Calculate(uint32_t batch, uint32_t heads, uint32_t queryCapaci
         return MlaScheduleStatus::WorkspaceOverflow;
     }
     w.totalBytes = w.userBytes + w.libApiBytes;
+    if (geometryOnly) {
+        s.fd.gS1BaseSizeOfFd = detail::SplitParam{}.gS1BaseSizeOfFd;
+        return MlaScheduleStatus::Success;
+    }
     detail::BaseInfo base{};
     base.bSize = s.bSize;
     base.n2Size = 1;
@@ -562,8 +566,9 @@ MlaScheduleStatus ParseUsedLengths(const MlaUsedShape& shape, const MlaUsedInput
     }
 }
 
-MlaScheduleStatus BuildUsedSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
-                                    const MlaUsedInputs& inputs, MlaUsedSchedule& output)
+namespace {
+MlaScheduleStatus BuildUsedScheduleImpl(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
+                                        const MlaUsedInputs& inputs, MlaUsedSchedule& output, bool geometryOnly)
 {
     try {
         MlaUsedSchedule result;
@@ -574,7 +579,7 @@ MlaScheduleStatus BuildUsedSchedule(const MlaUsedShape& shape, const MlaPlatform
             status = Calculate(
                 shape.batch, shape.queryHeads, tndQuery ? result.lengths.maxQueryCapacity : shape.query.maxLength,
                 tndKv ? result.lengths.maxKvCapacity : shape.kv.maxLength, tndQuery && inputs.usedQuery.data == nullptr,
-                tndKv && inputs.usedKv.data == nullptr, platform, result.lengths, result.schedule);
+                tndKv && inputs.usedKv.data == nullptr, platform, result.lengths, result.schedule, 0, geometryOnly);
         }
         if (status == MlaScheduleStatus::Success) {
             output = std::move(result);
@@ -583,6 +588,19 @@ MlaScheduleStatus BuildUsedSchedule(const MlaUsedShape& shape, const MlaPlatform
     } catch (const std::bad_alloc&) {
         return MlaScheduleStatus::AllocationFailure;
     }
+}
+} // namespace
+
+MlaScheduleStatus BuildUsedSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
+                                    const MlaUsedInputs& inputs, MlaUsedSchedule& output)
+{
+    return BuildUsedScheduleImpl(shape, platform, inputs, output, false);
+}
+
+MlaScheduleStatus PrepareUsedSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
+                                      const MlaUsedInputs& inputs, MlaUsedSchedule& output)
+{
+    return BuildUsedScheduleImpl(shape, platform, inputs, output, true);
 }
 
 MlaScheduleStatus ParsePagedLengths(const MlaPagedShape& shape, const MlaPagedInputs& inputs, MlaPagedLengths& output)

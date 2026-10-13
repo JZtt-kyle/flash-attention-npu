@@ -4,11 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import selectors
 import shutil
 import subprocess
-import time
 
+from tests.mla_cpu_driver import CpuDriver as CpuDriver
 from tests.test_flash_attn_npu_v3_mla_schedule import CANN_COMMIT, MLA, ROOT, run
 
 SOURCE_FILES = ("attention/common/op_host/split_core.h", "attention/common/op_host/split_core.cpp")
@@ -99,86 +98,3 @@ def compile_drivers(directory):
         result.check_returncode()
         binaries.append(binary)
     return binaries
-
-
-class CpuDriver:
-    """One checked process per executable; retain complete request/response logs.
-
-    In particular, LeakSanitizer still runs at exit, once for the entire corpus.
-    EOF, malformed output, nonzero exit and sanitizer stderr all fail acceptance.
-    """
-
-    def __init__(self, binary):
-        self.binary = binary
-        self.started = time.monotonic()
-        self.requests = 0
-        self.stderr_path = binary.with_name(binary.name + ".stderr")
-        self.stderr = self.stderr_path.open("w")
-        self.inputs = binary.with_name(binary.name + ".stdin").open("w")
-        self.outputs = binary.with_name(binary.name + ".stdout").open("w")
-        self.process = subprocess.Popen(
-            [str(binary)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=self.stderr,
-            text=True,
-            bufsize=1,
-        )
-        self.selector = selectors.DefaultSelector()
-        self.selector.register(self.process.stdout, selectors.EVENT_READ)
-
-    def __enter__(self):
-        return self
-
-    def evaluate(self, cases):
-        values = []
-        for item in cases:
-            line = " ".join(map(str, item)) + "\n"
-            self.inputs.write(line)
-            self.inputs.flush()
-            self.process.stdin.write(line)
-            self.process.stdin.flush()
-            if not self.selector.select(timeout=120):
-                raise RuntimeError(f"CPU driver response timed out: {self.binary}")
-            response = self.process.stdout.readline()
-            if not response:
-                raise RuntimeError(
-                    f"CPU driver exited before a response: {self.stderr_path.read_text()}"
-                )
-            self.outputs.write(response)
-            self.outputs.flush()
-            values.append(json.loads(response))
-            self.requests += 1
-        return values
-
-    def __exit__(self, exc_type, exc, traceback):
-        try:
-            self.process.stdin.close()
-            try:
-                code = self.process.wait(timeout=120)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
-                raise
-            extra = self.process.stdout.read()
-        finally:
-            self.selector.close()
-            self.process.stdout.close()
-            self.stderr.close()
-            self.inputs.close()
-            self.outputs.close()
-            self.binary.with_name(self.binary.name + "-run.json").write_text(
-                json.dumps(
-                    dict(
-                        returncode=self.process.returncode,
-                        requests=self.requests,
-                        seconds=time.monotonic() - self.started,
-                    ),
-                    indent=2,
-                )
-                + "\n"
-            )
-        if code or extra or self.stderr_path.read_text():
-            raise RuntimeError(
-                f"CPU driver failed at exit ({code}): {self.stderr_path.read_text()}; extra={extra!r}"
-            )

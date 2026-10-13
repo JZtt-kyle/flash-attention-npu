@@ -15,6 +15,7 @@
 // FA3 num_splits=1 whole-M endpoints with causal costs recomputed per block.
 
 #include "mla_causal.h"
+#include "mla_causal_metadata.h"
 #include "detail/cann_split_core.h"
 #include <algorithm>
 #include <new>
@@ -86,7 +87,11 @@ MlaCausalStatus Calculate(const MlaCausalScheduleInput& in, MlaCausalSchedule& r
     auto base = CausalBase(in.queryHeads);
     base.bSize = in.sequences.size();
     base.actualLenQDims = base.actualLenKvDims = base.bSize;
-    std::vector<uint64_t> prefix{0};
+    base.actualSeqS1Size.reserve(in.sequences.size());
+    base.actualSeqS2Size.reserve(in.sequences.size());
+    std::vector<uint64_t> prefix;
+    prefix.reserve(in.sequences.size() + 1);
+    prefix.push_back(0);
     for (const auto& seq : in.sequences) {
         base.actualSeqS1Size.push_back(seq.queryLength);
         base.actualSeqS2Size.push_back(seq.kvLength);
@@ -102,7 +107,7 @@ MlaCausalStatus Calculate(const MlaCausalScheduleInput& in, MlaCausalSchedule& r
     result.totalCost = context.costInfo.totalCost;
     result.totalS2Blocks = context.costInfo.totalBlockNum;
     detail::SplitResult split{uint32_t(in.aicNum), uint32_t(in.cvRatio)};
-    detail::SplitCore(in.aicNum, base, param, split);
+    detail::SplitCore(in.aicNum, context, split);
     if (split.usedCoreNum == 0 || split.usedCoreNum > uint64_t(in.aicNum)) {
         return MlaCausalStatus::InvalidSplit;
     }
@@ -222,6 +227,46 @@ MlaCausalStatus BuildCausalSchedule(const MlaCausalScheduleInput& input, MlaCaus
         return status;
     } catch (const std::bad_alloc&) {
         return MlaCausalStatus::AllocationFailure;
+    }
+}
+
+bool BuildCausalFullSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform, MlaCausalFullSchedule& output)
+{
+    if (shape.batch <= 0 || shape.query.maxLength <= 0 || shape.kv.maxLength <= 0 ||
+        shape.query.layout != MlaSequenceLayout::Bsnd || shape.kv.layout != MlaSequenceLayout::Bsnd) {
+        return false;
+    }
+    try {
+        MlaUsedSchedule prepared;
+        if (PrepareUsedSchedule(shape, platform, {}, prepared) != MlaScheduleStatus::Success) {
+            return false;
+        }
+        const auto& s = prepared.schedule;
+        MlaCausalScheduleInput input{{}, shape.queryHeads, s.mBaseSize, s.s2BaseSize, s.aicNum, s.cvRatio};
+        input.sequences.assign(shape.batch, {shape.query.maxLength, shape.kv.maxLength});
+        MlaCausalSchedule schedule{};
+        if (BuildCausalSchedule(input, schedule) != MlaCausalStatus::Success) {
+            return false;
+        }
+        MlaCausalFullSchedule full{};
+        full.enabled = 1;
+        full.batch = shape.batch;
+        full.queryCapacity = shape.query.maxLength;
+        full.kvCapacity = shape.kv.maxLength;
+        full.heads = shape.queryHeads;
+        full.aicNum = s.aicNum;
+        full.cvRatio = s.cvRatio;
+        full.mBaseSize = s.mBaseSize;
+        full.s2BaseSize = s.s2BaseSize;
+        full.usedCoreNum = schedule.usedCoreNum;
+        full.bN2End = schedule.bN2End;
+        full.gS1End = schedule.gS1End;
+        full.s2End = schedule.s2End;
+        full.maxCost = schedule.maxCost;
+        output = full;
+        return true;
+    } catch (const std::bad_alloc&) {
+        return false;
     }
 }
 } // namespace flash_attn::mla

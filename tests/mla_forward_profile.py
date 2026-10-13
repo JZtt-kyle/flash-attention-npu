@@ -33,6 +33,58 @@ from tests.mla_profile_cases import (
 )
 
 
+def check_causal_accuracy(actual, source, cpu, shape, scale, lengths):
+    from tests.mla_source_compare import assert_mla_source_close
+    from tests.test_flash_attn_npu_v3_mla_causal_attention import references
+
+    batch, sq, heads, sk = shape
+    full_refs = references(
+        dict(
+            shape=shape,
+            inputs=cpu,
+            lengths=lengths if lengths is not None else [sk] * batch,
+            scale=scale,
+        )
+    )
+    reports = []
+    for b, length in enumerate(lengths if lengths is not None else [sk] * batch):
+        refs = [ref[b : b + 1] for ref in full_refs]
+        got = [actual[0].cpu()[b : b + 1], actual[1].cpu()[b : b + 1]]
+        native = [source[0].cpu()[b : b + 1], source[1].cpu()[b : b + 1]]
+        empty = max(0, sq - length)
+        assert (got[0][:, :empty] == 0).all() and got[1][:, :, :empty].isneginf().all()
+        assert (native[0][:, :empty] == 0).all() and native[1][:, :, :empty].isposinf().all()
+        native[1][:, :, :empty] = -torch.inf
+        if length == 0:
+            refs[1].fill_(-torch.inf)
+            refs[3].fill_(-torch.inf)
+        comparison = {}
+        for i, name in enumerate(("out", "lse")):
+            if torch.equal(got[i], native[i]):
+                comparison[name] = assert_mla_source_close(
+                    got[i], native[i], refs[i], refs[i + 2], name=name
+                )
+            else:
+                # Native automatic FD can differ in arithmetic order. Its
+                # dispatch is retained below, with independent math checks.
+                assert_fa_close(got[i], refs[i], refs[i + 2], name=name)
+                assert_fa_close(native[i], refs[i], refs[i + 2], name="native-" + name)
+                comparison[name] = dict(source="different", math="passed")
+        reports.append(comparison)
+    identity = {
+        name: dict(
+            shape=list(t.shape),
+            stride=list(t.stride()),
+            offset=t.storage_offset(),
+            sha256=hashlib.sha256(t.contiguous().view(torch.uint8).numpy().tobytes()).hexdigest(),
+        )
+        for name, t in cpu.items()
+    }
+    return dict(
+        shape=shape, scale=scale, lengths=lengths, causal=True, inputs=identity, comparisons=reports
+    )
+
+
 def profile(
     directory,
     vendor,
@@ -42,6 +94,7 @@ def profile(
     kv_lengths=None,
     stride_profiles=None,
     dispatch_only=False,
+    causal=False,
 ):
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     timed_cpu_threads = torch.get_num_threads()
@@ -73,6 +126,7 @@ def profile(
             qkv_dtype=dtype,
             headdim_v=512,
             num_splits=1,
+            causal=causal,
         )
 
     def cached(index, record):
@@ -86,6 +140,7 @@ def profile(
             scheduler_metadata=record,
             softmax_scale=cases[index][1],
             num_splits=1,
+            causal=causal,
             return_softmax_lse=True,
         )
 
@@ -108,7 +163,7 @@ def profile(
                     overlap=profile_name in ("broadcast", "overlap"),
                 )
         inputs.append(device)
-        native.append(CannCall(device, scale=scale, kv_lengths=kv_lengths[index]))
+        native.append(CannCall(device, scale=scale, kv_lengths=kv_lengths[index], causal=causal))
         if metadata_reuse:
             lengths.append(
                 torch.tensor(
@@ -121,7 +176,7 @@ def profile(
             actual = cached(len(inputs) - 1, metadata[-1])
         else:
             actual = api.flash_attn_func(
-                **device, softmax_scale=scale, num_splits=1, return_attn_probs=True
+                **device, softmax_scale=scale, num_splits=1, return_attn_probs=True, causal=causal
             )
         if dispatch_only:
             torch.npu.synchronize()
@@ -130,6 +185,11 @@ def profile(
         if dispatch_only:
             torch.npu.synchronize()
             print(f"MLA_STRIDE_NATIVE_END {dtype_name} {index}", flush=True)
+        if causal:
+            accuracy.append(
+                check_causal_accuracy(actual, source, cpu, shape, scale, kv_lengths[index])
+            )
+            continue
         # The long-KV CPU oracle is outside every timed region. Restore the
         # caller's thread count even on failure, before any warmup or sampling.
         try:
@@ -194,12 +254,38 @@ def profile(
     if dispatch_only:
         return
 
+    dispatch = None
+    if causal:
+        from tests.mla_native_dispatch import sha256
+
+        dispatch = json.loads(Path(os.environ["MLA_FORWARD_NATIVE_DISPATCH"]).read_text())
+        assert dispatch["dtype"] == dtype_name and len(dispatch["cases"]) == len(cases)
+        assert all(sha256(p) == digest for p, digest in dispatch["artifacts"].items())
+        identity = [{k: v for k, v in item.items() if k != "comparisons"} for item in accuracy]
+        assert json.loads(json.dumps(identity)) == dispatch["inputs"], (
+            "Native dispatch inputs differ from timing"
+        )
+        assert os.environ.get("ASCEND_GLOBAL_LOG_LEVEL", "3") == "3", (
+            "Detailed logging cannot be timed"
+        )
+
     def snapshot(label):
         (directory / label).write_text(subprocess.check_output(["npu-smi", "info"], text=True))
 
     def call(index, name):
         if name == "native_cann":
             return native[index]()
+        if name in ("func", "func_4"):
+            return [
+                api.flash_attn_func(
+                    **inputs[index],
+                    softmax_scale=cases[index][1],
+                    num_splits=1,
+                    return_attn_probs=True,
+                    causal=True,
+                )
+                for _ in range(4 if name == "func_4" else 1)
+            ]
         if metadata_reuse:
             if name == "generate":
                 return generate(index)
@@ -207,12 +293,20 @@ def profile(
                 return [native[index]() for _ in range(4)]
             if name == "implicit":
                 return cached(index, None)
+            if name == "implicit_4":
+                return [cached(index, None) for _ in range(4)]
+            if name == "reuse_4":
+                return [cached(index, metadata[index]) for _ in range(4)]
             if name in ("generate_1", "generate_4"):
                 record = generate(index)
                 return [cached(index, record) for _ in range(1 if name == "generate_1" else 4)]
             return cached(index, metadata[index])
         return api.flash_attn_func(
-            **inputs[index], softmax_scale=cases[index][1], num_splits=1, return_attn_probs=True
+            **inputs[index],
+            softmax_scale=cases[index][1],
+            num_splits=1,
+            return_attn_probs=True,
+            causal=causal,
         )
 
     names = ("fa3", "native_cann")
@@ -221,18 +315,31 @@ def profile(
         if metadata_reuse
         else names
     )
+    if causal and metadata_reuse:
+        wall_names += ("reuse_4", "implicit_4")
+
+    def case_modes(index):
+        return (
+            wall_names + ("func", "func_4") if causal and kv_lengths[index] is None else wall_names
+        )
+
+    # Causal references use the existing bounded sample pool before this point.
+    # Pin only the timed section; parent orchestration preserves all CPU cores
+    # for untimed reference generation and cache verification.
+    if causal:
+        os.sched_setaffinity(0, {min(os.sched_getaffinity(0))})
     snapshot("npu-before.log")
     assert torch.get_num_threads() == timed_cpu_threads
     for index in range(len(cases)):
         for _ in range(5):
-            for name in wall_names:
+            for name in case_modes(index):
                 result = call(index, name)
                 torch.npu.synchronize()
     wall = []
     for index in range(len(cases)):
         for r in range(5):
             for i in range(20):
-                for name in wall_names if r % 2 == 0 else wall_names[::-1]:
+                for name in case_modes(index) if r % 2 == 0 else case_modes(index)[::-1]:
                     start = time.perf_counter_ns()
                     result = call(index, name)
                     torch.npu.synchronize()
@@ -293,7 +400,11 @@ def profile(
     def is_metadata(row):
         return any(
             name in row["Name"]
-            for name in ("ComputeMlaDenseMetadata", "ComputeMlaBsndKvLengthMetadata")
+            for name in (
+                "ComputeMlaDenseMetadata",
+                "ComputeMlaBsndKvLengthMetadata",
+                "ComputeMlaCausalBsndMetadata",
+            )
         )
 
     metadata_rows = [row for row in rows if is_metadata(row)]
@@ -319,7 +430,9 @@ def profile(
     conversion_index = 0
     for row, label in zip(rows, labels):
         expected_name = (
-            f"mla_dense_{dtype_name}" if label["name"] == "fa3" else "FusedInferAttentionScore"
+            f"mla_{'bsnd_used' if causal else 'dense'}_{dtype_name}"
+            if label["name"] == "fa3"
+            else "FusedInferAttentionScore"
         )
         assert expected_name in row["Name"]
         label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
@@ -370,7 +483,7 @@ def profile(
             native_call=native[index].description(),
             stride_profile=None if stride_profiles is None else stride_profiles[index],
         )
-        for name in wall_names:
+        for name in case_modes(index):
             kernels = [x for x in labels if x["case"] == index and x["name"] == name]
             walls = [x for x in wall if x["case"] == index and x["name"] == name]
             item[name] = dict(
@@ -399,10 +512,40 @@ def profile(
             item["generate_4_ratio"] = (
                 item["generate_4"]["median_e2e_us"] / item["native_cann_4"]["median_e2e_us"]
             )
+        if causal:
+            item.update(
+                {
+                    name: dispatch["cases"][index][name]
+                    for name in (
+                        "native_tiling_key",
+                        "native_template",
+                        "native_fd",
+                        "e2e_applicable",
+                    )
+                }
+            )
+            if metadata_reuse:
+                item["reuse_4_ratio"] = (
+                    item["reuse_4"]["median_e2e_us"] / item["native_cann_4"]["median_e2e_us"]
+                )
+                item["implicit_ratio"] = (
+                    item["implicit"]["median_e2e_us"] / item["native_cann"]["median_e2e_us"]
+                )
+                item["implicit_4_ratio"] = (
+                    item["implicit_4"]["median_e2e_us"] / item["native_cann_4"]["median_e2e_us"]
+                )
+                if kv_lengths[index] is None:
+                    item["func_ratio"] = (
+                        item["func"]["median_e2e_us"] / item["native_cann"]["median_e2e_us"]
+                    )
+                    item["func_4_ratio"] = (
+                        item["func_4"]["median_e2e_us"] / item["native_cann_4"]["median_e2e_us"]
+                    )
         results.append(item)
     snapshot("npu-after.log")
     report = dict(
         dtype=dtype_name,
+        causal=causal,
         stride_boundary=(
             None
             if stride_profiles is None
@@ -440,6 +583,7 @@ def profile(
     )
     (directory / "profile.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(results, indent=2))
+    return report
 
 
 if __name__ == "__main__":
@@ -458,6 +602,19 @@ if __name__ == "__main__":
         cases = [(shape, scale) for shape, scale, _, _ in STRIDE_CASES]
         lengths = [values for _, _, values, _ in STRIDE_CASES]
         strides = [profile_name for _, _, _, profile_name in STRIDE_CASES]
+    causal = os.environ.get("MLA_FORWARD_CAUSAL") == "1"
+    if causal:
+        from tests.test_flash_attn_npu_v3_mla_causal_public import (
+            NATIVE_PREFLIGHT_CASES,
+            PERFORMANCE_CASES,
+        )
+
+        specs = PERFORMANCE_CASES
+        if os.environ.get("MLA_FORWARD_CAUSAL_PREFLIGHT") == "1":
+            specs = NATIVE_PREFLIGHT_CASES
+        cases = [(s["shape"], s.get("scale")) for s in specs]
+        lengths = [s.get("lengths") for s in specs]
+        strides = [s.get("stride", "contiguous") for s in specs]
     profile(
         os.environ["MLA_FORWARD_ARTIFACT_DIR"],
         os.environ["MLA_CANN_VENDOR"],
@@ -467,4 +624,5 @@ if __name__ == "__main__":
         lengths,
         strides,
         os.environ.get("MLA_FORWARD_DISPATCH_ONLY") == "1",
+        causal=causal,
     )

@@ -15,6 +15,7 @@ import subprocess
 
 import pytest
 
+from tests.mla_cpu_driver import evaluate_cpu
 from tests.test_flash_attn_npu_v3_mla_bsnd_schedule import (
     compile_driver as compile_bsnd_driver,
     evaluate as evaluate_bsnd,
@@ -28,7 +29,6 @@ from tests.test_flash_attn_npu_v3_mla_schedule import (
     ROOT,
     SOURCE_FILES,
     case,
-    run,
     source_function,
 )
 
@@ -200,15 +200,14 @@ def prefixes(item):
 
 
 def evaluate(binary, cases, *, native=False, parse=False):
-    env = os.environ.copy()
-    for name, enabled in (("MLA_ORACLE_AUTOMATIC_FD", native), ("MLA_TND_PARSE_ONLY", parse)):
-        env.pop(name, None)
-        if enabled:
-            env[name] = "1"
-    inputs = "".join(" ".join(map(str, item)) + "\n" for item in cases)
-    result = run([str(binary)], input=inputs, env=env)
-    assert not result.stderr, result.stderr
-    outputs = [json.loads(line) for line in result.stdout.splitlines()]
+    outputs = evaluate_cpu(
+        binary,
+        cases,
+        options={
+            "MLA_ORACLE_AUTOMATIC_FD": "1" if native else None,
+            "MLA_TND_PARSE_ONLY": "1" if parse else None,
+        },
+    )
     assert len(outputs) == len(cases)
     return outputs
 

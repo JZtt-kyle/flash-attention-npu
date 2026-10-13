@@ -14,8 +14,9 @@ bool UsedMetadataWords(int64_t batch, uint32_t& words)
     return true;
 }
 
-bool BuildUsedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype, uint32_t* output,
-                       uint32_t outputWords, const MlaUsedInputs& inputs)
+bool BuildUsedMetadataWithSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                                   uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
+                                   MlaUsedScheduleBuilder builder, const void* context)
 {
     uint32_t expectedWords;
     const uintptr_t outAddress = reinterpret_cast<uintptr_t>(output);
@@ -64,7 +65,7 @@ bool BuildUsedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platfor
                !validAxis(shape.kv, inputs.cuKv, inputs.usedKv)) {
         prefix.status = uint32_t(MlaUsedMetadataStatus::InvalidLengths);
     } else {
-        const auto status = BuildUsedSchedule(shape, platform, inputs, result);
+        const auto status = builder(shape, platform, inputs, result, context);
         prefix.scheduleStatus = uint32_t(status);
         if (status == MlaScheduleStatus::Success) {
             prefix.schedule = SerializeMlaSchedule(result.schedule);
@@ -98,6 +99,15 @@ bool BuildUsedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platfor
     }
     std::memcpy(output, &prefix, sizeof(prefix));
     return true;
+}
+
+bool BuildUsedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype, uint32_t* output,
+                       uint32_t outputWords, const MlaUsedInputs& inputs)
+{
+    const auto builder = [](const MlaUsedShape& shape, const MlaPlatformInfo& platform, const MlaUsedInputs& inputs,
+                            MlaUsedSchedule& result,
+                            const void*) { return BuildUsedSchedule(shape, platform, inputs, result); };
+    return BuildUsedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs, builder);
 }
 
 } // namespace flash_attn::mla

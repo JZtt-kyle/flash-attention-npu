@@ -111,7 +111,7 @@ class CannCall:
     timed call. H2D input transfers and one-time creation of views are excluded.
     """
 
-    def __init__(self, inputs, *, scale=None, split_rope=True, kv_lengths=None):
+    def __init__(self, inputs, *, scale=None, split_rope=True, kv_lengths=None, causal=False):
         q, k, v = (inputs[name] for name in ("q", "k", "v"))
         if q.device.type != "npu" or q.dtype not in DTYPES.values():
             raise ValueError("CANN baseline requires FP16/BF16 NPU inputs")
@@ -130,6 +130,11 @@ class CannCall:
             next_tokens=2147483647,
             return_softmax_lse=True,
         )
+        if causal:
+            self.kwargs.update(
+                sparse_mode=3,
+                atten_mask=torch.ones((2048, 2048), dtype=torch.bool, device=q.device).triu(1),
+            )
         self.out_shape = (*q.shape[:3], v.shape[-1])
         self.lse_shape = (q.shape[0], q.shape[2], q.shape[1], 1)
         self.operator = torch.ops.npu.npu_fused_infer_attention_score_v2.out
@@ -168,7 +173,8 @@ class CannCall:
             "content_key_is_value": self.key.is_set_to(self.value),
             "scale": self.kwargs["softmax_scale"],
             "layout": "BSND",
-            "mask": "none",
+            "mask": "right-down causal" if self.kwargs["sparse_mode"] == 3 else "none",
+            "sparse_mode": self.kwargs["sparse_mode"],
             "split": "CANN native automatic policy",
             "metadata": "not exposed by FIA",
             "actual_seq_kvlen": self.kwargs.get("actual_seq_kvlen"),

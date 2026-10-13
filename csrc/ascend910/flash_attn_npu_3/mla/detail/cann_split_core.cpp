@@ -11,8 +11,8 @@
 // Derived from CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0,
 // attention/common/op_host/split_core.cpp. The upstream license is in ../LICENSE.cann.
 // Changes: private namespace/include guard, removed framework logging, and
-// declaration-order initialization. Scheduling formulas and traversal are unchanged.
-// Only BuildDenseSchedule exposes this algorithm; other source branches are not supported.
+// declaration-order initialization and reuse of prepared split contexts.
+// Scheduling formulas and traversal are unchanged; adapters expose the supported branches.
 
 /*!
  * \file split_core.cpp
@@ -671,22 +671,16 @@ void SplitFD(SplitResult& result)
     result.usedVecNumOfFd = curCoreIndex + 1;
 }
 
-void SplitCore(uint32_t coreNum, const BaseInfo& baseInfo, const SplitParam& param, SplitResult& result)
+void SplitCore(uint32_t coreNum, const SplitContext& splitContext, SplitResult& result)
 {
-    SplitContext splitContext(baseInfo, param);
-
-    // 1、划分基本块，统计信息
-    CalcSplitInfo(splitContext);
     // 全空case
     if (splitContext.splitInfo.isKvSeqAllZero) {
         result.usedCoreNum = 1U;
-        result.bN2End[0] = baseInfo.bSize * baseInfo.n2Size;
+        result.bN2End[0] = splitContext.baseInfo.bSize * splitContext.baseInfo.n2Size;
         result.gS1End[0] = 0U;
         result.s2End[0] = 0U;
         return;
     }
-
-    CalcCostInfo(splitContext);
 
     // 2、获取每个核的分配方案
     uint32_t maxCore = std::min(coreNum, splitContext.costInfo.totalBlockNum);
@@ -711,6 +705,17 @@ void SplitCore(uint32_t coreNum, const BaseInfo& baseInfo, const SplitParam& par
         SplitFD(result);
     }
     result.usedCoreNum = std::max(result.usedCoreNum, 1U); // 至少使用1个core
+}
+
+void SplitCore(uint32_t coreNum, const BaseInfo& baseInfo, const SplitParam& param, SplitResult& result)
+{
+    SplitContext splitContext(baseInfo, param);
+    // 1、划分基本块，统计信息
+    CalcSplitInfo(splitContext);
+    if (!splitContext.splitInfo.isKvSeqAllZero) {
+        CalcCostInfo(splitContext);
+    }
+    SplitCore(coreNum, splitContext, result);
 }
 
 } // namespace flash_attn::mla::detail

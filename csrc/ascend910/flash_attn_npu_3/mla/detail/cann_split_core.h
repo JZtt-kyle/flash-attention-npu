@@ -11,8 +11,8 @@
 // Derived from CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0,
 // attention/common/op_host/split_core.h. The upstream license is in ../LICENSE.cann.
 // Changes: private namespace/include guard, removed framework logging, and
-// declaration-order initialization. Scheduling formulas and traversal are unchanged.
-// Only BuildDenseSchedule exposes this algorithm; other source branches are not supported.
+// declaration-order initialization and reuse of prepared split contexts.
+// Scheduling formulas and traversal are unchanged; adapters expose the supported branches.
 
 /*!
  * \file split_core.h
@@ -260,6 +260,10 @@ void RecordFDInfo(const SplitContext& splitContext, const AssignContext& assignC
 // main
 void SplitFD(SplitResult& result);
 void CalcSplitPlan(uint32_t coreNum, int64_t costLimit, const SplitContext& splitContext, SplitResult& result);
+// Caller has completed CalcSplitInfo and, unless all KV lengths are zero,
+// CalcCostInfo. Reuse these immutable statistics across candidate selection
+// and the adapter's whole-M cost accounting.
+void SplitCore(uint32_t coreNum, const SplitContext& splitContext, SplitResult& result);
 void SplitCore(uint32_t coreNum, const BaseInfo& baseInfo, const SplitParam& param, SplitResult& result);
 } // namespace flash_attn::mla::detail
 #endif

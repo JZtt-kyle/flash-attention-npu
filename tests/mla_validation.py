@@ -1,6 +1,6 @@
 """Reproducible MLA checks: python -m tests.mla_validation --help.
 
-Existing suite selections preserve the M07e3c acceptance commands. No tests are sampled.
+Daily suites select at most 100 deterministic cases; --full-matrix opts into all cases.
 Builds, golden tensors and successful test evidence have separate identities.
 Performance remains in tests.mla_paged_profile and must always be measured.
 """
@@ -25,11 +25,53 @@ from tests.mla_dense_build import ROOT, sha256
 from tests.mla_validation_build import matching_files
 from tests.mla_validation_dependencies import suite_sources
 from tests.mla_validation_selection import INCREMENTAL_SUITES
+from tests.mla_validation_policy import DEFAULT_MAX_CASES, POLICY_VERSION
 
 
 PUBLIC = "tests/test_flash_attn_npu_v3_mla_paged_tnd_public.py"
 CAUSAL_CPU = "tests/test_flash_attn_npu_v3_mla_causal_schedule.py"
+USED_SHARED_CPU = [
+    f"tests/test_flash_attn_npu_v3_mla_{name}.py"
+    for name in (
+        "schedule",
+        "bsnd_schedule",
+        "tnd_schedule",
+        "tnd_bsnd_schedule",
+        "used_schedule",
+        "paged_schedule",
+        "used_metadata",
+    )
+]
 SUITES = {
+    "used-shared-cpu": USED_SHARED_CPU,
+    "used-shared-sanitize": USED_SHARED_CPU,
+    "causal-bsnd-cpu": [
+        "tests/test_flash_attn_npu_v3_mla_causal_metadata.py",
+        "tests/test_flash_attn_npu_v3_mla_used_metadata_consumer.py",
+    ],
+    "causal-bsnd-sanitize": [
+        "tests/test_flash_attn_npu_v3_mla_causal_metadata.py",
+        "tests/test_flash_attn_npu_v3_mla_used_metadata_consumer.py",
+    ],
+    "causal-bsnd-public": [
+        "tests/test_flash_attn_npu_v3_mla_causal_public.py",
+        "-k",
+        "not release_trap",
+    ],
+    "causal-bsnd-check": [
+        "tests/test_flash_attn_npu_v3_mla_causal_public.py",
+        "-k",
+        "representative",
+    ],
+    "causal-bsnd-trap": ["tests/test_flash_attn_npu_v3_mla_causal_public.py", "-k", "release_trap"],
+    "causal-bsnd-profile": ["tests/test_mla_causal_bsnd_profile.py", "-k", "not native_preflight"],
+    "causal-bsnd-native-check": ["tests/test_mla_causal_bsnd_profile.py", "-k", "native_preflight"],
+    "causal-bsnd-legacy": [
+        "tests/test_flash_attn_npu_v3_mla_bsnd_used.py",
+        "tests/test_flash_attn_npu_v3_mla_kvcache.py",
+        "-k",
+        "descriptor_rejections or tensor_rejections or explicit_metadata_rejected or word_overflow or fullgraph or cross_stream_allocator_lifetime or metadata_rejects_unsupported or metadata_length_tensor_boundary",
+    ],
     "public": [PUBLIC, "-k", "not public_release_trap"],
     "trap": [PUBLIC, "-k", "public_release_trap"],
     "device": [
@@ -77,6 +119,8 @@ SUITES = {
         "tests/test_mla_reference_cache.py",
         "tests/test_mla_validation_dependencies.py",
         "tests/test_mla_paged_reference_cache.py",
+        "tests/test_mla_native_dispatch.py",
+        "tests/test_mla_validation_policy.py",
         "tests/common/test_golden_cache.py",
     ],
     "reference": ["tests/test_flash_attn_npu_v3_mla_reference.py"],
@@ -119,17 +163,47 @@ SUITES = {
     "causal-sanitize": [CAUSAL_CPU],
 }
 SUITES.update(INCREMENTAL_SUITES)
-PERFORMANCE_SUITES = {"causal-profile", "shared-profile"}
-CAUSAL_DEVICE_SUITES = {"causal-smoke", "causal-attention", "causal-profile", "causal-check"}
-CPU_SUITES = {"cpu", "tools", "reference", "causal-cpu", "causal-sanitize"}
+PERFORMANCE_SUITES = {
+    "causal-profile",
+    "shared-profile",
+    "causal-bsnd-profile",
+    "causal-bsnd-native-check",
+}
+CAUSAL_DEVICE_SUITES = {
+    "causal-smoke",
+    "causal-attention",
+    "causal-profile",
+    "causal-check",
+    "causal-bsnd-public",
+    "causal-bsnd-check",
+    "causal-bsnd-profile",
+}
+CPU_SUITES = {
+    "used-shared-cpu",
+    "used-shared-sanitize",
+    "cpu",
+    "tools",
+    "reference",
+    "causal-cpu",
+    "causal-sanitize",
+    "causal-bsnd-cpu",
+    "causal-bsnd-sanitize",
+}
 
 
 def suite_dependencies(suite):
-    if suite not in {"causal-cpu", "causal-sanitize"}:
+    if suite not in {
+        "causal-cpu",
+        "causal-sanitize",
+        "causal-bsnd-cpu",
+        "causal-bsnd-sanitize",
+        "used-shared-cpu",
+        "used-shared-sanitize",
+    }:
         return {}
     from tests.mla_causal_build import toolchain_identity
 
-    return toolchain_identity(suite == "causal-sanitize")
+    return toolchain_identity(suite.endswith("sanitize"))
 
 
 def save(path, value):
@@ -275,12 +349,22 @@ def environment(args, directory, suite):
         "MLA_TND_PAGED_KVCACHE_DIR": "kvcache",
     }.items():
         env[variable] = str(directory / child)
+    env["MLA_VALIDATION_MAX_CASES"] = str(getattr(args, "max_cases", DEFAULT_MAX_CASES))
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
     if suite in CAUSAL_DEVICE_SUITES:
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
-    if suite in {"causal-cpu", "causal-sanitize"}:
+    if suite in {
+        "causal-cpu",
+        "causal-sanitize",
+        "causal-bsnd-cpu",
+        "causal-bsnd-sanitize",
+        "used-shared-cpu",
+        "used-shared-sanitize",
+    }:
         env["MLA_SCHEDULE_ARTIFACT_DIR"] = str(directory / "schedule")
-        env["MLA_SCHEDULE_SANITIZE"] = "1" if suite == "causal-sanitize" else "0"
+        env["MLA_SCHEDULE_SANITIZE"] = "1" if suite.endswith("sanitize") else "0"
+        if suite == "causal-bsnd-sanitize":
+            env["MLA_CONSUMER_SANITIZE"] = "1"
     return env
 
 
@@ -355,6 +439,9 @@ def cache_stats(path):
 
 
 def run(args):
+    args.max_cases = getattr(args, "max_cases", DEFAULT_MAX_CASES)
+    if not 0 <= args.max_cases <= DEFAULT_MAX_CASES:
+        raise ValueError("--max-cases must be 1..100; use --full-matrix for all cases")
     args.output = args.output.resolve()
     args.artifacts = args.artifacts.resolve()
     args.suite = list(dict.fromkeys(args.suite))
@@ -364,6 +451,8 @@ def run(args):
         print(
             json.dumps(
                 dict(
+                    max_cases_per_suite=args.max_cases,
+                    selection_policy=POLICY_VERSION,
                     prepare=[
                         sys.executable,
                         "-m",
@@ -418,7 +507,10 @@ def run(args):
             shutil.copyfile(state_path, attempt / "invalid-state.json")
             state = {}
         summary = dict(
-            attempt=str(attempt), groups={name: dict(status="not_run") for name in args.suite}
+            max_cases_per_suite=args.max_cases,
+            selection_policy=POLICY_VERSION,
+            attempt=str(attempt),
+            groups={name: dict(status="not_run") for name in args.suite},
         )
         summary_path = args.output / "summary.json"
         save(summary_path, summary)
@@ -514,6 +606,8 @@ def run(args):
                     runtime=runtime_info if suite not in CPU_SUITES else sys.version,
                     environment=semantic_env,
                     selection=SUITES[suite],
+                    case_limit=args.max_cases,
+                    selection_policy=POLICY_VERSION,
                     dependencies=dependencies,
                     golden=args.golden,
                     build=sha256(args.artifacts / "prepare.json") if needs_build else None,
@@ -621,6 +715,13 @@ def run(args):
     return 0
 
 
+def case_limit(value):
+    count = int(value)
+    if not 1 <= count <= DEFAULT_MAX_CASES:
+        raise argparse.ArgumentTypeError("expected 1..100; use --full-matrix for all cases")
+    return count
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -630,6 +731,20 @@ def main():
         help="Evidence directory; attempts are never overwritten",
     )
     parser.add_argument("--suite", nargs="+", choices=SUITES, required=True)
+    limits = parser.add_mutually_exclusive_group()
+    limits.add_argument(
+        "--max-cases",
+        type=case_limit,
+        default=DEFAULT_MAX_CASES,
+        help="Maximum deterministic pytest cases per suite (default: 100)",
+    )
+    limits.add_argument(
+        "--full-matrix",
+        dest="max_cases",
+        action="store_const",
+        const=0,
+        help="Explicitly run all correctness cases; performance keeps its fixed cap",
+    )
     parser.add_argument("--artifacts", type=Path, default=ROOT / "build/mla-validation-artifacts")
     parser.add_argument("--device", default="6", choices=[str(i) for i in range(8)])
     parser.add_argument("--golden", choices=("off", "cache", "refresh"), default="cache")

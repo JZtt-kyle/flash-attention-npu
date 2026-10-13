@@ -62,11 +62,11 @@ CANN 根目录：`/home/zhangqijia/repo/ops-transformer/attention/fused_infer_at
 
 | 公开入口 | 输入与长度 | 记录选择 |
 | --- | --- | --- |
-| `flash_attn_func` | BSND Q/KV，使用整容量 | 每次内部 v1，无显式复用参数 |
+| `flash_attn_func` | BSND Q/KV，使用整容量 | 无 mask 每次内部 v1，causal 每次内部 v7；无显式复用参数 |
 | `flash_attn_varlen_func` | TND Q/KV，两组分配前缀、两组 max；可选 `seqused_q/k` | 任一 used 存在时每次内部 v5，否则 v3；无显式复用参数 |
-| `flash_attn_with_kvcache`，BSND Q | Q 整容量，只读 BSND cache；`cache_seqlens` 为 None（整容量）、`0..Sk` 整数或长度 tensor | 无长度且无记录走 v1，否则内部 v2 或显式 v2 |
+| `flash_attn_with_kvcache`，BSND Q | Q 整容量，只读 BSND cache；`cache_seqlens` 为 None（整容量）、`0..Sk` 整数或长度 tensor | 无 mask 且无长度/记录走 v1，否则 v2；causal 使用内部或显式 v7 |
 | `flash_attn_with_kvcache`，TND Q | Q 使用完整分配段，须给 Q 前缀和 `max_seqlen_q`；只读 BSND cache，KV 长度同上 | 内部 v4 或显式 v4；整数长度按 cache 的 B 物化 |
-| `get_scheduler_metadata`，非 PA | 必须给 KV 长度 tensor，不接受 None/整数；`headdim=64, headdim_v=512` | 无 Q 前缀生成 v2，有 Q 前缀生成混合 v4；精确字数见 [第 5 节](#5-metadata-设计) |
+| `get_scheduler_metadata`，非 PA | 必须给 KV 长度 tensor，不接受 None/整数；`headdim=64, headdim_v=512` | 无 mask 的 BSND/混合生成 v2/v4；BSND causal 生成 v7；精确字数见 [第 5 节](#5-metadata-设计) |
 | `flash_attn_with_kvcache(page_table=...)` | BSND/TND Q + ND PA cache；TND 须给 Q 前缀和 max Q；Q 使用完整分配段 | 内部 v6 或显式 v6；KV 长度 None/整数/tensor，整数按逻辑 B 物化 |
 | `get_scheduler_metadata(page_size=P)` | BSND/TND Q；KV 长度 tensor，可选 Q 前缀；`max_seqlen_k` 为逻辑容量 C | 生成 v6；不接收或检查页表、物理页池 |
 
@@ -74,13 +74,13 @@ CANN 根目录：`/home/zhangqijia/repo/ops-transformer/attention/fused_infer_at
 
 ### 2.2 后端选项与返回值
 
-512+64 后端只接受 `causal=False`、`window_size=(-1,-1)`、`softcap=0`、`num_splits=1`、`pack_gqa=None`、`sm_margin=0`、`attention_chunk=0` 和 `rotary_interleaved=True`。追加 KV、rotary/量化输入、cache 重映射/leftpad 等选项由 Python 与 C++ 明确拒绝。metadata 生成器要求 `has_softcap=False`、`max_seqlen_k_new=0`，拒绝数值 scale/softcap 兼容关键字。`page_size=None` 沿用非分页 v2/v4；指定合法 P 时生成 v6，BSND/TND 只读 PA 前向均可显式复用。
+512+64 后端接受 `causal=False`，非 PA BSND 另接通 `causal=True`；TND、混合和 PA causal 仍明确拒绝。其他选项限定为 `window_size=(-1,-1)`、`softcap=0`、`num_splits=1`、`pack_gqa=None`、`sm_margin=0`、`attention_chunk=0` 和 `rotary_interleaved=True`。追加 KV、rotary/量化输入、cache 重映射/leftpad 等选项由 Python 与 C++ 明确拒绝。metadata 生成器要求 `has_softcap=False`、`max_seqlen_k_new=0`，拒绝数值 scale/softcap 兼容关键字。`page_size=None` 的无 mask 使用 v2/v4、BSND causal 使用 v7；指定合法 P 时生成 v6，BSND/TND 只读 PA 前向均可显式复用。
 
 func/varlen/内部前向的 `num_splits` 默认 1，kvcache/metadata 默认 0，调用 MLA 后两者须显式传 1。生成器 `qkv_dtype` 默认 BF16，必须匹配当次输入。前向默认 scale 见 [3.3](#33-共同契约)，显式值须能表示为有限 FP32；scale 不进入 MLA metadata。
 
 请求 LSE 的开关分别为 func/varlen 的 `return_attn_probs=True` 和 kvcache 的 `return_softmax_lse=True`。前两者返回 `(O,LSE)`，kvcache 返回 `(O,LSE,out_accum,lse_accum)`；单 split 时两个 accumulator 为同设备空 tensor，dtype 随 PyTorch 默认浮点 dtype（通常 FP32），真实/fake 一致。O/LSE 的维度、dtype 与空值见 [3.3](#33-共同契约)。
 
-192/128、mask、split 和调度选项的目标契约仍保留在下文，但未完成对应计划步骤前必须明确拒绝。这里的 910B C1V2 与容量限制属于本后端，不是官方 FA3 的通用限制。
+192/128、其他 mask 组合、split 和调度选项的目标契约仍保留在下文，但未完成对应计划步骤前必须明确拒绝。这里的 910B C1V2 与容量限制属于本后端，不是官方 FA3 的通用限制。
 
 ## 3. 两种 MLA 的接口映射
 
@@ -215,13 +215,14 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v4](#55-v4tnd-q-与-bsnd-kv-混合记录) | 4 / 4 | 406+5B | TND Q 使用整个分配段，BSND KV 保存 64 位物理起点与实际长度 |
 | [v5](#56-v5分配与-used-记录) | 5 / 5 | 410+8B | BSND Q/KV、TND Q/KV、TND Q + BSND KV；分别保存分配起点、容量与可选 Q/KV-used |
 | [v6](#57-v6nd-pa-记录) | 6 / 6 | 408+5B | ND PA，BSND/TND Q 分配与可选 Q-used、非累计 KV 长度 |
+| [v7](#59-v7bsnd-causal-记录) | 7 / 7 | 410+8B | 非 PA BSND 右下 causal；分配起点/容量、可选内部 Q-used 和 KV 实际长度 |
 
 协议能表达某布局，不代表该布局已接通生产入口。生成记录、设备校验、独立 attention、入口调用分别验收；当前接入层次见 [status](status.md#当前可调用能力)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 使用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
 
 ### 5.1 签名与复用规则
 
 - 保留官方参数名、顺序与默认值。`get_scheduler_metadata` 没有 `qv`、`cu_seqlens_k` 或 `seqused_q` 参数；`flash_attn_func` / `flash_attn_varlen_func` 没有显式 metadata 参数，采用内部生成。显式复用通过只读 kvcache 接入，不增加公共参数。
-- 非分页生成器必须接收设备连续 `int32[B]` 的 `cache_seqlens`。无 Q 前缀时生成 v2，`max_seqlen_q/k` 对应 BSND 分配容量；提供同设备连续 `int32[B+1]` 的 `cu_seqlens_q` 时生成 v4，`max_seqlen_q` 是每段 Q 上界，`max_seqlen_k` 是物理 cache 容量。v4 的 Q 总量由 AICPU 从前缀尾值推导，前向再与真实 Q shape 核对。
+- 非分页生成器必须接收设备连续 `int32[B]` 的 `cache_seqlens`。无 Q 前缀时，无 mask 生成 v2、causal 生成 v7，`max_seqlen_q/k` 对应 BSND 分配容量；提供同设备连续 `int32[B+1]` 的 `cu_seqlens_q` 时生成无 mask v4，`max_seqlen_q` 是每段 Q 上界，`max_seqlen_k` 是物理 cache 容量。v4 的 Q 总量由 AICPU 从前缀尾值推导，前向再与真实 Q shape 核对。
 - `None` / `0..Sk` 整数便利输入只属于 kvcache。None 表示整容量；整数先在 host 校验再物化设备 tensor。混合路径的 None 也物化为设备长度，再使用 v4。显式记录仍须逐项核对当次前缀和长度，None 不表示信任记录快照。
 - 记录保存静态几何、dtype、调度特征、切块、分核及长度快照，不保存地址、scale、stride 或可变 scratch。前向独立校验真实 qv 与 Q/K/V；softcap 接入后的数值同样由前向提供，不由 `has_softcap` 代替。
 - 无记录时内部生成，显式复用时省去 AICPU 生成；两者共用源调度函数。host 只读 shape/dtype/stride 等静态信息，长度值由 AICPU/设备读取，不增加长度 D2H、`.item()` 或主机同步。host 分配预算仍可能计算调度，见 [6.7](#67-生产接入与构建)。
@@ -237,9 +238,9 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 [`mla_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h) 定义共同前缀：`magic=0x4d4c4131`；前八字依次为 magic、version、kind、wordCount、dtype、生成状态、源调度状态、保留位。其后 393 字为 `MlaMetadataSchedule`，保存几何、端点、FD 记账、workspace 与局部资源需求。保留位为零；64 位字段拆为低/高 32 位，只要求 4 字节对齐，允许奇数 storage offset。
 
-v2–v6 生成器先按静态 B 计算精确字数，要求 wordCount 不超过 `UINT32_MAX`，再检查输出地址、对齐、地址加法及与输入的区间重叠。不安全输出返回失败且不写记录；区间判断不做可能溢出的终点加法。只读输入可以相互别名，不能与输出重叠。输出安全但 dtype、描述符、形状、长度值或调度失败时，写非成功头部并清零八字头后的**全部载荷**，包括快照。v3–v6 成功记录从调度器拥有的快照序列化，不二次读取原始前缀或 used。
+v2–v7 生成器先按静态 B 计算精确字数，要求 wordCount 不超过 `UINT32_MAX`，再检查输出地址、对齐、地址加法及与输入的区间重叠。不安全输出返回失败且不写记录；区间判断不做可能溢出的终点加法。只读输入可以相互别名，不能与输出重叠。输出安全但 dtype、描述符、形状、长度值或调度失败时，写非成功头部并清零八字头后的**全部载荷**，包括快照。v3–v7 成功记录从调度器拥有的快照序列化，不二次读取原始前缀或 used。
 
-| 生成错误 | v1 / v2 | v3 | v4 / v5 / v6 |
+| 生成错误 | v1 / v2 | v3 | v4 / v5 / v6 / v7 |
 | --- | --- | --- | --- |
 | dtype 不支持 | `UnsupportedDtype=1` | 同左 | 同左 |
 | 形状、平台或调度失败 | `ScheduleFailure=2`，另存调度状态 | 同左 | 同左 |
@@ -302,11 +303,27 @@ v2–v6 生成器先按静态 B 计算精确字数，要求 wordCount 不超过 
 
 ### 5.8 stream 与内存生命周期
 
-v1–v6 的生产或独立生成路径均使用当前 stream / AICPU stream 的双事件依赖：输入就绪后生成，写完执行设备屏障，生成完成后当前 stream 才能读取记录。`MlaMetadataArgs` / `MlaTndMetadataArgs` / `MlaTndBsndMetadataArgs` / `MlaUsedMetadataArgs` / `MlaPagedMetadataArgs` 中的地址仅属于当次发射；对 AICPU 使用的长度和记录登记 allocator stream，并保留 tensor 生命周期。生成完成后记录不依赖原长度存储，但每次消费仍须与当次长度比较。
+v1–v6 的生产或独立生成路径使用当前 stream / AICPU stream 的双事件依赖。v7 在调用者当前 stream 顺序提交 AICPU 生成和 attention 消费：长度更新先于生成，生成的设备写屏障完成后才能执行消费。`MlaMetadataArgs` / `MlaTndMetadataArgs` / `MlaTndBsndMetadataArgs` / `MlaUsedMetadataArgs` / `MlaPagedMetadataArgs` 中的地址仅属于当次发射；对长度和记录登记实际使用的 allocator stream，并保留 tensor 生命周期。生成完成后记录不依赖原长度存储，但每次消费仍须与当次长度比较。
+
+v7 发射前通过 `NPUStream::stream()` 排空 torch_npu 的 host 提交队列，保证此前排入的长度更新等任务已提交，再在调用线程使用现有 ASC 发射器；该操作不等待设备完成。设置 `ASCEND_LAUNCH_BLOCKING` 或 `TORCH_NPU_SANITIZER` 时保留 `RunOpApiV2` 调试路径。前向与独立生成均保留发射错误检查、profiler 标记和输入/输出生命周期；不依赖 torch_npu 未导出的私有发射符号。
 
 v5 的 `UsedForward` 持有两组分配前缀与两组可选 used，生成和 attention 使用同一组当次描述符，并在 worker/current stream 登记其非空 storage。B=0 的显式空 used 以零计数、非空地址表示存在：host 使用已持有 metadata 的地址作不读取的零跨度描述符，不将空 Tensor 的 null `data_ptr` 误当作缺省参数。
 
 跨 stream 复用由调用方建立正常 stream/event 依赖；前向对本次输入、长度和记录登记 stream。生成或消费期间不得改写长度/记录或共享可变 scratch。图内生成应在 replay 时重读设备长度，图外快照不会自动更新；fake/compile 与完整 graph replay 的验收层次见 [status](status.md)。新增协议须更新 version、kind 和 wordCount 校验，避免旧记录被新语义误读。
+
+### 5.9 v7：BSND causal 记录
+
+[`mla_causal_metadata.h/.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_causal_metadata.h) 定义 `version=7、kind=7`，沿用 v5 的 `410+8B` 字 allocation/used 编码，仅接受 BSND Q/KV。`BuildCausalBsndMetadata` 通过 `PrepareUsedSchedule` 复用 v5 的输入校验、快照、基本块与预算，对快照中的有效 Sq/Sk 直接调用 `BuildCausalSchedule`，覆盖完整 M 块并填写端点、成本和实际 workspace 偏移，再由共享序列化器写记录。无需先运行无 mask 分核；v5 仍使用原完整调度。非空物理容量按平台全核发射，空容量保留单校验核；失败记录规则与 v5 相同。
+
+causal host 生成/前向路径在设置设备 guard 后，按 host 线程和设备缓存已校验的不可变芯片资源描述；每次复制后按静态空容量选择发射核数。v1–v6 仍走原平台查询路径。
+
+v7 另以线程、设备、dtype、B/Sq/Sk/H 和 AIC/AIV 核数为身份，最多保存 16 个不可变的整容量分核候选。候选由相同的 `PrepareUsedSchedule` / `BuildCausalSchedule` 计算，通过内部 `MlaCausalMetadataArgs` 按值传给 AICPU，不改变公开 v7 编码。生成器每次仍检查原描述符、allocation/used、平台和溢出，读取当次有效长度快照；只有所有长度均等于容量且候选 shape、核数和基本块匹配时才复用分核端点与成本，否则运行原 causal 分核。空容量或候选构建失败也走原路径。缓存不保存设备 tensor、长度结果或 metadata；排队发射持有候选所有权，淘汰不会使未完成发射悬空。host 构建包含 `mla_causal.cpp` / `mla_tnd_schedule.cpp`，CPU 全记录等价和多线程/stream 长度更新、淘汰、生命周期检查覆盖此路径。
+
+causal CPU 调度为有效长度与 M 前缀一次预留容量，分核候选选择和完整 M 成本核算复用同一份已准备 `SplitContext`。本仓移植的 `SplitCore` 保留原入口，新增接收已完成块/成本统计的上下文重载；分核公式、遍历顺序和结果不变，两种入口均以固定源完整字段差分验收。
+
+公开生成器使用显式 KV 长度标记（第 409 字 bit 1）；显式记录搭配前向 None 时物化整容量长度，保持与整容量记录的复用身份。没有显式记录的缺省 KV 使用已定义的缺省长度语义，私有记录不设置该 bit，省去长度填充。内部 Q-used 另设置 bit 0，每次内部生成，拒绝显式复用。记录不保存 scale、stride、tensor 地址或 mask 数据；右下 causal 由独立 version/kind 表达，旧 v5 和无 mask 记录不能当作 causal 记录。
+
+`ReadUsedMetadata<true>` / `LoadUsedMetadata<InputT,true>` 在原 v5 校验基础上检查 v7、BSND 布局和最终 `(B,0,0)` 端点，覆盖尾部全遮罩 Q 行；消费者逐项核对当次长度后才进入 attention。`MlaUsed<InputT,false,HasStrides,true>` 复用既有 `MlaTaskRing` causal 特化，使用有效 Sq/Sk 做右下对齐，按分配容量和独立 stride 寻址。所有有效全遮罩行 O=0、LSE=-inf；全局空非 PA KV 容量沿用 +inf；未使用 Q 槽位不增加输出承诺。
 
 ## 6. 代码结构
 
@@ -333,6 +350,7 @@ v2 消费后将快照传给 `MlaDense<InputT, true, HasStrides>` 实际长度特
 | 紧凑 TND Q/KV | [`mla_tnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_launch_impl.hpp) 与 [`mla_tnd_attention_probe.cpp`](../../tests/mla_tnd_attention_probe.cpp) 消费 v3 | `MlaTnd<InputT, HasStrides>` → `MlaNonPaged<InputT, true, true, false, false, HasStrides>`，共用 Cube / Vector / Tile |
 | TND Q + BSND KV | [`mla_tnd_bsnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_bsnd_launch_impl.hpp) 与 [`mla_tnd_bsnd_attention_probe.cpp`](../../tests/mla_tnd_bsnd_attention_probe.cpp) 消费 v4 | [`kernel/mla_tnd_bsnd.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_tnd_bsnd.hpp)::`MlaTndBsnd<InputT, HasStrides>` → `MlaNonPaged<InputT, true, true, true, false, HasStrides>`，共用 Cube / Vector / Tile |
 | 分配与 used：BSND Q/KV | `mla_bsnd_used_launch_impl.hpp` 消费 v5 | `MlaUsed<InputT, false, HasStrides>` → `MlaNonPaged<InputT, true, false, false, true, HasStrides>` |
+| BSND causal、可选内部 Q-used | 同一 BSND used launcher 的 causal 特化消费 v7 | `MlaUsed<InputT,false,HasStrides,true>` → `MlaTaskRing` 的 used/causal 特化；复用 Cube / Vector / Tile |
 | 分配与 used：TND Q/KV 或 TND Q + BSND KV | `mla_tnd_used_launch_impl.hpp` 消费 v5；独立对照使用 `mla_used_attention_probe.cpp` | 两布局共用 `MlaUsed<InputT, true, HasStrides>` → `MlaNonPaged<InputT, true, true, false, true, HasStrides>`；按 span 分离分配起点与有效长度，按四路独立 stride 计算元素地址 |
 
 v3/v4 各自使用独立 context 和 Kernel 调度类型，防止将布局不同的起点快照误传给 BSND 或紧凑 TND。混合 span 的 KV 起点从两个 uint32 字恢复为 uint64，并在任务环 `RunInfo` 与 Tile 坐标中保持 64 位。FD 合并与 192/128 通用路径按计划迁移。
@@ -367,7 +385,7 @@ PA 链路通过编译期特化复用上述任务环和 Cube/Vector：
 | 同一 parser 与 tiling：Q 累计长度、KV 非累计实际长度组合 | `mla_tnd_bsnd_schedule.h` 声明，`mla_tnd_schedule.cpp` 实现并复用变长调度 | Q 紧凑起点与 KV 的 64 位 `b*Sk` 分开，物理 KV 容量不随实际长度缩短 |
 | 同一 tiling 的 `CreateSplitInput` 非累计 Q/KV 分支及 `SplitCore` | `mla_used_schedule.h` 声明，`mla_tnd_schedule.cpp` 的 CPU/AICPU 共用 used 入口 | 分配起点/容量与实际使用长度分别保存，Q/KV 独立选择累计尾值或非累计 used，复用变长端点映射 |
 | `../common/op_host/split_core.cpp`：`SplitCore`、`CalcSplitInfo`、`CalcCostInfo`、`CalcSplitPlan`、`AssignByBatch/Row/Block`、`ForceAssign` | 调度模块私有的 `detail/cann_split_core.h/.cpp` | 枚举核数、cost、容差、遍历次序和相同 cost 时保留已有方案的规则；专用 MLA 使用此文件，不是 `split_core_v2.cpp`；保留源算法分支不表示开放对应功能 |
-| 同一 `split_core.cpp`：`CalcNextTokenLeftUp`、`CalcS2Range`、`CalcS1GCache`、`SplitCore` | 独立 CPU `mla_causal.h/.cpp`，尚未接入生产 | 右下 causal 的逐样本有效长度、块范围与成本；完整 M 块端点及全遮罩行的输出归属，见 6.2.4 |
+| 同一 `split_core.cpp`：`CalcNextTokenLeftUp`、`CalcS2Range`、`CalcS1GCache`、`SplitCore` | CPU `mla_causal.h/.cpp`，v7 BSND AICPU 调用 | 右下 causal 的逐样本有效长度、块范围与成本；完整 M 块端点及全遮罩行的输出归属，见 6.2.4 |
 | `op_host/fused_infer_attention_score_tiling.h`；`op_kernel/arch22/fia_public_define.h`：`ConstInfo`、`RunInfo` | 调度字段与 Kernel 运行时参数 | 明确字段宽度、单位、端点语义和运行时状态，见 6.2 |
 | `op_kernel/arch22/fused_infer_attention_score_v3.cpp`：`INVOKE_FIA_OP_GENERAL_IMPL` 的 `BSH_KVBSH_MLA_TILING` 分支 | 独立实例化单元、launcher 和生成器 | FP16/BF16、无 PA、无 FD、BSND 输入输出、C1V1/C1V2；不带入 FIA 注册与大签名 |
 | `op_kernel/arch22/fia_kernel_nonquant_mla.h`：`Init`、`InitCalcParamsEach`、`CalcParams`、`FlashAttention`、`ExecuteTask` | `kernel/mla_dense.hpp` | 核区间解析、三项任务环、两级延迟流水、初始化及排空 |
@@ -419,11 +437,11 @@ PA 链路通过编译期特化复用上述任务环和 Cube/Vector：
 
 分核接受调用方选择的逻辑 M=1..256、N=1..512、1..26 个 Cube、C1V1/C1V2，沿用既有每样本字段/地址边界和保守的 uint32 总矩形 tile 上限；不在这里选择生产基本块或验设备资源。先运行原 `SplitCore`，将部分 S2 端点向上对齐到完整 M 块、合并重复端点，再逐块重算 causal 成本，不能用无 mask 的首块成本乘块数。最后端点规范为 `(B,0,0)`，包含尾部零成本 Q 块；全部有效 Q/head 行有且仅有一个所属核。全空输入保留单个零成本核；未使用数组项为零，失败保持输出不变。
 
-该 CPU 组件由 M08b1 的独立 probe 调用，尚未进入 setup 的生产源码清单、metadata/AICPU 或公共入口；范围和分核验收本身不能证明设备 O/LSE、mask 或 causal 前向已开放。[CPU 测试](../../tests/test_flash_attn_npu_v3_mla_causal_schedule.py) 编译固定源 Git blob 对照范围/成本和全部原生 FD 字段，另用独立逐行可见 key 与每核任务枚举验完整 M 映射；布局输入对照从原始 allocation/used 直接解读，不复用待测解析器。
+该 CPU 组件由独立 probe 和 v7 BSND AICPU 生成器调用；范围和分核验收本身不能证明设备 O/LSE、mask 或 causal 前向已开放。[CPU 测试](../../tests/test_flash_attn_npu_v3_mla_causal_schedule.py) 编译固定源 Git blob 对照范围/成本和全部原生 FD 字段，另用独立逐行可见 key 与每核任务枚举验完整 M 映射；布局输入对照从原始 allocation/used 直接解读，不复用待测解析器。
 
 #### 6.2.5 独立 BSND causal 数值组件
 
-M08b1 在 [`MlaTaskRing`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_dense.hpp) / `MlaVector` 增加默认关闭的编译期 causal 特化；独立 `MlaCausalBsnd` 包装只接受连续 BSND、完整 Q 分配段和调用方已校验的逐样本 uint32 KV 有效长度，以及 M08a 的完整 M 分核。此包装未接生产分派或 metadata，公共 causal 仍拒绝；Q-used 和首次公开 BSND 接入留在 M08b2。
+M08b1 在 [`MlaTaskRing`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_dense.hpp) / `MlaVector` 增加默认关闭的编译期 causal 特化；独立 `MlaCausalBsnd` 包装只接受连续 BSND、完整 Q 分配段和调用方已校验的逐样本 uint32 KV 有效长度，以及 M08a 的完整 M 分核。生产通过 v7 和 `MlaUsed` causal 特化复用这些数值组件，支持 BSND stride 及内部 Q-used，见 [5.9](#59-v7bsnd-causal-记录)。
 
 任务环按每个 M 块最后一个 query 和有效 `Sk-Sq` 计算 S2 半开范围，边界 tile 保留实际 KV 尾长度，逐行 mask 在 Vector 中执行。完全没有可见 key 的 M 块不消耗任务环槽位，O/LSE 初始化覆盖这些行；部分遮罩块保留 Cube/Vector 的原事件、softmax/aMLA、双缓冲与排空顺序。任务描述保存有效长度差，不能用容量或其他样本的长度。迁移侧生成隐式 causal mask，沿用固定源的有限负值哨兵；最终全遮罩行显式写 O=0、LSE=-inf，全局空非 PA KV 容量仍为 +inf。
 
@@ -625,13 +643,15 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 
 公开入口与记录选择统一见 [2.1](#21-入口与记录选择)。
 
-内部 `_flash_attn_forward` / C++ `fwd` 的 used 分支共用 `UsedForward`、v5 生成/校验与 `MlaUsed`，不增加公共签名：
+内部 `_flash_attn_forward` / C++ `fwd` 的无 mask used 分支共用 `UsedForward`、v5 生成/校验与 `MlaUsed`，不增加公共签名：
 
 | 内部输入 | 记录选择与边界 |
 | --- | --- |
 | BSND Q/KV | 有 `seqused_q` 时每次内部 v5，可选 `seqused_k`；无 Q-used 沿用 v1/v2；Q-used 与显式 metadata 组合拒绝 |
 | TND Q/KV | 前缀、max、可选 used 及 v3/v5 选择与公开 varlen 相同；拒绝显式 metadata |
 | TND Q + BSND KV | 无 Q-used 沿用 v4；有 `seqused_q` 时每次内部 v5，可选 `seqused_k`，复用 TND used launcher；Q-used 与显式 metadata 组合拒绝，混合入口始终拒绝 `max_seqlen_k` |
+
+BSND causal 的通用 `fwd`、公开 func/cache 与专用 `_mla_causal_bsnd_forward` 汇入 `CausalBsndForward` 和同一 `UsedForward`，选择 v7；`_mla_causal_bsnd_metadata` 接通公开生成器。func 的真实/fake tensor 校验由私有算子承担；cache 请求 LSE 时通过 `_mla_causal_bsnd_cache` 在同一 C++ 边界构造两个独立的默认浮点 dtype 空 accumulator，保留公开四返回值。内部 `seqused_q` 存在时每次生成 v7，无 Q-used 时允许显式复用。TND、混合、PA causal 在进入这些分派前明确拒绝。
 
 #### 6.7.2 校验、输出与发射
 
@@ -645,7 +665,7 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 
 各前向查询平台，为每次调用分配 O/LSE 和独立 workspace。`DenseForward` **仍在 host 调用 `BuildDenseSchedule`**，用于 launch、分配预算及独立校验 context；计算切块与端点来自设备记录。显式复用省去 AICPU 生成，不表示消除了全部 host 调度。
 
-v2/v3/v4/v5 的非空物理容量按平台全核 blockDim 生成和发射，工作核数取设备记录；按源 `CalcNormalWorkspaceSize` 的最大 M=256 预算 workspace。TND 按静态总容量和 max 上界分配，不按矩形 `B*maxQ*Hq` 拒绝紧凑 Q。该预算不决定实际切块或数值路径。空 batch/query/KV 容量使用单校验核、零 workspace；空 KV 先校验记录，再初始化 O/LSE：BSND v1/v2 由 `DenseForward` 在同 stream 排入填充，TND/混合/used 由对应 Kernel 写入。非空容量中的全零实际长度仍保留完整资源校验。
+v2/v3/v4/v5/v7 的非空物理容量按平台全核 blockDim 生成和发射，工作核数取设备记录；按源 `CalcNormalWorkspaceSize` 的最大 M=256 预算 workspace。TND 按静态总容量和 max 上界分配，不按矩形 `B*maxQ*Hq` 拒绝紧凑 Q。该预算不决定实际切块或数值路径。空 batch/query/KV 容量使用单校验核、零 workspace；空 KV 先校验记录，再初始化 O/LSE：BSND v1/v2 由 `DenseForward` 在同 stream 排入填充，TND/混合/used/causal 由对应 Kernel 写入。非空容量中的全零实际长度仍保留完整资源校验。
 
 #### 6.7.3 实例与构建依赖
 
@@ -653,7 +673,7 @@ v2/v3/v4/v5 的非空物理容量按平台全核 blockDim 生成和发射，工�
 
 CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射使用线程局部作用域给实际 ACL launch 设置源 `BATCH_MODE`，保留其他属性及错误码，普通 FA3 发射原样透传。绕过已验收 ACL 路径或作用域内不恰好发射一次时明确失败。
 
-[`setup.py`](../../setup.py) 的 910 FA3 构建包含七个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v6 的 `mla_metadata.aicpu`、`mla_bsnd_metadata.aicpu`、`mla_tnd_metadata.aicpu`、`mla_tnd_bsnd_metadata.aicpu`、`mla_used_metadata.aicpu`、`mla_paged_metadata.aicpu`。v6 由公开 PA metadata 入口和内部 BSND/TND PA 前向共用；生产构建同时包含 PA 静态计划、布局适配器和双 dtype PA attention 实例。生产 v4 生成器由 metadata 入口和混合前向共用，v5 由内部 BSND/混合 Q-used 和公开 varlen used 前向共用。编译选项、包含的头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，复现须核对加载路径、哈希和链接对象。
+[`setup.py`](../../setup.py) 的 910 FA3 构建包含八个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v7 的 `mla_metadata.aicpu`、`mla_bsnd_metadata.aicpu`、`mla_tnd_metadata.aicpu`、`mla_tnd_bsnd_metadata.aicpu`、`mla_used_metadata.aicpu`、`mla_paged_metadata.aicpu`、`mla_causal_metadata.aicpu`。v6 由公开 PA metadata 入口和内部 BSND/TND PA 前向共用；生产构建同时包含 PA 静态计划、布局适配器和双 dtype PA attention 实例。生产 v4 生成器由 metadata 入口和混合前向共用，v5 由内部 BSND/混合 Q-used 和公开 varlen used 前向共用，v7 由 BSND causal 生成器与前向共用。编译选项、包含的头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，复现须核对加载路径、哈希和链接对象。
 
 #### 6.7.4 BSND/TND PA 静态发射计划
 
@@ -700,7 +720,9 @@ Tq=0 而 B/maxQ/C 均非零时，生产适配器将静态计划的单核发射�
 
 源执行路径是否已迁移，按固定源调度字段和分派证据判定，不能按耗时结果筛选。保留完整预定矩阵和原始数据；FD、mask、PA 等能力接通后，对应路径再纳入验收。CANN 没有公开的 FA3 `num_splits=1` 等价开关时，使用明确标识的独立源 probe 作组件对照，保留原生 CANN 分派及库，不将改装调用冒充原生 E2E。
 
-**公开 E2E：** 用户明确的“不劣化”指 **走 MLA metadata 路径的 FA3 公开调用端到端（E2E）延迟**。在同一健康、空闲的 910B、同一输入/精度/软件栈上比较。固定 seed、预热、计时次数和同步方式，交替重复测量 CANN/新实现；保存每例耗时及运行信息。对双方执行路径均已迁移的约定代表用例，验收目标仍是 `FA3 metadata 路径 E2E / 原 CANN E2E <= 1.0`，不默认引入 5% 或其他放宽阈值，也不能用平均加速掩盖退化用例。噪声未能分辨时补测，不能宣布不劣化。
+**公开 E2E：** 用户明确的“不劣化”指 **走 MLA metadata 路径的 FA3 公开调用端到端（E2E）延迟**。在同一健康、空闲的 910B、同一输入/精度/软件栈上比较。固定 seed、预热、计时次数和同步方式，交替重复测量 CANN/新实现；保存每例耗时及运行信息。按用户调整，固定集合最多 100 个输入配置（dtype、shape、scale、长度、stride），不足 100 个时保留实际数量。双方执行路径均已迁移的配置参与验收：每个入口/R 的比值为两侧 5 轮×20 次 wall 样本中位数之比；先在一个配置内等权平均已定义的入口/R，再对所有适用配置等权取算术平均，目标 `mean_ratio <= 1.0`。单例退化只记录，不作为提交阻塞；同时报告逐例、各入口/R 均值和退化数量，不按测得耗时筛选用例。缺失结果、空集合、NaN/非正耗时或计时协议不符仍失败。原生 FD 等未迁移路径按上述规则单列，不填充平均值。
+
+当前 BSND causal 汇总器为 [`mla_public_performance.py`](../../tests/mla_public_performance.py)，合并 FP16/BF16 并校验集合、分段和原始耗时比；`causal-bsnd-profile` 自动保存 `public-profile/average.json` 并传播整体失败。输入清单经 [`mla_validation_policy.py`](../../tests/mla_validation_policy.py) 在采样前固定为双 dtype 合计最多 100 个，R=1/4、5 次 warmup、5 轮×20 次 wall 及公开调用完成同步不变。
 
 E2E 从公开 Python 入口开始，测至对应调用段的 O/LSE 完成，计入入口校验、调度、输出/workspace 分配、必要转换、发射、流间依赖和全部设备计算。输入 H2D 与一次性视图准备沿用基线的对称计时边界；两边使用一致的完成同步方式。只测内部 launcher、device event span 或 profiler kernel 时间均不能替代该口径。
 
@@ -716,12 +738,13 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 ### 7.1 固定性能矩阵与阶段边界
 
-性能形状在采样前固定，双 dtype 使用同一矩阵，原生自动 FD 用例保留并单列，不按耗时删选。**矩阵定义以代码中的清单为准**；下表区分定义文件与采样驱动，不再在文档维护一份用例数量。公开和组件采样的转换边界见 [7.2](#72-参考工具与对照边界)。
+性能形状在采样前固定，公开性能双 dtype 合计最多 100 个输入配置，双 dtype 使用同一矩阵；原生自动 FD 用例保留并单列，不按耗时删选。**候选矩阵定义以代码中的清单为准**；下表区分定义文件与采样驱动，限量后的实际清单随证据保存。公开和组件采样的转换边界见 [7.2](#72-参考工具与对照边界)。
 
 | 范围 | 固定矩阵定义 | 采样驱动与计量边界 |
 | --- | --- | --- |
 | 整容量 BSND、S1G 多块、长 KV | [`mla_profile_cases.py`](../../tests/mla_profile_cases.py)：`CASES/S1G_CASES/KV_CASES/LONG_KV_CASES` | [`mla_dense_profile.py`](../../tests/mla_dense_profile.py) 同调度组件；[`mla_forward_profile.py`](../../tests/mla_forward_profile.py) 公开 E2E |
 | 独立 BSND causal | [causal attention](../../tests/test_flash_attn_npu_v3_mla_causal_attention.py) 的 `PERFORMANCE_CASES`：保留上述四组的 causal 变体，增加有效 KV、部分/全遮罩代表例 | `tests.mla_validation --suite causal-profile` 同调度固定源 non-FD 组件；mask 准备、host 调度、分配和 H2D 在计时外，kernel 与预分配 probe wall 分列，无公开 E2E 声明 |
+| 生产/公开 BSND causal | [causal public](../../tests/test_flash_attn_npu_v3_mla_causal_public.py) 的 `PERFORMANCE_CASES` 保留整容量四组、实际 KV 和 stride 的 causal 变体及部分遮罩；`USED_CASES` 固定内部 Q-used 代表 | `tests.mla_validation --suite causal-bsnd-profile`：公开驱动测复用、生成加前向、内部生成的 R=1/4；`mla_causal_bsnd_used_profile.py` 对同调度固定源组件测内部 Q-used Kernel。原生执行必须使用真实三角 mask，逐例记录 template/FD；原生必要 stride 转换计入公开 E2E |
 | BSND 实际 KV 长度 | [同一清单](../../tests/mla_profile_cases.py) 的 `BSND_CASES`；[BSND attention](../../tests/test_flash_attn_npu_v3_mla_bsnd_attention.py) 的 `PERFORMANCE_CASES` | [`mla_forward_profile.py`](../../tests/mla_forward_profile.py) 公开 E2E；[`mla_bsnd_profile.py`](../../tests/mla_bsnd_profile.py) 同调度组件 |
 | 紧凑 TND | [TND attention](../../tests/test_flash_attn_npu_v3_mla_tnd_attention.py) 与 [`mla_varlen_profile.py`](../../tests/mla_varlen_profile.py) 的 `PERFORMANCE_CASES` | 组件由 [`mla_tnd_attention_probe.cpp`](../../tests/mla_tnd_attention_probe.cpp) 验收；公开驱动计入每次内部 v3 生成与 R=1/4 调用段 |
 | TND Q + BSND KV | [混合 attention](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_attention.py) 与 [`mla_mixed_profile.py`](../../tests/mla_mixed_profile.py) 的 `PERFORMANCE_CASES` | [`mla_tnd_bsnd_profile.py`](../../tests/mla_tnd_bsnd_profile.py) 同调度组件；公开驱动计量复用、生成加前向、内部生成及原生转换 |
@@ -761,7 +784,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | [紧凑 TND attention](../../tests/test_flash_attn_npu_v3_mla_tnd_attention.py) | 按独立逻辑段长切片；源用数值构造的 int64 累计尾值，不读取 v3 快照；源 LSE 转为 `[Hq,Tq]` | 同调度固定源组件，不等于公开 E2E |
 | [混合 attention](../../tests/test_flash_attn_npu_v3_mla_tnd_bsnd_attention.py) | Q 按独立段长、KV 按 `b*Sk`；padding/空 Q cache 用 poison。源独立 TND Q + BSH KV 实例按 `GetKvActSeqMode` 接收累计 KV 尾值，物理 offset 仍为 `b*Sk`；CPU 调度 oracle 用非累计 KV | 原始源 Kernel header 不变；独立实例不是原生公开混合分派 |
 | [used attention](../../tests/test_flash_attn_npu_v3_mla_used_attention.py) | 分配段累加起点、原始 used 限定有效区，不读 v5 span。源 TND 同时以累计长度决定起点/长度，因此独立压紧有效段；BSND 轴保留物理容量，迁移侧保留分配间隙和 poison | 源压紧在组件采样前完成；只比较有效 O/LSE 行，零 KV 符号差异单列 |
-| [原生 BSND 执行器](../../tests/mla_cann_baseline.py) / [基线用例](../../tests/test_flash_attn_npu_v3_mla_cann.py) | `CannCall` 覆盖无 mask D01/D02/P01/P02、FD01、长 prefill 和实际 KV 长度；原生自动 split。不覆盖 TND、PA、mask、全局空容量 | 安装包结果只有在对应固定源码构建后才可用于源性能验收 |
+| [原生 BSND 执行器](../../tests/mla_cann_baseline.py) / [基线用例](../../tests/test_flash_attn_npu_v3_mla_cann.py) | `CannCall` 覆盖无 mask D01/D02/P01/P02、FD01、长 prefill、实际 KV 长度及 512+64 BSND 右下 causal；原生自动 split。不覆盖 TND、PA、window、全局空容量 | causal 使用预先生成的真实 2048×2048 bool 三角 mask 和 sparse mode 3；逐样本按原始长度核对双数学，保存原生分派。安装包结果只有在对应固定源码构建后才可用于源性能验收 |
 | [公开 TND](../../tests/mla_varlen_profile.py) 的 `CannTndCall` | 两组 FA3 前缀转换为不带 0 的累计尾值；源输入为紧凑 TND，LSE 转为 `[Hq,Tq]` | H2D/一次性视图在计时外，原生 Python 长度提交在计时内 |
 | [公开 varlen used](../../tests/mla_varlen_used_profile.py) 的 `CannTndUsedCall` | 根据原分配段与 used 构造设备索引；每次压紧有间隙的轴，FIA 后将 O/LSE 恢复到 Q 分配位置；缺省/整段 used 不复制该轴 | gather、分配、scatter、长度提交和完成同步均计入源 E2E；固定索引准备在计时外 |
 | [公开混合](../../tests/mla_mixed_profile.py) 的 `CannMixedCall` | 原生 parser/checker 要求连续 Q/KV 同布局；每次从 BSND cache gather 紧凑 TND K/V。全零实际 KV 转为源空容量分派，保留其 tiling key | 两次 gather、分配、长度提交及 Q/qv 布局转换计入源 E2E；H2D/固定索引/零拷贝视图准备在计时外 |
@@ -777,7 +800,7 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 
 每步按改动影响选择测试，提交门槛见 [AGENTS.md](../../AGENTS.md#按影响范围验收)。选择必须包含共享依赖、调度/地址语义、生产分派、编译实例和运行参数的影响；源码文件未变或单个对象哈希相同，不能单独证明某条执行路径不受影响。新能力及受影响路径在当前提交完成必要实测，未变化组件可复核既有证据。阶段结束仍实测约定的已开放组合及性能矩阵，可复用有效构建和 reference，不能用历史通过记录替代阶段实测。
 
-日常共享回归按下节固定 `regression-*` 清单覆盖双 dtype、布局和关键边界，不重复运行所有历史参数组合。当前步须说明选中组的覆盖理由；若改动涉及清单未覆盖的调度、页 Copy、协议、地址、发射或公开语义，补相应用例或完整专项组。精简的是重复组合，新增算法/入口的精度、协议、真实/fake/compile/Trap/生命周期及适用逐例 E2E 仍在本步验收。阶段矩阵保持完整；性能矩阵、R、预热和采样次数保持原规定。只有缺少证据、依赖变化或具体风险才扩大日常回归。
+日常共享回归按下节固定 `regression-*` 候选清单及每组 100 个上限覆盖双 dtype、布局和关键边界，不重复运行所有历史参数组合。当前步须核对实际选中组的覆盖理由；若存在调度、页 Copy、协议、地址、发射或公开语义缺口，补针对性选择。新增算法/入口的精度、协议、真实/fake/compile/Trap/生命周期及适用平均 E2E 仍在本步验收。阶段收尾也采用代表性覆盖，只有明确要求全量时使用 `--full-matrix`；R、预热和采样次数不变。
 
 继承一项组件证据须能定位原提交、命令、用例集合、结果及原始产物，并核对该项依赖的源码（含测试与独立 oracle/适配器）、构建参数、工具链/运行栈、芯片类型、实际加载产物和执行条件。记录匹配依据和本步影响分析；无关文档变化不使组件证据自动失效，相关依赖变化、失败、缺失或无法解释的差异使该项失效，重跑受影响检查。只有完整依赖可确认的证据才能继承，不要求每步重新生成全仓源码/文档快照。
 
@@ -794,7 +817,7 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 
 ### 7.4 统一验收入口
 
-执行器为 [tests/mla_validation.py](../../tests/mla_validation.py)，复用 setup、已有 release probe builder、pytest 和通用 golden cache，不调用旧步骤目录的临时驱动。先按 7.3 和 plan 选择受影响组，再预览或收集；执行器不会自动判断代码影响范围。现有组保持 M07e3c 的选择条件，不开启随机抽样，也不继承环境中的 `PYTEST_ADDOPTS`。
+执行器为 [tests/mla_validation.py](../../tests/mla_validation.py)，复用 setup、已有 release probe builder、pytest 和通用 golden cache，不调用旧步骤目录的临时驱动。先按 7.3 和 plan 选择受影响组，再预览或收集；执行器不会自动判断代码影响范围。默认 `--max-cases 100` 限制每组 pytest 节点数，可选更小上限；按测试函数和 FP16/BF16 分层轮转、固定内容哈希选择参数，保留原执行顺序，不依赖随机状态或测试结果。`selection.json` 保存候选、选中和未选中清单，`cases.json` 只保存实际选中节点；collect 与实跑选择一致。上限及选择策略版本参与证据身份，改变上限不能恢复旧组为通过。上限限制 pytest 节点，不改变单节点内的 oracle 协议请求或采样次数。完整候选集合仍保留，仅明确要求时加 `--full-matrix`；不继承环境中的 `PYTEST_ADDOPTS`。
 
 | 测试组 | 固定范围 |
 | --- | --- |
@@ -804,12 +827,16 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 | `cpu` / `tools` | 原构建生成输入与依赖检查 / 验收执行器、reference 缓存、源精度优先规则与无头循环检查；均不构建扩展或发射 NPU |
 | `causal-cpu` / `causal-sanitize` | 同一完整 causal CPU 范围/成本/分核/长度用例集，分别普通编译和 ASan/UBSan 编译；不构建扩展或发射 NPU |
 | `causal-smoke` / `causal-attention` / `causal-profile` | BSND 独立 causal 代表及成本边界 / 完整数值及同步用例 / 固定组件性能；必须使用新的 causal probe 和数学适配 |
+| `causal-bsnd-cpu` / `causal-bsnd-sanitize` | v7 BSND causal 协议与固定源调度差分、失败记录和消费者边界；并测受影响 v5 消费者，普通与 ASan/UBSan 分别执行 |
+| `used-shared-cpu` / `used-shared-sanitize` | 共享分核与 allocation/used 调度修改的固定源回归：dense、BSND 长度、TND、混合、used、PA 调度及 v5 编解码；普通与 ASan/UBSan 使用相同集合 |
+| `causal-bsnd-public` / `causal-bsnd-trap` / `causal-bsnd-legacy` | causal 公开/内部 Q-used 的源与双数学、stride/空值/真实/fake/compile/生命周期；隔离 release Trap；受影响旧 BSND used 和 metadata 边界 |
+| `causal-bsnd-check` / `causal-bsnd-native-check` / `causal-bsnd-profile` | 新入口代表自检；原生 mask/长度/分派与采样驱动预检；完整固定公开 R=1/4 和内部 Q-used 组件性能。均核对生产构建和加载，不能由旧无 mask 组替代 |
 | `shared-profile` | 无 mask 代表组件性能：原整容量四组及 BSND/TND PA 各完整 `PERFORMANCE_CASES`；双 dtype、同调度固定源对照 |
 | `shared-dense` / `shared-nonpaged` / `shared-paged` | 共用任务环/Vector 的无 mask 回归：整容量多块和长 KV / 非 PA 各布局 / BSND 与 TND PA 的任务环、stride、空值、scale 和复用；完整选择见 dry-run/collect-only |
 | `regression-dense` / `regression-nonpaged` / `regression-paged` | 日常共享回归固定子集；分别覆盖 M/N 尾块与 16K KV、实际长度/三布局 used/stride、BSND/TND 页任务环与空值/生命周期。逐项理由和节点见 [选择清单](../../tests/mla_validation_selection.py)，需要时补专项 |
 | `causal-check` / `reference` | 独立 causal 快速检查（长成本矩阵另选 `causal-smoke`）/ 原双数学 CPU 契约与独立标量对照；快速组不代替新行为或阶段验收 |
 
-原有设备组、`shared-*` 及 `regression-*` 组测试无 mask 能力；独立 causal 的完整验收使用 `causal-attention`/`causal-profile`，`causal-check` 用于自检和按影响回归。CPU 组不证明前向已开放。causal CPU 两组还记录固定源 blob、CPU 编译器及相关运行库身份和 sanitizer 模式；这些依赖变化或运行期间发生变化时不能恢复为通过。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
+原有设备组、`shared-*` 及 `regression-*` 组测试无 mask 能力；独立 causal 的完整验收使用 `causal-attention`/`causal-profile`，`causal-check` 用于自检和按影响回归。CPU 组不证明前向已开放。causal 和 used-shared CPU 组还记录固定源 blob、CPU 编译器及相关运行库身份和 sanitizer 模式；这些依赖变化或运行期间发生变化时不能恢复为通过。逐行 CPU oracle/metadata 驱动在 pytest 会话内按可执行文件身份、参数和环境复用进程，保存全部请求/响应；结束时仍执行 LeakSanitizer，非零退出、stderr、EOF、无效或额外响应均使验收失败。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
 
 ```bash
 python3 -m tests.mla_validation --output build/mla-step --suite public ordinary --dry-run
@@ -824,7 +851,7 @@ causal CPU 驱动在每组内分别复用适配器、固定源 oracle、迁移 S
 
 每次执行创建新的 `attempt-*`，保存命令/环境、完整节点清单、XML、日志、数学输入/输出、源码身份及 pytest 实际加载的扩展身份；`summary.json` 表示最近一次尝试，`state.json` 索引可继承的成功组。退出非零、没有用例、失败、跳过、实际扩展不符或运行中依赖变化都不能记为通过。某组失败后，后续组为未运行；旧成功状态先失效，原尝试目录保留。
 
-`causal-profile` 和 `shared-profile` 每次重新采样，不恢复历史性能。其他组的 `--resume` 只继承同一输出目录中身份匹配且原始证据完整的成功组，结果标为 `inherited`，不会计入本次实测；失败、中断、证据缺失或依赖变化的组重新执行。每组 `sources.json` 保守覆盖全部原生源码/测试驱动/公共辅助代码，以及所选测试的递归 Python 导入、包初始化和 conftest；未知动态模块导入退回完整闭包。无关测试模块和无头脚本修改不再使数值组失效，未知原生影响仍保守扩大；无头脚本属于 tools 的依赖。新身份格式不继承旧身份记录。恢复仍为成功组粒度，不能跳过失败组内的单个节点。输出、共享构建目录与同卡运行有非阻塞锁；未结束进程继续持锁时必须先核查进程，不能直接另启相同任务。锁只协调本执行器，性能测量前仍须核查其他用户的设备活动。
+`causal-profile`、`shared-profile`、`causal-bsnd-native-check` 和 `causal-bsnd-profile` 每次重新采样，不恢复历史性能。其他组的 `--resume` 只继承同一输出目录中身份匹配且原始证据完整的成功组，结果标为 `inherited`，不会计入本次实测；失败、中断、证据缺失或依赖变化的组重新执行。每组 `sources.json` 保守覆盖全部原生源码/测试驱动/公共辅助代码，以及所选测试的递归 Python 导入、包初始化和 conftest；未知动态模块导入退回完整闭包。无关测试模块和无头脚本修改不再使数值组失效，未知原生影响仍保守扩大；无头脚本属于 tools 的依赖。新身份格式不继承旧身份记录。恢复仍为成功组粒度，不能跳过失败组内的单个节点。输出、共享构建目录与同卡运行有非阻塞锁；未结束进程继续持锁时必须先核查进程，不能直接另启相同任务。锁只协调本执行器，性能测量前仍须核查其他用户的设备活动。
 
 三类复用分别管理：
 

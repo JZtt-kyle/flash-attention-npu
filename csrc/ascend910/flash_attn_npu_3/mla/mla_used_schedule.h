@@ -79,4 +79,10 @@ MlaScheduleStatus ParseUsedLengths(const MlaUsedShape& shape, const MlaUsedInput
 MlaScheduleStatus BuildUsedSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
                                     const MlaUsedInputs& inputs, MlaUsedSchedule& output);
 
+// Validate/snapshot lengths and prepare the same tiles/workspace, without
+// running the unmasked partitioner. The caller must supply its own partition
+// and final workspace offsets before serializing or launching the schedule.
+MlaScheduleStatus PrepareUsedSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
+                                      const MlaUsedInputs& inputs, MlaUsedSchedule& output);
+
 } // namespace flash_attn::mla

@@ -6,8 +6,8 @@
 #include "../mla_used_metadata_consumer.h"
 
 namespace flash_attn::mla::Kernel {
-template <typename InputT, bool IsTnd, bool HasStrides = false>
-class MlaUsed : private MlaNonPaged<InputT, true, IsTnd, false, true, HasStrides> {
+template <typename InputT, bool IsTnd, bool HasStrides = false, bool IsCausal = false>
+class MlaUsed : private MlaTaskRing<InputT, true, IsTnd, false, true, HasStrides, false, IsCausal> {
   public:
     // Validate v5 and all four current arrays on every core before TPipe,
     // synchronization or writes. IsTnd must match the validated Q layout.

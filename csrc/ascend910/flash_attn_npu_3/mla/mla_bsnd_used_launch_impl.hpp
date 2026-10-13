@@ -9,7 +9,7 @@
 #endif
 
 namespace flash_attn::mla {
-template <bool HasStrides>
+template <bool HasStrides, bool IsCausal = false>
 __global__ __aicore__ __mix__(1, 2) void MLA_USED_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
                                                         GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
                                                         GM_ADDR metadata, MlaUsedMetadataContext context,
@@ -19,14 +19,14 @@ __global__ __aicore__ __mix__(1, 2) void MLA_USED_ENTRY(uint64_t ffts, GM_ADDR q
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     MlaUsedKernelSchedule schedule{};
     const uint32_t words = kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * context.batch;
-    if (!Kernel::LoadUsedMetadata<MLA_USED_TYPE>(metadata, words, context, inputs, schedule)) {
+    if (!Kernel::LoadUsedMetadata<MLA_USED_TYPE, IsCausal>(metadata, words, context, inputs, schedule)) {
         return;
     }
     // Every core validates before TPipe, synchronization or output writes,
     // even for empty capacity or all-zero used lengths.
     AscendC::SetSyncBaseAddr(ffts);
     AscendC::TPipe pipe;
-    Kernel::MlaUsed<MLA_USED_TYPE, false, HasStrides> op;
+    Kernel::MlaUsed<MLA_USED_TYPE, false, HasStrides, IsCausal> op;
     op(schedule, scale, qc, qr, kv, kr, output, lse, workspace, &pipe,
        metadata + kMlaUsedMetadataPrefixWords * sizeof(int32_t), &layouts);
 #endif
@@ -35,7 +35,15 @@ __global__ __aicore__ __mix__(1, 2) void MLA_USED_ENTRY(uint64_t ffts, GM_ADDR q
 aclError MLA_USED_LAUNCH(const MlaUsedLaunchArgs& a)
 {
     MlaBatchLaunchScope launch;
-    if (a.hasStrides) {
+    if (a.causal && a.hasStrides) {
+        MLA_USED_ENTRY<true, true><<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output,
+                                                                              a.lse, a.workspace, a.metadata, a.context,
+                                                                              a.inputs, a.scale, a.layouts);
+    } else if (a.causal) {
+        MLA_USED_ENTRY<false, true><<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output,
+                                                                               a.lse, a.workspace, a.metadata,
+                                                                               a.context, a.inputs, a.scale, a.layouts);
+    } else if (a.hasStrides) {
         MLA_USED_ENTRY<true><<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse,
                                                                         a.workspace, a.metadata, a.context, a.inputs,
                                                                         a.scale, a.layouts);

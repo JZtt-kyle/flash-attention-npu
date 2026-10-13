@@ -13,6 +13,7 @@
 // not split optimality or authenticity (maxCost is diagnostic only).
 #pragma once
 #include "mla_used_metadata.h"
+#include "mla_causal_metadata.h"
 #include "mla_used_metadata_args.h"
 #include "mla_metadata_consumer.h"
 
@@ -77,7 +78,7 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadataAxis(const Reader& read, c
 // Readers return uint32 bits, so negative int32 lengths exceed their validated
 // nonnegative capacity before subtraction or indexing. Check every descriptor
 // before reading any length, and never write output until all checks succeed.
-template <typename Reader, typename Arrays>
+template <bool IsCausal = false, typename Reader, typename Arrays>
 MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint32_t words,
                                                        const MlaUsedMetadataContext& c,
                                                        const MlaUsedMetadataInputs& inputs, const Arrays& arrays,
@@ -88,12 +89,16 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
         return Status::InvalidBuffer;
     }
     auto status = ReadMetadataHeader(read, words, kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * c.batch,
-                                     kMlaUsedMetadataVersion, kMlaMetadataUsed, c.dtype);
+                                     IsCausal ? kMlaCausalBsndMetadataVersion : kMlaUsedMetadataVersion,
+                                     IsCausal ? kMlaMetadataCausalBsnd : kMlaMetadataUsed, c.dtype);
     if (status != Status::Success) {
         return status;
     }
 #define MLA_USED_WORD(field) read(offsetof(MlaUsedMetadataPrefix, field) / sizeof(uint32_t))
     const uint64_t totalQ = UsedMetadataTotal(c.query);
+    if (IsCausal && (c.query.layout != 0 || c.kv.layout != 0)) {
+        return Status::ShapeMismatch;
+    }
     if (c.query.layout > 1 || c.kv.layout > 1 || (c.query.layout == 0 && c.kv.layout != 0) || c.usedFlags > 3 ||
         c.heads == 0 || c.heads > kMlaMaxQueryHeads || c.query.maxLength > kMlaMaxQueryLength ||
         c.kv.maxLength > kMlaMaxKvLength || uint64_t(c.query.maxLength) * c.heads > kMlaMaxDenseRows ||
@@ -166,10 +171,35 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
         return Status::InvalidTiling;
     }
     // Non-FD generators zero inactive bookkeeping and unused endpoint slots.
-    for (uint32_t word = offsetof(MlaUsedMetadataPrefix, schedule.bN2IdxOfFdHead) / sizeof(uint32_t);
-         word < offsetof(MlaUsedMetadataPrefix, schedule.workspace) / sizeof(uint32_t); ++word) {
-        if (read(word) != 0) {
+    constexpr uint32_t fdBegin = offsetof(MlaUsedMetadataPrefix, schedule.bN2IdxOfFdHead) / sizeof(uint32_t);
+    constexpr uint32_t fdEnd = offsetof(MlaUsedMetadataPrefix, schedule.workspace) / sizeof(uint32_t);
+    if constexpr (IsCausal) {
+        // All words lie in the validated fixed prefix. Independent loads avoid
+        // a scalar branch after every GM read while retaining every zero check.
+        uint32_t bits0 = 0, bits1 = 0, bits2 = 0, bits3 = 0;
+        uint32_t bits4 = 0, bits5 = 0, bits6 = 0, bits7 = 0;
+        uint32_t word = fdBegin;
+        for (; word + 7 < fdEnd; word += 8) {
+            bits0 |= read(word);
+            bits1 |= read(word + 1);
+            bits2 |= read(word + 2);
+            bits3 |= read(word + 3);
+            bits4 |= read(word + 4);
+            bits5 |= read(word + 5);
+            bits6 |= read(word + 6);
+            bits7 |= read(word + 7);
+        }
+        for (; word < fdEnd; ++word) {
+            bits0 |= read(word);
+        }
+        if ((bits0 | bits1 | bits2 | bits3 | bits4 | bits5 | bits6 | bits7) != 0) {
             return Status::InvalidTiling;
+        }
+    } else {
+        for (uint32_t word = fdBegin; word < fdEnd; ++word) {
+            if (read(word) != 0) {
+                return Status::InvalidTiling;
+            }
         }
     }
     uint64_t tiles = 0;
@@ -206,6 +236,10 @@ MLA_USED_INLINE MlaMetadataReadStatus ReadUsedMetadata(const Reader& read, uint3
         s.bN2End[i] = previousBatch = b;
         s.gS1End[i] = previousM = m;
         s.s2End[i] = n;
+    }
+    // Causal schedules own every M block, including the zero-cost suffix.
+    if (IsCausal && (previousBatch != c.batch || previousM != 0)) {
+        return Status::InvalidEndpoints;
     }
     // Check the whole omitted suffix, including a partially omitted sample.
     for (uint32_t b = previousBatch; b < c.batch; ++b) {

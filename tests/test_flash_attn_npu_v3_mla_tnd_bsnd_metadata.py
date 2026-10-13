@@ -9,6 +9,7 @@ import subprocess
 
 import pytest
 
+from tests.mla_cpu_driver import evaluate_cpu
 from tests.mla_metadata_build import MLA, ROOT, sha256
 from tests.test_flash_attn_npu_v3_mla_bsnd_metadata import projection
 from tests.test_flash_attn_npu_v3_mla_tnd_bsnd_schedule import (
@@ -101,16 +102,9 @@ def mixed_builder(tmp_path_factory):
 
 
 def build(builder, cases, dtype=1, *, from_prefix=False):
-    result = subprocess.run(
-        [str(builder[0]), str(dtype), *(["--from-prefix"] if from_prefix else [])],
-        input="".join(" ".join(map(str, c)) + "\n" for c in cases),
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=120,
+    rows = evaluate_cpu(
+        builder[0], cases, args=[str(dtype), *(["--from-prefix"] if from_prefix else [])]
     )
-    assert not result.stderr, result.stderr
-    rows = [json.loads(line) for line in result.stdout.splitlines()]
     assert len(rows) == len(cases)
     return rows
 

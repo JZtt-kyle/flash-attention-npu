@@ -78,4 +78,12 @@ bool UsedMetadataWords(int64_t batch, uint32_t& words);
 bool BuildUsedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype, uint32_t* output,
                        uint32_t outputWords, const MlaUsedInputs& inputs);
 
+// Share descriptor validation and serialization with a different partitioner.
+// The builder must return a complete schedule, using the same owned lengths.
+using MlaUsedScheduleBuilder = MlaScheduleStatus (*)(const MlaUsedShape&, const MlaPlatformInfo&, const MlaUsedInputs&,
+                                                     MlaUsedSchedule&, const void*);
+bool BuildUsedMetadataWithSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                                   uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
+                                   MlaUsedScheduleBuilder builder, const void* context = nullptr);
+
 } // namespace flash_attn::mla

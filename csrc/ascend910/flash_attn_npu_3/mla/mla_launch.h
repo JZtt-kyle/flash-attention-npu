@@ -56,6 +56,7 @@ struct MlaUsedLaunchArgs {
     float scale;
     MlaBsndInputLayouts layouts{};
     bool hasStrides = false;
+    bool causal = false;
 };
 aclError LaunchBsndUsedFp16(const MlaUsedLaunchArgs& args);
 aclError LaunchBsndUsedBf16(const MlaUsedLaunchArgs& args);

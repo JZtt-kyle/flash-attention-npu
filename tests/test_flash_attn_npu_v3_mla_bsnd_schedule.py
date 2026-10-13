@@ -15,6 +15,7 @@ import subprocess
 
 import pytest
 
+from tests.mla_cpu_driver import evaluate_cpu
 from tests.test_flash_attn_npu_v3_mla_schedule import (
     CANN_COMMIT,
     FIA,
@@ -116,15 +117,14 @@ def length_case(lengths=None, *, count=None, **shape):
 
 
 def evaluate(binary, cases, *, automatic_fd=False, dense=False):
-    inputs = "".join(" ".join(map(str, item)) + "\n" for item in cases)
-    env = os.environ.copy()
-    for name, enabled in (("MLA_ORACLE_AUTOMATIC_FD", automatic_fd), ("MLA_BSND_USE_DENSE", dense)):
-        env.pop(name, None)
-        if enabled:
-            env[name] = "1"
-    result = run([str(binary)], input=inputs, env=env)
-    assert not result.stderr, result.stderr
-    outputs = [json.loads(line) for line in result.stdout.splitlines()]
+    outputs = evaluate_cpu(
+        binary,
+        cases,
+        options={
+            "MLA_ORACLE_AUTOMATIC_FD": "1" if automatic_fd else None,
+            "MLA_BSND_USE_DENSE": "1" if dense else None,
+        },
+    )
     assert len(outputs) == len(cases)
     return outputs
 

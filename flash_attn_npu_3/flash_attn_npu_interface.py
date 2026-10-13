@@ -239,6 +239,7 @@ def _check_mla_dense_options(
     *,
     softmax_scale=None,
     causal=False,
+    allow_causal=False,
     window_size=(-1, -1),
     attention_chunk=0,
     softcap=0.0,
@@ -253,7 +254,7 @@ def _check_mla_dense_options(
             "MLA compressed forward is not implemented yet for optional tensors or length/rotary options"
         )
     if (
-        causal
+        (causal and not allow_causal)
         or window_size != (-1, -1)
         or attention_chunk != 0
         or softcap != 0.0
@@ -357,6 +358,31 @@ def _check_mla_used(q, batch, seqused_q, seqused_k):
             raise RuntimeError(f"MLA: {name} must have shape [batch_size]")
         if not tensor.is_contiguous():
             raise RuntimeError(f"MLA: {name} must be contiguous")
+
+
+def _mla_causal_bsnd_words(batch):
+    if not 0 <= batch <= (2**32 - 1 - 410) // 8:
+        raise RuntimeError("MLA: causal BSND metadata word count overflow")
+    return 410 + 8 * batch
+
+
+def _check_mla_causal_bsnd_metadata(q, cache_seqlens, seqused_q, metadata):
+    if seqused_q is not None:
+        _check_mla_bsnd_used(q, seqused_q, cache_seqlens, metadata)
+    else:
+        _check_mla_used(q, q.shape[0], None, cache_seqlens)
+    words = _mla_causal_bsnd_words(q.shape[0])
+    if metadata is not None:
+        if (
+            metadata.dtype != torch.int32
+            or metadata.device != q.device
+            or metadata.ndim != 1
+            or metadata.shape[0] != words
+            or not metadata.is_contiguous()
+        ):
+            raise RuntimeError(
+                "MLA: causal scheduler_metadata must be same-device contiguous int32[410 + 8 * batch_size]"
+            )
 
 
 def _check_mla_forward_metadata(q, cache_seqlens, metadata):
@@ -516,6 +542,29 @@ def _mla_paged_tnd_forward_fake(
     )
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_causal_bsnd_forward")
+def _mla_causal_bsnd_forward_fake(
+    q, k, v, qv, softmax_scale=None, cache_seqlens=None, seqused_q=None, scheduler_metadata=None
+):
+    _check_mla_inputs(q, k, v, qv)
+    _check_mla_dense_options(softmax_scale=softmax_scale, causal=True, allow_causal=True)
+    _check_mla_causal_bsnd_metadata(q, cache_seqlens, seqused_q, scheduler_metadata)
+    return (
+        torch.empty((*q.shape[:-1], 512), dtype=q.dtype, device=q.device),
+        torch.empty((q.shape[0], q.shape[2], q.shape[1]), dtype=torch.float32, device=q.device),
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_causal_bsnd_cache")
+def _mla_causal_bsnd_cache_fake(
+    q, k, v, qv, softmax_scale=None, cache_seqlens=None, scheduler_metadata=None
+):
+    out, lse = _mla_causal_bsnd_forward_fake(
+        q, k, v, qv, softmax_scale, cache_seqlens, None, scheduler_metadata
+    )
+    return out, lse, torch.empty(0, device=q.device), torch.empty(0, device=q.device)
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_dense_forward")
 def _mla_dense_forward_fake(
     q, k, v, qv, softmax_scale=None, cache_seqlens=None, scheduler_metadata=None
@@ -626,6 +675,7 @@ def _flash_attn_forward(
         _check_mla_dense_options(
             softmax_scale=softmax_scale,
             causal=causal,
+            allow_causal=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -674,6 +724,8 @@ def _flash_attn_forward(
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
                 if seqused_q is not None or seqused_k is not None:
                     _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
+        elif causal:
+            _check_mla_causal_bsnd_metadata(q, seqused_k, seqused_q, scheduler_metadata)
         elif seqused_q is not None:
             _check_mla_bsnd_used(q, seqused_q, seqused_k, scheduler_metadata)
         else:
@@ -788,6 +840,7 @@ def _flash_attn_forward_fake(
         _check_mla_dense_options(
             softmax_scale=softmax_scale,
             causal=causal,
+            allow_causal=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -836,6 +889,8 @@ def _flash_attn_forward_fake(
                 _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
                 if seqused_q is not None or seqused_k is not None:
                     _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
+        elif causal:
+            _check_mla_causal_bsnd_metadata(q, seqused_k, seqused_q, scheduler_metadata)
         elif seqused_q is not None:
             _check_mla_bsnd_used(q, seqused_q, seqused_k, scheduler_metadata)
         else:
@@ -1256,6 +1311,7 @@ class FlashAttnFunc(torch.autograd.Function):
             _check_mla_dense_options(
                 softmax_scale=softmax_scale,
                 causal=causal,
+                allow_causal=True,
                 window_size=window_size,
                 attention_chunk=attention_chunk,
                 softcap=softcap,
@@ -1737,6 +1793,24 @@ def flash_attn_func(
             FP32 natural log of each row's softmax normalization factor, including
             the qv contribution for MLA.
     """
+    # Causal MLA is forward-only. Its real/fake dispatcher validates every
+    # tensor, including rejecting gradients, without an autograd context.
+    if causal and qv is not None and q.device.type == "npu":
+        _check_mla_dense_options(
+            causal=True,
+            allow_causal=True,
+            window_size=window_size,
+            attention_chunk=attention_chunk,
+            softcap=softcap,
+            num_splits=num_splits,
+            pack_gqa=pack_gqa,
+            sm_margin=sm_margin,
+            optional_tensors=(q_descale, k_descale, v_descale),
+        )
+        out, softmax_lse = torch.ops.flash_attn_npu_3._mla_causal_bsnd_forward(
+            q, k, v, qv, softmax_scale
+        )
+        return (out, softmax_lse) if return_attn_probs else out
     return FlashAttnFunc.apply(
         q,
         k,
@@ -1863,8 +1937,8 @@ def flash_attn_with_kvcache(
     """
     NPU compressed MLA supports read-only BSND or ND paged caches with BSND/TND
     queries. Set num_splits=1 explicitly; current MLA limits are documented in
-    docs/mla/status.md. The generic FA3 append, rotary and mask options described
-    below are rejected on the MLA path.
+    docs/mla/status.md. Right-down causal is supported for nonpaged BSND queries;
+    generic FA3 append, rotary and local-window options below remain unsupported.
 
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
     k and v. This is useful for incremental decoding: you can pass in the cached keys/values from
@@ -1956,8 +2030,8 @@ def flash_attn_with_kvcache(
             returned by get_scheduler_metadata unchanged (do not clone/copy it).
             softmax_scale and the numerical softcap value come from this forward
             call and may change when reusing metadata with the same has_softcap.
-            MLA uses int32 v2 records for BSND queries or v4 records for TND queries
-            with a BSND cache, or v6 records for either query layout with a paged cache.
+            MLA uses int32 v2 records for unmasked BSND queries, v7 for causal BSND,
+            v4 for TND queries with a BSND cache, or v6 for paged caches.
             The device checks current lengths, TND query prefixes and all used pages.
             MLA records may be cloned or passed as contiguous
             offset views; scale is supplied to forward and is not fixed by the record.
@@ -1991,6 +2065,7 @@ def flash_attn_with_kvcache(
         # inside the op so torch.compile can capture this public wrapper.
         _check_mla_dense_options(
             causal=causal,
+            allow_causal=cu_seqlens_q is None and page_table is None,
             window_size=window_size,
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -2083,6 +2158,20 @@ def flash_attn_with_kvcache(
                 softmax_scale,
                 cache_seqlens,
                 scheduler_metadata,
+            )
+        elif causal and return_softmax_lse:
+            return torch.ops.flash_attn_npu_3._mla_causal_bsnd_cache(
+                q, k_cache, v_cache, qv, softmax_scale, cache_seqlens, scheduler_metadata
+            )
+        elif causal:
+            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_causal_bsnd_forward(
+                q,
+                k_cache,
+                v_cache,
+                qv,
+                softmax_scale,
+                cache_seqlens,
+                scheduler_metadata=scheduler_metadata,
             )
         else:
             out, softmax_lse = torch.ops.flash_attn_npu_3._mla_dense_forward(
@@ -2253,6 +2342,7 @@ def _check_mla_metadata_options(
     num_splits,
     sm_margin,
     optional_args,
+    allow_causal=False,
 ):
     if num_heads_kv != 1:
         raise RuntimeError(
@@ -2261,7 +2351,7 @@ def _check_mla_metadata_options(
     if (
         any(arg is not None for arg in optional_args)
         or max_seqlen_k_new != 0
-        or causal
+        or (causal and not allow_causal)
         or window_size != (-1, -1)
         or attention_chunk != 0
         or has_softcap
@@ -2290,6 +2380,22 @@ def _mla_bsnd_metadata_words(batch):
     if not 0 <= batch <= 2**32 - 1 - 401:
         raise RuntimeError("MLA: BSND metadata word count overflow")
     return 401 + batch
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_causal_bsnd_metadata")
+def _mla_causal_bsnd_metadata_fake(
+    batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
+):
+    if not _fits_mla_dense_shape(batch_size, max_seqlen_q, num_heads_q, max_seqlen_k):
+        raise RuntimeError("MLA: causal BSND shape bounds exceeded")
+    if qkv_dtype not in (torch.float16, torch.bfloat16):
+        raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
+    if cache_seqlens.device.type != "npu":
+        raise RuntimeError("MLA: cache_seqlens must be on the same NPU device")
+    _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
+    return torch.empty(
+        (_mla_causal_bsnd_words(batch_size),), dtype=torch.int32, device=cache_seqlens.device
+    )
 
 
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_dense_metadata")
@@ -2497,6 +2603,7 @@ def _get_scheduler_metadata_fake(
                 softcap,
                 softmax_scale,
             ),
+            allow_causal=cu_seqlens_q is None and page_size is None,
         )
         if page_size is not None:
             return _mla_paged_metadata_fake(
@@ -2518,6 +2625,10 @@ def _get_scheduler_metadata_fake(
                 qkv_dtype,
                 cache_seqlens,
                 cu_seqlens_q,
+            )
+        if causal:
+            return _mla_causal_bsnd_metadata_fake(
+                batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
             )
         return _mla_dense_metadata_fake(
             batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
@@ -2565,7 +2676,9 @@ def get_scheduler_metadata(
     MLA requires headdim=64, headdim_v=512, matching qkv_dtype and explicit
     num_splits=1. cache_seqlens must be a same-device contiguous int32 tensor
     of shape (batch_size,); None/integer lengths are kvcache conveniences only.
-    Without page_size or cu_seqlens_q, it returns an int32 v2 BSND-cache record.
+    Without page_size or cu_seqlens_q, it returns an int32 BSND-cache record:
+    v2 for unmasked attention or v7 for right-down causal. Causal records contain
+    410 + 8 * batch_size words and cannot be reused by an unmasked forward.
     With cu_seqlens_q and no page_size it generates a v4 TND-query/BSND-cache record;
     max_seqlen_q is a per-query-segment bound, max_seqlen_k is cache capacity.
     Read-only flash_attn_with_kvcache accepts this v4 record with TND queries
@@ -2600,6 +2713,7 @@ def get_scheduler_metadata(
                 softcap,
                 softmax_scale,
             ),
+            allow_causal=cu_seqlens_q is None and page_size is None,
         )
         if page_size is not None:
             return torch.ops.flash_attn_npu_3._mla_paged_metadata(
@@ -2621,6 +2735,10 @@ def get_scheduler_metadata(
                 qkv_dtype,
                 cache_seqlens,
                 cu_seqlens_q,
+            )
+        if causal:
+            return torch.ops.flash_attn_npu_3._mla_causal_bsnd_metadata(
+                batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
             )
         return torch.ops.flash_attn_npu_3._mla_dense_metadata(
             batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens

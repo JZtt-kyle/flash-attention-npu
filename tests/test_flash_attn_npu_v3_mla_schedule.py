@@ -17,6 +17,8 @@ import subprocess
 
 import pytest
 
+from tests.mla_cpu_driver import evaluate_cpu
+
 ROOT = Path(__file__).resolve().parents[1]
 MLA = ROOT / "csrc/ascend910/flash_attn_npu_3/mla"
 CANN_COMMIT = "ca18aee610729ca5270a44e2d84c751bc687fbf0"
@@ -147,14 +149,9 @@ def case(batch=1, sq=1, heads=128, sk=512, aic=20, ratio=2, **overrides):
 
 
 def evaluate(binary, cases, *, automatic_fd=False):
-    text = "".join(" ".join(map(str, item)) + "\n" for item in cases)
-    env = os.environ.copy()
-    env.pop("MLA_ORACLE_AUTOMATIC_FD", None)
-    if automatic_fd:
-        env["MLA_ORACLE_AUTOMATIC_FD"] = "1"
-    result = run([str(binary)], input=text, env=env)
-    assert not result.stderr, result.stderr
-    outputs = [json.loads(line) for line in result.stdout.splitlines()]
+    outputs = evaluate_cpu(
+        binary, cases, options={"MLA_ORACLE_AUTOMATIC_FD": "1" if automatic_fd else None}
+    )
     assert len(outputs) == len(cases)
     return outputs
 

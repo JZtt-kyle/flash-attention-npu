@@ -305,6 +305,7 @@ def build_probes(
         host_cmd += [
             str(ROOT / "tests/mla_causal_attention_schedule.cpp"),
             str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.cpp"),
+            str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_schedule.cpp"),
         ]
     (artifacts / "schedule-command.json").write_text(json.dumps(host_cmd, indent=2) + "\n")
     with (artifacts / "schedule-compile.log").open("w") as log:
@@ -342,6 +343,8 @@ def build_probes(
             ROOT / "tests/mla_causal_attention_schedule.cpp",
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.h",
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.cpp",
+            ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal_metadata.h",
+            ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_schedule.cpp",
         ]
     manifest = {
         "causal": causal,

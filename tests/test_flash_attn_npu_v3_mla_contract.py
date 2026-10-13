@@ -320,7 +320,6 @@ def test_mla_metadata_rejected(entry, dims, dtype, has_softcap):
         "k_descale",
         "v_descale",
         "rotary_interleaved",
-        "causal",
         "window_size_left",
         "window_size_right",
         "attention_chunk",
