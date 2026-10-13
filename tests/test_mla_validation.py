@@ -145,6 +145,7 @@ def test_lock_blocks_a_second_process(tmp_path):
     "suite",
     [
         "tools",
+        "window-device-tools",
         "window-cpu",
         "window-sanitize",
         "causal-cpu",
@@ -372,21 +373,32 @@ for line in sys.stdin:
     assert all(row["returncode"] == 0 for row in records)
 
 
-@pytest.mark.parametrize("suite", ("causal-smoke", "causal-attention", "causal-profile"))
+@pytest.mark.parametrize(
+    "suite",
+    (
+        "causal-smoke",
+        "causal-attention",
+        "causal-profile",
+        "window-check",
+        "window-attention",
+        "window-profile",
+    ),
+)
 def test_causal_device_groups_use_new_probe_and_device_identity(tmp_path, capsys, suite):
     config = args(tmp_path)
     config.suite = [suite]
     config.dry_run = True
     assert runner.run(config) == 0
     preview = json.loads(capsys.readouterr().out)
-    assert bool(preview["prepare"]) == (suite != "causal-smoke")
+    assert bool(preview["prepare"]) == (suite not in runner.STANDALONE_CHECK_SUITES)
     assert suite not in runner.CPU_SUITES
     selection = preview["suites"][suite]
-    assert any("causal" in path and path.endswith(".py") for path in selection)
+    kind = "window" if suite in runner.WINDOW_DEVICE_SUITES else "causal"
+    assert any(kind in path and path.endswith(".py") for path in selection)
     assert runner.CAUSAL_CPU not in selection
     env = runner.environment(config, tmp_path, suite)
     assert env["MLA_VALIDATION_NPU"] == "1"
-    assert env["MLA_CAUSAL_ATTENTION_DIR"] == str(tmp_path / "probes")
+    assert env[f"MLA_{kind.upper()}_ATTENTION_DIR"] == str(tmp_path / "probes")
     assert env["ASCEND_RT_VISIBLE_DEVICES"] == "6"
 
 
@@ -418,9 +430,12 @@ def test_shared_regression_preserves_each_layout():
     assert "zero" in runner.SUITES["shared-paged"][-1]
 
 
-def test_standalone_causal_smoke_never_requires_old_production_artifacts(tmp_path, monkeypatch):
+@pytest.mark.parametrize("suite", ("causal-smoke", "window-check"))
+def test_standalone_causal_smoke_never_requires_old_production_artifacts(
+    tmp_path, monkeypatch, suite
+):
     config = args(tmp_path)
-    config.suite = ["causal-smoke"]
+    config.suite = [suite]
     # This is a simulated device run. The outer acceptance process may hold
     # the actual card lock, so exercise real file locks in an isolated tree.
     real_locked = runner.locked
@@ -430,7 +445,7 @@ def test_standalone_causal_smoke_never_requires_old_production_artifacts(tmp_pat
     monkeypatch.setattr(runner, "sources", lambda: {"source": "fixed"})
     monkeypatch.setattr(runner.subprocess, "check_output", lambda *a, **kw: "npu-smi test\n")
     checked = []
-    monkeypatch.setattr(runner, "validate_causal_builds", lambda d: checked.append(d))
+    monkeypatch.setattr(runner, "validate_causal_builds", lambda d, **kw: checked.append((d, kw)))
     calls = []
     fail = False
 
@@ -453,14 +468,15 @@ def test_standalone_causal_smoke_never_requires_old_production_artifacts(tmp_pat
     assert all("prepare" not in command for command in calls)
     summary = json.loads((config.output / "summary.json").read_text())
     assert summary["build"]["status"] == "not_required"
-    assert summary["groups"]["causal-smoke"]["status"] == "passed"
+    assert summary["groups"][suite]["status"] == "passed"
     fail = True
     assert runner.run(config) == 1
-    assert "causal-smoke" not in json.loads((config.output / "state.json").read_text())
+    assert suite not in json.loads((config.output / "state.json").read_text())
 
 
 @pytest.mark.parametrize("fault", ("source", "dependency", "library", "loaded", "missing"))
-def test_causal_probe_identity_change_is_not_accepted(tmp_path, fault):
+@pytest.mark.parametrize("kind", ("causal", "window"))
+def test_causal_probe_identity_change_is_not_accepted(tmp_path, fault, kind):
     paths = {}
     for dtype in ("fp16", "bf16"):
         base = tmp_path / "probes" / dtype
@@ -478,14 +494,14 @@ def test_causal_probe_identity_change_is_not_accepted(tmp_path, fault):
         runner.save(
             base / "build-manifest.json",
             dict(
-                causal=True,
+                **{kind: True},
                 dtype=dtype,
                 libraries=libs,
                 sources={str(parts["source"]): runner.sha256(parts["source"])},
                 dependencies={str(parts["dependency"]): runner.sha256(parts["dependency"])},
             ),
         )
-    runner.validate_causal_builds(tmp_path)
+    runner.validate_causal_builds(tmp_path, kind=kind)
     base = tmp_path / "probes" / "bf16"
     if fault == "loaded":
         runner.save(base / "loaded.json", {})
@@ -494,16 +510,16 @@ def test_causal_probe_identity_change_is_not_accepted(tmp_path, fault):
     else:
         paths["bf16"][fault].write_text("after")
     with pytest.raises(RuntimeError):
-        runner.validate_causal_builds(tmp_path)
+        runner.validate_causal_builds(tmp_path, kind=kind)
 
 
-@pytest.mark.parametrize("suite", ("causal-profile", "shared-profile"))
+@pytest.mark.parametrize("suite", ("causal-profile", "shared-profile", "window-profile"))
 def test_performance_always_executes_on_resume(tmp_path, monkeypatch, suite):
     config = args(tmp_path)
     config.suite = [suite]
     monkeypatch.setattr(runner, "CPU_SUITES", runner.CPU_SUITES | {suite})
     monkeypatch.setattr(runner, "sources", lambda: {"source": "fixed"})
-    monkeypatch.setattr(runner, "validate_causal_builds", lambda _: None)
+    monkeypatch.setattr(runner, "validate_causal_builds", lambda _, **kw: None)
     calls = []
 
     def execute(command, env, directory, lock_fds=()):

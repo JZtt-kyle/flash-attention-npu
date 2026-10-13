@@ -11,7 +11,7 @@
 // Upstream license: ../LICENSE.cann.
 // Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0,
 // arch22/fia_block_vec_nonquant_mla.h::ElewiseCompute / DealInvalidRows.
-// Specialize boolean right-down causal mask to S1G rows. Generate the mask
+// Specialize boolean right-down causal/band masks to S1G rows. Generate the mask
 // from validated effective lengths instead of loading a public mask tensor.
 // Preserve the source finite sentinel and softmax/aMLA arithmetic; adapt only
 // fully masked O/LSE to the FA3 contract in the Block epilogue.
@@ -47,6 +47,27 @@ __aicore__ inline void CausalMask(LocalTensor<float> scores, uint32_t row, uint3
                 uint64_t bits[2] = {((~uint64_t(0)) << begin) & ((~uint64_t(0)) >> (64 - end)), 0};
                 Duplicate(scores[start * columns + col], -1000000000000.0f, bits, count, 1, columns / 8);
             }
+        }
+        start += count;
+    }
+}
+
+__aicore__ inline void WindowMask(LocalTensor<float> scores, uint32_t row, uint32_t rows, uint32_t heads,
+                                  int64_t preToken, int64_t nextToken, uint32_t keyStart, uint32_t columns,
+                                  uint32_t actualColumns)
+{
+    CausalMask(scores, row, rows, heads, nextToken, keyStart, columns, actualColumns);
+    // The source band combines the upper triangle with the inverted lower
+    // triangle. Preserve the same finite sentinel and aligned FP32 writes.
+    for (uint32_t start = 0; start < rows;) {
+        const uint32_t query = (row + start) / heads;
+        const uint32_t count = Min(rows - start, heads - (row + start) % heads);
+        const int64_t hidden = int64_t(query) - preToken - keyStart;
+        const uint32_t limit = hidden > 0 ? Min(uint64_t(hidden), uint64_t(columns)) : 0;
+        for (uint32_t col = 0; col < limit; col += 64) {
+            const uint32_t end = Min(64U, limit - col);
+            uint64_t bits[2] = {(~uint64_t(0)) >> (64 - end), 0};
+            Duplicate(scores[start * columns + col], -1000000000000.0f, bits, count, 1, columns / 8);
         }
         start += count;
     }

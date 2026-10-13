@@ -25,25 +25,28 @@
 // HasStrides selects independent BSND/TND input layouts, without changing the
 // task ring, output layout, metadata or numerical/synchronization order.
 // IsCausal specializes S2 ranges/masking at compile time; all existing wrappers default to false.
+// IsWindow adds normalized band bounds and nonzero S2 starts for the independent BSND component.
 // IsPaged selects validated v6 five-word spans and the PA Copy Tile. Query
 // allocation/used stay separate; the source S2 is not a physical cache stride.
 // Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
 // compute endpoints. FA3 requires -inf (source +inf) LSE for these empty rows.
 #pragma once
 #include "../mla_dense_params.h"
+#include "../mla_window_params.h"
 #include "../block/mla_vector.hpp"
 
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
 template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false, bool HasUsed = false,
-          bool HasStrides = false, bool IsPaged = false, bool IsCausal = false>
+          bool HasStrides = false, bool IsPaged = false, bool IsCausal = false, bool IsWindow = false>
 class MlaTaskRing {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
     static_assert(!MixedKv || (IsTnd && HasKvLengths));
     static_assert(!HasUsed || HasKvLengths);
     static_assert(!IsPaged || (HasKvLengths && HasStrides && !MixedKv && !HasUsed));
+    static_assert(!IsWindow || (HasKvLengths && !IsCausal));
     static constexpr uint32_t kSpanWords = IsPaged ? 5 : HasUsed ? 8 : MixedKv ? 5 : 4;
     static constexpr bool kQueryLengths = IsTnd || HasUsed || IsPaged;
 
@@ -52,9 +55,13 @@ class MlaTaskRing {
                                GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace, TPipe* pipe,
                                GM_ADDR kvLengths, uint32_t totalQuery = 0, const MlaBsndInputLayouts* layouts = nullptr,
                                bool kvIsTnd = IsTnd && !MixedKv, GM_ADDR pageTable = nullptr,
-                               const MlaPagedCacheLayout* pagedLayout = nullptr)
+                               const MlaPagedCacheLayout* pagedLayout = nullptr,
+                               MlaWindowKernelParams windowParams = {})
     {
         params = schedule;
+        if constexpr (IsWindow) {
+            window = windowParams;
+        }
         queryTokens = IsTnd ? totalQuery : params.sq;
         if constexpr (HasKvLengths) {
             lengths.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(kvLengths));
@@ -124,8 +131,9 @@ class MlaTaskRing {
     using RunInfo = Block::RunInfo;
     static constexpr uint32_t kTaskCount = 3;
     Block::MlaCube<InputT, IsTnd, HasStrides, IsPaged> cube;
-    Block::MlaVector<InputT, IsTnd, IsCausal> vector;
+    Block::MlaVector<InputT, IsTnd, IsCausal, IsWindow> vector;
     MlaDenseKernelSchedule params;
+    MlaWindowKernelParams window;
     GlobalTensor<uint32_t> lengths;
     uint32_t actualKvLength = 0, actualQueryLength = 0;
     uint32_t queryTokens = 0, queryStart = 0;
@@ -142,8 +150,8 @@ class MlaTaskRing {
         uint64_t total =
             IsTnd ? uint64_t(queryTokens) * params.heads : uint64_t(params.batch) * params.sq * params.heads;
         if constexpr (HasKvLengths) {
-            bool needInit = IsCausal;
-            if constexpr (!IsCausal) {
+            bool needInit = IsCausal || IsWindow;
+            if constexpr (!IsCausal && !IsWindow) {
                 for (uint32_t b = 0; b < params.batch; ++b) {
                     needInit |= lengths.GetValue(kQueryLengths ? kSpanWords * b + kSpanWords - 1 : b) == 0;
                 }
@@ -171,8 +179,8 @@ class MlaTaskRing {
         WaitFlag<HardEvent::MTE3_V>(event);
         if (start < total && count > 0) {
             matmul::InitOutput<float>(lseGm[start], count,
-                                      (HasKvLengths && !(IsCausal && params.sk == 0)) ? -float(1.0 / 0.0)
-                                                                                      : float(1.0 / 0.0));
+                                      (HasKvLengths && !((IsCausal || IsWindow) && params.sk == 0)) ? -float(1.0 / 0.0)
+                                                                                                    : float(1.0 / 0.0));
         }
         SetFlag<HardEvent::MTE3_V>(event);
         WaitFlag<HardEvent::MTE3_V>(event);
@@ -201,8 +209,10 @@ class MlaTaskRing {
             info.actualSingleProcessSInnerSize = kvLength - s * params.s2BaseSize;
         }
         info.actualSingleProcessSInnerSizeAlign = Tile::Align(info.actualSingleProcessSInnerSize, 32U);
-        // Every non-FD M block starts at S2=0 and consumes its visible S2 range.
-        info.isFirstSInnerLoop = (loop == 0 || s == 0);
+        // Whole-M partitions consume their visible range, which can start
+        // above zero for band masks. Softmax/PV and ping-pong ownership must
+        // restart on that first emitted tile, never on a skipped S2=0 tile.
+        info.isFirstSInnerLoop = (loop == 0 || s == FirstS2(m));
         if (info.isFirstSInnerLoop) {
             ++bn2IdxInCurCore;
         }
@@ -211,26 +221,50 @@ class MlaTaskRing {
         if constexpr (IsCausal) {
             info.nextToken = int64_t(kvLength) - (kQueryLengths ? actualQueryLength : params.sq);
         }
+        if constexpr (IsWindow) {
+            const int64_t delta = int64_t(kvLength) - (kQueryLengths ? actualQueryLength : params.sq);
+            info.nextToken = window.kind == 0 ? INT32_MAX : delta + (window.kind == 2 ? window.right : 0);
+            info.preToken = window.kind == 2 ? window.left - delta : INT32_MAX;
+        }
         info.s2BatchOffset = s * params.s2BaseSize;
     }
 
-    // Pinned CalcCurS2StartEndWithSparse, specialized to right-down causal.
+    // Pinned CalcCurS2StartEndWithSparse, specialized to right-down causal/band.
     // The last query touched by this S1G block determines its union of keys.
     // Keep full S2 tiles; Vector still masks each row within the boundary tile.
     __aicore__ inline uint32_t S2Loops(uint32_t m)
     {
         const uint32_t kvLength = HasKvLengths ? actualKvLength : params.sk;
-        if constexpr (IsCausal) {
+        if constexpr (IsWindow) {
+            if (window.kind == 0) {
+                return (kvLength + params.s2BaseSize - 1) / params.s2BaseSize;
+            }
+        }
+        if constexpr (IsCausal || IsWindow) {
             const uint32_t sq = kQueryLengths ? actualQueryLength : params.sq;
             const uint64_t end = Min(uint64_t(m + 1) * params.mBaseSize, uint64_t(sq) * params.heads);
             if (end == 0 || kvLength == 0) {
                 return 0;
             }
-            const int64_t keys = int64_t((end - 1) / params.heads) + int64_t(kvLength) - sq + 1;
+            const int64_t right = IsWindow && window.kind == 2 ? window.right : 0;
+            const int64_t keys = int64_t((end - 1) / params.heads) + int64_t(kvLength) - sq + right + 1;
             return keys <= 0 ? 0
                              : (Min(uint64_t(keys), uint64_t(kvLength)) + params.s2BaseSize - 1) / params.s2BaseSize;
         }
         return (kvLength + params.s2BaseSize - 1) / params.s2BaseSize;
+    }
+
+    __aicore__ inline uint32_t FirstS2(uint32_t m)
+    {
+        if constexpr (IsWindow) {
+            if (window.kind == 2) {
+                const uint32_t sq = kQueryLengths ? actualQueryLength : params.sq;
+                const int64_t first =
+                    int64_t(uint64_t(m) * params.mBaseSize / params.heads) + actualKvLength - int64_t(sq) - window.left;
+                return first <= 0 ? 0 : Min(uint64_t(first), uint64_t(actualKvLength)) / params.s2BaseSize;
+            }
+        }
+        return 0;
     }
 
     __aicore__ inline void UpdateAxisInfo(uint32_t& b, uint32_t& m, uint32_t& s)
@@ -338,13 +372,19 @@ class MlaTaskRing {
                         continue;
                     }
                 }
-                if constexpr (IsCausal) {
+                if constexpr (IsCausal || IsWindow) {
                     if (S2Loops(m) == 0) {
                         // Initialization owns entirely masked blocks. Do not
                         // consume ring slots or change ping-pong counters.
                         UpdateAxisInfo(b, m, s);
                         continue;
                     }
+                }
+                if constexpr (IsWindow) {
+                    // Axis endpoints stay at whole-M boundaries. Jump over
+                    // the hidden prefix without creating tasks or advancing
+                    // the ring counters; pending tasks retain their order.
+                    s = Max(s, FirstS2(m));
                 }
                 CalcParams(created, b, m, s, tasks[created % kTaskCount]);
                 ++created;
@@ -384,6 +424,19 @@ class MlaCausalBsnd : private MlaTaskRing<InputT, true, false, false, false, fal
                                       TPipe* pipe, GM_ADDR kvLengths)
     {
         this->Run(schedule, scale, qc, qr, kv, kr, output, lse, workspace, pipe, kvLengths);
+    }
+};
+// Validated contiguous BSND, uint32[B] KV lengths, normalized window and the
+// M09a complete-M partition. No public or production caller in this step.
+template <typename InputT>
+class MlaWindowBsnd : private MlaTaskRing<InputT, true, false, false, false, false, false, false, true> {
+  public:
+    __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, MlaWindowKernelParams window, float scale,
+                                      GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse,
+                                      GM_ADDR workspace, TPipe* pipe, GM_ADDR kvLengths)
+    {
+        this->Run(schedule, scale, qc, qr, kv, kr, output, lse, workspace, pipe, kvLengths, 0, nullptr, false, nullptr,
+                  nullptr, window);
     }
 };
 } // namespace flash_attn::mla::Kernel

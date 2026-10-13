@@ -35,6 +35,7 @@ from tests.mla_validation_policy import (
 
 PUBLIC = "tests/test_flash_attn_npu_v3_mla_paged_tnd_public.py"
 WINDOW_CPU = "tests/test_flash_attn_npu_v3_mla_window_schedule.py"
+WINDOW_ATTENTION = "tests/test_flash_attn_npu_v3_mla_window_attention.py"
 CAUSAL_CPU = "tests/test_flash_attn_npu_v3_mla_causal_schedule.py"
 USED_SHARED_CPU = [
     f"tests/test_flash_attn_npu_v3_mla_{name}.py"
@@ -49,6 +50,28 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "window-check": [WINDOW_ATTENTION, "-k", "representative or cost_boundary"],
+    "window-attention": [WINDOW_ATTENTION, "-k", "not representative and not cost_boundary"],
+    "window-profile": ["tests/test_mla_window_profile.py"],
+    "window-device-tools": [
+        "tests/test_mla_window_device_tools.py",
+        *[
+            f"tests/test_mla_validation.py::test_causal_device_groups_use_new_probe_and_device_identity[{suite}]"
+            for suite in ("window-check", "window-attention", "window-profile")
+        ],
+        "tests/test_mla_validation.py::test_standalone_causal_smoke_never_requires_old_production_artifacts[window-check]",
+        *[
+            f"tests/test_mla_validation.py::test_causal_probe_identity_change_is_not_accepted[window-{fault}]"
+            for fault in ("source", "dependency", "library", "loaded", "missing")
+        ],
+        "tests/test_mla_validation.py::test_performance_always_executes_on_resume[window-profile]",
+        "tests/test_mla_validation.py::test_success_failure_interruption_and_resume[window-device-tools]",
+        "tests/test_mla_reference_cache.py::test_changed_identity_recomputes[window]",
+        *[
+            f"tests/test_mla_reference_cache.py::test_cold_and_hit_equal_uncached_equations[options2-3-5-False-{dtype}]"
+            for dtype in ("dtype0", "dtype1")
+        ],
+    ],
     "window-cpu": [WINDOW_CPU],
     "window-sanitize": [WINDOW_CPU],
     "window-tools": [
@@ -286,6 +309,7 @@ SUITES = {
 }
 SUITES.update(INCREMENTAL_SUITES)
 PERFORMANCE_SUITES = {
+    "window-profile",
     "causal-paged-tnd-profile",
     "causal-paged-profile",
     "causal-tnd-profile",
@@ -295,6 +319,8 @@ PERFORMANCE_SUITES = {
     "causal-bsnd-profile",
     "causal-bsnd-native-check",
 }
+WINDOW_DEVICE_SUITES = {"window-check", "window-attention", "window-profile"}
+STANDALONE_CHECK_SUITES = {"causal-smoke", "causal-check", "window-check"}
 CAUSAL_DEVICE_SUITES = {
     "causal-tnd-check",
     "causal-mixed-check",
@@ -311,6 +337,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "window-device-tools",
     "window-cpu",
     "window-sanitize",
     "window-tools",
@@ -520,6 +547,8 @@ def environment(args, directory, suite):
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
     if suite in CAUSAL_DEVICE_SUITES:
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
+    if suite in WINDOW_DEVICE_SUITES:
+        env["MLA_WINDOW_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
         "window-cpu",
         "window-sanitize",
@@ -576,13 +605,13 @@ def validate_result(directory, returncode, runtime_info=None):
     )
 
 
-def validate_causal_builds(directory):
+def validate_causal_builds(directory, kind="causal"):
     """Check both fresh probes and their actual loaded identities after execution."""
     for dtype in ("fp16", "bf16"):
         base = directory / "probes" / dtype
         manifest = json.loads((base / "build-manifest.json").read_text())
-        if not manifest.get("causal") or manifest.get("dtype") != dtype:
-            raise RuntimeError("Expected a causal probe build for " + dtype)
+        if not manifest.get(kind) or manifest.get("dtype") != dtype:
+            raise RuntimeError(f"Expected a {kind} probe build for " + dtype)
         sources = {str(ROOT / p): h for p, h in manifest["sources"].items()}
         libraries = {r["path"]: r["sha256"] for r in manifest["libraries"].values()}
         loaded = json.loads((base / "loaded.json").read_text())
@@ -593,7 +622,7 @@ def validate_causal_builds(directory):
             or not all(matching_files(x) for x in (sources, manifest["dependencies"], libraries))
         ):
             raise RuntimeError(
-                "Causal probe sources, dependencies, outputs or loaded identities changed"
+                f"{kind.title()} probe sources, dependencies, outputs or loaded identities changed"
             )
 
 
@@ -648,7 +677,7 @@ def run(args):
                     ]
                     if set(args.suite) - CPU_SUITES
                     and not args.collect_only
-                    and not set(args.suite) <= {"causal-smoke", "causal-check"}
+                    and not set(args.suite) <= STANDALONE_CHECK_SUITES
                     else [],
                     suites={
                         name: pytest_command(
@@ -672,7 +701,7 @@ def run(args):
         # The representative component probe builds itself from source. It
         # does not call the production extension or PA producer. Full device
         # acceptance still prepares production and checks its actual runtime.
-        needs_build = needs_npu and not set(args.suite) <= {"causal-smoke", "causal-check"}
+        needs_build = needs_npu and not set(args.suite) <= STANDALONE_CHECK_SUITES
         if needs_npu:
             lock_fds += [
                 stack.enter_context(
@@ -767,7 +796,7 @@ def run(args):
             else:
                 summary["build"] = dict(
                     status="not_required",
-                    scope="Fresh independent causal smoke probes; no production execution",
+                    scope="Fresh independent mask probes; no production execution",
                 )
             summary["runtime_identity"] = runtime_info
         packages = {
@@ -879,12 +908,15 @@ def run(args):
                         error="Build artifacts or dependencies changed during validation",
                     )
             if (
-                suite in CAUSAL_DEVICE_SUITES
+                suite in CAUSAL_DEVICE_SUITES | WINDOW_DEVICE_SUITES
                 and not args.collect_only
                 and result["returncode"] == 0
             ):
                 try:
-                    validate_causal_builds(directory)
+                    if suite in WINDOW_DEVICE_SUITES:
+                        validate_causal_builds(directory, kind="window")
+                    else:
+                        validate_causal_builds(directory)
                 except (OSError, ValueError, KeyError, RuntimeError) as exc:
                     result.update(status="failed", error=str(exc))
             summary["groups"][suite] = result

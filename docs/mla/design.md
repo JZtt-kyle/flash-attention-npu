@@ -502,6 +502,16 @@ M08b1 在 [`MlaTaskRing`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_d
 
 [`window CPU 测试`](../../tests/test_flash_attn_npu_v3_mla_window_schedule.py) 独立编译固定 CANN Git blob，对照范围/成本与所有原生 FD 字段；从哈希校验的固定 FA3 `flash_api.cpp` 提取 forward/metadata 原文，并保留 forward 到 int 参数的转换。另用 Python 逐行 key 枚举、完整 M 任务枚举与原始五布局 allocation/used 映射验收，不用迁移结果构造 oracle。普通与 ASan/UBSan 使用同一集合；CPU 通过不代表设备窗口数值、性能或公开能力通过。
 
+#### 6.2.7 独立 BSND window 数值组件
+
+`MlaWindowBsnd` 在同一 [`MlaTaskRing`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_dense.hpp) 中增加默认关闭的 window 模板特化，只接连续 BSND、完整 Q 分配段、已校验的逐样本 uint32 KV 长度、6.2.6 的完整 M 分核与归一化窗口。轻量 [`MlaWindowKernelParams`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_window_params.h) 只供独立组件使用，不是 metadata 协议；生产分派和公开有限/单侧窗口仍拒绝。
+
+按固定源 `CalcCurS2StartEndWithSparse`，每个 M 块的首/末 query 与有效 `Sk-Sq` 决定可见 S2 半开范围。任务环跳过遮罩前缀，首块标志取实际 S2 起点而非零；全遮罩块不增加 created/executed 计数，已有三槽任务环、两槽 workspace、Cube 事件及排空顺序保持不变。任务描述保存按样本计算的左右界，正常/尾 S2 的实际宽度仍以有效 KV 为准。
+
+[`WindowMask`](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_causal_mask.hpp) 对齐 S1G 行，在既有右界遮罩上增加左界遮罩；沿用源 `ElewiseCompute` 的有限负值哨兵和原 softmax/aMLA 舍入。规范窗口没有额外空尾行，前导全遮罩行复用 causal epilogue：O=0、LSE=-inf；全局空非 PA KV 容量仍为 +inf。归一化为 causal/无 mask 的情况由同一组件显式分类处理，不将调用级上界替换成当前 used 长度。共享 Cube、Copy、地址、CPU 调度和 metadata 算法不变。
+
+[`独立 window probe`](../../tests/mla_window_attention_probe.cpp) 编译未修改的固定 CANN Kernel，传真实 2048×2048 bool 压缩三角 mask、band sparse mode 4 和独立归一化的 pre/next；causal/无 mask 分别使用 3/0。双方使用同一非 FD 完整 M 调度，源的 int64 KV 长度直接来自原始用例。双数学 reference 从原始有效长度切片、按调用级参数独立归一化，并复用内容缓存；不读取迁移后的范围或任务描述。检查非空 O/LSE 逐元素源一致，空行先单独验源 +inf 与 FA3 符号适配，源精度限制仍按第 7 节记录。组件性能只比较同调度固定源与迁移 Kernel 和预分配 probe 调用，不称公开 E2E。验收结果只在 status 维护。
+
 ### 6.3 长度与布局调度
 
 [`BuildDenseSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.cpp) 处理整容量 BSND；以下入口复用同一 `detail/cann_split_core.*`，由 host/CPU 驱动与相应 AICPU 生成器编译同一源码。长度先完整校验，再数值转换为固定源格式；分配起点与 used 分别处理。记录格式见 [第 5 节](#5-metadata-设计)。
@@ -917,6 +927,8 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 
 新增窗口 CPU 专项：`window-cpu/window-sanitize` 覆盖固定 FA3 归一化、固定 CANN band 范围/成本/全部 FD 候选、独立可见 key 与任务归属、五布局 allocation/used、空值及溢出，普通与 sanitizer 同集合；`window-tools` 覆盖固定源身份、CPU 隔离、选择一致性、失败/中断/恢复和驱动退出协议。FA3 源默认读取 `/tmp/mla-fa3-reference/d15f1531a460ba456f41b01a774f33ab2db8febf/flash_api.cpp`，可用 `MLA_FA3_SOURCE_ROOT` 指定包含该文件的目录；只接受固定 SHA256，缺失或不匹配即失败，不回退到其他版本。每组保存完整源文件、许可证、提取后的 oracle 与编译命令。
 
+独立设备窗口组为 `window-check/window-attention/window-profile`：check 包含双 dtype 小代表和两个新窗口成本边界，attention 排除相同节点并覆盖归一化、used、scale、跨块/空值/任务环/stream；profile 使用采样前固定的 8 个输入、双 dtype 共 16 个配置，每个配置均有数值用例。`window-device-tools` 检查集合互斥与性能输入覆盖、独立上界/used mask、构建/实际加载身份、失败/恢复及缓存窗口键；这些工具检查不能代替带真实 band mask 的设备验收。原有窗口 CPU 组仍可独立运行。
+
 原有设备组、`shared-*` 及 `regression-*` 组测试无 mask 能力；独立 causal 的完整验收使用 `causal-attention`/`causal-profile`，`causal-check` 用于自检和按影响回归。CPU 组不证明前向已开放。window、causal 和 used-shared CPU 组还记录固定源 blob、CPU 编译器及相关运行库身份和 sanitizer 模式；这些依赖变化或运行期间发生变化时不能恢复为通过。逐行 CPU oracle/metadata 驱动在 pytest 会话内按可执行文件身份、参数和环境复用进程，保存全部请求/响应；结束时仍执行 LeakSanitizer，非零退出、stderr、EOF、无效或额外响应均使验收失败。以下命令在仓库根目录、已配置 CANN 的 shell 中执行，`--device` 是可见的物理卡号；日志写入忽略目录：
 
 ```bash
@@ -933,13 +945,13 @@ python3 -m tests.mla_validation --output build/mla-causal-stage --device 6 --cau
 python3 -m tests.mla_causal_stage_performance --evidence build/mla-causal-stage/summary.json --output build/mla-causal-stage/average.json
 ```
 
-只选择 `causal-smoke` / `causal-check` 时只新编独立 causal probe，检查源码、传递依赖、库及实际加载身份；仍记录设备运行栈，但不构建或执行生产路径。混选其他设备组或完整验收时保留生产准备和实际扩展加载检查。长成本代表组用于成本边界或执行策略变化的检查，不作为每次编辑后的默认自检。
+只选择 `causal-smoke` / `causal-check` / `window-check` 时只新编对应独立 mask probe，检查源码、传递依赖、库及实际加载身份；仍记录设备运行栈，但不构建或执行生产路径。混选其他设备组或完整验收时保留生产准备和实际扩展加载检查。长成本代表组用于成本边界或执行策略变化的检查，不作为每次编辑后的默认自检。
 
 causal CPU 驱动在每组内分别复用适配器、固定源 oracle、迁移 SplitCore 三个独立进程，逐项保存 stdin/stdout，完整集合结束时检查退出码和 stderr。ASan/UBSan 组保留退出时 LeakSanitizer 检查；执行环境须允许其进程检查，不能把沙箱限制导致的失败记为通过。
 
 每次执行创建新的 `attempt-*`，保存命令/环境、完整节点清单、XML、日志、数学输入/输出、源码身份及 pytest 实际加载的扩展身份；`summary.json` 表示最近一次尝试，`state.json` 索引可继承的成功组。退出非零、没有用例、失败、跳过、实际扩展不符或运行中依赖变化都不能记为通过。某组失败后，后续组为未运行；旧成功状态先失效，原尝试目录保留。
 
-`causal-profile`、`shared-profile`、`causal-bsnd-native-check`、`causal-bsnd-profile`、`causal-tnd-profile`、`causal-mixed-profile`、`causal-paged-profile` 和 `causal-paged-tnd-profile` 每次重新采样，不恢复历史性能。其他组的 `--resume` 只继承同一输出目录中身份匹配且原始证据完整的成功组，结果标为 `inherited`，不会计入本次实测；失败、中断、证据缺失或依赖变化的组重新执行。每组 `sources.json` 保守覆盖全部原生源码/测试驱动/公共辅助代码，以及所选测试的递归 Python 导入、包初始化和 conftest；未知动态模块导入退回完整闭包。无关测试模块和无头脚本修改不再使数值组失效，未知原生影响仍保守扩大；无头脚本属于 tools 的依赖。新身份格式不继承旧身份记录。恢复仍为成功组粒度，不能跳过失败组内的单个节点。输出、共享构建目录与同卡运行有非阻塞锁；未结束进程继续持锁时必须先核查进程，不能直接另启相同任务。锁只协调本执行器，性能测量前仍须核查其他用户的设备活动。
+`window-profile`、`causal-profile`、`shared-profile`、`causal-bsnd-native-check`、`causal-bsnd-profile`、`causal-tnd-profile`、`causal-mixed-profile`、`causal-paged-profile` 和 `causal-paged-tnd-profile` 每次重新采样，不恢复历史性能。其他组的 `--resume` 只继承同一输出目录中身份匹配且原始证据完整的成功组，结果标为 `inherited`，不会计入本次实测；失败、中断、证据缺失或依赖变化的组重新执行。每组 `sources.json` 保守覆盖全部原生源码/测试驱动/公共辅助代码，以及所选测试的递归 Python 导入、包初始化和 conftest；未知动态模块导入退回完整闭包。无关测试模块和无头脚本修改不再使数值组失效，未知原生影响仍保守扩大；无头脚本属于 tools 的依赖。新身份格式不继承旧身份记录。恢复仍为成功组粒度，不能跳过失败组内的单个节点。输出、共享构建目录与同卡运行有非阻塞锁；未结束进程继续持锁时必须先核查进程，不能直接另启相同任务。锁只协调本执行器，性能测量前仍须核查其他用户的设备活动。
 
 三类复用分别管理：
 

@@ -32,10 +32,11 @@ def build_probes(
     tnd_stride=False,
     paged=False,
     causal=False,
+    window=False,
     paged_causal=False,
 ):
     assert dtype in ("fp16", "bf16")
-    assert sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride, paged, causal)) <= 1
+    assert sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride, paged, causal, window)) <= 1
     assert not paged_causal or paged
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -155,7 +156,9 @@ def build_probes(
         ROOT
         / "tests"
         / (
-            "mla_causal_attention_probe.cpp"
+            "mla_window_attention_probe.cpp"
+            if window
+            else "mla_causal_attention_probe.cpp"
             if causal
             else "mla_paged_attention_probe.cpp"
             if paged
@@ -305,12 +308,21 @@ def build_probes(
         "-o",
         str(host_output),
     ]
-    if causal:
+    if causal or window:
         host_cmd += [
-            str(ROOT / "tests/mla_causal_attention_schedule.cpp"),
+            str(
+                ROOT
+                / (
+                    "tests/mla_window_attention_schedule.cpp"
+                    if window
+                    else "tests/mla_causal_attention_schedule.cpp"
+                )
+            ),
             str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.cpp"),
             str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_schedule.cpp"),
         ]
+    if window:
+        host_cmd += [str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_window.cpp")]
     (artifacts / "schedule-command.json").write_text(json.dumps(host_cmd, indent=2) + "\n")
     with (artifacts / "schedule-compile.log").open("w") as log:
         subprocess.run(host_cmd, stdout=log, stderr=subprocess.STDOUT, timeout=120, check=True)
@@ -342,16 +354,27 @@ def build_probes(
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata_consumer.h",
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("*/*.hpp")),
     ]
-    if causal:
+    if causal or window:
         current += [
-            ROOT / "tests/mla_causal_attention_schedule.cpp",
+            ROOT
+            / (
+                "tests/mla_window_attention_schedule.cpp"
+                if window
+                else "tests/mla_causal_attention_schedule.cpp"
+            ),
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.h",
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.cpp",
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal_metadata.h",
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_schedule.cpp",
         ]
+    if window:
+        current += [
+            ROOT / "csrc/ascend910/flash_attn_npu_3/mla" / p
+            for p in ("mla_window.h", "mla_window.cpp", "mla_window_params.h")
+        ]
     manifest = {
         "causal": causal,
+        "window": window,
         "dtype": dtype,
         "bsnd": bsnd,
         "tnd": tnd,
@@ -373,7 +396,7 @@ def build_probes(
             ["git", "-C", str(ROOT / "csrc/catlass"), "rev-parse", "HEAD"], text=True
         ).strip(),
     }
-    if paged or causal:
+    if paged or causal or window:
         dependencies = set()
         for depfile in artifacts.glob("*-device.d"):
             dependencies.update(

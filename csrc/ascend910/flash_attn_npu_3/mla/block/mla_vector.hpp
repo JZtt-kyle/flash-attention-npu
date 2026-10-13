@@ -12,7 +12,7 @@
 // Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0.
 // attention/fused_infer_attention_score/op_kernel/arch22/fia_block_vec_nonquant_mla.h
 // Contiguous BSND/compact TND FP16/BF16, Hkv=1, no FD.
-// Optional compile-time causal mask; production wrappers keep the unmasked default.
+// Optional compile-time causal/band masks; existing specializations retain their defaults.
 // TND O is [Tq,Hq,512]; FA3 LSE is [Hq,Tq] (source LSE is [Tq,Hq]). Scale is launch data.
 // SoftmaxFlashV2, aMLA, all UB partitions, casts and events follow the source.
 // Cross-S2 nUpdate retains the source int32 atomic update of the FP32 PV bits.
@@ -33,7 +33,7 @@ struct VectorParams : CubeParams {
 };
 constexpr SoftmaxConfig FIA_SOFTMAX_FLASHV2_CFG_WITHOUT_BRC = {false, 0, 0, SoftmaxMode::SOFTMAX_OUTPUT_WITHOUT_BRC};
 
-template <typename InputT, bool IsTnd = false, bool IsCausal = false>
+template <typename InputT, bool IsTnd = false, bool IsCausal = false, bool IsWindow = false>
 class MlaVector {
   public:
     using T = float;
@@ -108,8 +108,8 @@ class MlaVector {
     LocalTensor<T> nValueUb, cofValueUb, aMlaSumUb, softmaxMaxUb, softmaxExpUb, softmaxSumUb;
     LocalTensor<T> softmaxMaxDefaultUb, softmaxSumDefaultUb;
 };
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::InitBuffers(TPipe* pipe)
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::InitBuffers(TPipe* pipe)
 {
     // queue
     pipe->InitBuffer(inputBuff1, VectorParams::BUFFER_SIZE_BYTE_32K * 2); // 2:pingpong
@@ -152,26 +152,26 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::InitBuffers(TPipe* pi
     Duplicate(softmaxSumDefaultUb, FLOAT_ZERO, SOFTMAX_TMP_BUFFER_OFFSET / sizeof(T));
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::InitVec1GlobalTensor(GlobalTensor<MM1_OUT_T> mm1ResGm,
-                                                                                GlobalTensor<KV_T> vec1ResGm,
-                                                                                GlobalTensor<int32_t> mm2ResInt32Gm)
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::InitVec1GlobalTensor(
+    GlobalTensor<MM1_OUT_T> mm1ResGm, GlobalTensor<KV_T> vec1ResGm, GlobalTensor<int32_t> mm2ResInt32Gm)
 {
     this->mm1ResGm = mm1ResGm;
     this->vec1ResGm = vec1ResGm;
     this->mm2ResInt32Gm = mm2ResInt32Gm;
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::InitVec2GlobalTensor(GlobalTensor<UPDATE_T> vec2ResGm,
-                                                                                GlobalTensor<MM2_OUT_T> mm2ResGm)
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void
+MlaVector<InputT, IsTnd, IsCausal, IsWindow>::InitVec2GlobalTensor(GlobalTensor<UPDATE_T> vec2ResGm,
+                                                                   GlobalTensor<MM2_OUT_T> mm2ResGm)
 {
     this->vec2ResGm = vec2ResGm;
     this->mm2ResGm = mm2ResGm;
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::AllocEventID()
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::AllocEventID()
 {
     SetFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG);
     SetFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_PONG_FLAG);
@@ -181,8 +181,8 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::AllocEventID()
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::FreeEventID()
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::FreeEventID()
 {
     CrossCoreWaitFlag(constInfo.syncC2V1);
     WaitFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG);
@@ -193,8 +193,8 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::FreeEventID()
     WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::SoftmaxFlashV2Compute(
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::SoftmaxFlashV2Compute(
     const RunInfo& info, const MSplitInfo& mSplitInfo, LocalTensor<T>& mmResUb, LocalTensor<uint8_t>& softmaxTmpUb,
     uint32_t startRow, uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount)
 {
@@ -220,8 +220,8 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::SoftmaxFlashV2Compute
         softmaxExpUb[softmaxOutOffset], inSumTensor, inMaxTensor, softmaxTmpUb, newTiling, srcShape);
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::AmlaVecCompute(
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::AmlaVecCompute(
     const RunInfo& info, const MSplitInfo& mSplitInfo, LocalTensor<T>& mmResUb, LocalTensor<uint8_t>& softmaxTmpUb,
     uint32_t startRow, uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount)
 {
@@ -313,11 +313,11 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::AmlaVecCompute(
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
 __aicore__ inline void
-MlaVector<InputT, IsTnd, IsCausal>::DealBmm1ResBaseBlock(const RunInfo& info, const MSplitInfo& mSplitInfo,
-                                                         uint32_t startRow, uint32_t dealRowCount, uint32_t columnCount,
-                                                         uint32_t actualColumnCount)
+MlaVector<InputT, IsTnd, IsCausal, IsWindow>::DealBmm1ResBaseBlock(const RunInfo& info, const MSplitInfo& mSplitInfo,
+                                                                   uint32_t startRow, uint32_t dealRowCount,
+                                                                   uint32_t columnCount, uint32_t actualColumnCount)
 {
     uint32_t computeSize = dealRowCount * columnCount;
     uint64_t inOutGmOffset = (info.loop % constInfo.preLoadNum) * constInfo.mmResUbSize +
@@ -333,10 +333,15 @@ MlaVector<InputT, IsTnd, IsCausal>::DealBmm1ResBaseBlock(const RunInfo& info, co
     Muls(mmResUb, mmResUb, constInfo.scaleValue, dealRowCount * columnCount);
 
     AscendC::PipeBarrier<PIPE_V>();
-    if constexpr (IsCausal) {
+    if constexpr (IsCausal || IsWindow) {
         const uint32_t row = info.gS1Idx + mSplitInfo.nBufferStartM + mSplitInfo.vecStartM + startRow;
-        Tile::CausalMask(mmResUb, row, dealRowCount, constInfo.gSize, info.nextToken, info.s2BatchOffset, columnCount,
-                         actualColumnCount);
+        if constexpr (IsWindow) {
+            Tile::WindowMask(mmResUb, row, dealRowCount, constInfo.gSize, info.preToken, info.nextToken,
+                             info.s2BatchOffset, columnCount, actualColumnCount);
+        } else {
+            Tile::CausalMask(mmResUb, row, dealRowCount, constInfo.gSize, info.nextToken, info.s2BatchOffset,
+                             columnCount, actualColumnCount);
+        }
         AscendC::PipeBarrier<PIPE_V>();
     }
     LocalTensor<T> tmpAFloorUb = tmpBuff1.Get<T>();
@@ -360,9 +365,9 @@ MlaVector<InputT, IsTnd, IsCausal>::DealBmm1ResBaseBlock(const RunInfo& info, co
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessAmlaNupdate(const RunInfo& info,
-                                                                              const MSplitInfo& mSplitInfo)
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::ProcessAmlaNupdate(const RunInfo& info,
+                                                                                        const MSplitInfo& mSplitInfo)
 {
     if (mSplitInfo.vecDealM == 0) {
         return;
@@ -425,9 +430,9 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessAmlaNupdate(co
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec1SingleBuf(const RunInfo& info,
-                                                                                const MSplitInfo& mSplitInfo)
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::ProcessVec1SingleBuf(const RunInfo& info,
+                                                                                          const MSplitInfo& mSplitInfo)
 {
     if (mSplitInfo.vecDealM == 0) {
         return;
@@ -456,8 +461,8 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec1SingleBuf(
     }
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec1L(const RunInfo& info)
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::ProcessVec1L(const RunInfo& info)
 {
     uint32_t nBufferLoopTimes = (info.actMBaseSize + constInfo.nBufferMBaseSize - 1) / constInfo.nBufferMBaseSize;
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -514,7 +519,7 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec1L(const Ru
                     Tile::ComputeSoftMaxLse(totalLseUb, sumTensor, maxTensor, mSplitInfo.vecDealM);
                 }
 
-                if constexpr (IsCausal) {
+                if constexpr (IsCausal || IsWindow) {
                     AscendC::PipeBarrier<PIPE_V>();
                     const uint32_t row = info.gS1Idx + mSplitInfo.nBufferStartM + mSplitInfo.vecStartM;
                     const uint32_t empty =
@@ -539,9 +544,9 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec1L(const Ru
     }
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec2SingleBuf(const RunInfo& info,
-                                                                                const MSplitInfo& mSplitInfo)
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::ProcessVec2SingleBuf(const RunInfo& info,
+                                                                                          const MSplitInfo& mSplitInfo)
 {
     if (!info.isLastS2Loop) {
         return;
@@ -553,8 +558,8 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec2SingleBuf(
     ProcessVec2Inner(info, mSplitInfo, 0, mSplitInfo.vecDealM);
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec2L(const RunInfo& info)
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::ProcessVec2L(const RunInfo& info)
 {
     uint32_t nBufferLoopTimes = (info.actMBaseSize + constInfo.nBufferMBaseSize - 1) / constInfo.nBufferMBaseSize;
     uint32_t nBufferTail = info.actMBaseSize - (nBufferLoopTimes - 1) * constInfo.nBufferMBaseSize;
@@ -578,10 +583,10 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec2L(const Ru
     }
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec2Inner(const RunInfo& info,
-                                                                            const MSplitInfo& mSplitInfo,
-                                                                            uint32_t mStartRow, uint32_t mDealSize)
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void
+MlaVector<InputT, IsTnd, IsCausal, IsWindow>::ProcessVec2Inner(const RunInfo& info, const MSplitInfo& mSplitInfo,
+                                                               uint32_t mStartRow, uint32_t mDealSize)
 {
     uint32_t mSplitSize = BASE_BLOCK_MAX_ELEMENT_NUM / headDimAlign;
     if (mSplitSize > mDealSize) {
@@ -599,13 +604,13 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::ProcessVec2Inner(cons
     }
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
-__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::Bmm2CastAndCopyOut(
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
+__aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow>::Bmm2CastAndCopyOut(
     const RunInfo& info, const MSplitInfo& mSplitInfo, LocalTensor<T>& bmm2ResUb, uint32_t wsMStart, uint32_t startRow,
     uint32_t dealRowCount, uint32_t columnCount, uint32_t actualColumnCount)
 {
     AscendC::PipeBarrier<PIPE_V>();
-    if constexpr (IsCausal) {
+    if constexpr (IsCausal || IsWindow) {
         const uint32_t empty =
             Tile::CausalEmptyRows(info.gS1Idx + wsMStart, dealRowCount, constInfo.gSize, info.nextToken);
         if (empty > 0) {
@@ -627,11 +632,11 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal>::Bmm2CastAndCopyOut(
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
 __aicore__ inline void
-MlaVector<InputT, IsTnd, IsCausal>::DealBmm2ResBaseBlock(const RunInfo& info, const MSplitInfo& mSplitInfo,
-                                                         uint32_t startRow, uint32_t dealRowCount, uint32_t columnCount,
-                                                         uint32_t actualColumnCount)
+MlaVector<InputT, IsTnd, IsCausal, IsWindow>::DealBmm2ResBaseBlock(const RunInfo& info, const MSplitInfo& mSplitInfo,
+                                                                   uint32_t startRow, uint32_t dealRowCount,
+                                                                   uint32_t columnCount, uint32_t actualColumnCount)
 {
     uint32_t vec2ComputeSize = dealRowCount * columnCount;
     uint32_t mStart = mSplitInfo.nBufferStartM + mSplitInfo.vecStartM + startRow;
@@ -669,11 +674,11 @@ MlaVector<InputT, IsTnd, IsCausal>::DealBmm2ResBaseBlock(const RunInfo& info, co
     Bmm2CastAndCopyOut(info, mSplitInfo, bmm2ResUb, mStart, startRow, dealRowCount, columnCount, actualColumnCount);
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
 __aicore__ inline void
-MlaVector<InputT, IsTnd, IsCausal>::Bmm2DataCopyOutTrans(const RunInfo& info, LocalTensor<OUT_T>& attenOutUb,
-                                                         uint32_t wsMStart, uint32_t dealRowCount, uint32_t columnCount,
-                                                         uint32_t actualColumnCount)
+MlaVector<InputT, IsTnd, IsCausal, IsWindow>::Bmm2DataCopyOutTrans(const RunInfo& info, LocalTensor<OUT_T>& attenOutUb,
+                                                                   uint32_t wsMStart, uint32_t dealRowCount,
+                                                                   uint32_t columnCount, uint32_t actualColumnCount)
 {
     // Source CopyAttenOutUbToGm<InputT, BSNGD, S1G>, ROW_PAD=true.
     // Preserve the per-query head/middle/tail copies even with Hkv=1.
@@ -707,10 +712,10 @@ MlaVector<InputT, IsTnd, IsCausal>::Bmm2DataCopyOutTrans(const RunInfo& info, Lo
     }
 }
 
-template <typename InputT, bool IsTnd, bool IsCausal>
+template <typename InputT, bool IsTnd, bool IsCausal, bool IsWindow>
 __aicore__ inline void
-MlaVector<InputT, IsTnd, IsCausal>::CopySoftmaxLseToGmByLayout(const RunInfo& info, LocalTensor<T>& lseSrc,
-                                                               uint32_t mOffset, const MSplitInfo& mSplitInfo)
+MlaVector<InputT, IsTnd, IsCausal, IsWindow>::CopySoftmaxLseToGmByLayout(const RunInfo& info, LocalTensor<T>& lseSrc,
+                                                                         uint32_t mOffset, const MSplitInfo& mSplitInfo)
 {
     if (mSplitInfo.vecDealM == 0) {
         return;
