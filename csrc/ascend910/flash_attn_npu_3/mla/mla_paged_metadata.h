@@ -10,6 +10,8 @@ namespace flash_attn::mla {
 
 constexpr uint32_t kMlaPagedMetadataVersion = 6;
 constexpr uint32_t kMlaMetadataPaged = 6;
+constexpr uint32_t kMlaCausalPagedBsndMetadataVersion = 10;
+constexpr uint32_t kMlaMetadataCausalPagedBsnd = 10;
 constexpr uint32_t kMlaPagedUsedQueryPresent = 1;
 
 enum class MlaPagedMetadataStatus : uint32_t {
@@ -81,5 +83,14 @@ bool PagedMetadataWords(int64_t batch, uint32_t& words);
 // its explicit allocation. This does not change the wire or the CPU default.
 bool BuildPagedMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype, uint32_t* output,
                         uint32_t outputWords, const MlaPagedInputs& inputs, bool fromQueryPrefix = false);
+
+using MlaPagedScheduleBuilder = MlaScheduleStatus (*)(const MlaPagedShape&, const MlaPlatformInfo&,
+                                                      const MlaPagedInputs&, MlaPagedSchedule&);
+// Internal serialization adapter; retains all descriptor/overlap guarantees.
+bool BuildPagedMetadataWithSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                                    uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs,
+                                    bool fromQueryPrefix, MlaPagedScheduleBuilder builder);
+bool BuildCausalPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                                  uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs);
 
 } // namespace flash_attn::mla

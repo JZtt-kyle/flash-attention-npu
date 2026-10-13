@@ -14,7 +14,8 @@ def native_log(tmp_path):
     binary.parent.mkdir(parents=True)
     binary.write_bytes(b"inert test binary")
     metadata = binary.with_suffix(".json")
-    keys = [105000000010000001, 105000000010100001]
+    # Fixed ca18aee GenTilingKey: non-PA/PA, each without/with FD.
+    keys = [105000000010000001, 105000000010100001, 105000000010200001, 105000000010300001]
     metadata.write_text(
         json.dumps(
             dict(
@@ -55,9 +56,9 @@ def native_log(tmp_path):
 
 def test_actual_launch_and_fd_classification(native_log):
     log, vendor, _ = native_log
-    result = parse_dispatch(log, "fp16", 2, vendor)
-    assert [x["native_fd"] for x in result["cases"]] == [False, True]
-    assert [x["e2e_applicable"] for x in result["cases"]] == [True, False]
+    result = parse_dispatch(log, "fp16", 4, vendor)
+    assert [x["native_fd"] for x in result["cases"]] == [False, True, False, True]
+    assert [x["e2e_applicable"] for x in result["cases"]] == [True, False, True, False]
     assert all(x["native_template"] == 5 for x in result["cases"])
     assert result["artifacts"][str(log)] == sha256(log)
 
@@ -98,4 +99,4 @@ def test_reject_incomplete_or_stale_dispatch(native_log, fault):
         }[fault]()
         log.write_text(text)
     with pytest.raises(RuntimeError):
-        parse_dispatch(log, "fp16", 2, vendor)
+        parse_dispatch(log, "fp16", 4, vendor)

@@ -405,7 +405,6 @@ def test_host_rejections(entry, fault):
 @pytest.mark.parametrize(
     "fault",
     (
-        "causal",
         "window",
         "split0",
         "split2",
@@ -445,7 +444,6 @@ def test_unconnected_options(kind, fault):
             args["k_new"] = args["k"][:1]
         else:
             name, value = {
-                "causal": ("causal", True),
                 "softcap": ("softcap", 1.0),
                 "pack": ("pack_gqa", False),
                 "margin": ("sm_margin", 1),

@@ -38,7 +38,12 @@ def uncached_references(case):
                         for t in range(klen)
                     ]
                 ).unsqueeze(0)
-            refs = [t[0] for t in mla_reference_pair(**data, softmax_scale=case["scale"])]
+            refs = [
+                t[0]
+                for t in mla_reference_pair(
+                    **data, softmax_scale=case["scale"], causal=case.get("causal", False)
+                )
+            ]
         else:
             out = torch.zeros((qlen, heads, 512), dtype=case["host"]["v"].dtype)
             lse = torch.full((heads, qlen), -torch.inf)
@@ -79,6 +84,7 @@ def references(case):
         item=case["item"],
         config=case["config"],
         scale=case["scale"],
+        causal=case.get("causal", False),
         heads=case["context"].heads,
         layout={name: tensor_layout(t) for name, t in tensors.items()},
         device_layout={

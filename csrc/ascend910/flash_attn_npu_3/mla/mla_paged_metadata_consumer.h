@@ -92,7 +92,7 @@ MLA_PAGED_INLINE MlaMetadataReadStatus CheckPagedCacheDescriptor(const MlaPagedM
     return Status::Success;
 }
 
-template <typename Reader, typename Arrays, typename Pages>
+template <bool IsCausal = false, typename Reader, typename Arrays, typename Pages>
 MLA_PAGED_INLINE MlaMetadataReadStatus ReadPagedMetadata(const Reader& read, uint32_t words,
                                                          const MlaPagedMetadataContext& c,
                                                          const MlaPagedMetadataInputs& inputs, const Arrays& arrays,
@@ -105,16 +105,17 @@ MLA_PAGED_INLINE MlaMetadataReadStatus ReadPagedMetadata(const Reader& read, uin
     }
     auto status =
         ReadMetadataHeader(read, words, kMlaPagedMetadataPrefixWords + kMlaPagedMetadataSequenceWords * c.batch,
-                           kMlaPagedMetadataVersion, kMlaMetadataPaged, c.dtype);
+                           IsCausal ? kMlaCausalPagedBsndMetadataVersion : kMlaPagedMetadataVersion,
+                           IsCausal ? kMlaMetadataCausalPagedBsnd : kMlaMetadataPaged, c.dtype);
     if (status != Status::Success) {
         return status;
     }
 #define MLA_PAGED_WORD(field) read(offsetof(MlaPagedMetadataPrefix, field) / sizeof(uint32_t))
     const uint64_t totalQ = uint64_t(c.query.totalTokens.low) | (uint64_t(c.query.totalTokens.high) << 32);
     const bool tnd = c.query.layout == 1, used = c.usedFlags != 0;
-    if (c.query.layout > 1 || c.usedFlags > 1 || c.heads == 0 || c.heads > kMlaMaxQueryHeads ||
-        c.query.maxLength > kMlaMaxQueryLength || uint64_t(c.query.maxLength) * c.heads > kMlaMaxDenseRows ||
-        totalQ > kMlaMaxBatchRows / c.heads ||
+    if ((IsCausal && c.query.layout != 0) || c.query.layout > 1 || c.usedFlags > 1 || c.heads == 0 ||
+        c.heads > kMlaMaxQueryHeads || c.query.maxLength > kMlaMaxQueryLength ||
+        uint64_t(c.query.maxLength) * c.heads > kMlaMaxDenseRows || totalQ > kMlaMaxBatchRows / c.heads ||
         (tnd ? totalQ > INT32_MAX : totalQ != uint64_t(c.batch) * c.query.maxLength) || c.pageSize < 16 ||
         c.pageSize > 1024 || c.pageSize % 16 != 0 || c.logicalKvCapacity > kMlaMaxKvLength ||
         c.logicalKvCapacity % c.pageSize != 0 || MLA_PAGED_WORD(query.layout) != c.query.layout ||
@@ -271,6 +272,10 @@ MLA_PAGED_INLINE MlaMetadataReadStatus ReadPagedMetadata(const Reader& read, uin
         s.bN2End[i] = previousBatch = b;
         s.gS1End[i] = previousM = m;
         s.s2End[i] = n;
+    }
+    // Causal owns every M block, including zero-cost/all-masked rows.
+    if (IsCausal && (previousBatch != c.batch || previousM != 0)) {
+        return Status::InvalidEndpoints;
     }
     // Check the whole omitted suffix, including a partially omitted sample.
     for (uint32_t b = previousBatch; b < c.batch; ++b) {

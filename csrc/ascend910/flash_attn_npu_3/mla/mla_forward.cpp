@@ -36,6 +36,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaCausalTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalMixedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalMixedMetadataFromPrefix(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaCausalPagedBsndMetadata(void* args);
 
 namespace flash_attn::mla {
 namespace {
@@ -167,6 +168,12 @@ struct MetadataSubmission {
                 return;
             }
         }
+        if constexpr (std::is_same_v<Args, MlaPagedMetadataArgs>) {
+            if (causal) {
+                ComputeMlaCausalPagedBsndMetadata<<<1, nullptr, current>>>(&args, sizeof(args));
+                return;
+            }
+        }
         TORCH_CHECK(aclrtRecordEvent(inputReady, current) == ACL_SUCCESS, "MLA: input event recording failed");
         TORCH_CHECK(aclrtStreamWaitEvent(worker, inputReady) == ACL_SUCCESS, "MLA: input event wait failed");
         if constexpr (std::is_same_v<Args, MlaTndMetadataArgs>) {
@@ -195,7 +202,7 @@ MetadataSubmission<Args> PrepareSubmission(const at::Tensor& metadata, const Arg
                                            const std::optional<at::Tensor>& usedKv = std::nullopt, bool causal = false)
 {
     auto stream = c10_npu::getCurrentNPUStream();
-    if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs>) {
+    if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs> || std::is_same_v<Args, MlaPagedMetadataArgs>) {
         if (causal) {
             c10_npu::NPUCachingAllocator::recordStream(metadata.storage().data_ptr(), stream);
             for (const auto* input : {&lengths, &query, &usedQuery, &usedKv}) {
@@ -402,8 +409,10 @@ at::Tensor CausalMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_
 }
 
 at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_t heads, int64_t pageSize,
-                           at::ScalarType dtype, const at::Tensor& cacheSeqlens, const std::optional<at::Tensor>& cuQ)
+                           at::ScalarType dtype, const at::Tensor& cacheSeqlens, const std::optional<at::Tensor>& cuQ,
+                           bool causal)
 {
+    TORCH_CHECK(!causal || !cuQ, "MLA causal metadata is not implemented yet for TND paged layouts");
     const auto words = CheckPagedMetadataInputs(batch, maxQ, capacity, heads, pageSize, dtype, cacheSeqlens, cuQ);
     const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
     auto metadata = at::empty({words}, cacheSeqlens.options().dtype(at::kInt));
@@ -413,19 +422,26 @@ at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_
     // No physical pages, cache addresses or strides are part of generation.
     // Static capacity fixes blockDim, including device-only zero lengths, so
     // forward consumers need not read the record to choose their launch size.
-    MlaPagedMetadataArgs args{reinterpret_cast<uint64_t>(metadata.data_ptr()),
-                              words,
-                              uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),
-                              {batch, heads, query, capacity, pageSize},
-                              DensePlatform(batch != 0 && maxQ != 0 && capacity != 0),
-                              {cuQ ? reinterpret_cast<uint64_t>(cuQ->data_ptr()) : 0, cuQ ? uint64_t(cuQ->numel()) : 0},
-                              {},
-                              {reinterpret_cast<uint64_t>(cacheSeqlens.data_ptr()), uint64_t(cacheSeqlens.numel())}};
-    auto submission = PrepareSubmission(metadata, args, cacheSeqlens, cuQ, true);
-    at_npu::native::OpCommand::RunOpApiV2("ascendc_mla_paged_metadata", [submission]() mutable -> int {
+    MlaPagedMetadataArgs args{
+        reinterpret_cast<uint64_t>(metadata.data_ptr()),
+        words,
+        uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),
+        {batch, heads, query, capacity, pageSize},
+        causal ? CausalPlatform(cacheSeqlens.device().index(), batch != 0 && maxQ != 0 && capacity != 0)
+               : DensePlatform(batch != 0 && maxQ != 0 && capacity != 0),
+        {cuQ ? reinterpret_cast<uint64_t>(cuQ->data_ptr()) : 0, cuQ ? uint64_t(cuQ->numel()) : 0},
+        {},
+        {reinterpret_cast<uint64_t>(cacheSeqlens.data_ptr()), uint64_t(cacheSeqlens.numel())}};
+    auto submission = PrepareSubmission(metadata, args, cacheSeqlens, cuQ, true, std::nullopt, std::nullopt, causal);
+    auto enqueue = [submission]() mutable -> int {
         submission.Enqueue();
         return 0;
-    });
+    };
+    if (causal) {
+        RunCausalLaunch("ascendc_mla_causal_paged_metadata", enqueue);
+    } else {
+        at_npu::native::OpCommand::RunOpApiV2("ascendc_mla_paged_metadata", enqueue);
+    }
     return metadata;
 }
 
@@ -435,9 +451,10 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
                                      const std::optional<at::Tensor>& cacheSeqlens,
                                      const std::optional<at::Tensor>& usedQuery,
                                      const std::optional<at::Tensor>& schedulerMetadata,
-                                     const std::optional<at::Tensor>& cuQ, int64_t maxQ)
+                                     const std::optional<at::Tensor>& cuQ, int64_t maxQ, bool causal = false)
 {
     const bool tnd = cuQ.has_value();
+    TORCH_CHECK(!causal || !tnd, "MLA causal forward is not implemented yet for TND paged layouts");
     TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
                 "MLA: inputs must have FP16 or BF16 dtype");
     TORCH_CHECK(q.device().type() == at::kPrivateUse1, "MLA: inputs must be NPU tensors");
@@ -458,7 +475,7 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
                                  pageTable.storage_offset(),
                                  pageTable.storage().nbytes()};
     const auto dtype = uint32_t(q.scalar_type() == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16);
-    const auto platform = DensePlatform();
+    const auto platform = causal ? CausalPlatform(q.device().index(), false) : DensePlatform();
     MlaPagedPlan plan{};
     const auto status = tnd ? BuildPagedTndPlan(PagedTensorView<MlaTndTensorView>(q),
                                                 PagedTensorView<MlaTndTensorView>(qv), PagedTensorView(k),
@@ -540,7 +557,7 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
                               PagedTensorArray(lengths, lengths.numel())};
     std::optional<MetadataSubmission<MlaPagedMetadataArgs>> producer;
     if (!schedulerMetadata) {
-        producer = PrepareSubmission(metadata, args, lengths, cuQ, true, usedQuery);
+        producer = PrepareSubmission(metadata, args, lengths, cuQ, true, usedQuery, std::nullopt, causal);
     }
     auto stream = c10_npu::getCurrentNPUStream();
     for (const auto& t : {q, k, v, qv, pageTable, lengths, metadata}) {
@@ -571,19 +588,22 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
     a.cache = cache;
     a.layouts = plan.layouts;
     a.scale = scale;
-    at_npu::native::OpCommand::RunOpApiV2(
-        tnd ? "ascendc_mla_paged_tnd" : "ascendc_mla_paged_bsnd",
-        [a, producer, tnd, q, k, v, qv, pageTable, lengths, cuQ, usedQuery, metadata, out, lse,
-         workspace]() mutable -> int {
-            if (producer) {
-                producer->Enqueue();
-            }
-            const auto error =
-                tnd ? (q.scalar_type() == at::kBFloat16 ? LaunchPagedTndBf16(a) : LaunchPagedTndFp16(a))
-                    : (q.scalar_type() == at::kBFloat16 ? LaunchPagedBsndBf16(a) : LaunchPagedBsndFp16(a));
-            TORCH_CHECK(error == ACL_SUCCESS, "MLA: paged BATCH_MODE kernel launch failed (", error, ")");
-            return 0;
-        });
+    a.causal = causal;
+    auto enqueue = [a, producer, tnd, q, k, v, qv, pageTable, lengths, cuQ, usedQuery, metadata, out, lse,
+                    workspace]() mutable -> int {
+        if (producer) {
+            producer->Enqueue();
+        }
+        const auto error = tnd ? (q.scalar_type() == at::kBFloat16 ? LaunchPagedTndBf16(a) : LaunchPagedTndFp16(a))
+                               : (q.scalar_type() == at::kBFloat16 ? LaunchPagedBsndBf16(a) : LaunchPagedBsndFp16(a));
+        TORCH_CHECK(error == ACL_SUCCESS, "MLA: paged BATCH_MODE kernel launch failed (", error, ")");
+        return 0;
+    };
+    if (causal) {
+        RunCausalLaunch("ascendc_mla_causal_paged_bsnd", enqueue);
+    } else {
+        at_npu::native::OpCommand::RunOpApiV2(tnd ? "ascendc_mla_paged_tnd" : "ascendc_mla_paged_bsnd", enqueue);
+    }
     return {out, lse, at::Tensor(), at::Tensor()};
 }
 } // namespace
@@ -592,9 +612,10 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
                                          const at::Tensor& qv, const at::Tensor& pageTable, float scale,
                                          const std::optional<at::Tensor>& cacheSeqlens,
                                          const std::optional<at::Tensor>& usedQuery,
-                                         const std::optional<at::Tensor>& schedulerMetadata)
+                                         const std::optional<at::Tensor>& schedulerMetadata, bool causal)
 {
-    return PagedForward(q, k, v, qv, pageTable, scale, cacheSeqlens, usedQuery, schedulerMetadata, std::nullopt, 0);
+    return PagedForward(q, k, v, qv, pageTable, scale, cacheSeqlens, usedQuery, schedulerMetadata, std::nullopt, 0,
+                        causal);
 }
 
 std::vector<at::Tensor> PagedTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -626,14 +647,14 @@ std::tuple<at::Tensor, at::Tensor> PagedBsndForwardOp(const at::Tensor& q, const
                                                       std::optional<double> softmaxScale,
                                                       const std::optional<at::Tensor>& cacheSeqlens,
                                                       const std::optional<at::Tensor>& usedQuery,
-                                                      const std::optional<at::Tensor>& schedulerMetadata)
+                                                      const std::optional<at::Tensor>& schedulerMetadata, bool causal)
 {
     TORCH_CHECK(!softmaxScale ||
                     (std::isfinite(*softmaxScale) && std::abs(*softmaxScale) <= std::numeric_limits<float>::max()),
                 "MLA: softmax_scale must be finite in FP32");
     auto result =
         PagedBsndForward(q, k, v, qv, pageTable, softmaxScale ? float(*softmaxScale) : 1.0f / std::sqrt(576.0f),
-                         cacheSeqlens, usedQuery, schedulerMetadata);
+                         cacheSeqlens, usedQuery, schedulerMetadata, causal);
     return {result[0], result[1]};
 }
 
@@ -1270,12 +1291,12 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
     m.def("_mla_tnd_bsnd_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
           "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q) -> Tensor");
     m.def("_mla_paged_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, int page_size, "
-          "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor? cu_seqlens_q) -> Tensor");
+          "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor? cu_seqlens_q, bool causal=False) -> Tensor");
     m.def("_mla_dense_forward(Tensor q, Tensor k, Tensor v, Tensor qv, float? softmax_scale=None, "
           "Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
     m.def("_mla_paged_bsnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor page_table, "
           "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? seqused_q=None, "
-          "Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
+          "Tensor? scheduler_metadata=None, bool causal=False) -> (Tensor, Tensor)");
     m.def("_mla_paged_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor page_table, "
           "Tensor cu_seqlens_q, int max_seqlen_q, float? softmax_scale=None, Tensor? cache_seqlens=None, "
           "Tensor? seqused_q=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");

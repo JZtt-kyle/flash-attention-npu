@@ -61,4 +61,8 @@ MlaScheduleStatus ParsePagedLengths(const MlaPagedShape& shape, const MlaPagedIn
 MlaScheduleStatus BuildPagedSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
                                      const MlaPagedInputs& inputs, MlaPagedSchedule& output);
 
+// Validated PA geometry/workspace without a no-mask partition; used by causal.
+MlaScheduleStatus PreparePagedSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
+                                       const MlaPagedInputs& inputs, MlaPagedSchedule& output);
+
 } // namespace flash_attn::mla

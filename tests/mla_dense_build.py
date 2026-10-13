@@ -32,9 +32,11 @@ def build_probes(
     tnd_stride=False,
     paged=False,
     causal=False,
+    paged_causal=False,
 ):
     assert dtype in ("fp16", "bf16")
     assert sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride, paged, causal)) <= 1
+    assert not paged_causal or paged
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
@@ -112,6 +114,8 @@ def build_probes(
         "-lruntime",
         "-Wl,--wrap=aclrtLaunchKernelWithHostArgs",
     ]
+    if paged_causal:
+        common += ["-DMLA_PAGED_CAUSAL"]
     if dtype == "bf16":
         common.append("-DMLA_DENSE_BF16")
     if bsnd:
@@ -356,6 +360,7 @@ def build_probes(
         "stride": stride,
         "tnd_stride": tnd_stride,
         "paged": paged,
+        "paged_causal": paged_causal,
         "ndebug": bsnd or tnd or mixed or used or stride or tnd_stride or paged,
         "oracle_tiling_sha256": sha256(artifacts / "oracle_tiling.h"),
         "libraries": {

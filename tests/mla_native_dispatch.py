@@ -69,7 +69,8 @@ def parse_dispatch(log, dtype, count, vendor):
                 ):
                     raise RuntimeError("Missing, ambiguous or foreign native FIA launch")
                 key = launches[0]["key"]
-                template, fd = key // 10**15 % 100, bool(key // 10**5 % 10)
+                # Fixed-source GenTilingKey encodes this digit as PA * 2 + FD.
+                template, fd = key // 10**15 % 100, bool((key // 10**5 % 10) & 1)
                 current.update(
                     end_line=line_number,
                     native_tiling_key=key,

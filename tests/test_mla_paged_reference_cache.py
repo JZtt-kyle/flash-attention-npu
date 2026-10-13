@@ -35,12 +35,16 @@ def cache(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.mark.parametrize("causal", [False, True])
 @pytest.mark.parametrize("layout", [0, 2])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("used", [None, [2, 1], [0, 0]])
-def test_hit_matches_uncached_for_layout_used_and_empty(cache, monkeypatch, layout, dtype, used):
+def test_hit_matches_uncached_for_layout_used_and_empty(
+    cache, monkeypatch, layout, dtype, used, causal
+):
     case = make_case(layout, dtype)
     case["item"]["uq"] = used
+    case["causal"] = causal
     expected = reference.uncached_references(case)
     fresh = reference.references(case)
 
@@ -63,6 +67,7 @@ def test_hit_matches_uncached_for_layout_used_and_empty(cache, monkeypatch, layo
         "v",
         "page_table",
         "scale",
+        "causal",
         "used",
         "prefix",
         "length",
@@ -87,6 +92,8 @@ def test_changed_input_or_adapter_cannot_hit(cache, monkeypatch, tmp_path, field
         other["host"][field].flatten()[0] += 1
     elif field == "page_table":
         other["table_host"][0, 0] = 1
+    elif field == "causal":
+        other["causal"] = True
     elif field == "scale":
         other["scale"] *= 2
     elif field == "used":

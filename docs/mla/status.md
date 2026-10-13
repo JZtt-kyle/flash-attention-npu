@@ -1,73 +1,72 @@
 # MLA 当前状态
 
-**M08c2 已闭环：非 PA TND Q + BSND KV causal cache、公开 metadata 生成/复用及内部混合 Q-used；唯一下一步是 M08d。** 分支 `feat/mla-cann-migration`，本步基线 `83244ab74690cb5e6d9691fa23cfab3dcc80e6d1`。本步只提交一次，提交后立即停止；当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
+**M08d：BSND PA causal 已接通并通过必要验收；唯一下一步是 M08e。** 分支 `feat/mla-cann-migration`，本步基线 `527fd6891b52ca6aa05f56e55882a1ee05c0a3c5`。本次只提交 M08d，提交成功后立即停止；当前闭环提交用 `git log -1 -- docs/mla/status.md` 定位。
 
 ## 当前可调用能力
 
-- 非 PA BSND、TND Q/KV varlen、TND Q + BSND KV 只读 cache 均支持 512+64、FP16/BF16、Hkv=1、右下 causal 和 `num_splits=1`，保留原合法四路 stride。无 mask 非分页/PA 能力保留；PA causal 仍明确拒绝。
-- 混合 causal 使用独立 v9（`version=kind=9`、`410+8B` 个 int32）。公开生成器在 AICPU 校验描述符后从 Q 前缀推导总分配量；内部前向使用 tensor 静态总量。Q 分配起点与有效长度分离，KV 按物理容量定位、实际长度决定 mask。
-- 公开 cache 支持 None/整数/tensor KV 长度和显式 v9 复用；前缀或长度改变后须重建。记录不绑定输入地址、合法 stride 或 scale。内部 Q-used 每次生成 v9，拒绝与显式记录组合；公开 cache/metadata 不增加 Q-used 参数。
+- 512+64、FP16/BF16、Hkv=1、`num_splits=1` 下，BSND Q + ND PA KV 已支持右下 causal 的只读 cache、公开 metadata 生成/复用和内部 Q-used；全部合法 P 为 16..1024 的 16 倍数。TND PA causal 仍明确拒绝。
+- 独立 v10（`version=kind=10`、`408+5B` 个 int32）复用 PA 切块/页 Copy 和既有 causal 完整 M 分核/数值任务环；v6/v10 双向拒绝。mask 按有效 Sq/Sk 定位，消费时校验所有有效页，包括 Q/used 为零的样本；padding 页不读取。
+- 公开 cache 支持 None/整数/tensor KV 长度、合法 stride/offset 和 v10 复用。内部 Q-used 每次生成新记录且拒绝显式复用，不给公开接口新增 Q-used 参数。记录不绑定页 ID、物理池大小、地址、合法 stride 或 scale；长度/P/C 改变须重建。全遮罩及 PA 零 KV 均为 `O=0、LSE=-inf`。
 
-协议及生命周期见 [design 5.11](design.md#511-v9混合-causal-记录)，影响路径与验收选择见 [plan 的本步产物](plan.md#最近完成-m08c2非-pa-混合-causal-cache)。CATLASS、Block/Tile、causal 数值任务环和 CANN 源代码未修改。
+契约见 [design 5.12](design.md#512-v10bsnd-pa-causal-记录)，本步产物与影响路径见 [plan](plan.md#最近完成-m08dbsnd-pa-causal)。CATLASS、Block/Tile、causal 数值任务环及固定 CANN 源未改。
 
-## 最近闭环证据
+## 最近一次闭环证据
 
-证据根 `build/mla-m08c2/`。下表为本次实际执行的 18 个 pytest 组，所选节点全部通过，无跳过或正式验收失败。CPU/工具、代表、设备及性能批次各自保留完整 command、候选/选中/未选中、XML、源/数学结果和依赖身份。
+证据根 `build/mla-m08d/`，数学缓存 `build/mla-validation-artifacts/golden`。本次有效结果 **20 组、1188 项 pytest 通过**（组之间可能有重复节点）；另继承历史组件证据 326 项。未解决失败 0，必要未运行 0；失效/失败/中断尝试单列于下节，不计通过。
 
-| 检查 | 本次通过数 | 耗时（秒） | 证据目录（相对证据根） |
-| --- | ---: | ---: | --- |
-| v9 CPU / ASan+UBSan（含退出 LSan） | 76 / 76 | 25.8 / 90.9 | `cpu-final/attempt-1791886737466459190` |
-| v7/v5 CPU / ASan+UBSan | 100 / 100 | 55.3 / 163.9 | 同上 |
-| v8 CPU / ASan+UBSan | 41 / 41 | 24.0 / 91.8 | 同上 |
-| 构建 CPU / 混合性能汇总专项 | 2 / 7 | 3.5 / 3.3 | 同上 |
-| 最终工具组 | 100 | 15.1 | `final-tools/attempt-1791887468713825000` |
-| 混合双 dtype 代表 | 6 | 101.0 | `representative/attempt-1791886737832350310` |
-| 混合公开行为 | 80 | 168.0 | `final-devices/attempt-1791887725272648300` |
-| 未开放边界 / 隔离 Trap | 10 / 26 | 20.0 / 362.1 | 同上 |
-| BSND / TND causal 代表回归 | 56 / 6 | 106.3 / 98.2 | 同上 |
-| 固定非分页 / 普通 FA3 回归 | 86 / 100 | 734.5 / 25.6 | 同上 |
-| 公开平均 E2E / 双 dtype 代表组件 | 1 / 2 | 合计 512.5 | `profile-final/attempt-1791889402618531670` |
+统一复现：`python3 -m tests.mla_validation --output build/mla-m08d/<新批次> --device 6 --max-cases 100 --suite <组>`。先 dry-run/collect；恢复前核对进程、依赖和完成记录。最终汇总 `final-evidence-audit.json` 核验 851 个源码身份及 4683 个原始结果文件（5.6 秒），保留每组确切 summary/命令/源码差异；`final-selection-audit.json` 保存全部组候选、选中与未选中数量，各组目录保留完整节点清单。
 
-工具专项与通用工具组有重复节点，不据上表累加唯一用例总数；早期 tools 100 项由最终工具组替代。CPU 候选/选择见 `cpu-collection-final/`；设备集合见 `final-collection/`、`selection-audit.json`。混合公开 80、边界 10、Trap 26、BSND/TND 代表 56/6、非分页回归 86 均全选；ordinary 816 选 100。未选中组合及 M08e 阶段矩阵未运行，不计通过。
+| 本次检查 | 通过数 | 执行耗时（秒） | 根目录下的确切批次 |
+| --- | --- | --- | --- |
+| `causal-paged-cpu` | 36 | 32.9 | `cpu-final/attempt-1791891883525338020` |
+| `causal-paged-sanitize` | 36 | 112.7 | `cpu-resume/attempt-1791892305321400320` |
+| `paged-shared-cpu` / `paged-shared-sanitize` | 100 / 100 | 55.5 / 786.4 | 同上 |
+| `tools` / `causal-paged-tools` / `cpu` | 100 / 55 / 2 | 19.9 / 6.1 / 5.5 | `dispatch-tools/attempt-1791897082693314130` |
+| `causal-paged-check` | 6 | 139.1 | `representative-resume/attempt-1791892302006253970` |
+| `causal-paged-public` / `causal-paged-trap` | 70 / 26 | 1272.0 / 593.6 | `final-devices/attempt-1791892503150876240` |
+| `regression-paged` / `regression-nonpaged` | 100 / 86 | 106.9 / 771.7 | 同上 |
+| `causal-bsnd-check` / `causal-tnd-check` / `causal-mixed-check` | 56 / 6 / 6 | 107.3 / 102.3 / 103.8 | 同上 |
+| `ordinary` | 100 | 28.1 | 同上 |
+| `bsnd` / `public` | 100 / 100 | 59.1 / 48.9 | `shared-public/attempt-1791895707934293410` |
+| `metadata` | 100 | 58.0 | `metadata-resume/attempt-1791896104453069170` |
+| `causal-paged-profile` | 3 | 648.3 | `profile-retry/attempt-1791897195026249460` |
 
-`precision.json` 汇总代表、公开和组件：FP16/BF16 各 **593 次 O、593 次 LSE** 同调度固定源比较逐元素一致，双数学全部通过；本步源精度限制为 0。原生公开对照每 dtype 47 组 O/LSE 双数学通过；非逐元素一致仅出现在原生 FD 配置，未将其冒充同调度源一致。
+PA 固定回归 120 选 100，非 PA 86 全选，ordinary 816 选 100；补充 `bsnd/public/metadata` 分别从 1872/2145/2844 选 100。metadata 的四个新增 v10 节点全部入选。新公开 70、Trap 26、代表 6 全选；全部 64 个合法 P 在每 dtype 的固定循环节点中实测，逐例输入/输出留存。覆盖跨页 mask、乱序/重复页、Sq<Sk/=/>、Q-used/poison、零 KV/空行、记录更新与新页池/stride/scale 复用、真实/fake/compile、流/allocator 生命周期及设备 Trap。
 
-数值与性能组数学缓存合计命中 **357** 次，新增 **156** 个不同内容的 reference；性能组 100 次及非分页回归 130 次全部命中。工具组的故意损坏/失效缓存测试单列，不混入该统计。缓存固定为 `build/mla-validation-artifacts/golden`，实现及固定源仍实际执行。
+新增 PA causal 精度记录中，每 dtype 的 O、LSE 各 709 次比较均为固定源逐元素一致且双数学通过，另各有 27 次空值检查；本步新路径源精度限制计数为 0。原生公开对照的 15 个配置/每 dtype 另与双数学核对，FD 不要求与迁移核逐元素一致。源全遮罩 LSE 的 `+inf` 先单独断言，再按 FA3 `-inf` 契约归一。原始记录见代表、公开和性能组的 `causal-paged-accuracy/results.jsonl`、`public-profile/*-dispatch/accuracy-*.pt`。
 
-## 公开性能与组件采样
+数学缓存的数值组共命中 287 次、冷算并写入 322 次；性能重跑 66 次全部命中。工具组的关闭/刷新/损坏故障注入另计。代表、正式验收和性能使用同一缓存，同输入 reference 不重复冷算，双方设备实现仍实际执行。
 
-固定双 dtype 共 **24** 个配置；**16** 个适用配置的平均耗时比 **0.407973 ≤ 1**，退化配置 **0**、退化分段 **0**。其余 **8** 个配置实际启用原生 FD，保留全部结果并单列。输入不按耗时筛选；每配置先等权平均六个入口/R 分段，再等权平均适用配置。
+## 公开与组件性能
 
-| 分段 | 平均 FA3 / 原生 CANN 耗时比 |
-| --- | ---: |
-| 隐式生成，R=1 / R=4 | 0.503140 / 0.413498 |
-| 一次公开生成加前向，R=1 / R=4 | 0.612117 / 0.315715 |
-| 预生成复用，R=1 / R=4 | 0.358435 / 0.244930 |
+`profile-retry/attempt-1791897195026249460/causal-paged-profile/public-profile/average.json`：固定 30 个配置含双 dtype，18 个原生非 FD 配置参与验收，12 个原生 FD 配置单列；适用配置的等权平均耗时比 **0.495594 ≤ 1**，退化配置 **0/18**、退化分段 **0/108**。不按耗时筛选；原始单例、分段、metadata 生成和 Kernel 时间均保留。
 
-公开 metadata 生成中位数范围：FP16 221.835–224.800 μs，BF16 210.915–220.155 μs。原生混合 KV gather、必要布局转换、分配与完成同步计入 E2E；真实 bool causal mask、固定 vendor 二进制/加载路径/tiling key 已验证。双方固定 CPU 0，预热 5 次、5 轮×20 个 wall 样本、R=1/4 不变。
+| 公开调用段 | R=1 平均耗时比 | R=4 平均耗时比 |
+| --- | --- | --- |
+| 隐式生成 | 0.625614 | 0.486543 |
+| 公开生成一次再前向 | 0.714017 | 0.387471 |
+| 预生成记录复用 | 0.449020 | 0.310901 |
 
-三个固定代表组件的生产/同调度源 Kernel 比值：FP16 **1.321114 / 1.317673 / 0.372543**，BF16 **1.167427 / 1.320919 / 0.360091**；小配置 Kernel 较慢如实保留。组件耗时用于诊断，公开平均 E2E 为验收门槛，二者不互代。
+双方同一 CPU 亲和性、5 次预热、5 轮×20 次 wall；必要 Q/cache/页表物化、输出分配和完成同步计入原生 E2E，真实 causal mask 一次性准备在外。固定源原生 PA 包及实际二进制/tiling key 核验见 `native-vendor-audit.json` 和性能组 `*.dispatch.json`。第六位编码为 `PA*2+FD`，仅低位表示 FD。
 
-原始数据位于 profile 批次 `causal-mixed-profile/public-profile/` 的 `average.json`、逐 dtype `profile.json`、`wall.json`、`metadata-wall.json`、dispatch 证明与 profiler；组件数据在 `probes/<dtype>/mixed-component-profile/`。采样前两次第 6 卡 AICore 为 0，保留 136 MiB 常驻上下文记录；无遗留验证进程，采样前/后设备及进程快照在证据根和各 dtype 目录。
+同调度源代表组件另采 5 轮×10 次，生产 attention 含当次 metadata/页表校验，AICPU 单列。三例顺序为 P112 跨页/部分遮罩、P528 多 query、P16 内部 Q-used/重复页；FP16 Kernel 耗时比分别 **1.338/1.147/1.818**，BF16 为 **1.170/1.112/1.391**。六个组件单例均较源核慢，完整耗时及 profiler 在 `component/{fp16,bf16}/summary.json`；按 design，第 7 节的不劣化门槛为上述公开 E2E 平均值，不把组件退化记成提速。
 
-## 证据身份、继承与失败记录
+## 证据继承与失败记录
 
-- **本步结果身份：**`final-evidence-audit.json` 核验 18 组的 **3579** 个原始产物哈希。`frozen-sources.json` 为限量验收时 844 个源码文件的身份；最终 `final-sources.json` 另保存质量整理后的身份。公开边界补例前已完成的 CPU/代表，经 `boundary-inheritance.json` 核对既有函数 AST 未变而保留，不重复执行。
-- **质量整理后的同一步证据：**首次质量检查发现性能驱动局部变量 F841，将生命周期保留用的 `record` 改名为 `_record`。`quality-inheritance.json` 核对归一 AST 及全部 **26** 个 code object 的执行字节码、常量、参数、全局引用和闭包完全一致，仅一个局部绑定名称改变；性能/精度执行仍适用，未重跑等价采样。原始失败日志 `quality-initial.log` 保留，修复后质量检查通过。
-- **继承历史组件 326 项：**M08b2 的 causal attention 324 项与组件性能 2 项，仅用于未变 causal 组件、Block/Tile、任务环及最长 reference/最大内存边界。`baseline-audit.json` 核对 M08c1 的 837 个冻结文件、完整历史原始产物和原扩展；`component-inheritance.json` 核对 15 个算法依赖。新混合协议、地址、传参与公开 E2E 均为本步实测。
-- **开发失败：**首轮 v9 CPU 在 66 项通过后，驱动因文本 `2147483648` 无法读入 int32 退出；改用对应 int32 位模式后普通/sanitizer 各 76 项通过。原始日志及 core 位于 `cpu-dev/`、`cpu-dev-core.79`，不计闭环通过。
-- **失效尝试：**首轮构建期间格式整理改变源码，执行器拒绝产物身份（`prepare.log`）；随后重建通过。早期 `device-collection/` 在补组/驱动收尾时拒绝 Trap 集合身份变化，最终集合已在冻结实现上重新核对；两者不记为数值回归或有效证据。
+- 接手时工作树干净；基线 844 个源码身份与 18 组 3579 个原始产物全部核验，见 `baseline-audit.json`。`component-inheritance.json` 再核验 13 个未变算法依赖和 M08b2 数值/组件证据 326 项、1577 个原始产物（6.5 秒），仅继承未变组件及最长 reference/最大内存边界；新 PA causal 协议、分派、mask/页地址和公开性能均本次实测。
+- 首轮代表集合在沙箱因 NPU 不可见而导入失败，主机环境重新收集成功。首轮生产编译成功，但执行器因期间新增性能驱动而拒绝整树身份；第一次 sanitizer 的 36 项也实际通过，但因驱动源码变化失效。原尝试不计通过，源码固定后构建复用核验及 sanitizer 重跑通过。
+- shared metadata 首轮 78 项通过后，旧 `opcheck` 参数驱动遗漏新增可选 `causal` 的缺省行为而失败。两处签名参数提取均已修正；候选/选中/未选中清单不变，整个失败组 100 项重新通过，见 `metadata-test-change.json`。
+- 第一轮性能在 605.1 秒主动中断：旧分派解析器将 PA 非 FD 误判为 FD。按固定源编码修复并补四种组合/证据失效测试后，工具及原固定性能组重新通过。原始日志保留在 `profile-final/`，不计通过；来源、改动及不变计时口径见 `dispatch-parser-fix.json`。
+- 最终实现身份在 `final-sources.json`。早期 CPU 36 项跨无关 docstring/性能驱动变化的有效性见 `cpu-inheritance.json`；后续 metadata 测试与性能分类工具改动未触及数值实现。最终审计按实际调用依赖保留已完成组，仅重跑受影响工具、metadata 和性能，未重复整个长矩阵。
 
-复现统一使用 `python3 -m tests.mla_validation --output build/mla-m08c2/<新批次> --device 6 --max-cases 100 --suite <组>`，实际组见上表及 [plan](plan.md#最近完成-m08c2非-pa-混合-causal-cache)，先核对 dry-run/collect。恢复时先核对进程、依赖和已完成记录，只续跑未完成/失效组；性能组不自动继承历史采样。
+## 环境、构建与提交检查
 
-## 环境、构建与质量
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2，第 6 卡 Ascend910B3，20 AIC/40 AIV。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`；只读固定 CANN `ca18aee610729ca5270a44e2d84c751bc687fbf0`。环境和进程快照在证据根；无上步遗留验证任务。性能前设备健康且 AICore 为 0，存在三个各约 136 MiB 的外部常驻上下文，未终止它们；快照见 `before-profile-retry-device.log` 及中断后的进程记录。
 
-Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；第 6 卡 Ascend910B3，20 AIC/40 AIV。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`；只读 CANN 固定 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，源 oracle 从固定 Git blob 提取。接手工作树干净，无上步遗留验证进程。
+实际加载本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `30821e39c0bfe5a379074f6f7419d13bde40875efe69d4a4a172bcbba7ffa46b`。首次重建/probe 准备 498.9 秒；最终复用核验 1.4 秒、实际加载核验 34.7 秒。构建 manifest 在 `build/mla-validation-artifacts/prepare.json`，最终运行加载身份随性能组保存。设备与 LSan 使用主机可见性，shell 为 `login=false`。
 
-实际加载本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `b02bb84a4f0883f907ed1ced4adb50522bc2008acd45eaa1e0632c8c1fca05ee`。代表批次重建 473.2 秒、加载核验 22.1 秒；后续构建缓存逐次核验，完整环境在各批次 `runtime.json`，manifest 在 `build/mla-validation-artifacts/prepare.json`。原生混合使用固定 TND vendor `build/mla-m06c3a-varlen/vendor/mla_ca18aee_transformer`，二进制核验见 `native-vendor-audit.json`，本步实际分派见 profile 证明。
-
-设备与 LSan 需要主机可见性；shell 使用 `login=false`，不 source CANN set_env 或覆盖原 PYTHONPATH。质量入口 `ci/code_quality.sh --staged`，pre-commit 包 `/tmp/mla-m01-precommit` 附加至原 PYTHONPATH 前。质量日志与耗时见 `quality-final.log/json`；三份文档的本步契约、链接和表格及 `git diff --check` 均检查，不增加文档文件。
+提交前检查本步契约、链接/表格和 `git diff --check`，仅暂存本步文件，质量入口为 `PYTHONPATH=/tmp/mla-m01-precommit:$PYTHONPATH ci/code_quality.sh --staged`；记录在 `document-links-final.json` 与 `quality-final.log`。原始结果、构建和缓存均在忽略目录；迁机须复制实际依赖与证据或重新验收。
 
 ## 唯一下一步
 
-[M08d：BSND PA causal](plan.md#唯一下一步-m08dbsnd-pa-causal)。本次到 M08c2 提交即停止，不开始 M08d；M08 全组合阶段实测仍在 M08e。
+[M08e：TND PA causal 与阶段收尾](plan.md#唯一下一步-m08etnd-pa-causal-与阶段收尾)。先复核本步状态/源码/进程和证据，再细化 TND PA 协议、前缀/used、生成/消费及统一专项；冻结后按 design 限量规则实测全部已开放 causal 组合及阶段性能。M08e 尚未开始，本次提交后停止。

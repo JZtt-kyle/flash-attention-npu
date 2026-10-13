@@ -21,7 +21,7 @@ struct PageTableReader {
     }
 };
 
-template <typename InputT>
+template <typename InputT, bool IsCausal = false>
 __aicore__ inline MlaMetadataReadStatus
 ReadPagedMetadata(GM_ADDR address, uint32_t words, const MlaPagedMetadataContext& context,
                   const MlaPagedMetadataInputs& inputs, const MlaPagedCacheInputs& cache,
@@ -53,15 +53,16 @@ ReadPagedMetadata(GM_ADDR address, uint32_t words, const MlaPagedMetadataContext
     if (cache.table.address != 0) {
         pages.data.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(cache.table.address));
     }
-    return flash_attn::mla::ReadPagedMetadata(read, words, context, inputs, arrays, cache, pages, output);
+    return flash_attn::mla::ReadPagedMetadata<IsCausal>(read, words, context, inputs, arrays, cache, pages, output);
 }
 
-template <typename InputT>
+template <typename InputT, bool IsCausal = false>
 __aicore__ inline bool LoadPagedMetadata(GM_ADDR address, uint32_t words, const MlaPagedMetadataContext& context,
                                          const MlaPagedMetadataInputs& inputs, const MlaPagedCacheInputs& cache,
                                          MlaPagedKernelSchedule& output)
 {
-    if (ReadPagedMetadata<InputT>(address, words, context, inputs, cache, output) != MlaMetadataReadStatus::Success) {
+    if (ReadPagedMetadata<InputT, IsCausal>(address, words, context, inputs, cache, output) !=
+        MlaMetadataReadStatus::Success) {
         AscendC::Trap();
         return false;
     }

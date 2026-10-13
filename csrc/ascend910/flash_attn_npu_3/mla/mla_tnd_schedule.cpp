@@ -618,8 +618,9 @@ MlaScheduleStatus ParsePagedLengths(const MlaPagedShape& shape, const MlaPagedIn
     }
 }
 
-MlaScheduleStatus BuildPagedSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
-                                     const MlaPagedInputs& inputs, MlaPagedSchedule& output)
+namespace {
+MlaScheduleStatus BuildPagedScheduleImpl(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
+                                         const MlaPagedInputs& inputs, MlaPagedSchedule& output, bool geometryOnly)
 {
     try {
         MlaUsedLengths normalized;
@@ -633,7 +634,7 @@ MlaScheduleStatus BuildPagedSchedule(const MlaPagedShape& shape, const MlaPlatfo
             status =
                 Calculate(shape.batch, shape.queryHeads, tndQuery ? normalized.maxQueryCapacity : shape.query.maxLength,
                           s2Size, tndQuery && inputs.usedQuery.data == nullptr, false, platform, normalized,
-                          result.schedule, result.pageSize);
+                          result.schedule, result.pageSize, geometryOnly);
         }
         if (status == MlaScheduleStatus::Success) {
             output = std::move(result);
@@ -642,5 +643,18 @@ MlaScheduleStatus BuildPagedSchedule(const MlaPagedShape& shape, const MlaPlatfo
     } catch (const std::bad_alloc&) {
         return MlaScheduleStatus::AllocationFailure;
     }
+}
+} // namespace
+
+MlaScheduleStatus BuildPagedSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
+                                     const MlaPagedInputs& inputs, MlaPagedSchedule& output)
+{
+    return BuildPagedScheduleImpl(shape, platform, inputs, output, false);
+}
+
+MlaScheduleStatus PreparePagedSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
+                                       const MlaPagedInputs& inputs, MlaPagedSchedule& output)
+{
+    return BuildPagedScheduleImpl(shape, platform, inputs, output, true);
 }
 } // namespace flash_attn::mla

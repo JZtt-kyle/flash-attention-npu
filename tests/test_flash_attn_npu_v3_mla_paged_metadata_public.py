@@ -1,4 +1,4 @@
-"""Public v6 generation: logical geometry, device lengths and consumer boundary."""
+"""Public v6/v10 generation: geometry, device lengths and consumer boundary."""
 
 from contextlib import nullcontext
 import inspect
@@ -90,7 +90,9 @@ def arguments(
 def call(entry, args):
     if entry.startswith("dispatch"):
         names = inspect.signature(api._mla_paged_metadata_fake).parameters
-        return torch.ops.flash_attn_npu_3._mla_paged_metadata(**{n: args[n] for n in names})
+        return torch.ops.flash_attn_npu_3._mla_paged_metadata(
+            **{n: args[n] for n in names if n in args}
+        )
     return metadata(entry, args)
 
 
@@ -304,8 +306,60 @@ def test_unsupported_options(dtype, kind, field, value):
     with FakeTensorMode() if kind.endswith("fake") else nullcontext():
         args = arguments(dtype, 2)
         args[field] = args["cache_seqlens"] if value == "tensor" else value
-        with pytest.raises(RuntimeError, match="MLA scheduler metadata is not implemented yet"):
+        with pytest.raises(
+            RuntimeError, match="MLA (scheduler|causal) metadata is not implemented yet"
+        ):
             call(kind, args)
+
+
+def test_causal_bsnd_all_metadata_entries(dtype):
+    for fake in (False, True):
+        with FakeTensorMode() if fake else nullcontext():
+            entries = (
+                ("public_fake", "op_fake", "dispatch_fake")
+                if fake
+                else ("public", "op", "cpp", "dispatch")
+            )
+            for kv in ([3, 225], [0, 0], [17, 33]):
+                args = dict(arguments(dtype, 0, [7, 7], kv, capacity=336), causal=True)
+                with forbid_host_readback():
+                    records = [call(entry, args) for entry in entries]
+                for record in records:
+                    assert record.shape == (418,) and record.dtype == torch.int32
+                    assert record.device == args["cache_seqlens"].device and record.is_contiguous()
+                if not fake:
+                    rows = [[v & 0xFFFFFFFF for v in r.cpu().tolist()] for r in records]
+                    assert all(r == rows[0] for r in rows)
+                    assert rows[0][:6] == [
+                        0x4D4C4131,
+                        10,
+                        10,
+                        418,
+                        1 if dtype == torch.float16 else 2,
+                        0,
+                    ]
+                    assert rows[0][408:] == [0, 0, 7, 7, kv[0], 7, 0, 7, 7, kv[1]]
+
+
+def test_causal_metadata_failure_and_tnd_boundary(dtype):
+    for kv in ([-1, 0], [337, 0]):
+        args = dict(arguments(dtype, 0, [7, 7], kv, capacity=336), causal=True)
+        with forbid_host_readback():
+            records = [call(entry, args) for entry in ("public", "op", "cpp", "dispatch")]
+        for record in records:
+            row = record.cpu().tolist()
+            assert row[1:3] == [10, 10] and row[5] != 0 and not any(row[8:])
+    for fake in (False, True):
+        with FakeTensorMode() if fake else nullcontext():
+            args = dict(arguments(dtype, 2), causal=True)
+            entries = (
+                ("public_fake", "op_fake", "dispatch_fake")
+                if fake
+                else ("public", "op", "cpp", "dispatch")
+            )
+            for entry in entries:
+                with pytest.raises(RuntimeError, match="not implemented"):
+                    call(entry, args)
 
 
 @pytest.mark.parametrize("extra", ["cu_seqlens_k", "seqused_q"])
@@ -400,7 +454,7 @@ def test_schema_compile_and_length_updates(dtype, layout):
     torch.library.opcheck(
         op,
         (),
-        {n: args[n] for n in names},
+        {n: args[n] for n in names if n in args},
         test_utils=("test_schema", "test_faketensor", "test_autograd_registration"),
     )
 

@@ -14,8 +14,9 @@ bool PagedMetadataWords(int64_t batch, uint32_t& words)
     return true;
 }
 
-bool BuildPagedMetadata(const MlaPagedShape& inputShape, const MlaPlatformInfo& platform, uint32_t dtype,
-                        uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs, bool fromQueryPrefix)
+bool BuildPagedMetadataWithSchedule(const MlaPagedShape& inputShape, const MlaPlatformInfo& platform, uint32_t dtype,
+                                    uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs,
+                                    bool fromQueryPrefix, MlaPagedScheduleBuilder builder)
 {
     auto shape = inputShape;
     uint32_t expectedWords;
@@ -65,7 +66,7 @@ bool BuildPagedMetadata(const MlaPagedShape& inputShape, const MlaPlatformInfo& 
             // zero, monotonicity, per-segment bound, used and all KV lengths.
             shape.query.totalTokens = inputs.cuQuery.data[shape.batch];
         }
-        const auto status = BuildPagedSchedule(shape, platform, inputs, result);
+        const auto status = builder(shape, platform, inputs, result);
         prefix.scheduleStatus = uint32_t(status);
         if (status == MlaScheduleStatus::Success) {
             prefix.schedule = SerializeMlaSchedule(result.schedule);
@@ -94,6 +95,13 @@ bool BuildPagedMetadata(const MlaPagedShape& inputShape, const MlaPlatformInfo& 
     }
     std::memcpy(output, &prefix, sizeof(prefix));
     return true;
+}
+
+bool BuildPagedMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype, uint32_t* output,
+                        uint32_t outputWords, const MlaPagedInputs& inputs, bool fromQueryPrefix)
+{
+    return BuildPagedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs, fromQueryPrefix,
+                                          BuildPagedSchedule);
 }
 
 } // namespace flash_attn::mla

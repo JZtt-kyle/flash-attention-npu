@@ -115,7 +115,18 @@ def build_probe(directory, *, bsnd=False, tnd=False, mixed=False, used=False, pa
         *([str(MLA / "mla_tnd_metadata.cpp")] if tnd else []),
         *([str(MLA / "mla_tnd_bsnd_metadata.cpp")] if mixed else []),
         *([str(MLA / "mla_used_metadata.cpp")] if used else []),
-        *([str(MLA / "mla_paged_metadata.cpp")] if paged else []),
+        *(
+            [
+                str(MLA / name)
+                for name in (
+                    "mla_paged_metadata.cpp",
+                    "mla_causal_paged_metadata.cpp",
+                    "mla_causal.cpp",
+                )
+            ]
+            if paged
+            else []
+        ),
         *([str(MLA / "mla_tnd_schedule.cpp")] if tnd or mixed or used or paged else []),
         "-x",
         "none",
@@ -218,6 +229,9 @@ def build_probe(directory, *, bsnd=False, tnd=False, mixed=False, used=False, pa
                 "mla_paged_metadata.h",
                 "mla_paged_metadata_args.h",
                 "mla_paged_metadata.cpp",
+                "mla_causal_paged_metadata.cpp",
+                "mla_causal.cpp",
+                "mla_causal.h",
                 "mla_paged_schedule.h",
                 "mla_used_schedule.h",
                 "mla_tnd_schedule.cpp",

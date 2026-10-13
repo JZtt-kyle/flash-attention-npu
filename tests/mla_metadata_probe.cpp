@@ -57,6 +57,14 @@ extern "C" uint32_t paged_metadata_host(const MlaPagedMetadataArgs* args, uint32
                : 1;
 }
 
+extern "C" uint32_t causal_paged_metadata_host(const MlaPagedMetadataArgs* args, uint32_t* output)
+{
+    return BuildCausalPagedBsndMetadata(args->shape, args->platform, args->dtype, output, args->outputWords,
+                                        PagedMetadataInputs(*args))
+               ? 0
+               : 1;
+}
+
 extern "C" int launch_paged_metadata(void* current, void* worker, void* ready, void* done,
                                      const MlaPagedMetadataArgs* args, uint64_t diagnosticStatus, bool nullArgs)
 {

@@ -142,6 +142,7 @@ def load_attention(directory):
             ct.c_void_p,
             ct.c_bool,
             ct.c_uint32,
+            ct.c_void_p,
         ]
         lib.launch_paged_attention.restype = ct.c_int
         lib.build_attention_cache.argtypes = [
@@ -245,7 +246,8 @@ def make_case(
     if full_launch and batch and sq and spec["capacity"]:
         item["block_dim"] = platform.block_dims[platform.aic - 1]
     kind = 1 if dtype == torch.float16 else 2
-    row = host_record(producer, item, kind)
+    causal = spec.get("causal", False)
+    row = host_record(producer, item, kind, causal=causal)
     context = context_for(row, item, kind)
     args, inputs = arguments(item, kind), device_inputs(item)
     storage = storage_for(args)
@@ -376,6 +378,10 @@ def make_case(
         ws_bases[n] = torch.full((context.workspace + 1024,), 205, dtype=torch.uint8, device="npu")
         workspace[n] = ws_bases[n][512:-512]
     case = dict(
+        causal=causal,
+        mask=torch.triu(torch.ones((2048, 2048), dtype=torch.bool), diagonal=1).npu()
+        if causal
+        else None,
         config=spec,
         item=item,
         context=context,
@@ -416,7 +422,10 @@ def make_case(
         for n, d in devices.items()
     }
     with forbid_host_readback():
-        enqueue(producer, args, storage, inputs)
+        if causal:
+            storage[1:-1].copy_(torch.tensor(row, dtype=torch.int32).npu())
+        else:
+            enqueue(producer, args, storage, inputs)
     return case
 
 
@@ -457,6 +466,7 @@ def launch(
         case["source_q"],
         case["source_k"],
         case["status"],
+        case.get("mask"),
     ]:
         if t is not None:
             t.record_stream(stream)
@@ -479,6 +489,7 @@ def launch(
         address(case["status"]) if diagnostic else 0,
         checked,
         c.block_dim,
+        address(case.get("mask")),
     )
 
 

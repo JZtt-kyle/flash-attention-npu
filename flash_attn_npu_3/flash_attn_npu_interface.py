@@ -526,6 +526,7 @@ def _mla_paged_bsnd_forward_fake(
     cache_seqlens=None,
     seqused_q=None,
     scheduler_metadata=None,
+    causal=False,
 ):
     _check_mla_inputs(q, k, v, qv, paged_kv=True)
     _check_mla_dense_options(softmax_scale=softmax_scale)
@@ -775,7 +776,7 @@ def _flash_attn_forward(
         _check_mla_dense_options(
             softmax_scale=softmax_scale,
             causal=causal,
-            allow_causal=page_table is None,
+            allow_causal=page_table is None or cu_seqlens_q is None,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -940,7 +941,7 @@ def _flash_attn_forward_fake(
         _check_mla_dense_options(
             softmax_scale=softmax_scale,
             causal=causal,
-            allow_causal=page_table is None,
+            allow_causal=page_table is None or cu_seqlens_q is None,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -2064,7 +2065,7 @@ def flash_attn_with_kvcache(
     """
     NPU compressed MLA supports read-only BSND or ND paged caches with BSND/TND
     queries. Set num_splits=1 explicitly; current MLA limits are documented in
-    docs/mla/status.md. Right-down causal is supported for nonpaged BSND and TND queries;
+    docs/mla/status.md. Right-down causal supports nonpaged BSND/TND and paged BSND queries;
     generic FA3 append, rotary and local-window options below remain unsupported.
 
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
@@ -2158,7 +2159,8 @@ def flash_attn_with_kvcache(
             softmax_scale and the numerical softcap value come from this forward
             call and may change when reusing metadata with the same has_softcap.
             MLA uses int32 v2 records for unmasked BSND queries, v7 for causal BSND,
-            v4/v9 for unmasked/causal TND queries with a BSND cache, or v6 for paged caches.
+            v4/v9 for unmasked/causal TND queries with a BSND cache, v6 for unmasked paged
+            caches, or v10 for causal paged caches with BSND queries.
             The device checks current lengths, TND query prefixes and all used pages.
             MLA records may be cloned or passed as contiguous
             offset views; scale is supplied to forward and is not fixed by the record.
@@ -2192,7 +2194,7 @@ def flash_attn_with_kvcache(
         # inside the op so torch.compile can capture this public wrapper.
         _check_mla_dense_options(
             causal=causal,
-            allow_causal=page_table is None,
+            allow_causal=page_table is None or cu_seqlens_q is None,
             window_size=window_size,
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -2271,6 +2273,7 @@ def flash_attn_with_kvcache(
                 softmax_scale,
                 cache_seqlens,
                 scheduler_metadata=scheduler_metadata,
+                causal=causal,
             )
         elif cu_seqlens_q is not None:
             if max_seqlen_q is None:
@@ -2605,7 +2608,10 @@ def _mla_paged_metadata_fake(
     qkv_dtype,
     cache_seqlens,
     cu_seqlens_q,
+    causal=False,
 ):
+    if causal and cu_seqlens_q is not None:
+        raise RuntimeError("MLA causal metadata is not implemented yet for TND paged layouts")
     if not 0 <= batch_size <= (2**32 - 1 - 408) // 5:
         raise RuntimeError("MLA: paged metadata word count overflow")
     if not (16 <= page_size <= 1024 and page_size % 16 == 0):
@@ -2773,7 +2779,7 @@ def _get_scheduler_metadata_fake(
                 softcap,
                 softmax_scale,
             ),
-            allow_causal=page_size is None,
+            allow_causal=page_size is None or cu_seqlens_q is None,
         )
         if page_size is not None:
             return _mla_paged_metadata_fake(
@@ -2785,6 +2791,7 @@ def _get_scheduler_metadata_fake(
                 qkv_dtype,
                 cache_seqlens,
                 cu_seqlens_q,
+                causal,
             )
         if cu_seqlens_q is not None:
             return (_mla_causal_mixed_metadata_fake if causal else _mla_tnd_bsnd_metadata_fake)(
@@ -2854,10 +2861,12 @@ def get_scheduler_metadata(
     max_seqlen_q is a per-query-segment bound, max_seqlen_k is cache capacity.
     Read-only flash_attn_with_kvcache accepts the matching v4/v9 record with TND queries
     and a BSND cache; the current query prefixes and KV lengths must match.
-    With page_size it generates v6 for BSND/TND queries: page_size must be a
+    With page_size it generates v6 for unmasked BSND/TND queries or v10 for causal
+    BSND queries. Both contain 408 + 5 * batch_size words and are not interchangeable.
+    page_size must be a
     multiple of 16 in [16, 1024], and max_seqlen_k is logical capacity, divisible
     by page_size and at most 16384. No page table or physical cache is inspected.
-    Read-only MLA paged kvcache accepts v6 with BSND or TND queries; TND also
+    Read-only MLA paged kvcache accepts the matching v6/v10 record; TND also
     requires cu_seqlens_q and max_seqlen_q at forward. The record does not bind
     a page table or physical cache; each forward validates current lengths,
     query prefixes and all used pages. Regenerate after lengths or prefixes change.
@@ -2884,7 +2893,7 @@ def get_scheduler_metadata(
                 softcap,
                 softmax_scale,
             ),
-            allow_causal=page_size is None,
+            allow_causal=page_size is None or cu_seqlens_q is None,
         )
         if page_size is not None:
             return torch.ops.flash_attn_npu_3._mla_paged_metadata(
@@ -2896,6 +2905,7 @@ def get_scheduler_metadata(
                 qkv_dtype,
                 cache_seqlens,
                 cu_seqlens_q,
+                causal,
             )
         if cu_seqlens_q is not None:
             op = (

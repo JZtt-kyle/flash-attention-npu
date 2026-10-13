@@ -120,14 +120,19 @@ def paged_probe(tmp_path_factory):
         yield probe
 
 
-def host_record(probe, item, dtype):
+def host_record(probe, item, dtype, *, causal=False):
     args, keep = arguments(item, dtype), []
     for name, (values, present, _) in zip(ARRAY_NAMES, input_arrays(item)):
         data = (ct.c_int32 * (len(values) + 2))(SENTINEL, *values, SENTINEL)
         getattr(args, name).address = ct.addressof(data) + 4 if present else 0
         keep.append((data, [SENTINEL, *values, SENTINEL]))
     output = (ct.c_uint32 * args.words)()
-    assert probe["lib"].paged_metadata_host(ct.byref(args), output) == 0
+    function = (
+        probe["lib"].causal_paged_metadata_host if causal else probe["lib"].paged_metadata_host
+    )
+    function.argtypes = [ct.POINTER(PagedArgs), ct.c_void_p]
+    function.restype = ct.c_uint32
+    assert function(ct.byref(args), output) == 0
     assert all(list(data) == before for data, before in keep)
     return list(output)
 

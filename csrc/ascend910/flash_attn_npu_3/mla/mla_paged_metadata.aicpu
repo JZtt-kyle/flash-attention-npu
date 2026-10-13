@@ -3,6 +3,8 @@
 #include "aicpu_api.h"
 #include "mla_paged_metadata_args.h"
 #include "mla_paged_metadata.cpp"
+#include "mla_causal_paged_metadata.cpp"
+#include "mla_causal.cpp"
 #include "mla_metadata.cpp"
 #include "mla_tnd_schedule.cpp"
 #include "mla_schedule.cpp"
@@ -18,6 +20,22 @@ __global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args)
     if (!BuildPagedMetadata(input.shape, input.platform, input.dtype,
                             reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
                             PagedMetadataInputs(input), true)) {
+        return 1;
+    }
+    AscendC::DataStoreBarrier();
+    return 0;
+}
+
+__global__ __aicpu__ uint32_t ComputeMlaCausalPagedBsndMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaPagedMetadataArgs*>(args);
+    if (!BuildCausalPagedBsndMetadata(input.shape, input.platform, input.dtype,
+                                      reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
+                                      PagedMetadataInputs(input))) {
         return 1;
     }
     AscendC::DataStoreBarrier();

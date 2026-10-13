@@ -10,6 +10,11 @@
 #include "mla_probe_batch_launch.h"
 using namespace AscendC;
 using namespace flash_attn::mla;
+#ifdef MLA_PAGED_CAUSAL
+constexpr bool IsCausal = true;
+#else
+constexpr bool IsCausal = false;
+#endif
 #ifdef MLA_DENSE_BF16
 using InputT = bfloat16_t;
 #else
@@ -32,7 +37,7 @@ template <AttentionCommon::FIA_LAYOUT QLayout>
 __aicore__ inline void RunSource(GM_ADDR qc, GM_ADDR qr, GM_ADDR kvList, GM_ADDR kr, GM_ADDR output, GM_ADDR lse,
                                  GM_ADDR workspace, const MlaPagedKernelSchedule& sourceSchedule, float scale,
                                  GM_ADDR sourceQ, GM_ADDR sourceK, const MlaPagedCacheInputs& cache,
-                                 bool sourceNeedInit, TPipe& pipe)
+                                 bool sourceNeedInit, GM_ADDR mask, TPipe& pipe)
 {
     using Types = AttentionCommon::FIAType<InputT, InputT, InputT, InputT, true, false, QLayout, 0, false,
                                            AttentionCommon::FIA_LAYOUT::BSH>;
@@ -58,7 +63,14 @@ __aicore__ inline void RunSource(GM_ADDR qc, GM_ADDR qr, GM_ADDR kvList, GM_ADDR
     tiling.baseParams.outputLayout = uint32_t(QLayout);
     tiling.baseParams.actualSeqS1Dims = params.batch;
     tiling.baseParams.actualSeqS2Dims = params.batch;
-    tiling.baseParams.needInit = sourceNeedInit;
+    tiling.baseParams.needInit = IsCausal || sourceNeedInit;
+    if (IsCausal) {
+        tiling.maskParams.attenMaskFlag = 1;
+        tiling.maskParams.attenMaskStride = 2048;
+        tiling.maskParams.sparseMode = 3;
+        tiling.maskParams.preToken = INT32_MAX;
+        tiling.maskParams.nextToken = 0;
+    }
     tiling.pageAttenParams.blockSize = sourceSchedule.pageSize;
     tiling.pageAttenParams.maxBlockNumPerBatch = cache.layout.maxPages;
     tiling.kvStrideParams.keyBnStride = cache.layout.v.batchStride;
@@ -74,10 +86,10 @@ __aicore__ inline void RunSource(GM_ADDR qc, GM_ADDR qr, GM_ADDR kvList, GM_ADDR
         tiling.outerSplitParams.s2End[i] = params.s2End[i];
     }
     FiaKernelNonQuantMla<Types, OracleCube, OracleVector, OracleFd> op;
-    op.Init(qc, kvList, kvList, nullptr, nullptr, sourceQ, sourceK, nullptr, nullptr, nullptr, nullptr, nullptr,
-            nullptr, nullptr, reinterpret_cast<GM_ADDR>(cache.table.address), nullptr, nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr, nullptr, nullptr, qr, kr, nullptr, nullptr, output, lse, workspace, &tiling,
-            nullptr, &pipe);
+    op.Init(qc, kvList, kvList, nullptr, mask, sourceQ, sourceK, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+            nullptr, reinterpret_cast<GM_ADDR>(cache.table.address), nullptr, nullptr, nullptr, nullptr, nullptr,
+            nullptr, nullptr, nullptr, nullptr, qr, kr, nullptr, nullptr, output, lse, workspace, &tiling, nullptr,
+            &pipe);
     op.Process();
 }
 #endif
@@ -98,15 +110,16 @@ __global__ __aicore__ __mix__(1, 2) void PAGED_ENTRY(uint64_t ffts, GM_ADDR qc, 
                                                      MlaPagedMetadataInputs inputs, MlaPagedCacheInputs cache,
                                                      MlaPagedKernelSchedule sourceSchedule, MlaBsndInputLayouts layouts,
                                                      float scale, GM_ADDR sourceQ, GM_ADDR sourceK, bool sourceNeedInit,
-                                                     GM_ADDR status, bool checked)
+                                                     GM_ADDR status, bool checked, GM_ADDR mask)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #ifndef MLA_DENSE_ORACLE
     MlaPagedKernelSchedule schedule{};
-    if (checked && !Kernel::LoadPagedMetadata<InputT>(metadata, words, context, inputs, cache, schedule))
+    if (checked && !Kernel::LoadPagedMetadata<InputT, IsCausal>(metadata, words, context, inputs, cache, schedule))
         return;
-    const auto result = checked ? MlaMetadataReadStatus::Success
-                                : Kernel::ReadPagedMetadata<InputT>(metadata, words, context, inputs, cache, schedule);
+    const auto result =
+        checked ? MlaMetadataReadStatus::Success
+                : Kernel::ReadPagedMetadata<InputT, IsCausal>(metadata, words, context, inputs, cache, schedule);
     if (status != nullptr) {
         uint32_t index = GetBlockIdx();
         if ASCEND_IS_AIV {
@@ -127,10 +140,10 @@ __global__ __aicore__ __mix__(1, 2) void PAGED_ENTRY(uint64_t ffts, GM_ADDR qc, 
     if (context.query.layout == 1) {
         // PA keeps KV lengths non-cumulative even with TND query prefixes.
         RunSource<Layout::TND>(qc, qr, kvList, reinterpret_cast<GM_ADDR>(cache.k.address), output, lse, workspace,
-                               sourceSchedule, scale, sourceQ, sourceK, cache, sourceNeedInit, pipe);
+                               sourceSchedule, scale, sourceQ, sourceK, cache, sourceNeedInit, mask, pipe);
     } else {
         RunSource<Layout::BSH>(qc, qr, kvList, reinterpret_cast<GM_ADDR>(cache.k.address), output, lse, workspace,
-                               sourceSchedule, scale, sourceQ, sourceK, cache, sourceNeedInit, pipe);
+                               sourceSchedule, scale, sourceQ, sourceK, cache, sourceNeedInit, mask, pipe);
     }
 #else
     GM_ADDR spans = metadata + kMlaPagedMetadataPrefixWords * sizeof(uint32_t);
@@ -138,7 +151,7 @@ __global__ __aicore__ __mix__(1, 2) void PAGED_ENTRY(uint64_t ffts, GM_ADDR qc, 
         Kernel::MlaPagedTnd<InputT> op;
         op(schedule, scale, qc, qr, cache, output, lse, workspace, &pipe, spans, layouts);
     } else {
-        Kernel::MlaPagedBsnd<InputT> op;
+        Kernel::MlaPagedBsnd<InputT, IsCausal> op;
         op(schedule, scale, qc, qr, cache, output, lse, workspace, &pipe, spans, layouts);
     }
 #endif
@@ -160,7 +173,7 @@ extern "C" int launch_paged_attention(void* stream, void* qc, void* qr, void* kv
                                       const MlaPagedMetadataContext* context, const MlaPagedMetadataInputs* inputs,
                                       const MlaPagedCacheInputs* cache, const MlaPagedKernelSchedule* sourceSchedule,
                                       const MlaBsndTensorView* views, float scale, void* sourceQ, void* sourceK,
-                                      bool sourceNeedInit, void* status, bool checked, uint32_t blocks)
+                                      bool sourceNeedInit, void* status, bool checked, uint32_t blocks, void* mask)
 {
     if (!context || !inputs || !cache || !sourceSchedule || !views || !std::isfinite(scale) || blocks == 0 ||
         blocks > 26 || context->query.layout > 1)
@@ -213,10 +226,10 @@ extern "C" int launch_paged_attention(void* stream, void* qc, void* qr, void* kv
 #if !defined(__NPU_ARCH__)
     auto before = batchLaunchCount;
 #endif
-    PAGED_ENTRY<<<blocks, nullptr, stream>>>(ffts, (uint8_t*)qc, (uint8_t*)qr, (uint8_t*)kvList, (uint8_t*)output,
-                                             (uint8_t*)lse, (uint8_t*)workspace, (uint8_t*)metadata, words, *context,
-                                             *inputs, *cache, *sourceSchedule, layouts, scale, (uint8_t*)sourceQ,
-                                             (uint8_t*)sourceK, sourceNeedInit, (uint8_t*)status, checked);
+    PAGED_ENTRY<<<blocks, nullptr, stream>>>(
+        ffts, (uint8_t*)qc, (uint8_t*)qr, (uint8_t*)kvList, (uint8_t*)output, (uint8_t*)lse, (uint8_t*)workspace,
+        (uint8_t*)metadata, words, *context, *inputs, *cache, *sourceSchedule, layouts, scale, (uint8_t*)sourceQ,
+        (uint8_t*)sourceK, sourceNeedInit, (uint8_t*)status, checked, (uint8_t*)mask);
 #if !defined(__NPU_ARCH__)
     return batchLaunchCount == before + 1 ? batchLaunchError : -2;
 #else

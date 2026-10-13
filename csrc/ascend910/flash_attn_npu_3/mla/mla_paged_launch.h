@@ -14,6 +14,7 @@ struct MlaPagedLaunchArgs {
     MlaPagedCacheInputs cache;
     MlaBsndInputLayouts layouts;
     float scale;
+    bool causal = false;
 };
 aclError LaunchPagedBsndFp16(const MlaPagedLaunchArgs& args);
 aclError LaunchPagedBsndBf16(const MlaPagedLaunchArgs& args);

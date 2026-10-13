@@ -43,11 +43,43 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "causal-paged-cpu": ["tests/test_flash_attn_npu_v3_mla_causal_paged_metadata.py"],
+    "causal-paged-sanitize": ["tests/test_flash_attn_npu_v3_mla_causal_paged_metadata.py"],
+    "paged-shared-cpu": [
+        f"tests/test_flash_attn_npu_v3_mla_{name}.py"
+        for name in ("paged_schedule", "paged_metadata", "paged_metadata_consumer")
+    ],
+    "paged-shared-sanitize": [
+        f"tests/test_flash_attn_npu_v3_mla_{name}.py"
+        for name in ("paged_schedule", "paged_metadata", "paged_metadata_consumer")
+    ],
+    "causal-paged-tools": [
+        "tests/test_mla_paged_reference_cache.py",
+        "tests/test_mla_native_dispatch.py",
+        "tests/test_mla_validation_policy.py::test_mixed_average_weights_entries_and_keeps_regressions",
+        "tests/test_mla_validation_policy.py::test_mixed_average_rejects_incomplete_evidence",
+    ],
+    "causal-paged-check": [
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_public.py",
+        "-k",
+        "representative",
+    ],
+    "causal-paged-public": [
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_public.py",
+        "-k",
+        "not representative and not release_trap",
+    ],
+    "causal-paged-trap": [
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_public.py",
+        "-k",
+        "release_trap",
+    ],
+    "causal-paged-profile": ["tests/test_mla_causal_paged_profile.py"],
     "causal-mixed-boundary": [
-        "tests/test_flash_attn_npu_v3_mla_causal_public.py",
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_public.py",
         "tests/test_flash_attn_npu_v3_mla_mixed_used.py",
         "-k",
-        "(static_rejections and paged) or (unconnected_combinations and window)",
+        "static_and_unopened_boundaries or (unconnected_combinations and window)",
     ],
     "causal-mixed-tools": ["tests/test_mla_validation_policy.py", "-k", "mixed_average"],
     "causal-mixed-cpu": ["tests/test_flash_attn_npu_v3_mla_causal_mixed_metadata.py"],
@@ -87,9 +119,9 @@ SUITES = {
     ],
     "causal-tnd-profile": ["tests/test_mla_causal_tnd_profile.py"],
     "causal-tnd-boundary": [
-        "tests/test_flash_attn_npu_v3_mla_causal_public.py",
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_public.py",
         "-k",
-        "static_rejections and paged",
+        "static_and_unopened_boundaries",
     ],
     "used-shared-cpu": USED_SHARED_CPU,
     "used-shared-sanitize": USED_SHARED_CPU,
@@ -212,6 +244,7 @@ SUITES = {
 }
 SUITES.update(INCREMENTAL_SUITES)
 PERFORMANCE_SUITES = {
+    "causal-paged-profile",
     "causal-tnd-profile",
     "causal-mixed-profile",
     "causal-profile",
@@ -235,6 +268,11 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "causal-paged-tools",
+    "causal-paged-cpu",
+    "causal-paged-sanitize",
+    "paged-shared-cpu",
+    "paged-shared-sanitize",
     "causal-mixed-tools",
     "causal-tnd-cpu",
     "causal-mixed-cpu",
@@ -254,6 +292,10 @@ CPU_SUITES = {
 
 def suite_dependencies(suite):
     if suite not in {
+        "causal-paged-cpu",
+        "causal-paged-sanitize",
+        "paged-shared-cpu",
+        "paged-shared-sanitize",
         "causal-cpu",
         "causal-sanitize",
         "causal-tnd-cpu",
@@ -419,6 +461,10 @@ def environment(args, directory, suite):
     if suite in CAUSAL_DEVICE_SUITES:
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "causal-paged-cpu",
+        "causal-paged-sanitize",
+        "paged-shared-cpu",
+        "paged-shared-sanitize",
         "causal-cpu",
         "causal-sanitize",
         "causal-tnd-cpu",
@@ -432,7 +478,7 @@ def environment(args, directory, suite):
     }:
         env["MLA_SCHEDULE_ARTIFACT_DIR"] = str(directory / "schedule")
         env["MLA_SCHEDULE_SANITIZE"] = "1" if suite.endswith("sanitize") else "0"
-        if suite == "causal-bsnd-sanitize":
+        if suite in {"causal-bsnd-sanitize", "paged-shared-sanitize"}:
             env["MLA_CONSUMER_SANITIZE"] = "1"
     return env
 

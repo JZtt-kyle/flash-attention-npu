@@ -8,6 +8,7 @@
 #endif
 
 namespace flash_attn::mla {
+template <bool IsCausal>
 __global__ __aicore__ __mix__(1, 2) void MLA_PAGED_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR output,
                                                          GM_ADDR lse, GM_ADDR workspace, GM_ADDR metadata,
                                                          MlaPagedMetadataContext context, MlaPagedMetadataInputs inputs,
@@ -19,12 +20,12 @@ __global__ __aicore__ __mix__(1, 2) void MLA_PAGED_ENTRY(uint64_t ffts, GM_ADDR 
     const uint32_t words = kMlaPagedMetadataPrefixWords + kMlaPagedMetadataSequenceWords * context.batch;
     // All cores validate the current lengths and every effective page before
     // TPipe, events, synchronization or output/workspace writes, even if empty.
-    if (!Kernel::LoadPagedMetadata<MLA_PAGED_TYPE>(metadata, words, context, inputs, cache, schedule)) {
+    if (!Kernel::LoadPagedMetadata<MLA_PAGED_TYPE, IsCausal>(metadata, words, context, inputs, cache, schedule)) {
         return;
     }
     AscendC::SetSyncBaseAddr(ffts);
     AscendC::TPipe pipe;
-    Kernel::MlaPagedBsnd<MLA_PAGED_TYPE> op;
+    Kernel::MlaPagedBsnd<MLA_PAGED_TYPE, IsCausal> op;
     op(schedule, scale, qc, qr, cache, output, lse, workspace, &pipe,
        metadata + kMlaPagedMetadataPrefixWords * sizeof(int32_t), layouts);
 #endif
@@ -33,8 +34,15 @@ __global__ __aicore__ __mix__(1, 2) void MLA_PAGED_ENTRY(uint64_t ffts, GM_ADDR 
 aclError MLA_PAGED_LAUNCH(const MlaPagedLaunchArgs& a)
 {
     MlaBatchLaunchScope launch;
-    MLA_PAGED_ENTRY<<<a.context.blockDim, nullptr, a.stream>>>(
-        a.ffts, a.qc, a.qr, a.output, a.lse, a.workspace, a.metadata, a.context, a.inputs, a.cache, a.layouts, a.scale);
+    if (a.causal) {
+        MLA_PAGED_ENTRY<true><<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.output, a.lse,
+                                                                         a.workspace, a.metadata, a.context, a.inputs,
+                                                                         a.cache, a.layouts, a.scale);
+    } else {
+        MLA_PAGED_ENTRY<false><<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.output, a.lse,
+                                                                          a.workspace, a.metadata, a.context, a.inputs,
+                                                                          a.cache, a.layouts, a.scale);
+    }
     return launch.Result();
 }
 } // namespace flash_attn::mla

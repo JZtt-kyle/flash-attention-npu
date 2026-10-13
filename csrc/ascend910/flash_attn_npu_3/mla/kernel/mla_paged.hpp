@@ -7,8 +7,8 @@
 #include "mla_paged_metadata.hpp"
 
 namespace flash_attn::mla::Kernel {
-template <typename InputT, bool IsTnd>
-class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, true> {
+template <typename InputT, bool IsTnd, bool IsCausal = false>
+class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, true, IsCausal> {
   public:
     // The caller has passed LoadPagedMetadata on every core, checked Q/qv
     // storage and matching query layout, and bound cache addresses to this call.
@@ -52,8 +52,8 @@ class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, tr
                   false, reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout);
     }
 };
-template <typename InputT>
-using MlaPagedBsnd = MlaPaged<InputT, false>;
+template <typename InputT, bool IsCausal = false>
+using MlaPagedBsnd = MlaPaged<InputT, false, IsCausal>;
 template <typename InputT>
 using MlaPagedTnd = MlaPaged<InputT, true>;
 } // namespace flash_attn::mla::Kernel
