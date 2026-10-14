@@ -69,6 +69,8 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "split-kv-plan-sanitize": ["tests/mla/unit/split_kv_plan/test_plan.py"],
+    "split-kv-plan-tools": ["tests/mla/unit/tools/test_mla_split_kv_plan_tools.py"],
     "split-kv-merge-check": [SPLIT_KV_MERGE, "-k", "representative or cost_boundary"],
     "split-kv-merge": [SPLIT_KV_MERGE, "-k", "not representative and not cost_boundary"],
     "split-kv-merge-profile": ["tests/mla/unit/split_kv_merge/test_component_profile.py"],
@@ -649,6 +651,9 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "unit-split_kv_plan",
+    "split-kv-plan-sanitize",
+    "split-kv-plan-tools",
     "split-kv-merge-tools",
     "split-kv-attention-tools",
     "unit-split_kv",
@@ -701,7 +706,12 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
-    if suite in {"unit-split_kv", "split-kv-sanitize"}:
+    if suite in {
+        "unit-split_kv",
+        "split-kv-sanitize",
+        "unit-split_kv_plan",
+        "split-kv-plan-sanitize",
+    }:
         from tests.mla.support.mla_split_kv_build import split_toolchain_identity
 
         return split_toolchain_identity(suite.endswith("sanitize"))
@@ -914,6 +924,8 @@ def environment(args, directory, suite):
     if suite in SPLIT_KV_DEVICE_SUITES:
         env["MLA_SPLIT_KV_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "unit-split_kv_plan",
+        "split-kv-plan-sanitize",
         "unit-split_kv",
         "split-kv-sanitize",
         "unit-window_paged_tnd",

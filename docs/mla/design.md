@@ -617,6 +617,22 @@ S>1 时，同一设备任务按 M10a 的 `[S,B,H,Q,512]` / `[S,B,H,Q]` 连续 FP
 
 [`模块测试`](../../tests/mla/unit/split_kv_merge/test_merge.py) 每次新构建并执行双方 partial，比较真实原始缓冲，再验证归并源一致性、双数学、空行、accumulator 的每行地址、重复执行和 guard；合成统计量另覆盖权重跨度、低于 mask 哨兵的有效 max 和 192/255/256 资源边界。数学结果按内容缓存，组件性能单列规范化输入的源/迁移归并，以及迁移行适配加 accumulator 的调用成本，不称公开 E2E。当前实测完成情况见 status。
 
+#### 6.2.11 BSND 显式 split 任务归属与持久 partial 布局
+
+[`mla_split_kv_plan.h/.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_kv_plan.h) 定义独立 CPU 计划，补齐单块 partial/merge 组件之间的跨波所有权与地址协议。它不生成设备 metadata、不选择实际可运行的 Tile 资源、不发射 Kernel，也不改变公开 split 边界。新任务编号与持久存储是本仓对 FA3 显式 split 的接入适配，不冒充 CANN 原生自动 FD 的变长分核。
+
+`BuildSplitKvPlanLayout` 只用静态 BSND 容量、逻辑 M/N、显式 S=2..256 和已知 AIC/blockDim/CV 比构造内存上界，不分配任务数组或 tensor。复用 M10a 的非 FD scratch 公式，保留每核双槽与全部源 host reserve；其后向上对齐到 32 字节，再依次安排 FP32 O、八路 sum、八路 max。源 host reserve 在奇数 M 时未必对齐，不能直接作为新缓冲起点。新增持久区以 `B*ceil(Sq*H/M)*S*M` 行为上界，所有乘加和包含 libApi 的总字节数必须能表示为非负 int64。FA3 accumulator 单独沿用 `[S,B,H,Sq,512]` / `[S,B,H,Sq]`，不与原始 sum/max 混用。
+
+`BuildSplitKvPlan` 接收既有 allocation/used 解析后的逐样本实际 Q/KV 长度，并重新检查长度数量、容量边界与调用级 window 身份。计划持有长度副本；有效 Q 的 M 块形成紧凑前缀，零 Q 样本的重复前缀不占任务。第 g 个有效 M 块的第 s 片编号为 `g*S+s`，AIC 归属为编号模 blockDim，后续迭代步长为 blockDim；merge 归属为 g 模 `blockDim*cvRatio`。任务数、前缀和波次为 64 位，不能截为 uint32。
+
+每个片拥有独立的 `[g,s,M行,512或8]` 持久槽，所有片完成前不得覆盖或复用这些槽。merge 必须排在全部 partial 写入完成之后，例如在同一 stream 的后续 Kernel 中执行；CPU 唯一归属验证不能替代设备同步验收。每个有效 Q 行均有唯一 merge 所有者，mask 无可见键、零实际 KV 和空尾片仍保留 partial 任务，以便设备初始化。M 尾部和静态上界中未使用的槽不参与归并，未使用 Q 的输出不增加值承诺。
+
+`Task` 复用固定 CANN mask 块范围和固定 FA3 ceil-div 显式分片，使用该样本有效 Sq/Sk 做右下对齐；窗口归一化仍使用调用级容量。`Merge` 提供同一 M 块的连续分片起点。`Row` 分别计算原分配 BSND O、head-major LSE、FA3 accumulator 和原始 partial 的字节地址，Q-used 不压紧最终输出中的间隙。所有构造与查询失败均保持输出不变，默认空计划也拒绝任务查询。
+
+全局 B/Q/KV 容量为零时，计划保留 accumulator shape，但任务与 workspace 为零；合法非空容量中的全零 KV-used 则保留初始化任务与预算。空容量仍校验所有静态参数和实际长度。这里只定义调度边界，不宣称执行过公开空值初始化、metadata 校验或 attention；这些仍由后续生产接入验收。
+
+[`模块测试`](../../tests/mla/unit/split_kv_plan/test_plan.py) 本次编译并执行固定 CANN 块范围/workspace 与 FA3 分片/shape 片段，另从原始长度逐行枚举可见键、跨波唯一槽、merge 覆盖和 allocation 地址；覆盖 C1V1/C1V2、超核波数、193..256 扩展任务、64 位编号和 int64 字节边界。普通与 ASan/UBSan 运行同一集合。这里只对照 CPU 分片公式，不声称源 FD 归并支持超过 192 片；没有公开新行为时不注册伪 split E2E。
+
 ### 6.3 长度与布局调度
 
 [`BuildDenseSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.cpp) 处理整容量 BSND；以下入口复用同一 `detail/cann_split_core.*`，由 host/CPU 驱动与相应 AICPU 生成器编译同一源码。长度先完整校验，再数值转换为固定源格式；分配起点与 used 分别处理。记录格式见 [第 5 节](#5-metadata-设计)。

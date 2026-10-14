@@ -1,64 +1,55 @@
 # MLA 当前状态
 
-当前分支 `feat/mla-cann-migration`，本轮起点 `d14eb492258bdf07647c04a93bf82959a382c4ac`。**M10b2 独立 FD 归并与 BSND FA3 accumulator 适配已闭环。** 当前闭环提交用 `git log -1 -- docs/mla/status.md` 定位。生产能力仍为 M09e 的五布局 mask 能力，公开 `num_splits` 仍只接受 1；本步没有开放 metadata 或公开 split。
+当前分支 `feat/mla-cann-migration`，本轮起点 `ff0a64d908ccf943665ef5d958c0f8a9213f3438`。**M10c1a 显式 split 任务归属与持久 partial 布局已闭环。** 当前闭环提交用 `git log -1 -- docs/mla/status.md` 定位。生产能力仍为 M09e 的五布局 mask，公开 `num_splits` 仍只接受 1。
 
 ## 本步产物与边界
 
-新增独立 Kernel / Block / Tile 归并和 FP32 accumulator 写回，保留源 max/sum 权重、按片顺序乘加、O 双缓冲及最终 dtype 舍入。按原始片区间与逐行 mask 排除无贡献片，空行 O=0、LSE=-inf；有效片 O 已归一化，不重复除 sum。1 片不写 accumulator，2..256 按 BSND `[S,B,H,Q,512]` / `[S,B,H,Q]` 写回。具体协议和来源见 [design 6.2.10](design.md#6210-独立-bsnd-fd-归并与-accumulator-适配)。
+接手发现独立 partial 每核只处理一片并复用原生 FD 临时槽，独立归并只处理一个 M 块；生产接入尚缺跨波所有权和持久地址。按 plan 已允许的新算法拆分，M10c1a 先闭环此 CPU 协议，M10c1b 再整体接入 metadata、CPU/AICPU、设备调度、生产及公开入口。
 
-模块归 `tests/mla/unit/split_kv_merge/`，新构建且实际执行双方 partial 产生输入，再运行固定源 FD Block 与迁移归并。源 6 KiB 缓冲在一行时最多表示 192 片，超域 oracle 明确拒绝；193..256 的迁移扩展使用双数学验收。全空行独立检查源有限负 LSE 与迁移 -inf 的适配。未接通公开路径，不注册伪公开 E2E；CANN/CATLASS、既有 partial 算法与公开分派未修改。
+新增 `mla_split_kv_plan.h/.cpp`：静态容量给出内存上界，实际 Q 长度给出紧凑 M 前缀；partial/merge 分别按 AIC/AIV 循环归属。每片拥有独立的持久 O/sum/max 槽，不随核复用覆盖；最终 O/LSE/accumulator 保持原分配 Q 地址。复用固定 CANN 块范围/workspace 和 FA3 显式分片/accumulator，原始 Q/KV 长度决定 mask。新增区在源 host reserve 后按 32 字节对齐，检查完整 int64 字节预算、64 位任务编号及失败原子性。协议见 [design 6.2.11](design.md#6211-bsnd-显式-split-任务归属与持久-partial-布局)。
 
-## 接手、环境与实际加载
+模块归 `tests/mla/unit/split_kv_plan/`。CPU 计划不分配数值 tensor，不生成设备 metadata，不证明设备同步或 Tile 资源可运行；全局空容量的公开初始化仍待接入。未形成新的公开行为，因此不注册伪 split E2E。CANN/CATLASS、已有 Kernel/生产分派和公开参数未修改。
 
-接手工作树干净，无遗留 MLA 测试/构建，第 6 张 910B3 空闲。M10b1 累计 E2E 的 13 个原始证据文件与源码哈希完整，见 `/tmp/mla-m10b2/takeover.json`；本步保守依赖身份改变，累计 E2E 实跑，继承 0，历史单元/性能继承 0。
+## 接手、环境与证据
 
-Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。初始扩展与上步吻合，记录在 `environment.json`。本次生产重建 505.8 秒，运行时加载检查 20.8 秒；实际路径为仓库 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，新 SHA-256 为 `b630d616a60c93b38b68a9979faea3aad401572734a80685d78b58389637428c`，与各设备组 `loaded.json` 一致。固定 CANN 源仍从 `ca18aee610729ca5270a44e2d84c751bc687fbf0` Git 对象提取，不用源仓当前 HEAD 代替。
+接手工作树干净，无遗留 MLA 测试/构建，第 6 张 910B3 空闲。M10b2 累计 E2E 的 13 个原始文件、852 个源码、生产 6,333 个依赖和 12 个产物完整，见 `/tmp/mla-m10c1a/takeover.json`。新增源码/驱动改变保守依赖身份，本步累计 E2E 实跑，继承 0；历史单元/性能继承 0。
 
-证据根 `/tmp/mla-m10b2/`；构建/reference 工作目录 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`。生产构建身份在该目录 `prepare.json`，各模块 probe 的 source、dependency、library 和 loaded 身份随组保存。`build/` 只保留 `mla-codex-loop/`。这些 `/tmp` 证据清理后不能继续继承。
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。初始加载扩展与上步一致。本步统一入口生产重建 487.0 秒、运行时核对 29.3 秒；实际加载仓库 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，新 SHA-256 为 `6fa057a1d524d1a0f610c54f1787e4625a83a89b6d0e662eb7dec3b39c16842d`，与 E2E `loaded.json` 和 `runtime.json` 一致。
 
-## 最近一次闭环验收
+证据根 `/tmp/mla-m10c1a/`；构建/reference 沿用 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`。`build/` 仅有 `mla-codex-loop/`。所有 `/tmp` 原始文件须保留，清理后不能继续继承。
 
-所有组先 dry-run/collect-only，最终清单见 `final-dry-run.json` 与 `final-collect/attempt-1791983640907410700/`。最终工具 attempt 为 `tools-final/attempt-1791983634854243700/`，设备 attempt 为 `acceptance/attempt-1791983761761732450/`。
+## 本轮验收
 
-| 本次实际执行 | 结果 | 耗时 |
+所有组均先 dry-run/collect-only。`selection-check.json` 确认普通/sanitizer 的 43 项完全一致，累计 E2E 与上步同为 119 项且清单未变；不设数量截断。
+
+| 本轮实际执行 | 结果 | 耗时 |
 | --- | --- | --- |
-| `split-kv-merge-tools` | 9/9；选择/恢复、失败传播、数学及构建/加载身份 | 5.1 秒 |
-| `split-kv-merge-check` | 10/10；双 dtype 代表、最长 KV 和 256 片成本边界 | 127.2 秒 |
-| `split-kv-merge` | 36/36；其余真实 partial、合成统计量、空值/guard/重复调用和失败原子性 | 127.9 秒 |
-| `split-kv-merge-profile` | 2/2；双 dtype 共 6 个固定配置采样及原始 profiler 对应检查 | 137.1 秒 |
-| 累计小输入 `e2e` | 119/119；本次实跑，继承 0 | 24.7 秒 |
+| `split-kv-plan-tools` | 12/12；选择/恢复、源身份、失败传播和 CPU 退出协议 | 7.7 秒 |
+| `unit-split_kv_plan` | 43/43；固定源、任务/地址/空值/溢出与输入所有权 | 24.0 秒 |
+| `split-kv-plan-sanitize` | 同一 43/43，ASan/UBSan 及进程退出/泄漏检查通过 | 77.4 秒 |
+| 累计小输入 `e2e` | 119/119；本次实跑，继承 0 | 33.2 秒 |
 
-模块正确性共 46 项：44 个数值配置及双 dtype host 拒绝检查。38 个数值配置运行可比固定源 FD，另 6 个 255/256 片配置明确拒绝源归并并通过双数学；真实 partial 均由双方实际执行。原始输入的完整 attention、独立归并和 accumulator LSE 数学检查全部通过，源精度限制例外为 0。原始输入、partial、结果、源、有效性和双 reference 保存在各组 `probes/<dtype>/accuracy/*.{pt,json}`。
+普通组使用 `development-aligned/attempt-1791986123997534050/` 的最后一次实跑；随后实现未变，源码/原始证据逐项核对一致，不重复执行。最终工具为 `cpu-final/attempt-1791986211554909940/`，sanitizer 为 `sanitize-final/attempt-1791986312881279360/`。CPU 证据核对见 `cpu-evidence-check.json`。每组保存固定 Git blob/许可证、编译命令、二进制哈希和完整请求/响应；sanitizer 三个实际执行器分别处理 3,651 / 41 / 1,109 个请求并以 0 退出。
 
-最终代表 reference 命中 36，边界组命中 62、首次计算并写入 74，累计 E2E 命中 266；相同输入在开发/代表/验收间复用，没有重复计算 reference，设备仍实际执行。最长 KV 的首次 FP16/BF16 reference 检查为 29.2/36.5 秒，最终命中后检查为 0.23/0.22 秒；最终 256 片检查约 0.30 秒，正确性进程峰值 RSS 2,134,792 KiB。这里的单例时间不含生成 partial；上表为完整组时间，含模块冷构建。
+本模块覆盖无 mask/causal/window、有效 Q/KV、零 Q 前缀、空片/全遮罩、2/8/192/193/255/256、C1V1/C1V2 和超核波数。`2^40` 任务编号和接近 int64 的最大字节预算只构造描述符并查询边界，不枚举或分配巨量缓冲。193..256 只对照 CPU 分片公式，不声称执行过该范围的源 FD 归并。CPU 测试不计算数学 reference；E2E 命中既有缓存 266 次、重算 0，待测设备路径实际执行。
 
-`final-evidence-check.json` 逐项核对 2,039 个原始证据条目、各组当前源码、生产 6,333 个依赖和 12 个产物，以及 probe/扩展实际加载哈希；无缺失或变化。最终实现冻结后仅更新文档。源码质量检查见 `final-freeze-quality.log`，提交前 staged 质量检查见 `quality-final.log`。
-
-复现命令：
+最小复现命令（sanitizer 与 E2E 需可访问宿主机进程/设备的环境）：
 
 ```bash
-python3 -m tests.mla --suite split-kv-merge-tools --output /tmp/mla-m10b2/tools-final
-python3 -m tests.mla --suite split-kv-merge-check split-kv-merge split-kv-merge-profile e2e --device 6 --output /tmp/mla-m10b2/acceptance
+python3 -m tests.mla --suite split-kv-plan-tools --output /tmp/mla-m10c1a/tools-repro
+python3 -m tests.mla --unit split_kv_plan --output /tmp/mla-m10c1a/cpu-repro
+python3 -m tests.mla --suite split-kv-plan-sanitize --output /tmp/mla-m10c1a/sanitize-repro
+python3 -m tests.mla --suite e2e --device 6 --output /tmp/mla-m10c1a/e2e-repro
 ```
 
-## 组件性能与未开放项
+最终 E2E attempt 为 `e2e-final/attempt-1791986228937415880/`。`final-evidence-check.json` 核对四组全部原始证据、当前源码、生产构建依赖/产物和实际加载库，未发现缺失或变化；源码冻结后只修改文档。最终差异/链接与 staged 质量检查见 `doc-links-final.json` 和 `quality-final.log`。
 
-性能在第 6 张卡隔离采样，CPU affinity 为 0；每配置预热 5，五轮各 20 wall/10 profiler 样本。比较同一规范化 FP32 O/sum/max 的首个 M 块，partial、行规范化、分配及 H2D 在计时外；wall 包含 ctypes、发射与完成同步。原始 CSV、逐轮样本、输入和调度位于 `split-kv-merge-profile/probes/<dtype>/profile/`。
+## 已处理的失败与未运行项
 
-| 固定配置 | FP16 kernel / wall 比 | BF16 kernel / wall 比 | FP16 / BF16 适配调用中位数 |
-| --- | --- | --- | --- |
-| merge-tail，S=2、M=16 | 1.7918 / 1.0170 | 1.7993 / 1.0037 | 140.030 / 145.335 μs |
-| band-partial-empty，S=8、M=17 | 1.4340 / 0.9911 | 1.4245 / 1.0002 | 163.470 / 162.025 μs |
-| longest-kv，S=2、M=256 | 1.8993 / 1.1387 | 1.8680 / 1.1518 | 216.730 / 212.290 μs |
+首次边界检查发现奇数 M 的源 host reserve 不满足新增统计缓冲对齐，已补齐 32 字节对齐并重跑本模块全部 43 项。首次 E2E 收集在沙箱无法读取 NPU，宿主机重做收集已成功。首次 sanitizer 43 项执行后，LeakSanitizer 因沙箱 ptrace 限制在退出时报错，整组记为失败；宿主机完整重跑、保留泄漏检查后通过。失败记录在 `development/`、`collect/`、`cpu-final/`；没有关闭检查来绕过失败。首次质量工具使用缺少 actionlint 的临时缓存无法联网，改用完整已有缓存；实现冻结质量检查见 `quality-freeze.log`。
 
-六配置等权平均 kernel 比 **1.7028**、wall 比 **1.0504**，分别退化 6/6、5/6，组件仍存在性能差距。最后一列单列迁移原始行适配加 accumulator 写回的调用成本，每项 100 样本；源没有 FA3 accumulator，不填充对照比值。本步完成组件采样，不宣称公开平均性能通过；公开接入时仍须满足 [design 第 7 节](design.md#7-验收口径) 的适用门槛。
-
-普通 FA3、历史单元/性能、公开性能、full-matrix 和 910C 实机未运行，不列为本独立组件的通过或继承。公开自动/显式 split、其他布局归并、metadata 和全局零 KV 的公开快速路径留待接入验收，不能将独立 probe 当成完整 M10 阶段完成。
-
-## 已处理的开发失败
-
-首次 probe 缺少 CATLASS 标量 helper 和固定源头文件依赖；随后发现按值端点数组超过编译器 1536 字节限制，改为在 KV≤16384 契约内使用 uint16 并加入静态检查。一次 runtime 检查因源码仍在修改而被身份检查正确拒绝。失败记录保留在 `development/`，后续冻结验收已解决。开发代表通过后复核补齐源 O 双缓冲、按 query 写回和 M10a 行宽/字节溢出检查，因此最终重跑代表；复用原数学缓存。没有未解决的验证失败。
+普通 FA3 专项、历史单元/性能、公开性能、full-matrix 和 910C 未运行，不列为本独立 CPU 组件的通过或继承。设备 partial 的多任务/stride 执行、归并阶段同步、metadata Trap/生命周期、新公开 E2E 和适用平均公开性能均留在 M10c1b，不能以本步 CPU 计划验收替代。
 
 ## 唯一下一步
 
-[M10c1：BSND 显式 split 生产接入](plan.md#唯一下一步-m10c1bsnd-显式-split-生产接入)。在非 PA BSND 同时完成所需 metadata、CPU/AICPU、生产及公开显式 split，新增该能力的日常 E2E 并验收适用公开性能；自动 split 和其他布局后续分别闭环。本轮只提交 M10b2，提交后立即停止。
+[M10c1b：BSND 显式 split 生产接入](plan.md#唯一下一步-m10c1bbsnd-显式-split-生产接入)。整体完成所需 metadata、CPU/AICPU、设备调度/同步/stride、生产及公开显式 split，新增该能力的日常 E2E 并验收适用平均公开性能；自动 split 和其他布局后续分别闭环。本轮只提交 M10c1a，提交后立即停止。
