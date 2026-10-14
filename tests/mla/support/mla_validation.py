@@ -55,6 +55,13 @@ USED_SHARED_CPU = [
     )
 ]
 SPLIT_KV_ATTENTION = "tests/mla/unit/split_kv_attention/test_attention.py"
+SPLIT_KV_MERGE = "tests/mla/unit/split_kv_merge/test_merge.py"
+SPLIT_KV_MERGE_SUITES = {
+    "unit-split_kv_merge",
+    "split-kv-merge-check",
+    "split-kv-merge",
+    "split-kv-merge-profile",
+}
 SPLIT_KV_DEVICE_SUITES = {
     "unit-split_kv_attention",
     "split-kv-attention-check",
@@ -62,6 +69,10 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "split-kv-merge-check": [SPLIT_KV_MERGE, "-k", "representative or cost_boundary"],
+    "split-kv-merge": [SPLIT_KV_MERGE, "-k", "not representative and not cost_boundary"],
+    "split-kv-merge-profile": ["tests/mla/unit/split_kv_merge/test_component_profile.py"],
+    "split-kv-merge-tools": ["tests/mla/unit/tools/test_mla_split_kv_merge_tools.py"],
     "split-kv-attention-check": [SPLIT_KV_ATTENTION, "-k", "representative or cost_boundary"],
     "split-kv-attention": [SPLIT_KV_ATTENTION, "-k", "not representative and not cost_boundary"],
     "split-kv-attention-profile": ["tests/mla/unit/split_kv_attention/test_component_profile.py"],
@@ -587,6 +598,7 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "split-kv-merge-profile",
     "split-kv-attention-profile",
     "window-paged-tnd-profile",
     "window-paged-profile",
@@ -615,6 +627,7 @@ WINDOW_DEVICE_SUITES = {
     "window-bsnd-public",
 }
 STANDALONE_CHECK_SUITES = {
+    "split-kv-merge-check",
     "causal-smoke",
     "causal-check",
     "window-check",
@@ -636,6 +649,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "split-kv-merge-tools",
     "split-kv-attention-tools",
     "unit-split_kv",
     "split-kv-sanitize",
@@ -895,6 +909,8 @@ def environment(args, directory, suite):
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
     if suite in WINDOW_DEVICE_SUITES:
         env["MLA_WINDOW_ATTENTION_DIR"] = str(directory / "probes")
+    if suite in SPLIT_KV_MERGE_SUITES:
+        env["MLA_SPLIT_KV_MERGE_DIR"] = str(directory / "probes")
     if suite in SPLIT_KV_DEVICE_SUITES:
         env["MLA_SPLIT_KV_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
@@ -1287,12 +1303,18 @@ def run(args):
                         error="Build artifacts or dependencies changed during validation",
                     )
             if (
-                suite in CAUSAL_DEVICE_SUITES | WINDOW_DEVICE_SUITES | SPLIT_KV_DEVICE_SUITES
+                suite
+                in CAUSAL_DEVICE_SUITES
+                | WINDOW_DEVICE_SUITES
+                | SPLIT_KV_DEVICE_SUITES
+                | SPLIT_KV_MERGE_SUITES
                 and not args.collect_only
                 and result["returncode"] == 0
             ):
                 try:
-                    if suite in SPLIT_KV_DEVICE_SUITES:
+                    if suite in SPLIT_KV_MERGE_SUITES:
+                        validate_causal_builds(directory, kind="split_kv_merge")
+                    elif suite in SPLIT_KV_DEVICE_SUITES:
                         validate_causal_builds(directory, kind="split_kv")
                     elif suite in WINDOW_DEVICE_SUITES:
                         validate_causal_builds(directory, kind="window")
