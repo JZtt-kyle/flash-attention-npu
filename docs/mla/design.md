@@ -231,6 +231,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v19](#6217-tnd-显式-split-生产适配) | 19 / 19 | 416+10B | 非 PA TND Q/KV 显式 split；双 allocation/used、窗口、片数和紧凑 M 前缀 |
 | [v20](#6219-tnd-自动-split-的-v20-安全协议) | 20 / 20 | 758+10B | 非 PA TND Q/KV 自动 split；双 allocation/used、原生端点与紧凑 M 前缀 |
 | [v21](#6221-混合显式-split-计划与-v21-安全协议) | 21 / 21 | 416+10B | TND Q + BSND KV 显式 split；64 位 KV 起点与紧凑 Q 计划；生产接入见 [6.2.22](#6222-混合显式-split-生产适配) |
+| [v22](#6223-混合原生自动-split-计划与-v22-安全协议) | 22 / 22 | 758+10B | TND Q + BSND KV 自动 split；紧凑 Q、64 位 KV 起点和原生 AIC/FD/Vector 端点；仅 CPU 构造与共享消费协议 |
 
 协议能表达某布局，不代表该布局已接通生产入口。生成记录、设备校验、独立 attention、入口调用分别验收；当前接入层次见 [status](status.md)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 使用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
 
@@ -792,6 +793,18 @@ M10c5a 独立闭环 CPU 构造/计划及共享校验协议，M10c5b 的生产适
 公开请求 LSE 时返回 `(O,LSE,out_accum,lse_accum)`，其中 accumulator 为真实 FP32 `[S,H,totalQ,512]` / `[S,H,totalQ]`，每个有效 Q 行保留各片的归一化 partial O 与 partial LSE；空片为 0/-inf。内部 unused Q allocation 间隙不压紧。全局空容量在 metadata 校验后填 O=0、LSE=+inf、accumulator=0/-inf；非空容量中零 KV 或全遮罩有效行的 LSE=-inf。cache 只读，输入、长度和记录的 stream 生命周期随提交保留。
 
 [`本模块固定源`](../../tests/mla/unit/split_mixed/test_source.py) 用独立原始 Q 段与矩形 KV 起点映射未修改 CANN partial/FD 执行器，并核对双数学与 accumulator；[`公开专项`](../../tests/mla/e2e/split_mixed/test_public.py) 覆盖三 mask、长度/stride/空容量、复用、real/fake/compile 与生命周期，release Trap 单独运行。[`固定性能输入`](../../tests/mla/support/mla_split_mixed_cases.py) 使用六种配置、双 dtype；沿用混合原生转换成本与隐式/生成/复用各 R=1/4 的六段平均口径，原生自动 FD 仍单列。profile 验证 AICPU→partial→merge 顺序、dtype、设备与完整阶段时间，不将两个数值阶段误计为单 Kernel。
+
+#### 6.2.23 混合原生自动 split 计划与 v22 安全协议
+
+[`混合自动计划`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_mixed_plan.h) 接收 TND Q 的 int32 allocation 前缀、totalQ/maxQ、BSND KV 容量 Sk、可选 Q/KV-used 和调用级窗口。它复用紧凑 Q 的拥有存储计划、原生 AIC 变长分区、FD 持久槽及 8 行 Vector 归约；共享构造器显式选择 KV 布局。KV 无前缀，矩形总量和原始 `b*Sk` 起点保留 64 位，不施加 TND 的 INT32_MAX 总量限制。计划不持有调用方的长度指针。
+
+静态预算以 totalQ 与非空 Q 段数限定 M 组，不使用 `B*maxQ`；FD 持久槽最多 `2*AIC`，Direct/Empty 不占槽，任务和 M 前缀为 uint64。真实 accumulator 布局为 `[AIC,H,totalQ,512]` / `[AIC,H,totalQ]` FP32（单核没有 accumulator）；Q/O/LSE/accumulator 地址使用原 allocation token，KV 地址再结合独立 batch/token stride。零 B、totalQ 或 Sk 无任务/workspace；非空容量的全零 KV-used 保留 Empty 初始化任务。静态容量、连续 stride、字节上界和 libApi 加法失败均不改写输出。
+
+[`v22 构造器`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_mixed_metadata.cpp) 输出精确 int32 `[758+10B]`。前 `410+8B` 字沿用 v5 混合几何/资源和 allocation/used；尾部与 v18/v20 同 schema，依次保存归一化 window、原生 AIC 端点、FD 头/分片/8 行归约及 Vector 端点、B+1 个 uint64 M 前缀，version=kind=22。协议要求 C1V2，非空 scratch 按物理 AIC 容量分配；非法输出缓冲保持不变，合法缓冲上的失败清空 payload 并写失败头。
+
+[`独立消费者`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_mixed_consumer.h) 先验证 v22 与 Q=TND/KV=BSND 身份，再经 v5 view 核对当前长度、64 位起点、几何和平台；共享原生端点/FD/Vector 校验以独立 KV 布局模板参数扩展，v18/v20 保持原参数。它重算紧凑前缀、持久预算与 accumulator 上界，不调用生成器或 CPU 计划，拒绝损坏记录、陈旧长度和交叉版本。校验及查询失败都保持输出不变。
+
+[`本模块单元`](../../tests/mla/unit/auto_split_mixed_protocol/test_plan.py) 重新编译固定 CANN AIC/FD/Vector、workspace 与 FA3 accumulator 片段，并独立枚举三种 mask 的可见行、任务所有权和原 allocation 地址；[`协议单元`](../../tests/mla/unit/auto_split_mixed_protocol/test_metadata.py) 覆盖双 dtype、空容量、坏描述符、资源/长度/端点损坏、uint32 之外的 KV 起点及精确溢出。普通与 ASan/UBSan 使用同一集合。本步尚未注册 v22 AICPU、发射自动设备 Kernel 或开放混合 `num_splits=0`；对应数值、公开 E2E、Trap、生命周期和性能留给独立生产接入步骤。
 
 ### 6.3 长度与布局调度
 

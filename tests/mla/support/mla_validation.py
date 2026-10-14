@@ -78,6 +78,17 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "auto-split-mixed-protocol-tools": ["tests/mla/unit/tools/test_mla_auto_split_mixed_tools.py"],
+    "auto-split-mixed-protocol-sanitize": [
+        "tests/mla/unit/auto_split_mixed_protocol/test_plan.py",
+        "tests/mla/unit/auto_split_mixed_protocol/test_metadata.py",
+    ],
+    "auto-split-mixed-protocol-check": [
+        "tests/mla/unit/auto_split_mixed_protocol/test_plan.py",
+        "tests/mla/unit/auto_split_mixed_protocol/test_metadata.py",
+        "-k",
+        "representative or capacity_cost_boundary",
+    ],
     "split-mixed-protocol-tools": ["tests/mla/unit/tools/test_mla_split_mixed_tools.py"],
     "split-mixed-protocol-sanitize": [
         "tests/mla/unit/split_mixed_protocol/test_plan.py",
@@ -756,6 +767,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "auto-split-mixed-protocol-tools",
     "split-mixed-tools",
     "auto-split-tnd-tools",
     "auto-split-bsnd-tools",
@@ -763,6 +775,9 @@ CPU_SUITES = {
     "auto-split-metadata-sanitize",
     "auto-split-metadata-tools",
     "auto-split-metadata-check",
+    "unit-auto_split_mixed_protocol",
+    "auto-split-mixed-protocol-sanitize",
+    "auto-split-mixed-protocol-check",
     "unit-split_mixed_protocol",
     "split-mixed-protocol-sanitize",
     "split-mixed-protocol-check",
@@ -851,6 +866,9 @@ def suite_dependencies(suite):
         "split-tnd-cpu",
         "split-tnd-sanitize",
         "split-bsnd-sanitize",
+        "unit-auto_split_mixed_protocol",
+        "auto-split-mixed-protocol-sanitize",
+        "auto-split-mixed-protocol-check",
         "unit-split_mixed_protocol",
         "split-mixed-protocol-sanitize",
         "split-mixed-protocol-check",
@@ -1088,6 +1106,9 @@ def environment(args, directory, suite):
         "split-tnd-cpu",
         "split-tnd-sanitize",
         "split-bsnd-sanitize",
+        "unit-auto_split_mixed_protocol",
+        "auto-split-mixed-protocol-sanitize",
+        "auto-split-mixed-protocol-check",
         "unit-split_mixed_protocol",
         "split-mixed-protocol-sanitize",
         "split-mixed-protocol-check",

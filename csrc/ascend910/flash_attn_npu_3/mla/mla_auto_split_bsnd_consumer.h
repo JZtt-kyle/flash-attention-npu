@@ -1,6 +1,6 @@
 // Copyright (c) 2025 Huawei Technologies Co., Ltd.
 // CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
-// Independent v18/v20 safety validation. No producer, CPU plan or SplitCore call.
+// Independent v18/v20/v22 safety validation. No producer, CPU plan or SplitCore call.
 // Validates coverage/addressing, not the optimality/authenticity of a partition.
 #pragma once
 #include "mla_auto_split_bsnd_metadata.h"
@@ -111,7 +111,7 @@ MLA_AUTO_INLINE void Offsets(const MlaAutoSplitBsndSchedule& s, uint64_t row, ui
 }
 } // namespace auto_split_detail
 
-template <bool IsTnd, uint32_t Version, typename Reader, typename Arrays, typename Context>
+template <bool IsTnd, uint32_t Version, bool IsKvTnd = IsTnd, typename Reader, typename Arrays, typename Context>
 MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, uint32_t words, const Context& context,
                                                             const MlaUsedMetadataInputs& inputs, const Arrays& arrays,
                                                             MlaAutoSplitBsndSchedule& output)
@@ -124,7 +124,7 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
     auto status = ReadMetadataHeader(read, words, kMlaAutoSplitFixedWords + 10 * c.batch, Version, Version, c.dtype);
     if (status != Status::Success)
         return status;
-    if (c.query.layout != uint32_t(IsTnd) || c.kv.layout != uint32_t(IsTnd))
+    if (c.query.layout != uint32_t(IsTnd) || c.kv.layout != uint32_t(IsKvTnd))
         return Status::ShapeMismatch;
     const uint32_t base = Base(c.batch), prefixWord = base + kMlaAutoSplitTailPrefix;
     const auto& w = context.window;

@@ -45,17 +45,21 @@ MlaScheduleStatus Convert(MlaCausalStatus s)
 }
 } // namespace
 
-MlaScheduleStatus BuildAutoSplitTndPlanLayout(const MlaAutoSplitTndPlanConfig& c, MlaAutoSplitKvLayout& output)
+MlaScheduleStatus BuildAutoSplitCompactPlanLayout(const MlaAutoSplitTndPlanConfig& c, MlaSequenceLayout kvLayout,
+                                                  MlaAutoSplitKvLayout& output)
 {
     const auto& s = c.shape;
+    if (kvLayout != MlaSequenceLayout::Tnd && kvLayout != MlaSequenceLayout::Bsnd)
+        return MlaScheduleStatus::UnsupportedShape;
     if (s.batch < 0 || s.totalQuery < 0 || s.totalKv < 0 || s.maxQueryLength < 0 || s.maxKvLength < 0 ||
         s.queryHeads < 1 || c.mBaseSize < 1 || c.mBaseSize > 256 || c.s2BaseSize < 1 || c.s2BaseSize > 512) {
         return MlaScheduleStatus::UnsupportedShape;
     }
     if (c.aicNum < 1 || c.aicNum > kMlaMaxAic || (c.cvRatio != 1 && c.cvRatio != 2))
         return MlaScheduleStatus::InvalidPlatform;
-    if (uint64_t(s.batch) > UINT32_MAX || s.totalQuery > INT32_MAX || s.totalKv > INT32_MAX ||
-        s.maxQueryLength > kMlaMaxQueryLength || s.maxKvLength > kMlaMaxKvLength || s.queryHeads > kMlaMaxQueryHeads) {
+    if (uint64_t(s.batch) > UINT32_MAX || s.totalQuery > INT32_MAX ||
+        (kvLayout == MlaSequenceLayout::Tnd && s.totalKv > INT32_MAX) || s.maxQueryLength > kMlaMaxQueryLength ||
+        s.maxKvLength > kMlaMaxKvLength || s.queryHeads > kMlaMaxQueryHeads) {
         return MlaScheduleStatus::FieldOverflow;
     }
     const uint64_t rows = uint64_t(s.maxQueryLength) * s.queryHeads;
@@ -63,7 +67,8 @@ MlaScheduleStatus BuildAutoSplitTndPlanLayout(const MlaAutoSplitTndPlanConfig& c
     if (rows > kMlaMaxDenseRows || totalRows > kMlaMaxBatchRows)
         return MlaScheduleStatus::FieldOverflow;
     if (uint64_t(s.totalQuery) > uint64_t(s.batch) * s.maxQueryLength ||
-        uint64_t(s.totalKv) > uint64_t(s.batch) * s.maxKvLength)
+        uint64_t(s.totalKv) > uint64_t(s.batch) * s.maxKvLength ||
+        (kvLayout == MlaSequenceLayout::Bsnd && s.totalKv != s.batch * s.maxKvLength))
         return MlaScheduleStatus::UnsupportedShape;
     MlaAutoSplitKvLayout result{};
     auto status = BuildSplitAccumulatorLayout(Accumulator(c), result.accumulator);
@@ -96,11 +101,12 @@ MlaScheduleStatus BuildAutoSplitTndPlanLayout(const MlaAutoSplitTndPlanConfig& c
     return MlaScheduleStatus::Success;
 }
 
-MlaScheduleStatus BuildAutoSplitTndPlan(const MlaAutoSplitTndPlanConfig& c, const MlaWindowConfig& window,
-                                        const MlaUsedInputs& inputs, MlaAutoSplitTndPlan& output)
+MlaScheduleStatus BuildAutoSplitCompactPlan(const MlaAutoSplitTndPlanConfig& c, MlaSequenceLayout kvLayout,
+                                            const MlaWindowConfig& window, const MlaUsedInputs& inputs,
+                                            MlaAutoSplitTndPlan& output)
 {
     MlaAutoSplitTndPlan result;
-    auto status = BuildAutoSplitTndPlanLayout(c, result.layout_);
+    auto status = BuildAutoSplitCompactPlanLayout(c, kvLayout, result.layout_);
     if (status != MlaScheduleStatus::Success)
         return status;
     const auto& shape = c.shape;
@@ -114,7 +120,7 @@ MlaScheduleStatus BuildAutoSplitTndPlan(const MlaAutoSplitTndPlanConfig& c, cons
         status = ParseUsedLengths({shape.batch,
                                    shape.queryHeads,
                                    {MlaSequenceLayout::Tnd, shape.totalQuery, shape.maxQueryLength},
-                                   {MlaSequenceLayout::Tnd, shape.totalKv, shape.maxKvLength}},
+                                   {kvLayout, shape.totalKv, shape.maxKvLength}},
                                   inputs, parsed);
         if (status != MlaScheduleStatus::Success)
             return status;
@@ -173,6 +179,16 @@ MlaScheduleStatus BuildAutoSplitTndPlan(const MlaAutoSplitTndPlanConfig& c, cons
     } catch (const std::length_error&) {
         return MlaScheduleStatus::AllocationFailure;
     }
+}
+
+MlaScheduleStatus BuildAutoSplitTndPlanLayout(const MlaAutoSplitTndPlanConfig& c, MlaAutoSplitKvLayout& output)
+{
+    return BuildAutoSplitCompactPlanLayout(c, MlaSequenceLayout::Tnd, output);
+}
+MlaScheduleStatus BuildAutoSplitTndPlan(const MlaAutoSplitTndPlanConfig& c, const MlaWindowConfig& window,
+                                        const MlaUsedInputs& inputs, MlaAutoSplitTndPlan& output)
+{
+    return BuildAutoSplitCompactPlan(c, MlaSequenceLayout::Tnd, window, inputs, output);
 }
 
 MlaScheduleStatus MlaAutoSplitTndPlan::Task(uint64_t group, uint32_t split, MlaAutoSplitTndTask& output) const

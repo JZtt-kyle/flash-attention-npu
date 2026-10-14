@@ -27,6 +27,15 @@ struct MlaAutoSplitTndTask {
 // Accumulator capacity is AIC with shape [AIC,H,totalQ,512] / [AIC,H,totalQ].
 MlaScheduleStatus BuildAutoSplitTndPlanLayout(const MlaAutoSplitTndPlanConfig&, MlaAutoSplitKvLayout&);
 
+// Shared compact-Q implementation used by the TND and mixed adapters. The
+// KV layout selects validation/parsing only; native partitions use effective
+// lengths and all task addresses retain the owned original allocation spans.
+class MlaAutoSplitTndPlan;
+MlaScheduleStatus BuildAutoSplitCompactPlanLayout(const MlaAutoSplitTndPlanConfig&, MlaSequenceLayout,
+                                                  MlaAutoSplitKvLayout&);
+MlaScheduleStatus BuildAutoSplitCompactPlan(const MlaAutoSplitTndPlanConfig&, MlaSequenceLayout, const MlaWindowConfig&,
+                                            const MlaUsedInputs&, MlaAutoSplitTndPlan&);
+
 // Owned CPU component only. Native endpoints are exclusive in (B,M,S2), FD
 // Vector endpoints inclusive in (head,8-row part). Neither is cyclic ownership.
 // Plans store O(B+AIC) metadata, not a descriptor per M block or physical tile.
@@ -61,8 +70,9 @@ class MlaAutoSplitTndPlan {
     MlaScheduleStatus Row(uint64_t group, uint32_t split, uint32_t row, MlaAutoSplitKvRow& output) const;
 
   private:
-    friend MlaScheduleStatus BuildAutoSplitTndPlan(const MlaAutoSplitTndPlanConfig&, const MlaWindowConfig&,
-                                                   const MlaUsedInputs&, MlaAutoSplitTndPlan&);
+    friend MlaScheduleStatus BuildAutoSplitCompactPlan(const MlaAutoSplitTndPlanConfig&, MlaSequenceLayout,
+                                                       const MlaWindowConfig&, const MlaUsedInputs&,
+                                                       MlaAutoSplitTndPlan&);
     MlaAutoSplitTndPlanConfig config_{};
     MlaAutoSplitKvLayout layout_{};
     MlaNativeSplitKvSchedule native_{};
