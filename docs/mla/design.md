@@ -665,7 +665,19 @@ host 用 M=256、N=512 给出静态上界，AICPU 的实际源 M 为 256 或容�
 
 静态 accumulator 描述以 AIC 数作为后端容量上界，复用 FA3 的 `[S,B,H,Sq,512]`／`[S,B,H,Sq]` FP32 地址；单核无 accumulator。它与每个 M 块实际分片数分开：Direct 占第 0 片，其余无贡献片和 Empty 行需要调用者初始化为 0/-inf。这里只定义容量与地址，不承诺公开自动请求的返回形状或初始化已执行；生产接入须同时验证自动请求选择、设备长度、真实返回值及 fake/compile。全局空容量仍保留合法 accumulator 描述，workspace 为零。所有构造/查询失败保持输出不变，计划拥有长度副本。
 
-[`模块测试`](../../tests/mla/unit/auto_split_kv_plan/test_plan.py) 新编译固定源 SplitCore/workspace 和 FA3 shape 片段；独立枚举原始输入的可见 tile、AIC 唯一覆盖、FD 首片编号、每核至多两个 FD 块、Vector 8 行归约、持久槽无覆盖及原分配行地址。普通与 ASan/UBSan 使用同一集合，最大逻辑容量检查不分配 tensor。该组件尚未接通 metadata、设备或公开自动路径，不新增伪自动 E2E；既有公开能力继续由累计小输入 E2E 回归。
+[`模块测试`](../../tests/mla/unit/auto_split_kv_plan/test_plan.py) 新编译固定源 SplitCore/workspace 和 FA3 shape 片段；独立枚举原始输入的可见 tile、AIC 唯一覆盖、FD 首片编号、每核至多两个 FD 块、Vector 8 行归约、持久槽无覆盖及原分配行地址。普通与 ASan/UBSan 使用同一集合，最大逻辑容量检查不分配 tensor。该组件不直接作为设备记录；独立记录协议见 6.2.14。设备和公开自动路径尚未接通，不新增伪自动 E2E；既有公开能力继续由累计小输入 E2E 回归。
+
+#### 6.2.14 BSND 自动 split 的 v18 安全协议
+
+[`v18 构造器`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_bsnd_metadata.h) 与 [`独立消费者`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_bsnd_consumer.h) 是 M10c2b1 的共享协议组件，尚未编入生产 setup、发射或公开入口。本步在 CPU 上验收序列化及 CPU/AICore 共用头中的校验/查询逻辑；AICPU 生成、AICore 编译执行、release Trap 和自动返回形状由 M10c2b2 接入时实测。
+
+记录使用 `version=kind=18`、连续 int32 `[758+10B]`。前 `410+8B` 字保留 v5 的完整 allocation/used、平台、源基本块和无 FD 调度身份；消费者核验真实 v18 头部后，用只读 schema view 复用 v5 安全检查。这段无 FD 端点不作为自动任务。尾部依次编码归一化窗口 3 字、原生 usedCoreNum 1 字、三个 26 项 AIC 端点数组、4 个 FD 标量、6 个 26 项和 2 个 52 项 FD 数组，以及 B+1 个 low/high uint64 M 前缀。记录不存成本、地址、CPU 对象或逐任务数组。
+
+构造器以已校验的源基本块调用 6.2.13 的自动计划。沿用现有设备协议的 C1V2 限制，C1V1 明确拒绝；非空容量的 blockDim 必须等于 AIC 容量，以匹配按物理核复用的 scratch。全局空容量使用单校验核和零 workspace，但长度、窗口、平台及头部仍须校验。合法输出缓冲上的生成失败清空 payload 并写失败头，非法缓冲或与长度重叠则在写入前失败。
+
+消费者不调用构造器、CPU 计划或 SplitCore。相邻 AIC 排他端点构成不重叠区间，与每个 M 的真实 mask 可见区间相交；检查端点顺序、范围和最后非空样本覆盖，从内部端点独立重建全部 FD head/片数/首片，检查紧凑持久槽不超过 2×AIC。原生 window 端点可以停在首个可见 tile 前，不能把该零成本前缀计为 partial；全零成本也允许原生端点位于 batch 末尾。FD 8 行分块及尾行数按有效 Q 重算，Vector 包含端点必须严格递增且完整覆盖归约行。所有未使用数组槽须为零；静态预算按实际源 M/N 独立重算，超预算拒绝；另外检查 FP32 accumulator 的分配容量和空 tensor 连续 stride 溢出，不能用实际长度或 FD workspace 的上界代替。校验复杂度与 B/AIC 有关，不遍历全部 M。
+
+成功校验后，`AutoSplitBsndTask/Merge/Row` 在记录与调用 context 保持不变的前提下查询所有者、逻辑片段、持久槽与 BSND 分配行地址；查询及消费失败不改写输出。Direct/Empty 的初始化责任、FD 阶段同步和 AIC 容量 accumulator 描述沿用 6.2.13，协议本身不执行初始化或数值计算。模块所属的 [`协议测试`](../../tests/mla/unit/auto_split_bsnd_metadata/test_metadata.py) 新编译固定 CANN SplitCore/workspace 和 FA3 片段，另以原始长度枚举 tile/归约/地址，并对头、平台、长度、窗口、分区、FD、Vector、宽整数前缀和预算进行损坏及溢出检查；普通与 sanitizer 使用同一集合。
 
 ### 6.3 长度与布局调度
 

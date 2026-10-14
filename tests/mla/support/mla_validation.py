@@ -72,6 +72,13 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "auto-split-metadata-sanitize": ["tests/mla/unit/auto_split_bsnd_metadata/test_metadata.py"],
+    "auto-split-metadata-tools": ["tests/mla/unit/tools/test_mla_auto_split_metadata_tools.py"],
+    "auto-split-metadata-check": [
+        "tests/mla/unit/auto_split_bsnd_metadata/test_metadata.py",
+        "-k",
+        "representative or capacity_cost_boundary",
+    ],
     "auto-split-kv-plan-sanitize": ["tests/mla/unit/auto_split_kv_plan/test_plan.py"],
     "auto-split-kv-plan-tools": ["tests/mla/unit/tools/test_mla_auto_split_kv_plan_tools.py"],
     "auto-split-kv-plan-check": [
@@ -672,6 +679,10 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "unit-auto_split_bsnd_metadata",
+    "auto-split-metadata-sanitize",
+    "auto-split-metadata-tools",
+    "auto-split-metadata-check",
     "unit-auto_split_kv_plan",
     "auto-split-kv-plan-sanitize",
     "auto-split-kv-plan-tools",
@@ -740,6 +751,9 @@ def suite_dependencies(suite):
         "split-bsnd-cpu",
         "split-bsnd-sanitize",
         "unit-auto_split_kv_plan",
+        "unit-auto_split_bsnd_metadata",
+        "auto-split-metadata-sanitize",
+        "auto-split-metadata-check",
         "auto-split-kv-plan-sanitize",
         "auto-split-kv-plan-check",
         "unit-split_kv_plan",
@@ -960,6 +974,9 @@ def environment(args, directory, suite):
         "split-bsnd-cpu",
         "split-bsnd-sanitize",
         "unit-auto_split_kv_plan",
+        "unit-auto_split_bsnd_metadata",
+        "auto-split-metadata-sanitize",
+        "auto-split-metadata-check",
         "auto-split-kv-plan-sanitize",
         "auto-split-kv-plan-check",
         "unit-split_kv_plan",
