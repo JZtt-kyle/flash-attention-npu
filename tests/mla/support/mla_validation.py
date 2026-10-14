@@ -34,6 +34,7 @@ from tests.mla.support.mla_validation_policy import (
     POLICY_VERSION,
     CAUSAL_STAGE_POLICY,
     CAUSAL_STAGE_SUITES,
+    WINDOW_STAGE_SUITES,
 )
 
 
@@ -54,6 +55,30 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "window-paged-tnd-cpu": [
+        "tests/mla/unit/window_paged_tnd/test_flash_attn_npu_v3_mla_window_paged_tnd_metadata.py"
+    ],
+    "window-paged-tnd-sanitize": [
+        "tests/mla/unit/window_paged_tnd/test_flash_attn_npu_v3_mla_window_paged_tnd_metadata.py"
+    ],
+    "window-paged-tnd-check": [
+        "tests/mla/e2e/window_paged_tnd/test_flash_attn_npu_v3_mla_window_paged_tnd_public.py",
+        "-k",
+        "representative or cost_boundary",
+    ],
+    "window-paged-tnd-public": [
+        "tests/mla/e2e/window_paged_tnd/test_flash_attn_npu_v3_mla_window_paged_tnd_public.py",
+        "-k",
+        "not representative and not cost_boundary and not release_trap",
+    ],
+    "window-paged-tnd-trap": [
+        "tests/mla/e2e/window_paged_tnd/test_flash_attn_npu_v3_mla_window_paged_tnd_public.py",
+        "-k",
+        "release_trap",
+    ],
+    "window-paged-tnd-profile": [
+        "tests/mla/e2e/window_paged_tnd/test_mla_window_paged_tnd_profile.py"
+    ],
     "window-paged-cpu": [
         "tests/mla/unit/window_paged/test_flash_attn_npu_v3_mla_window_paged_metadata.py"
     ],
@@ -85,6 +110,26 @@ SUITES = {
         "tests/mla/e2e/paged_tnd/test_flash_attn_npu_v3_mla_paged_tnd_public.py::test_compile_and_length_updates",
         "-k",
         "static_and_unopened_boundaries or window_size or schema_compile_and_length_updates or test_compile_and_length_updates",
+    ],
+    "window-paged-tnd-tools": [
+        "tests/mla/unit/tools/test_mla_window_paged_tnd_tools.py",
+        "tests/mla/unit/tools/test_mla_causal_stage_performance.py",
+        *[
+            f"tests/mla/unit/tools/test_mla_validation.py::test_success_failure_interruption_and_resume[{suite}]"
+            for suite in (
+                "window-paged-tnd-tools",
+                "window-paged-tnd-cpu",
+                "window-paged-tnd-sanitize",
+            )
+        ],
+        *[
+            f"tests/mla/unit/tools/test_mla_validation.py::test_causal_dependencies_changing_during_execution_fail[{suite}]"
+            for suite in ("window-paged-tnd-cpu", "window-paged-tnd-sanitize")
+        ],
+        "tests/mla/unit/tools/test_mla_validation.py::test_performance_always_executes_on_resume[window-paged-tnd-profile]",
+    ],
+    "window-stage-correctness": [
+        "tests/mla/e2e/window_stage/test_window_stage.py",
     ],
     "window-paged-tools": [
         "tests/mla/unit/tools/test_mla_window_paged_tools.py",
@@ -525,6 +570,7 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "window-paged-tnd-profile",
     "window-paged-profile",
     "window-mixed-profile",
     "window-tnd-profile",
@@ -568,12 +614,16 @@ CAUSAL_DEVICE_SUITES = {
 }
 CPU_SUITES = {
     "unit-tools",
+    "unit-window_paged_tnd",
+    "window-paged-tnd-cpu",
     "window-paged-cpu",
     "window-mixed-cpu",
     "window-tnd-cpu",
+    "window-paged-tnd-sanitize",
     "window-paged-sanitize",
     "window-mixed-sanitize",
     "window-tnd-sanitize",
+    "window-paged-tnd-tools",
     "window-paged-tools",
     "window-mixed-tools",
     "window-tnd-tools",
@@ -615,9 +665,12 @@ def suite_dependencies(suite):
         "window-sanitize",
         "window-bsnd-cpu",
         "window-bsnd-sanitize",
+        "unit-window_paged_tnd",
+        "window-paged-tnd-cpu",
         "window-paged-cpu",
         "window-mixed-cpu",
         "window-tnd-cpu",
+        "window-paged-tnd-sanitize",
         "window-paged-sanitize",
         "window-mixed-sanitize",
         "window-tnd-sanitize",
@@ -802,6 +855,8 @@ def environment(args, directory, suite):
         env["MLA_E2E_SELECTION"] = "1"
     if getattr(args, "causal_stage_performance", False) and suite in CAUSAL_STAGE_SUITES:
         env["MLA_CAUSAL_STAGE_PERFORMANCE"] = "1"
+    if getattr(args, "window_stage_performance", False) and suite in WINDOW_STAGE_SUITES:
+        env["MLA_WINDOW_STAGE_PERFORMANCE"] = "1"
     env["MLA_VALIDATION_MAX_CASES"] = str(getattr(args, "max_cases", DEFAULT_MAX_CASES))
     env["MLA_FULL_MATRIX"] = "1" if getattr(args, "full_matrix", False) else "0"
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
@@ -810,9 +865,12 @@ def environment(args, directory, suite):
     if suite in WINDOW_DEVICE_SUITES:
         env["MLA_WINDOW_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "unit-window_paged_tnd",
+        "window-paged-tnd-cpu",
         "window-paged-cpu",
         "window-mixed-cpu",
         "window-tnd-cpu",
+        "window-paged-tnd-sanitize",
         "window-paged-sanitize",
         "window-mixed-sanitize",
         "window-tnd-sanitize",
@@ -915,7 +973,12 @@ def cache_stats(path):
 
 
 def run(args):
+    args.window_stage_performance = getattr(args, "window_stage_performance", False)
     args.causal_stage_performance = getattr(args, "causal_stage_performance", False)
+    if args.window_stage_performance and (
+        args.causal_stage_performance or not set(args.suite) <= set(WINDOW_STAGE_SUITES)
+    ):
+        raise ValueError("--window-stage-performance requires window performance suites")
     if args.causal_stage_performance and not set(args.suite) <= set(CAUSAL_STAGE_SUITES) | {
         "causal-profile"
     }:
@@ -941,6 +1004,7 @@ def run(args):
                     max_cases_per_suite=args.max_cases,
                     full_matrix=args.full_matrix,
                     selection_policy=POLICY_VERSION,
+                    window_stage_performance=args.window_stage_performance,
                     causal_stage_performance=args.causal_stage_performance,
                     causal_stage_policy=CAUSAL_STAGE_POLICY,
                     prepare=[
@@ -1000,6 +1064,7 @@ def run(args):
             max_cases_per_suite=args.max_cases,
             full_matrix=args.full_matrix,
             selection_policy=POLICY_VERSION,
+            window_stage_performance=args.window_stage_performance,
             causal_stage_performance=args.causal_stage_performance,
             causal_stage_policy=CAUSAL_STAGE_POLICY,
             attempt=str(attempt),
@@ -1102,6 +1167,7 @@ def run(args):
                     case_limit=args.max_cases,
                     full_matrix=args.full_matrix,
                     selection_policy=POLICY_VERSION,
+                    window_stage_performance=args.window_stage_performance,
                     causal_stage_performance=args.causal_stage_performance,
                     causal_stage_policy=CAUSAL_STAGE_POLICY,
                     dependencies=dependencies,
@@ -1247,6 +1313,11 @@ def main():
         "--causal-stage-performance",
         action="store_true",
         help="Limit five causal layouts to 100 total dtype/input configurations; requires stage aggregate acceptance",
+    )
+    parser.add_argument(
+        "--window-stage-performance",
+        action="store_true",
+        help="Measure five window layouts within 100 total dtype/input configurations",
     )
     limits = parser.add_mutually_exclusive_group()
     limits.add_argument(

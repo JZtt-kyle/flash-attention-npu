@@ -184,7 +184,7 @@ def test_public_paged_route_and_protocol_size():
     assert "window_left=window_left" in forward and "window_right=window_right" in forward
     metadata = ast.get_source_segment(text, functions["_mla_paged_metadata_fake"])
     assert "411 if is_window else 408" in metadata
-    assert "MLA TND PA window metadata is not implemented yet" in metadata
+    assert "MLA TND PA window metadata is not implemented yet" not in metadata
 
 
 def test_source_probe_uses_band_and_independent_window():

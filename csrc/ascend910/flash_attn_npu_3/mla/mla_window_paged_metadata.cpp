@@ -1,4 +1,4 @@
-// BSND PA window adapter. Pinned CANN/FA3 algorithms and licenses remain in
+// BSND/TND PA window adapters. Pinned CANN/FA3 algorithms and licenses remain in
 // mla_window.cpp, mla_tnd_schedule.cpp, LICENSE.cann and LICENSE.fa3; page Copy is unchanged.
 #include "mla_window_paged_metadata.h"
 #include <new>
@@ -6,12 +6,13 @@
 
 namespace flash_attn::mla {
 namespace {
+template <MlaSequenceLayout Layout>
 MlaScheduleStatus BuildWindowPagedSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
                                            const MlaPagedInputs& inputs, MlaPagedSchedule& output, const void* context)
 {
     const auto& config = *static_cast<const MlaWindowConfig*>(context);
     MlaWindow normalized{};
-    if (shape.query.layout != MlaSequenceLayout::Bsnd || shape.query.maxLength != config.maxQueryLength ||
+    if (shape.query.layout != Layout || shape.query.maxLength != config.maxQueryLength ||
         shape.logicalKvCapacity != config.maxKvLength ||
         NormalizeWindow(config, normalized) != MlaCausalStatus::Success) {
         return MlaScheduleStatus::UnsupportedShape;
@@ -66,11 +67,32 @@ bool BuildWindowPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatformI
                                   const MlaWindowConfig& window)
 {
     if (!BuildPagedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs, false,
-                                        BuildWindowPagedSchedule, &window, kMlaWindowPagedMetadataTailWords)) {
+                                        BuildWindowPagedSchedule<MlaSequenceLayout::Bsnd>, &window,
+                                        kMlaWindowPagedMetadataTailWords)) {
         return false;
     }
     output[1] = kMlaWindowPagedBsndMetadataVersion;
     output[2] = kMlaMetadataWindowPagedBsnd;
+    if (output[5] == 0) {
+        MlaWindow normalized{};
+        NormalizeWindow(window, normalized); // Checked even for empty allocations by the builder.
+        output[outputWords - 3] = uint32_t(normalized.kind);
+        output[outputWords - 2] = uint32_t(normalized.left);
+        output[outputWords - 1] = uint32_t(normalized.right);
+    }
+    return true;
+}
+bool BuildWindowPagedTndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                                 uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs,
+                                 const MlaWindowConfig& window, bool fromQueryPrefix)
+{
+    if (!BuildPagedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs, fromQueryPrefix,
+                                        BuildWindowPagedSchedule<MlaSequenceLayout::Tnd>, &window,
+                                        kMlaWindowPagedMetadataTailWords)) {
+        return false;
+    }
+    output[1] = kMlaWindowPagedTndMetadataVersion;
+    output[2] = kMlaMetadataWindowPagedTnd;
     if (output[5] == 0) {
         MlaWindow normalized{};
         NormalizeWindow(window, normalized); // Checked even for empty allocations by the builder.

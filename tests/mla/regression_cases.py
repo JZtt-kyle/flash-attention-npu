@@ -17,9 +17,10 @@ BEHAVIORS = {
     "window_tnd": ("tnd", "window"),
     "window_mixed": ("mixed", "window"),
     "window_paged": ("paged_bsnd", "window"),
+    "window_paged_tnd": ("paged_tnd", "window"),
 }
 SCENARIOS = ("lengths", "strided_reuse", "empty")
-COMPILE_BEHAVIORS = ("dense", "causal_tnd", "window_mixed", "causal_paged_tnd")
+COMPILE_BEHAVIORS = ("dense", "causal_tnd", "window_mixed", "causal_paged_tnd", "window_paged_tnd")
 
 
 def daily_cases():

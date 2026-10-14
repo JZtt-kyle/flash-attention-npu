@@ -1,5 +1,7 @@
 """Fixed window/PA inputs chosen before timing; all legal pages are tested separately."""
 
+from tests.mla.support.mla_validation_policy import window_public_cases
+
 
 def config(
     page=112,
@@ -65,3 +67,8 @@ ACCURACY_CASES = [s for s in PERFORMANCE_CASES if s not in REPRESENTATIVES] + [
 ]
 COST_CASES = [PERFORMANCE_CASES[0]]
 ACCURACY_CASES = [s for s in ACCURACY_CASES if s not in COST_CASES]
+
+
+# Only stage performance changes this fixed candidate set; correctness lists above stay intact.
+
+PERFORMANCE_CASES = window_public_cases(PERFORMANCE_CASES, "paged-bsnd")

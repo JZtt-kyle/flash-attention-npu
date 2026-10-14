@@ -27,6 +27,31 @@ CAUSAL_STAGE_SUITES = dict(
     )
 )
 
+WINDOW_STAGE_SUITES = dict(
+    zip(
+        (
+            "window-bsnd-profile",
+            "window-tnd-profile",
+            "window-mixed-profile",
+            "window-paged-profile",
+            "window-paged-tnd-profile",
+        ),
+        CAUSAL_STAGE_GROUPS,
+    )
+)
+
+
+def window_public_cases(specs, group):
+    if os.environ.get("MLA_WINDOW_STAGE_PERFORMANCE") != "1":
+        return list(specs)
+    selection = stage_selection(specs, group)
+    directory = Path(os.environ["MLA_VALIDATION_RESULT"])
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"public-stage-selection-{group}.json").write_text(
+        json.dumps(selection, indent=2) + "\n"
+    )
+    return selection["selected"]
+
 
 def rank(value):
     return hashlib.sha256(("mla-daily-v1:" + original_nodeid(value)).encode()).hexdigest()
@@ -167,5 +192,8 @@ def public_cases(specs, *, group=None):
 def check_public_performance(result):
     # Stage acceptance is the equal configuration mean across all five layouts.
     # The separate stage summarizer requires complete, hashed group evidence.
-    if os.environ.get("MLA_CAUSAL_STAGE_PERFORMANCE") != "1":
+    if (
+        os.environ.get("MLA_CAUSAL_STAGE_PERFORMANCE") != "1"
+        and os.environ.get("MLA_WINDOW_STAGE_PERFORMANCE") != "1"
+    ):
         assert result["passed"], result["mean_ratio"]

@@ -1,8 +1,8 @@
 # MLA 迭代计划
 
-本页记录实施顺序、每步产物与完成条件。**M09d、测试归档及用例精简已完成；唯一下一步是 M09e。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。
+本页记录实施顺序、每步产物与完成条件。**M09e 与五布局窗口阶段验收已完成；唯一下一步是 M10a。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。
 
-## 最近完成：按覆盖目的精简测试
+## 已完成：按覆盖目的精简测试
 
 用户已确认直接实施：取消默认固定数量抽样，以合理的代表用例和开发反馈时间决定规模。
 
@@ -12,7 +12,7 @@
 - 继承：生产构建、固定源和数学 reference 缓存核对内容后复用；上一轮性能只保留历史记录，不计本次通过或继承，新增/调整的选择规则及公开回归本步实际执行。
 - 完成：公布默认与专项的实际用例数及实测耗时，普通调用不收集再截断庞大参数全集；文档、质量检查通过后提交一次并停止，不开始 M09e。
 
-## 最近完成：单元测试 / E2E 整理与 build 清理
+## 已完成：单元测试 / E2E 整理与 build 清理
 
 用户已确认：单元测试由开发模块拥有，E2E 随模块的可调用行为交付，后续仅累计 E2E 回归，失败再运行所属模块单元测试定位；`build/` 仅保留无头循环日志和恢复状态。
 
@@ -29,22 +29,27 @@
 
 边界依据是现有共享 `MlaTaskRing`/Vector、布局包装、metadata 路径及测试驱动。功能轮开始前，按下列当前步补齐实际改动路径、明确测试命令、继承依据和完成条件；进入远期里程碑时再细化，不另设审批或纯计划提交。
 
-### 唯一下一步 M09e：TND PA window 与阶段收尾
+### 已完成 M09e：TND PA window 与阶段收尾
 
-复用已闭环的窗口算法、BSND PA window 和 TND PA causal 契约，在一个独立步骤内接通 **TND Q + ND PA KV window 只读 cache**，并完成 M09 阶段验收；不提前启动 split-KV。
+在一个步骤内接通 TND Q + ND PA KV window 只读 cache：v16 metadata 的 CPU/AICPU 生成、共享消费者、TND launcher、生产分派和公开 real/fake/compile。复用现有 window 数值核、页 Copy 和四路 stride；公开签名不增加 Q-used，内部 used 与分配起点保持独立。CANN/CATLASS 未改。
 
-- 同步接通 TND PA window 的独立 metadata 身份、前缀/allocation/内部 used、生产分派、公开 cache 及 metadata 生成/复用；公开签名不增加 Q-used，动态前缀/长度、归一化窗口与全部有效页在消费前核验。优先复用现有地址/Copy、Block/Tile 和窗口分核；其他未开放能力明确拒绝。
-- 开工前在本节补齐实际协议/影响路径、统一组/命令、代表用例清单和继承依赖。专项覆盖非均匀/空前缀、used 间隙、合法 P 的代表边界、跨页/页尾与非零 S2 起点、有限/单侧/causal 叠加、stride/空值、复用/更新/互斥、real/fake/compile/生命周期/Trap，实测双 dtype 固定源与双数学及适用 R=1/4 平均公开 E2E。
-- 阶段收尾按 [design 第 7 节](design.md#7-验收口径) 实测五种已开放窗口布局的约定组合、累计 E2E 回归及性能矩阵；正确性按覆盖目的选择代表组合，不凑固定数量；阶段公开性能沿用约定的固定输入集合，保留全部单例/分段、退化、原生 FD 与源精度限制。阶段组合不能以历史结果替代，也不因收尾自动使用 full-matrix。
-- 复用有效构建和数学内容缓存，仅继承有效 E2E 证据；本模块新增单元测试专属于自己，其他模块回归走累计 E2E；新入口和阶段约定组合实际执行。必跑检查、相关契约核对和平均公开 E2E 完成后更新三份文档、质量检查并提交一次后停止；必要验收无法完成则如实交接，不提交为已闭环。
+本模块交付独占 CPU/sanitizer、固定源与双数学、公开/Trap/生命周期及成本边界测试，并在 `regression_cases.py` 新增 `window_paged_tnd` 的日常 E2E。M09 五种窗口布局的约定组合、累计日常 E2E、普通 FA3 和至多 100 配置阶段性能均已实测，阶段汇总核验原始证据、分派及身份后通过。具体命令、耗时、FD 和组件性能差距见 [status](status.md)；不继承历史单元或性能，不以无 mask 历史测试代替窗口验收。
 
-## 后续里程碑：M09–M17
+### 唯一下一步 M10a：独立 CPU split-KV 分区与 workspace 布局
+
+先闭环 512+64 split-KV 的独立调度/布局组件，再进入设备 partial attention 与合并数值。生产入口仍只接受 `num_splits=1`；本步不开放自动/显式 split，不返回占位 accumulator。
+
+- 改动与影响路径：在 `csrc/ascend910/flash_attn_npu_3/mla/` 新增 CPU split-KV 适配，复用既有长度、块范围及固定源分核；逐项对齐 CANN FD 分区/workspace 与固定 FA3 的 0/1/显式 split、accumulator 外形。源代码保持只读，保留来源和版权。开始实现前在本节固定实际文件、共享头依赖和可独立验收的协议；若需变更既有共享调度，列明受影响生产路径。
+- 本模块测试放在 `tests/mla/unit/split_kv/`，支持驱动放 `tests/mla/support/`；新增并注册 `python3 -m tests.mla --unit split_kv` 及对应 sanitizer 组，先 dry-run/collect-only。覆盖固定源分区/记账差分、独立覆盖与不重叠检查、空分片/全空、显式 1/2/8/256 及非法值、mask 范围、对齐/地址/尺寸溢出，保留 ASan/UBSan。CANN 自动策略与 FA3 请求语义分别验收，不能伪称源提供相同公开参数。
+- 回归与继承：只复核本轮有效 E2E 的依赖和原始证据；独立组件未改变生产时可以继承其正确性，若修改共享生产依赖则通过统一入口实际运行受影响的累计小输入 E2E。单元测试和性能不继承；不把其他模块历史单元组加入门槛，不重复计算相同数学 reference。
+- 完成条件：独立分区、accumulator/workspace 布局及失败边界有固定源和独立检查证据，sanitizer 与受影响回归通过；design 按实际协议更新，status 记录结果及未开放边界，质量检查后提交一次并停止。后续设备数值/合并及各布局生产接入另行闭环。
+
+## 后续里程碑：M10–M17
 
 **下表每行是能力里程碑，不是一个无头轮次或一个提交。**临近该阶段时根据已闭环组件和实际影响细化当前步，同时保留下一步；不现在为所有远期任务固定文件、测试数量或提交数。细化采用与 M08 相同的规则：新算法先独立验收，稳定布局接入一次闭环。实现和必要的测试/对照驱动一起交付，基础精度、普通回归与生命周期不推迟到阶段末。
 
 | 里程碑 | 依赖与建议提交边界 | 阶段完成条件 |
 | --- | --- | --- |
-| M09：512+64 window | 复用 causal；先闭环窗口归一化/范围和首个 BSND 行为，再按 TND、混合、PA 接入；是否需要独立算法步取决于与 causal 的共享影响 | 有限/单侧窗口、causal 叠加、非等长与页边界；已开放组合精度和适用 E2E |
 | M10：512+64 split-KV | 独立验证分区、accumulator 与合并数值；再按 BSND、TND/混合、PA 接入显式及自动调度，不把完整 split 迁移作为一轮 | 自动/1/显式 split、空分片/全空、O/LSE/accumulator/metadata 及已支持 mask 组合；长 KV E2E |
 | M11：192/128 BSND prefill | 这是新数值表示；先验证独立 K/V、分组头及 192 stride 数值组件，再完成 BSND metadata/生产/公开接入 | qv=None、源通用非量化路径、GQA、真实 stride、O/LSE 和适用 E2E |
 | M12：prefill TND/长度 | 复用 M11 数值；TND varlen 和混合 cache 按可调用行为接入，各自同时覆盖 allocation/used 与 stride | 非均匀长度、seqused、空值/边界/GQA、生产精度和适用 E2E |
@@ -94,6 +99,7 @@
 | M09c1 | 非 PA TND Q/KV window varlen、v13 双前缀/used 与调用级窗口身份；四路 stride、真实/fake/compile/Trap/生命周期、固定源/双数学、共享回归及平均公开 E2E |
 | M09c2 | 非 PA TND Q + BSND KV window cache、v14 公开 metadata 生成/复用及内部 Q-used；混合地址/四路 stride、真实/fake/compile/Trap/生命周期、固定源/双数学、共享回归及平均公开 E2E |
 | M09d | BSND Q + ND PA KV window cache、v15 metadata 生成/复用与生产/公开接入；全 P、跨页窗口、stride/空值/Trap/compile/生命周期、固定源/双数学及平均公开 E2E |
+| M09e | TND Q + ND PA KV window cache、v16 前缀/used、metadata 生成/复用与全部入口；五种窗口布局的阶段组合、累计 E2E、普通 FA3、源组件及平均公开 E2E；M09 完成 |
 | 测试整理与精简 | 模块所属单元测试、明确的小输入日常 E2E 与共享支持目录；代表组合取代默认数量截断，穷举显式开启、仅继承 E2E；外部产物和可重建原生对照，build 仅保留无头日志与状态 |
 
 M07 的页大小精度覆盖全部 16..1024 的 16 倍数；性能矩阵及原生非 FD/FD 的边界见 [design 7.1](design.md#71-固定性能矩阵与阶段边界)。公开接入包含 None/整数/tensor KV 长度、v6 复用及相关 MLA/普通 FA3 回归，结果只在 status 维护。

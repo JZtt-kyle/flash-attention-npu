@@ -4,7 +4,9 @@
 #define ComputeMlaCausalPagedBsndMetadata ComputeMlaCausalPagedBsndMetadataForProbe
 #define ComputeMlaCausalPagedTndMetadata ComputeMlaCausalPagedTndMetadataForProbe
 #define ComputeMlaWindowPagedBsndMetadata ComputeMlaWindowPagedBsndMetadataForProbe
+#define ComputeMlaWindowPagedTndMetadata ComputeMlaWindowPagedTndMetadataForProbe
 #include "../../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_metadata.aicpu"
+#undef ComputeMlaWindowPagedTndMetadata
 #undef ComputeMlaWindowPagedBsndMetadata
 #undef ComputeMlaCausalPagedTndMetadata
 #undef ComputeMlaPagedMetadata

@@ -19,6 +19,7 @@ from tests.mla.support.mla_validation_policy import (
     CAUSAL_STAGE_GROUPS,
     CAUSAL_STAGE_POLICY,
     CAUSAL_STAGE_SUITES,
+    WINDOW_STAGE_SUITES,
     PUBLIC_MAX_CASES,
     stage_selection,
 )
@@ -64,14 +65,17 @@ def summarize_stage(averages):
     )
 
 
-def load_evidence(paths):
+def load_evidence(paths, *, mask="causal"):
+    if mask not in {"causal", "window"}:
+        raise ValueError("Unknown stage mask")
+    suites = WINDOW_STAGE_SUITES if mask == "window" else CAUSAL_STAGE_SUITES
     averages, evidence = {}, []
     source_identity = {}
     runtime = None
     for path in paths:
         summary = json.loads(path.read_text())
         if (
-            not summary.get("causal_stage_performance")
+            not summary.get(f"{mask}_stage_performance")
             or summary.get("causal_stage_policy") != CAUSAL_STAGE_POLICY
         ):
             raise ValueError("Expected capped causal stage evidence")
@@ -79,7 +83,7 @@ def load_evidence(paths):
         if runtime is not None and runtime != current_runtime:
             raise ValueError("Stage runtime identities differ")
         runtime = current_runtime
-        for suite, group in CAUSAL_STAGE_SUITES.items():
+        for suite, group in suites.items():
             record = summary["groups"].get(suite)
             if record is None or record.get("status") == "not_run":
                 continue
@@ -120,6 +124,11 @@ def load_evidence(paths):
                         scale=s.get("scale"),
                         lengths=s.get("lengths"),
                         stride_profile=s.get("stride", "contiguous"),
+                        **(
+                            dict(window=s["window"], causal=s.get("causal", False))
+                            if mask == "window"
+                            else {}
+                        ),
                     )
                     for s in specs
                 ]
@@ -151,11 +160,12 @@ def load_evidence(paths):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mask", choices=("causal", "window"), default="causal")
     parser.add_argument("--evidence", type=Path, action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     try:
-        result = load_evidence(args.evidence)
+        result = load_evidence(args.evidence, mask=args.mask)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         result = dict(passed=False, error=str(exc))
     args.output.parent.mkdir(parents=True, exist_ok=True)

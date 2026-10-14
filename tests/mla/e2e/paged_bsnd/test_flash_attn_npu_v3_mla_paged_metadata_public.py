@@ -287,7 +287,6 @@ def test_generator_requires_tensor_lengths(dtype, layout, value):
         ("num_heads_kv", 2),
         ("num_splits", 0),
         ("num_splits", 2),
-        ("window_size", (0, -1)),
         ("attention_chunk", 1),
         ("has_softcap", True),
         ("pack_gqa", False),
@@ -307,7 +306,7 @@ def test_unsupported_options(dtype, kind, field, value):
         args[field] = args["cache_seqlens"] if value == "tensor" else value
         with pytest.raises(
             RuntimeError,
-            match="MLA (scheduler|causal|TND PA window) metadata is not implemented yet",
+            match="MLA (scheduler|causal) metadata is not implemented yet",
         ):
             call(kind, args)
 

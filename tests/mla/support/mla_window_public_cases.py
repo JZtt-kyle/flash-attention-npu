@@ -1,5 +1,7 @@
 """Fixed BSND window public correctness and performance inputs."""
 
+from tests.mla.support.mla_validation_policy import window_public_cases
+
 # Selected by semantics before measurement; every profile configuration also
 # executes the same source/dual-math public correctness check.
 PERFORMANCE_CASES = [
@@ -45,3 +47,8 @@ ACCURACY_CASES += [
         ((31, 5), False, None),
     ]
 ]
+
+
+# Only stage performance changes this fixed candidate set; correctness lists above stay intact.
+
+PERFORMANCE_CASES = window_public_cases(PERFORMANCE_CASES, "bsnd")

@@ -1,5 +1,7 @@
 """Fixed mixed window inputs, chosen by semantics before any timing."""
 
+from tests.mla.support.mla_validation_policy import window_public_cases
+
 
 def spec(
     q=(7, 0, 3), k=(3, 0, 17), capacity=33, uq=None, h=16, implicit_k=False, window=(2, 1), **kw
@@ -57,3 +59,8 @@ ACCURACY_CASES = (
         spec(q=(3, 7), k=(17, 257), capacity=1025, uq=[1, 2], sq=64),
     ]
 )
+
+
+# Only stage performance changes this fixed candidate set; correctness lists above stay intact.
+
+PERFORMANCE_CASES = window_public_cases(PERFORMANCE_CASES, "mixed")

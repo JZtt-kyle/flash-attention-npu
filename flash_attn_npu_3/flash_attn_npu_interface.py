@@ -502,8 +502,6 @@ def _check_mla_paged_inputs(
     # Physical pages and total TND tokens are independent of logical batch.
     tnd = cu_seqlens_q is not None
     is_window = (window_left, window_right) != (-1, -1)
-    if is_window and tnd:
-        raise RuntimeError("MLA TND PA window forward is not implemented yet")
     prefix_words = 411 if is_window else 408
     batch, page = q.shape[0], k.shape[1]
     if tnd:
@@ -644,11 +642,23 @@ def _mla_paged_tnd_forward_fake(
     seqused_q=None,
     scheduler_metadata=None,
     causal=False,
+    window_left=-1,
+    window_right=-1,
 ):
     _check_mla_inputs(q, k, v, qv, varlen_q=True, paged_kv=True)
     _check_mla_dense_options(softmax_scale=softmax_scale, causal=causal, allow_causal=True)
     _check_mla_paged_inputs(
-        q, k, page_table, cache_seqlens, scheduler_metadata, seqused_q, cu_seqlens_q, max_seqlen_q
+        q,
+        k,
+        page_table,
+        cache_seqlens,
+        scheduler_metadata,
+        seqused_q,
+        cu_seqlens_q,
+        max_seqlen_q,
+        window_left,
+        window_right,
+        causal,
     )
     return (
         q.new_empty((*q.shape[:-1], 512)),
@@ -1027,7 +1037,7 @@ def _flash_attn_forward(
             softmax_scale=softmax_scale,
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None or cu_seqlens_q is None,
+            allow_window=True,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -1226,7 +1236,7 @@ def _flash_attn_forward_fake(
             softmax_scale=softmax_scale,
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None or cu_seqlens_q is None,
+            allow_window=True,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -2539,7 +2549,7 @@ def flash_attn_with_kvcache(
         _check_mla_dense_options(
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None or cu_seqlens_q is None,
+            allow_window=True,
             window_size=window_size,
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -2611,6 +2621,8 @@ def flash_attn_with_kvcache(
                 cache_seqlens,
                 scheduler_metadata=scheduler_metadata,
                 causal=causal,
+                window_left=window_size[0],
+                window_right=window_size[1],
             )
         elif page_table is not None:
             out, softmax_lse = torch.ops.flash_attn_npu_3._mla_paged_bsnd_forward(
@@ -3064,8 +3076,6 @@ def _mla_paged_metadata_fake(
     window_right=-1,
 ):
     is_window = (window_left, window_right) != (-1, -1)
-    if is_window and cu_seqlens_q is not None:
-        raise RuntimeError("MLA TND PA window metadata is not implemented yet")
     prefix_words = 411 if is_window else 408
     if not 0 <= batch_size <= (2**32 - 1 - prefix_words) // 5:
         raise RuntimeError("MLA: paged metadata word count overflow")
@@ -3239,7 +3249,7 @@ def _get_scheduler_metadata_fake(
                 softmax_scale,
             ),
             allow_causal=True,
-            allow_window=page_size is None or cu_seqlens_q is None,
+            allow_window=True,
         )
         if page_size is not None:
             return _mla_paged_metadata_fake(
@@ -3381,7 +3391,7 @@ def get_scheduler_metadata(
                 softmax_scale,
             ),
             allow_causal=True,
-            allow_window=page_size is None or cu_seqlens_q is None,
+            allow_window=True,
         )
         if page_size is not None:
             return torch.ops.flash_attn_npu_3._mla_paged_metadata(

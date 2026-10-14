@@ -8,6 +8,8 @@
 namespace flash_attn::mla {
 constexpr uint32_t kMlaWindowPagedBsndMetadataVersion = 15;
 constexpr uint32_t kMlaMetadataWindowPagedBsnd = 15;
+constexpr uint32_t kMlaWindowPagedTndMetadataVersion = 16;
+constexpr uint32_t kMlaMetadataWindowPagedTnd = 16;
 constexpr uint32_t kMlaWindowPagedMetadataTailWords = 3;
 struct MlaWindowPagedMetadataArgs {
     MlaPagedMetadataArgs input;
@@ -28,4 +30,7 @@ inline bool WindowPagedMetadataWords(int64_t batch, uint32_t& words)
 bool BuildWindowPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                                   uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs,
                                   const MlaWindowConfig& window);
+bool BuildWindowPagedTndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                                 uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs,
+                                 const MlaWindowConfig& window, bool fromQueryPrefix = false);
 } // namespace flash_attn::mla

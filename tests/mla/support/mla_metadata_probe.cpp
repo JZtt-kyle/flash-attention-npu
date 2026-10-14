@@ -71,10 +71,12 @@ extern "C" uint32_t causal_paged_metadata_host(const MlaPagedMetadataArgs* args,
 extern "C" uint32_t window_paged_metadata_host(const MlaPagedMetadataArgs* args, uint32_t* output,
                                                const MlaWindowConfig* window)
 {
-    return BuildWindowPagedBsndMetadata(args->shape, args->platform, args->dtype, output, args->outputWords,
-                                        PagedMetadataInputs(*args), *window)
-               ? 0
-               : 1;
+    const bool ok = args->shape.query.layout == MlaSequenceLayout::Tnd
+                        ? BuildWindowPagedTndMetadata(args->shape, args->platform, args->dtype, output,
+                                                      args->outputWords, PagedMetadataInputs(*args), *window)
+                        : BuildWindowPagedBsndMetadata(args->shape, args->platform, args->dtype, output,
+                                                       args->outputWords, PagedMetadataInputs(*args), *window);
+    return ok ? 0 : 1;
 }
 
 extern "C" int launch_paged_metadata(void* current, void* worker, void* ready, void* done,

@@ -109,10 +109,10 @@ MLA_PAGED_INLINE MlaMetadataReadStatus ReadPagedMetadata(const Reader& read, uin
     }
     auto status = ReadMetadataHeader(
         read, words, kMlaPagedMetadataPrefixWords + kMlaPagedMetadataSequenceWords * c.batch + tail,
-        IsWindow   ? kMlaWindowPagedBsndMetadataVersion
+        IsWindow   ? (c.query.layout == 1 ? kMlaWindowPagedTndMetadataVersion : kMlaWindowPagedBsndMetadataVersion)
         : IsCausal ? (c.query.layout == 1 ? kMlaCausalPagedTndMetadataVersion : kMlaCausalPagedBsndMetadataVersion)
                    : kMlaPagedMetadataVersion,
-        IsWindow   ? kMlaMetadataWindowPagedBsnd
+        IsWindow   ? (c.query.layout == 1 ? kMlaMetadataWindowPagedTnd : kMlaMetadataWindowPagedBsnd)
         : IsCausal ? (c.query.layout == 1 ? kMlaMetadataCausalPagedTnd : kMlaMetadataCausalPagedBsnd)
                    : kMlaMetadataPaged,
         c.dtype);
@@ -121,7 +121,7 @@ MLA_PAGED_INLINE MlaMetadataReadStatus ReadPagedMetadata(const Reader& read, uin
     }
     if constexpr (IsWindow) {
         // Invocation identity is checked before geometry, lengths, pages or empty shortcuts.
-        if (c.query.layout != 0 || window.kind > 2 || window.left < -1 || window.right < -1 ||
+        if (c.query.layout > 1 || window.kind > 2 || window.left < -1 || window.right < -1 ||
             window.left > int64_t(c.logicalKvCapacity) - 1 ||
             window.right > (c.query.maxLength == 0 ? 0 : int64_t(c.query.maxLength) - 1) ||
             read(words - 3) != window.kind || int64_t(int32_t(read(words - 2))) != window.left ||

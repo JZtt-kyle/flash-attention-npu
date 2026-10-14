@@ -1,5 +1,7 @@
 """Fixed TND window inputs selected by semantics before performance sampling."""
 
+from tests.mla.support.mla_validation_policy import window_public_cases
+
 
 def spec(q=(7, 0, 3), k=(33, 0, 17), uq=None, uk=None, h=16, window=(2, 1), **kwargs):
     return dict(q=list(q), kv=list(k), uq=uq, uk=uk, heads=h, window=list(window), **kwargs)
@@ -37,3 +39,8 @@ ACCURACY_CASES = (
     ]
     + [spec(uq=[0, 0, 0], uk=[33, 0, 17]), spec(uk=[0, 0, 0]), spec(h=257)]
 )
+
+
+# Only stage performance changes this fixed candidate set; correctness lists above stay intact.
+
+PERFORMANCE_CASES = window_public_cases(PERFORMANCE_CASES, "tnd")

@@ -46,7 +46,11 @@ def uncached_references(case):
             out = torch.zeros((qlen, heads, 512), dtype=case["host"]["v"].dtype)
             lse = torch.full((heads, qlen), -torch.inf)
             return [out, lse, out, lse]
-        data = {n: case["host"][n][b : b + 1, :qlen].contiguous() for n in ("q", "qv")}
+        if case["config"].get("layout") == 2:
+            start = sum(case["item"]["q"][:b])
+            data = {n: case["host"][n][:, start : start + qlen].contiguous() for n in ("q", "qv")}
+        else:
+            data = {n: case["host"][n][b : b + 1, :qlen].contiguous() for n in ("q", "qv")}
         # Scalar logical token mapping uses raw table/physical pool, never metadata.
         for n in ("k", "v"):
             data[n] = torch.stack(

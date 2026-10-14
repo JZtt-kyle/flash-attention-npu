@@ -56,13 +56,14 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
                                          const std::optional<at::Tensor>& usedQuery,
                                          const std::optional<at::Tensor>& schedulerMetadata, bool causal = false,
                                          int64_t windowLeft = -1, int64_t windowRight = -1);
-// TND PA, including causal v11. Allocation prefixes determine sample starts
+// TND PA, including causal v11 and window v16. Allocation prefixes determine sample starts
 // independently of effective Q-used lengths.
 std::vector<at::Tensor> PagedTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                         const at::Tensor& qv, const at::Tensor& pageTable, const at::Tensor& cuQ,
                                         int64_t maxQ, float scale, const std::optional<at::Tensor>& cacheSeqlens,
                                         const std::optional<at::Tensor>& usedQuery,
-                                        const std::optional<at::Tensor>& schedulerMetadata, bool causal = false);
+                                        const std::optional<at::Tensor>& schedulerMetadata, bool causal = false,
+                                        int64_t windowLeft = -1, int64_t windowRight = -1);
 std::vector<at::Tensor> WindowTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                          const at::Tensor& qv, const at::Tensor& cuQ, const at::Tensor& cuK,
                                          int64_t maxQ, int64_t maxK, float scale, int64_t windowLeft,

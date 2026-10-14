@@ -63,7 +63,8 @@ def make_case(probes, producer, spec, **kwargs):
     function.restype = ct.c_uint32
     assert function(ct.byref(args), output, ct.byref(cfg)) == 0
     row = list(output)
-    assert row[:6] == [0x4D4C4131, 15, 15, 411 + 5 * len(spec["q"]), kind, 0]
+    version = 16 if spec.get("layout") == 2 else 15
+    assert row[:6] == [0x4D4C4131, version, version, 411 + 5 * len(spec["q"]), kind, 0]
     context = base.context_for(row, case["item"], kind)
     assert context.workspace == case["context"].workspace
     window = Window(*window_for(case))
