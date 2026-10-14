@@ -186,13 +186,21 @@ std::vector<at::Tensor> mha_fwd(
                         is_rotary_interleaved,
                     "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
         TORCH_CHECK(attention_chunk == 0 && softcap == 0.0f &&
-                        (num_splits == 1 ||
-                         (num_splits >= 0 && num_splits <= 256 && !cu_seqlens_k_ && !cu_seqlens_q_ && !page_table_)) &&
+                        (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 && !page_table_ &&
+                                             ((!cu_seqlens_k_ && !cu_seqlens_q_) ||
+                                              (num_splits > 1 && cu_seqlens_k_ && cu_seqlens_q_)))) &&
                         !pack_gqa_.has_value() && sm_margin == 0,
                     "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (num_splits != 1) {
+            if (cu_seqlens_q_) {
+                TORCH_CHECK(max_seqlen_q_ && max_seqlen_k_, "MLA: TND split requires max_seqlen_q/k");
+                return flash_attn::mla::SplitTndForward(q, k, v, *q_v_, *cu_seqlens_q_, *cu_seqlens_k_, *max_seqlen_q_,
+                                                        *max_seqlen_k_, scale, window_size_left, window_size_right,
+                                                        is_causal, num_splits, seqused_q_, seqused_k_,
+                                                        scheduler_metadata_);
+            }
             return flash_attn::mla::SplitBsndForward(q, k, v, *q_v_, scale, window_size_left, window_size_right,
                                                      is_causal, num_splits, seqused_k_, seqused_q_,
                                                      scheduler_metadata_);

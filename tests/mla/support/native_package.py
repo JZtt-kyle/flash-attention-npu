@@ -35,6 +35,9 @@ DENSE_KEYS = (
     105000000110100001,
 )
 LAYOUT_KEYS = (105000000030000002, 105000000010200001, 105000000010200002)
+# FIA's empty-KV template uses the same key for both output dtypes; the MLA
+# dtype offset does not apply (arch22/fia_tiling_empty_tensor.cpp).
+EMPTY_KV_KEY = 100000000000000020
 
 
 def native_root():
@@ -122,6 +125,7 @@ def build(*, host_only=False):
         keys = sorted(
             {k + offset for k in DENSE_KEYS}
             | {k + offset + causal for k in LAYOUT_KEYS for causal in (0, 100000)}
+            | {EMPTY_KV_KEY}
         )
         output = root / "device" / dtype
         output.mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,7 @@ struct MlaSplitKvMergeParams {
     // 1: adapt raw partials and write FA3 accumulators. 0: component timing on
     // already canonical statistics, without accumulator stores.
     uint32_t adapt;
+    // TND specialization uses batch=1, sq=totalQ, batchIndex=allocation token.
     // Production Q-used controls mask geometry; sq remains allocation stride.
     // Independent components leave this zero and use sq (zero-Q has no task).
     uint32_t queryLength = 0;

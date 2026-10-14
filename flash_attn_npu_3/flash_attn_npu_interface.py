@@ -897,6 +897,116 @@ def _mla_causal_tnd_forward_fake(
     return result
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_split_tnd_forward")
+def _mla_split_tnd_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_splits,
+    window_left=-1,
+    window_right=-1,
+    causal=False,
+    softmax_scale=None,
+    seqused_q=None,
+    seqused_k=None,
+    scheduler_metadata=None,
+):
+    out, lse = _mla_causal_tnd_forward_fake(
+        q,
+        k,
+        v,
+        qv,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        softmax_scale,
+        seqused_q,
+        seqused_k,
+    )
+    if not 2 <= num_splits <= 256:
+        raise RuntimeError("MLA: TND split requires num_splits in [2,256]")
+    words = _mla_split_bsnd_words(cu_seqlens_q.numel() - 1)
+    _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
+    if scheduler_metadata is not None and (
+        scheduler_metadata.dtype != torch.int32
+        or scheduler_metadata.ndim != 1
+        or scheduler_metadata.numel() != words
+        or not scheduler_metadata.is_contiguous()
+        or scheduler_metadata.device != q.device
+    ):
+        raise RuntimeError(
+            "MLA: TND split metadata must be same-device contiguous int32 with the v19 size"
+        )
+    total, heads = q.shape[:2]
+    batch = cu_seqlens_q.numel() - 1
+    # Match the static host TND envelope without reading device prefixes/used.
+    # Byte and empty-shape stride checks precede fake accumulator allocation.
+    limit = 2**63 - 1
+    if num_splits * heads * max(total, 1) * 512 > limit:
+        raise RuntimeError("MLA: TND split accumulator stride overflow")
+    if num_splits * heads * total * 512 * 4 > limit:
+        raise RuntimeError("MLA: TND split workspace or accumulator overflow")
+    if total and k.shape[0]:
+        active = min(batch, total)
+        groups = min(
+            active * ((max_seqlen_q * heads + 255) // 256), (total * heads + active * 255) // 256
+        )
+        if (
+            groups * num_splits * 256 * 528 * 4 + 2 * 26 * (6 * 256 * 512 + 8 * 256 * 512 + 8 * 256)
+            > limit
+        ):
+            raise RuntimeError("MLA: TND split workspace or accumulator overflow")
+    return (
+        out,
+        lse,
+        q.new_empty((num_splits, q.shape[1], q.shape[0], 512), dtype=torch.float32),
+        q.new_empty((num_splits, q.shape[1], q.shape[0]), dtype=torch.float32),
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_split_tnd_metadata")
+def _mla_split_tnd_metadata_fake(
+    q,
+    k,
+    v,
+    qv,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_splits,
+    window_left=-1,
+    window_right=-1,
+    causal=False,
+    seqused_q=None,
+    seqused_k=None,
+):
+    _mla_split_tnd_forward_fake(
+        q,
+        k,
+        v,
+        qv,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        num_splits,
+        window_left,
+        window_right,
+        causal,
+        None,
+        seqused_q,
+        seqused_k,
+    )
+    return q.new_empty((_mla_split_bsnd_words(cu_seqlens_q.numel() - 1),), dtype=torch.int32)
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_window_tnd_forward")
 def _mla_window_tnd_forward_fake(
     q,
@@ -1126,7 +1236,11 @@ def _flash_attn_forward(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
-            allow_split=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
+            allow_split=page_table is None
+            and (
+                (cu_seqlens_q is None and cu_seqlens_k is None)
+                or (num_splits > 1 and cu_seqlens_q is not None and cu_seqlens_k is not None)
+            ),
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -1148,6 +1262,25 @@ def _flash_attn_forward(
             ),
         )
         if num_splits != 1:
+            if cu_seqlens_q is not None:
+                return torch.ops.flash_attn_npu_3._mla_split_tnd_forward(
+                    q,
+                    k,
+                    v,
+                    qv,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    num_splits,
+                    window_size_left,
+                    window_size_right,
+                    causal,
+                    softmax_scale,
+                    seqused_q,
+                    seqused_k,
+                    scheduler_metadata,
+                )
             return torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
                 q,
                 k,
@@ -1341,7 +1474,11 @@ def _flash_attn_forward_fake(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
-            allow_split=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
+            allow_split=page_table is None
+            and (
+                (cu_seqlens_q is None and cu_seqlens_k is None)
+                or (num_splits > 1 and cu_seqlens_q is not None and cu_seqlens_k is not None)
+            ),
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -1363,6 +1500,25 @@ def _flash_attn_forward_fake(
             ),
         )
         if num_splits != 1:
+            if cu_seqlens_q is not None:
+                return _mla_split_tnd_forward_fake(
+                    q,
+                    k,
+                    v,
+                    qv,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    num_splits,
+                    window_size_left,
+                    window_size_right,
+                    causal,
+                    softmax_scale,
+                    seqused_q,
+                    seqused_k,
+                    scheduler_metadata,
+                )
             return _mla_split_bsnd_forward_fake(
                 q,
                 k,
@@ -2427,11 +2583,15 @@ def flash_attn_varlen_func(
     return_attn_probs=True returns (out, lse), with FP32 lse shaped (nheads, total_q).
 
     Compressed MLA uses q/k dimensions 64 and qv/v dimensions 512. Metadata
-    is generated internally on every call (v13 for nondefault windows, v8 for right-down causal; otherwise
+    is generated internally on every call (v19 for explicit num_splits=2..256; v13 for nondefault windows, v8 for right-down causal; otherwise
     v3 without used lengths, v5 with either used array). There is no explicit metadata or page-table parameter;
     paged MLA uses flash_attn_with_kvcache. See docs/mla/status.md for limits.
     """
-    if (causal or window_size != (-1, -1)) and qv is not None and q.device.type == "npu":
+    if (
+        (causal or window_size != (-1, -1) or num_splits != 1)
+        and qv is not None
+        and q.device.type == "npu"
+    ):
         _check_mla_dense_options(
             causal=causal,
             allow_window=True,
@@ -2441,10 +2601,30 @@ def flash_attn_varlen_func(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
+            allow_split=num_splits > 1,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             optional_tensors=(q_descale, k_descale, v_descale),
         )
+        if num_splits != 1:
+            out, lse, _, _ = torch.ops.flash_attn_npu_3._mla_split_tnd_forward(
+                q,
+                k,
+                v,
+                qv,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_splits,
+                window_size[0],
+                window_size[1],
+                causal,
+                softmax_scale,
+                seqused_q,
+                seqused_k,
+            )
+            return (out, lse) if return_attn_probs else out
         if window_size != (-1, -1):
             out, lse = torch.ops.flash_attn_npu_3._mla_window_tnd_forward(
                 q,

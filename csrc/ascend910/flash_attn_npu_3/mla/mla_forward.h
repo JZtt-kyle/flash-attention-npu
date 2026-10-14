@@ -4,6 +4,12 @@
 namespace flash_attn::mla {
 // v7 BSND causal, including internal Q-used. Explicit reuse is read-only cache
 // only; Q-used with an explicit record remains unsupported.
+std::vector<at::Tensor> SplitTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                        const at::Tensor& qv, const at::Tensor& cuQ, const at::Tensor& cuK,
+                                        int64_t maxQ, int64_t maxK, float scale, int64_t left, int64_t right,
+                                        bool causal, int64_t splits, const std::optional<at::Tensor>& usedQ,
+                                        const std::optional<at::Tensor>& usedK,
+                                        const std::optional<at::Tensor>& metadata);
 std::vector<at::Tensor> SplitBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                          const at::Tensor& qv, float scale, int64_t windowLeft, int64_t windowRight,
                                          bool causal, int64_t splits, const std::optional<at::Tensor>& cacheSeqlens,

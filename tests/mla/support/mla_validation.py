@@ -57,6 +57,8 @@ USED_SHARED_CPU = [
 SPLIT_KV_ATTENTION = "tests/mla/unit/split_kv_attention/test_attention.py"
 SPLIT_KV_MERGE = "tests/mla/unit/split_kv_merge/test_merge.py"
 SPLIT_KV_MERGE_SUITES = {
+    "split-tnd",
+    "unit-split_tnd",
     "auto-split-bsnd",
     "unit-auto_split_bsnd",
     "split-bsnd",
@@ -74,6 +76,16 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "split-tnd-tools": ["tests/mla/unit/tools/test_mla_split_tnd_tools.py"],
+    "split-tnd-cpu": ["tests/mla/unit/split_tnd/test_metadata.py"],
+    "split-tnd-sanitize": ["tests/mla/unit/split_tnd/test_metadata.py"],
+    "split-tnd-check": ["tests/mla/e2e/split_tnd/test_public.py", "-k", "representative"],
+    "split-tnd": [
+        "tests/mla/unit/split_tnd/test_source.py",
+        "tests/mla/e2e/split_tnd/test_public.py",
+    ],
+    "split-tnd-trap": ["tests/mla/e2e/split_tnd/test_trap.py"],
+    "split-tnd-profile": ["tests/mla/e2e/split_tnd/test_split_tnd_profile.py"],
     "auto-split-bsnd-check": [
         "tests/mla/e2e/auto_split_bsnd/test_public.py",
         "-k",
@@ -651,6 +663,7 @@ SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()
 PERFORMANCE_SUITES = {
     "auto-split-bsnd-profile",
     "split-bsnd-profile",
+    "split-tnd-profile",
     "split-kv-merge-profile",
     "split-kv-attention-profile",
     "window-paged-tnd-profile",
@@ -712,8 +725,11 @@ CPU_SUITES = {
     "auto-split-kv-plan-tools",
     "auto-split-kv-plan-check",
     "split-bsnd-cpu",
+    "split-tnd-cpu",
+    "split-tnd-sanitize",
     "split-bsnd-sanitize",
     "split-bsnd-tools",
+    "split-tnd-tools",
     "unit-split_tnd_plan",
     "split-tnd-plan-sanitize",
     "split-tnd-plan-check",
@@ -777,6 +793,8 @@ def suite_dependencies(suite):
         "unit-split_kv",
         "split-kv-sanitize",
         "split-bsnd-cpu",
+        "split-tnd-cpu",
+        "split-tnd-sanitize",
         "split-bsnd-sanitize",
         "unit-auto_split_kv_plan",
         "unit-auto_split_bsnd_metadata",
@@ -1003,6 +1021,8 @@ def environment(args, directory, suite):
         env["MLA_SPLIT_KV_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
         "split-bsnd-cpu",
+        "split-tnd-cpu",
+        "split-tnd-sanitize",
         "split-bsnd-sanitize",
         "unit-auto_split_kv_plan",
         "unit-auto_split_bsnd_metadata",

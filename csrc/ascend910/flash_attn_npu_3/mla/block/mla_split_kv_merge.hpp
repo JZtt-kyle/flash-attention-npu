@@ -19,7 +19,7 @@
 namespace flash_attn::mla::Block {
 using namespace AscendC;
 
-template <typename OutputT, bool WriteSingleAccumulator = false>
+template <typename OutputT, bool WriteSingleAccumulator = false, bool IsTnd = false>
 class MlaSplitKvMerge {
   public:
     __aicore__ inline void Init(const MlaSplitKvMergeParams& p, GM_ADDR out, GM_ADDR sum, GM_ADDR maximum,
@@ -72,6 +72,8 @@ class MlaSplitKvMerge {
     __aicore__ inline uint64_t RowAddress(uint32_t row) const
     {
         const uint64_t flat = uint64_t(params.rowStart) + row;
+        if constexpr (IsTnd)
+            return (flat % params.heads) * params.sq + params.batchIndex + flat / params.heads;
         return (uint64_t(params.batchIndex) * params.heads + flat % params.heads) * params.sq + flat / params.heads;
     }
 
@@ -144,9 +146,12 @@ class MlaSplitKvMerge {
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         for (uint32_t row = 0; row < rows;) {
-            const uint32_t count = Min(rows - row, params.heads - (params.rowStart + start + row) % params.heads);
-            DataCopyPad(outputLse[RowAddress(start + row)], lse[row * 8],
-                        DataCopyExtParams{uint16_t(count), 4, 0, (params.sq - 1) * 4, 0});
+            const uint64_t gap = (uint64_t(params.sq) - 1) * 4;
+            const uint32_t count =
+                gap > UINT32_MAX ? 1 : Min(rows - row, params.heads - (params.rowStart + start + row) % params.heads);
+            DataCopyPad(
+                outputLse[RowAddress(start + row)], lse[row * 8],
+                DataCopyExtParams{uint16_t(count), 4, 0, count == 1 ? 0 : uint32_t((uint64_t(params.sq) - 1) * 4), 0});
             row += count;
         }
         SetFlag<HardEvent::MTE3_V>(0);
@@ -178,14 +183,18 @@ class MlaSplitKvMerge {
                 SetFlag<HardEvent::V_MTE3>(0);
                 WaitFlag<HardEvent::V_MTE3>(0);
                 for (uint32_t row = 0; row < rows;) {
+                    const uint64_t gap = (uint64_t(params.sq) - 1) * 512 * 4;
                     const uint32_t count =
-                        Min(rows - row, params.heads - (params.rowStart + start + row) % params.heads);
+                        gap > UINT32_MAX
+                            ? 1
+                            : Min(rows - row, params.heads - (params.rowStart + start + row) % params.heads);
                     const uint64_t offset =
                         uint64_t(split) * params.batch * params.heads * params.sq + RowAddress(start + row);
                     DataCopyPad(accumulator[offset * 512], current[row * 512],
-                                DataCopyExtParams{uint16_t(count), 512 * 4, 0, (params.sq - 1) * 512 * 4, 0});
+                                DataCopyExtParams{uint16_t(count), 512 * 4, 0, count == 1 ? 0 : uint32_t(gap), 0});
                     DataCopyPad(accumulatorLse[offset], lse[row * 8],
-                                DataCopyExtParams{uint16_t(count), 4, 0, (params.sq - 1) * 4, 0});
+                                DataCopyExtParams{uint16_t(count), 4, 0,
+                                                  count == 1 ? 0 : uint32_t((uint64_t(params.sq) - 1) * 4), 0});
                     row += count;
                 }
                 SetFlag<HardEvent::MTE3_V>(0);
@@ -210,7 +219,8 @@ class MlaSplitKvMerge {
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
-        const uint64_t outRow = uint64_t(params.batchIndex) * params.sq * params.heads + params.rowStart + start;
+        const uint64_t outRow =
+            uint64_t(params.batchIndex) * (IsTnd ? 1 : params.sq) * params.heads + params.rowStart + start;
         DataCopy(output[outRow * 512], cast, rows * 512);
         SetFlag<HardEvent::MTE3_V>(0);
         WaitFlag<HardEvent::MTE3_V>(0);

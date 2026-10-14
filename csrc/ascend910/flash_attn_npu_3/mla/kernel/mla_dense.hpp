@@ -49,7 +49,7 @@ class MlaTaskRing {
     static_assert(!HasUsed || HasKvLengths);
     static_assert(!IsPaged || (HasKvLengths && HasStrides && !MixedKv && !HasUsed));
     static_assert(!IsWindow || (HasKvLengths && !IsCausal));
-    static_assert(!IsPartial || (IsWindow && !IsTnd && !IsPaged));
+    static_assert(!IsPartial || (IsWindow && !IsPaged));
     static constexpr uint32_t kSpanWords = IsPaged ? 5 : HasUsed ? 8 : MixedKv ? 5 : 4;
     static constexpr bool kQueryLengths = IsTnd || HasUsed || IsPaged;
 

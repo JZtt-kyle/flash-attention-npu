@@ -165,11 +165,17 @@ def sample_kernels(
     patterns = {}
     for label in labels:
         if label["name"] == names[0]:
-            group = rows[pos : pos + 2]
-            assert len(group) == 2 and metadata_name in group[0]["Op Name"]
-            assert production_name in group[1]["Op Name"]
+            if isinstance(production_name, tuple):
+                from tests.mla.support.mla_split_tnd_profile_rows import production_sample
+
+                group = rows[pos : pos + 3]
+                kernel = production_sample(group, metadata_name, production_name)
+            else:
+                group = rows[pos : pos + 2]
+                assert len(group) == 2 and metadata_name in group[0]["Op Name"]
+                assert production_name in group[1]["Op Name"]
+                kernel = group[1]
             label["generation_us"] = float(group[0]["Task Duration(us)"])
-            kernel = group[1]
         else:
             index = label["case"]
             if index not in patterns:
@@ -189,7 +195,9 @@ def sample_kernels(
         label.update(
             tasks=group,
             kernel_us=float(kernel["Task Duration(us)"]),
-            conversion_us=sum(
+            conversion_us=0
+            if label["name"] == names[0]
+            else sum(
                 float(r["Task Duration(us)"])
                 for r in group
                 if r is not kernel and "ComputeMla" not in r["Op Name"]
@@ -213,6 +221,7 @@ def profile(
     check_accuracy=accuracy,
     mask="causal",
     metadata_name="ComputeMlaCausalTndMetadata",
+    production_name="mla_tnd_used_",
 ):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -287,7 +296,7 @@ def profile(
         len(cases),
         output,
         names,
-        "mla_tnd_used_",
+        production_name,
         "FusedInferAttentionScore",
         metadata_name=metadata_name,
     )

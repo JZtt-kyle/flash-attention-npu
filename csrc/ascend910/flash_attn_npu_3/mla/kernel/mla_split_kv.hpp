@@ -43,4 +43,17 @@ class MlaSplitKvUsedBsnd
                   nullptr, p.window, &p);
     }
 };
+// TND allocation starts and independent strides are already carried by v5
+// spans. Total Q is only the output head stride; mask uses per-sample used.
+template <typename InputT>
+class MlaSplitKvUsedTnd : private MlaTaskRing<InputT, true, true, false, true, true, false, false, true, true, true> {
+  public:
+    __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
+                                      GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace, TPipe* pipe,
+                                      GM_ADDR spans, const MlaBsndInputLayouts& layouts, uint32_t totalQ)
+    {
+        this->Run(s, scale, qc, qr, kv, kr, workspace, workspace, workspace, pipe, spans, totalQ, &layouts, true,
+                  nullptr, nullptr, p.window, &p);
+    }
+};
 } // namespace flash_attn::mla::Kernel

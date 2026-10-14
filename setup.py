@@ -396,6 +396,7 @@ class BishengBuildExt(build_ext):
             sources.append(os.path.join(src_dir, "mla", "mla_tnd_bsnd_metadata.aicpu"))
             sources.append(os.path.join(src_dir, "mla", "mla_used_metadata.aicpu"))
             sources.append(os.path.join(src_dir, "mla", "mla_split_bsnd_metadata.aicpu"))
+            sources.append(os.path.join(src_dir, "mla", "mla_split_tnd_metadata.aicpu"))
             sources.append(os.path.join(src_dir, "mla", "mla_auto_split_bsnd_metadata.aicpu"))
             sources.append(os.path.join(src_dir, "mla", "mla_causal_metadata.aicpu"))
             sources.append(os.path.join(src_dir, "mla", "mla_window_metadata.aicpu"))
@@ -667,6 +668,9 @@ src_ascend910_v3 += [
         "mla_forward.cpp",
         "mla_split_kv.cpp",
         "mla_split_kv_plan.cpp",
+        "mla_split_tnd_plan.cpp",
+        "mla_dispatch_fp16_split_tnd.cpp",
+        "mla_dispatch_bf16_split_tnd.cpp",
         "mla_auto_split_kv_plan.cpp",
         "mla_dispatch_fp16_auto_split_bsnd.cpp",
         "mla_dispatch_bf16_auto_split_bsnd.cpp",
