@@ -727,7 +727,7 @@ host 用 6.2.16 的紧凑 totalQ 上界预算 workspace，不读取设备长度�
 
 #### 6.2.18 TND 原生自动 split 任务与持久布局
 
-[`MlaAutoSplitTndPlan`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_tnd_plan.h) 是独立 CPU 组件，复用固定 CANN 的原生 AIC/FD 分区和 6.2.13 的任务/8 行 Vector 归约协议，不重新均匀分片。通过 `ParseUsedLengths` 校验并拥有双 allocation 前缀与可选 Q/KV-used 对应的段信息；调用方输入销毁后查询仍有效。本组件尚未生成设备 metadata 或接通自动 TND 生产路径。
+[`MlaAutoSplitTndPlan`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_tnd_plan.h) 是独立 CPU 组件，复用固定 CANN 的原生 AIC/FD 分区和 6.2.13 的任务/8 行 Vector 归约协议，不重新均匀分片。通过 `ParseUsedLengths` 校验并拥有双 allocation 前缀与可选 Q/KV-used 对应的段信息；调用方输入销毁后查询仍有效。M10c4b1 将其用于 6.2.19 的独立 v20 协议；尚未编入设备生成器或接通自动 TND 生产路径。
 
 静态 `BuildAutoSplitTndPlanLayout` 接收紧凑 totalQ/totalKV、maxQ/maxKV、B/H、逻辑 M/N、AIC/CV 与 libApi 字节数。总量、段界及行数限制沿用 6.2.16；最大 M 组数使用该节的总量上界，不能由 B×maxQ 或仅 `ceil(totalQ*H/M)` 替代。源非 FD scratch 复用既有组件，只有 FD 任务占持久槽，每 AIC 最多首尾两个 FD M，故最多 2×AIC 槽；AIC=1 时没有 FD 持久槽。该 CPU 预算不包含后续设备 Direct 临时槽，生产接入须独立确定并验收。
 
@@ -736,6 +736,18 @@ host 用 6.2.16 的紧凑 totalQ 上界预算 workspace，不读取设备长度�
 Task 返回原 allocation Q/KV token 起点、段容量和 used 长度；四路输入各自应用实际 stride。Row 以 `allocationQStart+localQuery` 计算 TND O、`[H,totalQ]` LSE 和 accumulator，保留 Q-used 间隙及 64 位地址。全局 totalQ 或 totalKV 为零时任务/workspace 为零，仍验证全部静态参数、前缀/used 并保留合法 accumulator 描述；仅 used KV 为零则保留 Empty 初始化任务。构造和查询失败不修改输出。
 
 [`本模块单元`](../../tests/mla/unit/auto_split_tnd_plan/test_plan.py) 新编译固定 CANN AIC/FD 分区、workspace 和 FA3 TND accumulator 片段，独立枚举可见 tile、任务/归约所有者及 allocation 地址。覆盖三种 mask、非均匀分配/used 间隙、Direct/FD/Empty 混合、零段/全空、跨 M 与 8 行尾块、int32 总量、超过 uint32 的组前缀、精确 int64 字节边界、输入生命周期及失败原子性；小分配分区穷举核对静态上界，普通和 ASan/UBSan 使用同集合。此组件尚无新公开行为，累计 E2E 只验证已开放路径。
+
+#### 6.2.19 TND 自动 split 的 v20 安全协议
+
+[`v20 构造器`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_tnd_metadata.h) 与 [`消费者`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_tnd_consumer.h) 是 M10c4b1 的独立共享协议组件；只验收 CPU 序列化及 CPU/AICore 共用头的校验和查询逻辑。v18 的空容量、FP32 accumulator 上界和 Row 地址依赖 BSND，故先独立验收 TND 协议，再由 M10c4b2 整体接入生产。当前不编入 AICPU、设备 init/partial/merge 或公开入口，TND `num_splits=0` 仍明确拒绝。
+
+记录为 contiguous int32 `[758+10B]`、`version=kind=20`。前 `410+8B` 字保存 v5 的 TND 几何、平台/资源、双 allocation/used 和无 FD 端点快照；尾部字段位置与 6.2.14 相同，保存窗口、原生 AIC/FD/Vector 端点和 B+1 个 uint64 M 前缀。相同字数不允许与 v18 或其他版本混用；没有序列化 CPU 对象、地址或逐任务数组。生成器使用实际源 M/N 调用 M10c4a 计划；C1V2、非空容量 blockDim=AIC 及失败记录/非法缓冲原子性沿用 v18。
+
+消费者先检查真实 v20 头与 TND 布局，再由 v5 schema view 完整核验当次双前缀/used；调用级 max 只作为上界和窗口身份，不作分配步长。源 scratch 按实际最大 allocation 段及已校验 M/N 重算，可以小于以 maxQ 计算的静态预算。原生端点、可见区间、FD 重建、每核首尾槽预算、8 行 Vector 包含端点及数组零尾复用 v18 共用实现，保持 BSND wrapper 与 Row 语义。TND 独立按 totalQ/totalKV 判定全局空容量、重算 6.2.16 的紧凑 M 上界和 `[AIC,H,totalQ,512]` / `[AIC,H,totalQ]` FP32 accumulator 容量及连续 stride；零 used 不能绕过分配容量溢出检查。AIC=1 无 accumulator，所有失败保持输出不变。
+
+`AutoSplitTndTask` 返回原 allocation 起点/容量/used 与原生任务；`AutoSplitTndRow` 以原 token 写 O、head-major LSE 和 accumulator，保留 unused Q 间隙。`AutoSplitTndMerge` 使用原生 8 行归约范围。查询要求记录/context 自成功校验以来保持不变；协议不执行初始化、Direct 临时槽、数值归并或跨阶段同步。生产静态容量、Direct 临时区、真实/fake 返回及性能仍须在 M10c4b2 独立验收，不能把 CPU 协议或已有 BSND 数值证据当作 TND 自动能力。
+
+[`模块测试`](../../tests/mla/unit/auto_split_tnd_metadata/test_metadata.py) 新编译并执行固定 CANN AIC/FD/workspace 和 FA3 TND accumulator 片段，独立枚举三种 mask、非均匀双前缀/used、任务/归约所有者和 allocation 地址；覆盖所有尾字段、长度描述符、交叉版本、宽整数前缀、精确 accumulator 字节边界及失败原子性。普通与 ASan/UBSan 集合一致，另以同输入核对 v18/v20 分区及既有 BSND 地址。共用头变化后的生产构建与累计 E2E 实际执行，数值 reference 按内容复用；本步无新公开行为，不注册伪自动 TND 日常用例。
 
 ### 6.3 长度与布局调度
 

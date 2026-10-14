@@ -1,6 +1,6 @@
 // Copyright (c) 2025 Huawei Technologies Co., Ltd.
 // CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
-// Independent v18 safety validation. No producer, CPU plan or SplitCore call.
+// Independent v18/v20 safety validation. No producer, CPU plan or SplitCore call.
 // Validates coverage/addressing, not the optimality/authenticity of a partition.
 #pragma once
 #include "mla_auto_split_bsnd_metadata.h"
@@ -111,22 +111,20 @@ MLA_AUTO_INLINE void Offsets(const MlaAutoSplitBsndSchedule& s, uint64_t row, ui
 }
 } // namespace auto_split_detail
 
-template <typename Reader, typename Arrays>
-MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitBsndMetadata(const Reader& read, uint32_t words,
-                                                                const MlaAutoSplitBsndContext& context,
-                                                                const MlaUsedMetadataInputs& inputs,
-                                                                const Arrays& arrays, MlaAutoSplitBsndSchedule& output)
+template <bool IsTnd, uint32_t Version, typename Reader, typename Arrays, typename Context>
+MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, uint32_t words, const Context& context,
+                                                            const MlaUsedMetadataInputs& inputs, const Arrays& arrays,
+                                                            MlaAutoSplitBsndSchedule& output)
 {
     using Status = MlaMetadataReadStatus;
     using namespace auto_split_detail;
     const auto& c = context.used;
     if (c.batch > (UINT32_MAX - kMlaAutoSplitFixedWords) / 10)
         return Status::InvalidBuffer;
-    auto status = ReadMetadataHeader(read, words, kMlaAutoSplitFixedWords + 10 * c.batch, kMlaAutoSplitBsndVersion,
-                                     kMlaAutoSplitBsndVersion, c.dtype);
+    auto status = ReadMetadataHeader(read, words, kMlaAutoSplitFixedWords + 10 * c.batch, Version, Version, c.dtype);
     if (status != Status::Success)
         return status;
-    if (c.query.layout || c.kv.layout)
+    if (c.query.layout != uint32_t(IsTnd) || c.kv.layout != uint32_t(IsTnd))
         return Status::ShapeMismatch;
     const uint32_t base = Base(c.batch), prefixWord = base + kMlaAutoSplitTailPrefix;
     const auto& w = context.window;
@@ -143,14 +141,15 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitBsndMetadata(const Reader& re
     if (status != Status::Success)
         return status;
     auto& a = s.used.tiling;
-    const bool empty = !c.batch || !a.sq || !a.sk;
+    const uint64_t totalQ = UsedMetadataTotal(c.query);
+    const bool empty = IsTnd ? !totalQ || !UsedMetadataTotal(c.kv) : !c.batch || !a.sq || !a.sk;
     if (c.aicNum > 1) {
         // FP32 accumulator storage and contiguous strides are independent of
         // the much smaller FD workspace. Used lengths may all be zero while
         // the allocation capacity still overflows. Empty tensors retain strides.
-        const uint64_t rows = uint64_t(c.batch ? c.batch : 1) * (a.sq ? a.sq : 1) * a.heads;
-        if (rows > uint64_t(INT64_MAX) / 512 / c.aicNum ||
-            (c.batch && a.sq && rows > uint64_t(INT64_MAX) / 2048 / c.aicNum))
+        const uint64_t rows =
+            IsTnd ? (totalQ ? totalQ : 1) * a.heads : uint64_t(c.batch ? c.batch : 1) * (a.sq ? a.sq : 1) * a.heads;
+        if (rows > uint64_t(INT64_MAX) / 512 / c.aicNum || (totalQ && rows > uint64_t(INT64_MAX) / 2048 / c.aicNum))
             return Status::InvalidWorkspace;
     }
     if (!empty && a.blockDim != c.aicNum)
@@ -183,6 +182,18 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitBsndMetadata(const Reader& re
             lastBatch = b;
             lastM = count - 1;
             lastN = (k + a.s2BaseSize - 1) / a.s2BaseSize - 1;
+        }
+    }
+    if constexpr (IsTnd) {
+        if (!empty) {
+            // Each nonempty allocation has its own M tail. Compact totalQ,
+            // not B*maxQ, bounds every valid allocation/used partition.
+            const uint64_t active = c.batch < totalQ ? c.batch : totalQ;
+            const uint64_t rows = uint64_t(c.query.maxLength) * a.heads;
+            const uint64_t perSample = active * ((rows + a.mBaseSize - 1) / a.mBaseSize);
+            const uint64_t padded = (totalQ * a.heads + active * (a.mBaseSize - 1)) / a.mBaseSize;
+            if (prefix > (perSample < padded ? perSample : padded))
+                return Status::InvalidPrefixes;
         }
     }
     s.groups = prefix;
@@ -302,6 +313,16 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitBsndMetadata(const Reader& re
     }
     output = s;
     return Status::Success;
+}
+
+// Keep the established v18 entry point and BSND wire identity unchanged.
+template <typename Reader, typename Arrays>
+MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitBsndMetadata(const Reader& read, uint32_t words,
+                                                                const MlaAutoSplitBsndContext& context,
+                                                                const MlaUsedMetadataInputs& inputs,
+                                                                const Arrays& arrays, MlaAutoSplitBsndSchedule& output)
+{
+    return ReadAutoSplitMetadata<false, kMlaAutoSplitBsndVersion>(read, words, context, inputs, arrays, output);
 }
 
 // Queries require an unchanged, successfully validated record and context.
