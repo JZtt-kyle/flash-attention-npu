@@ -5,7 +5,11 @@ import re
 
 
 def production_sample(rows, metadata_name, stages):
-    if len(rows) != 3 or metadata_name not in rows[0]["Op Name"]:
+    if (
+        len(stages) not in (2, 3)
+        or len(rows) != len(stages) + 1
+        or metadata_name not in rows[0]["Op Name"]
+    ):
         raise ValueError("Missing TND split metadata or kernel")
 
     def matches(name, symbol):

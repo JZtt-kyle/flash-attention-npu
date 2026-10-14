@@ -14,6 +14,8 @@
 #include "mla_split_kv_plan.h"
 #include "mla_auto_split_kv_plan.h"
 #include "mla_auto_split_bsnd_launch.h"
+#include "mla_auto_split_tnd_launch.h"
+#include "mla_auto_split_tnd_plan.h"
 #include "mla_window_paged_metadata.h"
 #include "mla_paged_metadata_args.h"
 #include "mla_paged_launch.h"
@@ -43,6 +45,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaSplitBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaSplitTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaAutoSplitBsndMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaAutoSplitTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowTndMetadata(void* args);
@@ -170,8 +173,13 @@ struct MetadataSubmission {
     {
         if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs>) {
             if (splits == 0) {
-                MlaAutoSplitBsndMetadataArgs autoArgs{args, *window};
-                ComputeMlaAutoSplitBsndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
+                if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
+                    MlaAutoSplitTndMetadataArgs autoArgs{args, *window};
+                    ComputeMlaAutoSplitTndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
+                } else {
+                    MlaAutoSplitBsndMetadataArgs autoArgs{args, *window};
+                    ComputeMlaAutoSplitBsndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
+                }
                 return;
             }
             if (splits > 1) {
@@ -1029,12 +1037,21 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     if (splits == 0) {
         MlaAutoSplitKvLayout layout{};
         MlaAccumulatorLayout accumulator{};
-        TORCH_CHECK(BuildAutoSplitKvLayout({batch, sq, sk, heads, 256, 512, p.aicNum, 2, libBytes}, layout) ==
-                            MlaScheduleStatus::Success &&
-                        BuildSplitAccumulatorLayout(
-                            {MlaAccumulatorQueryLayout::Bsnd, batch, sq, batch * sq, heads, kMlaAutoSplitCapacity},
-                            accumulator) == MlaScheduleStatus::Success,
-                    "MLA: auto split workspace or accumulator overflow");
+        const auto status =
+            tnd ? BuildAutoSplitTndPlanLayout({{batch, shape.query.totalTokens, shape.kv.totalTokens, heads, sq, sk},
+                                               256,
+                                               512,
+                                               p.aicNum,
+                                               2,
+                                               libBytes},
+                                              layout)
+                : BuildAutoSplitKvLayout({batch, sq, sk, heads, 256, 512, p.aicNum, 2, libBytes}, layout);
+        TORCH_CHECK(
+            status == MlaScheduleStatus::Success &&
+                BuildSplitAccumulatorLayout({tnd ? MlaAccumulatorQueryLayout::Tnd : MlaAccumulatorQueryLayout::Bsnd,
+                                             batch, sq, shape.query.totalTokens, heads, kMlaAutoSplitCapacity},
+                                            accumulator) == MlaScheduleStatus::Success,
+            "MLA: auto split workspace or accumulator overflow");
         userBytes = layout.userBytes + (nonempty ? uint64_t(p.aicNum) * 256 * 528 * 4 : 0);
     }
     TORCH_CHECK(libBytes <= uint64_t(INT64_MAX) - userBytes, "MLA: workspace overflow");
@@ -1154,7 +1171,10 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
             if (tnd) {
                 MlaSplitTndLaunchArgs tndArgs{a, uint32_t(splits), static_cast<uint8_t*>(accum.data_ptr()),
                                               static_cast<uint8_t*>(accumLse.data_ptr())};
-                error = q.scalar_type() == at::kBFloat16 ? LaunchSplitTndBf16(tndArgs) : LaunchSplitTndFp16(tndArgs);
+                error = splits == 0 ? (q.scalar_type() == at::kBFloat16 ? LaunchAutoSplitTndBf16(tndArgs)
+                                                                        : LaunchAutoSplitTndFp16(tndArgs))
+                                    : (q.scalar_type() == at::kBFloat16 ? LaunchSplitTndBf16(tndArgs)
+                                                                        : LaunchSplitTndFp16(tndArgs));
             } else
                 error = splits == 0 ? (q.scalar_type() == at::kBFloat16 ? LaunchAutoSplitBsndBf16(splitArgs)
                                                                         : LaunchAutoSplitBsndFp16(splitArgs))
@@ -1496,7 +1516,7 @@ MlaUsedShape CheckSplitTnd(const at::Tensor& q, const at::Tensor& k, const at::T
     CheckForwardBoundary(q, k, v, qv, true, true, false);
     CheckTndInputs(q, k, cuQ, cuK, maxQ, maxK);
     CheckUsedInputs(q, cuQ.numel() - 1, usedQ, usedK);
-    TORCH_CHECK(splits >= 2 && splits <= 256, "MLA: TND split requires num_splits in [2,256]");
+    TORCH_CHECK(splits == 0 || (splits >= 2 && splits <= 256), "MLA: TND split requires num_splits=0 or [2,256]");
     return {cuQ.numel() - 1,
             q.size(1),
             {MlaSequenceLayout::Tnd, q.size(0), maxQ},
@@ -1516,11 +1536,12 @@ std::vector<at::Tensor> SplitTndForward(const at::Tensor& q, const at::Tensor& k
     MlaWindowConfig window{maxQ, maxK, left, right, causal};
     CheckWindow(window);
     uint32_t words;
-    TORCH_CHECK(SplitTndMetadataWords(shape.batch, words), "MLA: split metadata word count overflow");
+    TORCH_CHECK(splits == 0 ? AutoSplitTndMetadataWords(shape.batch, words) : SplitTndMetadataWords(shape.batch, words),
+                "MLA: split metadata word count overflow");
     if (metadata) {
         TORCH_CHECK(metadata->scalar_type() == at::kInt && metadata->dim() == 1 && metadata->numel() == words &&
                         metadata->is_contiguous() && metadata->device() == q.device(),
-                    "MLA: TND split metadata must be same-device contiguous int32 with the v19 size");
+                    "MLA: TND split metadata must be same-device contiguous int32 with the selected protocol size");
     }
     const c10::OptionalDeviceGuard guard(device_of(q));
     return UsedForward(q, k, v, qv, shape, cuQ, cuK, usedQ, usedK, scale, false, metadata, window, splits);
@@ -1552,7 +1573,8 @@ at::Tensor SplitTndMetadataOp(const at::Tensor& q, const at::Tensor& k, const at
     CheckWindow(window);
     const c10::OptionalDeviceGuard guard(device_of(q));
     uint32_t words;
-    TORCH_CHECK(SplitTndMetadataWords(shape.batch, words), "MLA: split metadata word count overflow");
+    TORCH_CHECK(splits == 0 ? AutoSplitTndMetadataWords(shape.batch, words) : SplitTndMetadataWords(shape.batch, words),
+                "MLA: split metadata word count overflow");
     auto metadata = at::empty({words}, q.options().dtype(at::kInt));
     const auto arr = [&](const std::optional<at::Tensor>& t) {
         return t ? MlaUsedMetadataArray{reinterpret_cast<uint64_t>(t->numel() ? t->data_ptr() : metadata.data_ptr()),

@@ -109,12 +109,17 @@ def summarize(reports, cases_per_dtype, *, include_native_fd=False):
     )
 
 
-def summarize_varlen(reports, specs):
+def summarize_varlen(reports, specs, *, include_native_fd=False):
     """Varlen has one public entry; average R=1/4 within each fixed input/dtype."""
     if not 0 < len(specs) <= PUBLIC_MAX_CASES // 2:
         raise ValueError("Expected 1..50 fixed varlen inputs")
     if len(reports) != 2 or {r["dtype"] for r in reports} != {"fp16", "bf16"}:
         raise ValueError("Both dtypes are required")
+    if include_native_fd and (
+        not all(r.get("automatic_split") for r in reports)
+        or any(s.get("splits") != 0 for s in specs)
+    ):
+        raise ValueError("Native FD acceptance requires automatic split inputs and reports")
     cases, excluded = [], []
     for report in reports:
         if not (report["causal"] or report.get("window")) or (
@@ -132,7 +137,7 @@ def summarize_varlen(reports, specs):
             if row["case"] != index:
                 raise ValueError("Inconsistent case index")
             item = dict(dtype=report["dtype"], case=index, spec=row["spec"])
-            applicable = row["native_template"] == 5 and not row["native_fd"]
+            applicable = row["native_template"] == 5 and (include_native_fd or not row["native_fd"])
             if applicable != row["e2e_applicable"]:
                 raise ValueError("Inconsistent native dispatch classification")
             if not applicable:
@@ -159,6 +164,7 @@ def summarize_varlen(reports, specs):
         threshold=1.0,
         mean_ratio=mean,
         weighting="equal input/dtype weight; equal R=1/4 weight within each input",
+        includes_native_fd=include_native_fd,
         measured_cases=2 * len(specs),
         applicable_cases=len(cases),
         excluded_cases=len(excluded),

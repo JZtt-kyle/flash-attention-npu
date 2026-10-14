@@ -1,7 +1,7 @@
 // Copyright (c) 2025 Huawei Technologies Co., Ltd.
 // CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
 // TND native partition provenance: mla_auto_split_tnd_plan.h.
-// Local wire protocol only; no public/production automatic TND path yet.
+// Layout-specific protocol shared by the production AICPU and AICore stages.
 #pragma once
 #include "mla_auto_split_bsnd_metadata.h"
 

@@ -250,7 +250,7 @@ def test_compile():
 @pytest.mark.parametrize(
     "fault",
     [
-        "split-zero",
+        "split-one",
         "split-over",
         "split-negative",
         "scale",
@@ -269,7 +269,7 @@ def test_reject(fake, fault):
         a = c["args"]
         record = None
         if fault.startswith("split"):
-            a["num_splits"] = {"split-zero": 0, "split-over": 257, "split-negative": -1}[fault]
+            a["num_splits"] = {"split-one": 1, "split-over": 257, "split-negative": -1}[fault]
         elif fault == "scale":
             a["softmax_scale"] = float("nan")
         elif fault == "used-size":

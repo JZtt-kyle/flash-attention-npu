@@ -168,7 +168,7 @@ def sample_kernels(
             if isinstance(production_name, tuple):
                 from tests.mla.support.mla_split_tnd_profile_rows import production_sample
 
-                group = rows[pos : pos + 3]
+                group = rows[pos : pos + len(production_name) + 1]
                 kernel = production_sample(group, metadata_name, production_name)
             else:
                 group = rows[pos : pos + 2]
@@ -222,7 +222,10 @@ def profile(
     mask="causal",
     metadata_name="ComputeMlaCausalTndMetadata",
     production_name="mla_tnd_used_",
+    automatic_split=False,
 ):
+    if automatic_split and any(s.get("splits") != 0 for s in specs):
+        raise ValueError("Automatic split timing requires num_splits=0 for every input")
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     vendor = check_vendor_configuration(vendor)
@@ -310,6 +313,8 @@ def profile(
                 for key in ("native_fd", "native_template", "native_tiling_key", "e2e_applicable")
             },
         )
+        if automatic_split:
+            row["e2e_applicable"] = row["native_template"] == 5
         for r in (1, 4):
             times = {
                 name: statistics.median(
@@ -336,6 +341,7 @@ def profile(
         dtype=dtype_name,
         causal=mask == "causal",
         window=mask == "window",
+        automatic_split=automatic_split,
         warmup=5,
         rounds=5,
         wall_iterations=20,

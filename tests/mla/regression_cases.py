@@ -68,4 +68,11 @@ def daily_suites():
         f"{tnd_split}::test_fake",
         f"{tnd_split}::test_compile",
     ]
+    auto_tnd = "tests/mla/e2e/auto_split_tnd/test_public.py"
+    suites["auto_split_tnd"] = [
+        f"{auto_tnd}::test_daily",
+        f"{auto_tnd}::test_empty",
+        f"{auto_tnd}::test_fake",
+        f"{auto_tnd}::test_compile",
+    ]
     return suites
