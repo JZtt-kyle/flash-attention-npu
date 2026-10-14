@@ -654,6 +654,19 @@ host 用 M=256、N=512 给出静态上界，AICPU 的实际源 M 为 256 或容�
 
 本步显式分片使用 FA3 的均匀 ceil-div 规则。原生 CANN 自动 FD 的变长任务归属与自动生产分派尚未接通，公开性能仍按第 7 节单列这部分原生路径；FD Block 的数值闭环不等同于自动调度生产路径完成。固定输入清单在采样前确定，不能根据耗时决定是否适用。
 
+
+#### 6.2.13 BSND 自动 split 的独立任务与归约计划
+
+[`MlaAutoSplitKvPlan`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_kv_plan.h) 是 M10c2a 的独立 CPU 组件。复用 6.2.8 的固定 CANN 原生自动分区，保留全部 AIC 的 `(B,M,S2)` 排他端点和 FD Vector 的 `(head,8行片)` 包含端点；不把 `maxS2SplitNum` 代入显式均匀分片公式。长度仍由已有 allocation/used 解析器提供，mask 使用有效 Sq/Sk，最终 BSND O/LSE 地址使用分配容量。
+
+计划只保存 O(B+AIC) 的长度、64 位 M 前缀、原生分区和 FD 前缀，不创建逐 M 或逐 S2 描述符数组。`Task(group,split)` 用相邻原生端点与该 M 块的可见范围求交，保留 AIC 所有者及不同 M 块的实际片数。一个非空片覆盖完整 M 时为 Direct，跨核片为 Partial；源端点省略的零 KV／全遮罩 M 块为 Empty，由 `group % AIC` 独立初始化遍历负责。零 Q 不占 M，空 B/Q/KV 容量不产生任务，但仍完整校验输入。
+
+仅 Partial 使用持久 FP32 O 与八路 sum/max。原生每个 AIC 至多参与首尾两个 FD M 块，因此静态预算保留 `2*AIC` 个 M 槽（单核为零）；实际地址按 `(FD head,该 head 的 split)` 紧凑排列，位于完整源 scratch 预算之后并按 32 字节对齐。Direct/Empty 无 partial 地址，不能覆盖这些槽。静态 scratch 使用 AIC 容量作为 blockDim；后续设备发射须保持该地址约定。`Merge(head,part)` 保留原生 Vector 分区，提供 8 行范围、首槽及实际片数，M 尾部按有效行裁剪。归并必须在全部 partial 写回完成后执行，CPU 验收不替代设备阶段同步。
+
+静态 accumulator 描述以 AIC 数作为后端容量上界，复用 FA3 的 `[S,B,H,Sq,512]`／`[S,B,H,Sq]` FP32 地址；单核无 accumulator。它与每个 M 块实际分片数分开：Direct 占第 0 片，其余无贡献片和 Empty 行需要调用者初始化为 0/-inf。这里只定义容量与地址，不承诺公开自动请求的返回形状或初始化已执行；生产接入须同时验证自动请求选择、设备长度、真实返回值及 fake/compile。全局空容量仍保留合法 accumulator 描述，workspace 为零。所有构造/查询失败保持输出不变，计划拥有长度副本。
+
+[`模块测试`](../../tests/mla/unit/auto_split_kv_plan/test_plan.py) 新编译固定源 SplitCore/workspace 和 FA3 shape 片段；独立枚举原始输入的可见 tile、AIC 唯一覆盖、FD 首片编号、每核至多两个 FD 块、Vector 8 行归约、持久槽无覆盖及原分配行地址。普通与 ASan/UBSan 使用同一集合，最大逻辑容量检查不分配 tensor。该组件尚未接通 metadata、设备或公开自动路径，不新增伪自动 E2E；既有公开能力继续由累计小输入 E2E 回归。
+
 ### 6.3 长度与布局调度
 
 [`BuildDenseSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.cpp) 处理整容量 BSND；以下入口复用同一 `detail/cann_split_core.*`，由 host/CPU 驱动与相应 AICPU 生成器编译同一源码。长度先完整校验，再数值转换为固定源格式；分配起点与 used 分别处理。记录格式见 [第 5 节](#5-metadata-设计)。
