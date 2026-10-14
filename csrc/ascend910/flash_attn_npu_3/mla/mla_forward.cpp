@@ -10,6 +10,8 @@
 #include "mla_split_bsnd_metadata.h"
 #include "mla_split_bsnd_launch.h"
 #include "mla_split_kv_plan.h"
+#include "mla_auto_split_kv_plan.h"
+#include "mla_auto_split_bsnd_launch.h"
 #include "mla_window_paged_metadata.h"
 #include "mla_paged_metadata_args.h"
 #include "mla_paged_launch.h"
@@ -37,6 +39,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadataFromPrefix(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaSplitBsndMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaAutoSplitBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowTndMetadata(void* args);
@@ -163,6 +166,11 @@ struct MetadataSubmission {
     void Enqueue()
     {
         if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs>) {
+            if (splits == 0) {
+                MlaAutoSplitBsndMetadataArgs autoArgs{args, *window};
+                ComputeMlaAutoSplitBsndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
+                return;
+            }
             if (splits > 1) {
                 MlaSplitBsndMetadataArgs splitArgs{args, *window, splits};
                 ComputeMlaSplitBsndMetadata<<<1, nullptr, current>>>(&splitArgs, sizeof(splitArgs));
@@ -419,9 +427,10 @@ at::Tensor SplitBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t he
     TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
     CheckCacheLengths(cacheSeqlens, batch, cacheSeqlens.device());
     CheckUsedInputs(cacheSeqlens, batch, std::nullopt, cacheSeqlens);
-    TORCH_CHECK(splits >= 2 && splits <= 256, "MLA: explicit split requires num_splits in [2,256]");
+    TORCH_CHECK(splits == 0 || (splits >= 2 && splits <= 256), "MLA: split requires num_splits=0 or [2,256]");
     uint32_t words;
-    TORCH_CHECK(SplitBsndMetadataWords(batch, words), "MLA: window metadata word count overflow");
+    TORCH_CHECK(splits == 0 ? AutoSplitBsndMetadataWords(batch, words) : SplitBsndMetadataWords(batch, words),
+                "MLA: split metadata word count overflow");
     MlaWindowConfig config{sq, sk, windowLeft, windowRight, causal};
     CheckWindow(config);
     const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
@@ -974,8 +983,10 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     if (window) {
         TORCH_CHECK(WindowMetadataWords(shape.batch, words), "MLA: window metadata word count overflow");
     }
-    if (splits > 1) {
-        TORCH_CHECK(SplitBsndMetadataWords(shape.batch, words), "MLA: split metadata word count overflow");
+    if (splits != 1) {
+        TORCH_CHECK(splits == 0 ? AutoSplitBsndMetadataWords(shape.batch, words)
+                                : SplitBsndMetadataWords(shape.batch, words),
+                    "MLA: split metadata word count overflow");
     }
     const int64_t batch = shape.batch, sq = shape.query.maxLength, heads = shape.queryHeads, sk = shape.kv.maxLength;
     const bool tnd = shape.query.layout == MlaSequenceLayout::Tnd;
@@ -997,13 +1008,26 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
                     "MLA: split workspace or accumulator overflow");
         userBytes = layout.userBytes;
     }
+    if (splits == 0) {
+        MlaAutoSplitKvLayout layout{};
+        MlaAccumulatorLayout accumulator{};
+        TORCH_CHECK(BuildAutoSplitKvLayout({batch, sq, sk, heads, 256, 512, p.aicNum, 2, libBytes}, layout) ==
+                            MlaScheduleStatus::Success &&
+                        BuildSplitAccumulatorLayout(
+                            {MlaAccumulatorQueryLayout::Bsnd, batch, sq, batch * sq, heads, kMlaAutoSplitCapacity},
+                            accumulator) == MlaScheduleStatus::Success,
+                    "MLA: auto split workspace or accumulator overflow");
+        userBytes = layout.userBytes + (nonempty ? uint64_t(p.aicNum) * 256 * 528 * 4 : 0);
+    }
     TORCH_CHECK(libBytes <= uint64_t(INT64_MAX) - userBytes, "MLA: workspace overflow");
     auto out = tnd ? at::empty({shape.query.totalTokens, heads, 512}, q.options())
                    : at::empty({batch, sq, heads, 512}, q.options());
     auto lse = tnd ? at::empty({heads, shape.query.totalTokens}, q.options().dtype(at::kFloat))
                    : at::empty({batch, heads, sq}, q.options().dtype(at::kFloat));
-    auto accum = splits > 1 ? at::empty({splits, batch, heads, sq, 512}, q.options().dtype(at::kFloat)) : at::Tensor();
-    auto accumLse = splits > 1 ? at::empty({splits, batch, heads, sq}, q.options().dtype(at::kFloat)) : at::Tensor();
+    const int64_t capacity = splits == 0 ? kMlaAutoSplitCapacity : splits;
+    auto accum =
+        splits != 1 ? at::empty({capacity, batch, heads, sq, 512}, q.options().dtype(at::kFloat)) : at::Tensor();
+    auto accumLse = splits != 1 ? at::empty({capacity, batch, heads, sq}, q.options().dtype(at::kFloat)) : at::Tensor();
     auto workspace = at::empty({static_cast<int64_t>(userBytes + libBytes)}, q.options().dtype(at::kByte));
     auto metadata = schedulerMetadata ? *schedulerMetadata : at::empty({words}, q.options().dtype(at::kInt));
     const auto checkAddress = [](const at::Tensor& t) {
@@ -1103,10 +1127,13 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
             producer->Enqueue();
         }
         aclError error;
-        if (splits > 1) {
+        if (splits != 1) {
             MlaSplitBsndLaunchArgs splitArgs{a, uint32_t(splits), static_cast<uint8_t*>(accum.data_ptr()),
                                              static_cast<uint8_t*>(accumLse.data_ptr())};
-            error = q.scalar_type() == at::kBFloat16 ? LaunchSplitBsndBf16(splitArgs) : LaunchSplitBsndFp16(splitArgs);
+            error = splits == 0 ? (q.scalar_type() == at::kBFloat16 ? LaunchAutoSplitBsndBf16(splitArgs)
+                                                                    : LaunchAutoSplitBsndFp16(splitArgs))
+                                : (q.scalar_type() == at::kBFloat16 ? LaunchSplitBsndBf16(splitArgs)
+                                                                    : LaunchSplitBsndFp16(splitArgs));
         } else
             error = tnd ? (q.scalar_type() == at::kBFloat16 ? LaunchTndUsedBf16(a) : LaunchTndUsedFp16(a))
                         : (q.scalar_type() == at::kBFloat16 ? LaunchBsndUsedBf16(a) : LaunchBsndUsedFp16(a));
@@ -1152,15 +1179,16 @@ std::vector<at::Tensor> SplitBsndForward(const at::Tensor& q, const at::Tensor& 
                 "MLA compressed forward is not implemented yet for Q-used with explicit metadata");
     const int64_t batch = q.size(0), sq = q.size(1), heads = q.size(2), sk = k.size(1);
     CheckUsedInputs(q, batch, usedQuery, cacheSeqlens);
-    TORCH_CHECK(splits >= 2 && splits <= 256, "MLA: explicit split requires num_splits in [2,256]");
+    TORCH_CHECK(splits == 0 || (splits >= 2 && splits <= 256), "MLA: split requires num_splits=0 or [2,256]");
     uint32_t words;
-    TORCH_CHECK(SplitBsndMetadataWords(batch, words), "MLA: window metadata word count overflow");
+    TORCH_CHECK(splits == 0 ? AutoSplitBsndMetadataWords(batch, words) : SplitBsndMetadataWords(batch, words),
+                "MLA: split metadata word count overflow");
     MlaWindowConfig config{sq, sk, windowLeft, windowRight, causal};
     CheckWindow(config);
     if (schedulerMetadata) {
         TORCH_CHECK(schedulerMetadata->scalar_type() == at::kInt && schedulerMetadata->dim() == 1 &&
                         schedulerMetadata->numel() == words && schedulerMetadata->is_contiguous(),
-                    "MLA: split scheduler_metadata must be contiguous int32[416 + 10 * batch_size]");
+                    "MLA: split scheduler_metadata must be contiguous int32 with the selected protocol size");
         TORCH_CHECK(schedulerMetadata->device() == q.device(),
                     "MLA: scheduler_metadata must be on the same NPU device");
     }

@@ -1,0 +1,7 @@
+// Native automatic split instantiation; implementation retains source licenses.
+#define MLA_AUTO_TYPE half
+#define MLA_AUTO_INIT mla_auto_split_bsnd_init_fp16
+#define MLA_AUTO_PARTIAL mla_auto_split_bsnd_partial_fp16
+#define MLA_AUTO_MERGE mla_auto_split_bsnd_merge_fp16
+#define MLA_AUTO_LAUNCH LaunchAutoSplitBsndFp16
+#include "mla_auto_split_bsnd_launch_impl.hpp"

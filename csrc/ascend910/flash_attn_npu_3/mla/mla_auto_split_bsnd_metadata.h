@@ -1,7 +1,7 @@
 // Copyright (c) 2025 Huawei Technologies Co., Ltd.
 // CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
 // Native partition provenance: mla_auto_split_kv_plan.h. This is a local wire
-// protocol, not a CANN ABI or an opened FA3 automatic-split return contract.
+// protocol, not a CANN ABI; the production adapter defines the FA3 capacity.
 #pragma once
 #include "mla_used_metadata.h"
 #include "mla_window.h"
@@ -26,6 +26,12 @@ struct MlaAutoSplitBsndContext {
     MlaUsedMetadataContext used;
     MlaWindowKernelParams window;
 };
+struct MlaAutoSplitBsndMetadataArgs {
+    MlaUsedMetadataArgs input;
+    MlaWindowConfig window;
+};
+// Static public allocation capacity; native per-M partitions remain variable.
+constexpr uint32_t kMlaAutoSplitCapacity = kMlaMaxAic;
 bool BuildAutoSplitBsndMetadata(const MlaUsedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
                                 uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&);
 } // namespace flash_attn::mla

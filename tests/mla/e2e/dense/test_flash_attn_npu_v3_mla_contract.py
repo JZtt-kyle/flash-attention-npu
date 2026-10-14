@@ -234,7 +234,7 @@ def test_public_rejects_before_metadata_or_dispatch(
 def test_mla_options_cannot_fall_through(entry, representation, option, dtype):
     args = _inputs(representation, dtype=dtype)
     if option == "split":
-        args["num_splits"] = 0
+        args["num_splits"] = -1
     elif option == "chunk":
         args.update(causal=True, attention_chunk=1)
     elif option == "softcap":
@@ -261,7 +261,7 @@ def test_mla_options_cannot_fall_through(entry, representation, option, dtype):
 
 @pytest.mark.parametrize("dims", [(64, 512), (192, 128), (64, 128)])
 @pytest.mark.parametrize("has_softcap", [False, True])
-def test_mla_metadata_rejected(entry, dims, dtype, has_softcap):
+def test_mla_metadata_auto_default_and_rejections(entry, dims, dtype, has_softcap):
     args = dict(
         batch_size=2,
         max_seqlen_q=3,
@@ -274,8 +274,14 @@ def test_mla_metadata_rejected(entry, dims, dtype, has_softcap):
         cache_seqlens=torch.full((2,), 17, dtype=torch.int32, device="npu"),
         has_softcap=has_softcap,
     )
-    with pytest.raises(RuntimeError, match="MLA scheduler metadata is not implemented yet"):
-        api.get_scheduler_metadata(**args)
+    if dims == (64, 512) and not has_softcap:
+        record = api.get_scheduler_metadata(**args)
+        assert record.shape == (778,) and record.dtype == torch.int32
+        if entry != "fake":
+            assert record.cpu()[1:3].tolist() == [18, 18]
+    else:
+        with pytest.raises(RuntimeError, match="MLA scheduler metadata is not implemented yet"):
+            api.get_scheduler_metadata(**args)
     args.update(
         cu_seqlens_q=None,
         cu_seqlens_k=None,
@@ -336,7 +342,7 @@ def test_each_unsupported_dense_option(entry, option, dtype):
     elif option == "causal":
         args[option] = True
     elif option == "num_splits":
-        args[option] = 0
+        args[option] = -1
     elif option in ("attention_chunk", "softcap", "sm_margin"):
         args[option] = 1
     else:

@@ -260,7 +260,7 @@ def _check_mla_dense_options(
         or (window_size != (-1, -1) and not allow_window)
         or attention_chunk != 0
         or softcap != 0.0
-        or (num_splits != 1 and not (allow_split and 2 <= num_splits <= 256))
+        or (num_splits != 1 and not (allow_split and 0 <= num_splits <= 256))
         or pack_gqa is not None
         or sm_margin != 0
     ):
@@ -667,19 +667,20 @@ def _mla_paged_tnd_forward_fake(
     )
 
 
-def _mla_split_bsnd_words(batch):
-    if not 0 <= batch <= (2**32 - 1 - 416) // 10:
+def _mla_split_bsnd_words(batch, splits=2):
+    fixed = 758 if splits == 0 else 416
+    if not 0 <= batch <= (2**32 - 1 - fixed) // 10:
         raise RuntimeError("MLA: split metadata word count overflow")
-    return 416 + 10 * batch
+    return fixed + 10 * batch
 
 
 def _check_mla_split_bsnd(q, k, lengths, used_q, metadata, splits, left, right, causal):
-    if not 2 <= splits <= 256:
-        raise RuntimeError("MLA: explicit split requires num_splits in [2,256]")
+    if splits != 0 and not 2 <= splits <= 256:
+        raise RuntimeError("MLA: split requires num_splits=0 or [2,256]")
     batch, sq, heads = q.shape[:3]
     _normalize_mla_window(sq, k.shape[1], left, right, causal)
     _check_mla_used(q, batch, used_q, lengths)
-    words = _mla_split_bsnd_words(batch)
+    words = _mla_split_bsnd_words(batch, splits)
     if metadata is not None:
         if used_q is not None:
             raise RuntimeError(
@@ -693,8 +694,15 @@ def _check_mla_split_bsnd(q, k, lengths, used_q, metadata, splits, left, right, 
             or not metadata.is_contiguous()
         ):
             raise RuntimeError(
-                "MLA: split scheduler_metadata must be same-device contiguous int32[416 + 10 * batch_size]"
+                "MLA: split scheduler_metadata must be same-device contiguous int32 with the selected protocol size"
             )
+    if splits == 0:
+        # Static public capacity, independent of device used lengths/native FD count.
+        if 26 * max(batch, 1) * heads * max(sq, 1) * 512 > 2**63 - 1:
+            raise RuntimeError("MLA: auto split accumulator stride overflow")
+        if 26 * batch * heads * sq * 512 * 4 > 2**63 - 1:
+            raise RuntimeError("MLA: auto split workspace or accumulator overflow")
+        return
     # Match the host's conservative M=256,N=512 envelope before allocating fake tensors.
     if batch and sq and k.shape[1]:
         rows = batch * ((sq * heads + 255) // 256) * splits * 256
@@ -733,11 +741,12 @@ def _mla_split_bsnd_forward_fake(
         causal,
     )
     batch, sq, heads = q.shape[:3]
+    capacity = 26 if num_splits == 0 else num_splits
     return (
         q.new_empty((batch, sq, heads, 512)),
         q.new_empty((batch, heads, sq), dtype=torch.float32),
-        q.new_empty((num_splits, batch, heads, sq, 512), dtype=torch.float32),
-        q.new_empty((num_splits, batch, heads, sq), dtype=torch.float32),
+        q.new_empty((capacity, batch, heads, sq, 512), dtype=torch.float32),
+        q.new_empty((capacity, batch, heads, sq), dtype=torch.float32),
     )
 
 
@@ -1138,7 +1147,7 @@ def _flash_attn_forward(
                 v_descale,
             ),
         )
-        if num_splits > 1:
+        if num_splits != 1:
             return torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
                 q,
                 k,
@@ -1353,7 +1362,7 @@ def _flash_attn_forward_fake(
                 v_descale,
             ),
         )
-        if num_splits > 1:
+        if num_splits != 1:
             return _mla_split_bsnd_forward_fake(
                 q,
                 k,
@@ -2332,7 +2341,7 @@ def flash_attn_func(
     # Causal MLA is forward-only. Its real/fake dispatcher validates every
     # tensor, including rejecting gradients, without an autograd context.
     if (
-        (causal or window_size != (-1, -1) or num_splits > 1)
+        (causal or window_size != (-1, -1) or num_splits != 1)
         and qv is not None
         and q.device.type == "npu"
     ):
@@ -2349,7 +2358,7 @@ def flash_attn_func(
             sm_margin=sm_margin,
             optional_tensors=(q_descale, k_descale, v_descale),
         )
-        if num_splits > 1:
+        if num_splits != 1:
             out, softmax_lse, _, _ = torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
                 q, k, v, qv, num_splits, window_size[0], window_size[1], causal, softmax_scale
             )
@@ -2533,10 +2542,12 @@ def flash_attn_with_kvcache(
 ):
     """
     NPU compressed MLA supports read-only BSND or ND paged caches with BSND/TND
-    queries. Set num_splits=1 explicitly; current MLA limits are documented in
-    docs/mla/status.md. Right-down causal supports nonpaged and paged BSND/TND queries;
-    generic FA3 append and rotary options below remain unsupported; window is supported
-    for nonpaged BSND and mixed cache.
+    queries, including right-down causal and window masks. Nonpaged BSND queries
+    support automatic num_splits=0, single split 1, and explicit splits 2..256.
+    Other MLA layouts require num_splits=1. Automatic requests return 26 FP32
+    accumulator slots; the native partition determines the actual splits per M
+    block and unused slots are 0/-inf. Current limits are in docs/mla/status.md.
+    Generic FA3 append and rotary options below remain unsupported for MLA.
 
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
     k and v. This is useful for incremental decoding: you can pass in the cached keys/values from
@@ -2725,7 +2736,7 @@ def flash_attn_with_kvcache(
                 dtype=torch.int32,
                 device=k_cache.device,
             )
-        if num_splits > 1:
+        if num_splits != 1:
             result = torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
                 q,
                 k_cache,
@@ -3064,7 +3075,7 @@ def _check_mla_metadata_options(
         or (window_size != (-1, -1) and not allow_window)
         or attention_chunk != 0
         or has_softcap
-        or (num_splits != 1 and not (allow_split and 2 <= num_splits <= 256))
+        or (num_splits != 1 and not (allow_split and 0 <= num_splits <= 256))
         or sm_margin != 0
     ):
         raise RuntimeError(
@@ -3148,10 +3159,12 @@ def _mla_split_bsnd_metadata_fake(
         batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
     )
     _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
-    if not 2 <= num_splits <= 256:
-        raise RuntimeError("MLA: explicit split requires num_splits in [2,256]")
+    if num_splits != 0 and not 2 <= num_splits <= 256:
+        raise RuntimeError("MLA: split requires num_splits=0 or [2,256]")
     return torch.empty(
-        (_mla_split_bsnd_words(batch_size),), dtype=torch.int32, device=cache_seqlens.device
+        (_mla_split_bsnd_words(batch_size, num_splits),),
+        dtype=torch.int32,
+        device=cache_seqlens.device,
     )
 
 
@@ -3410,7 +3423,7 @@ def _get_scheduler_metadata_fake(
             allow_window=True,
             allow_split=cu_seqlens_q is None and page_size is None,
         )
-        if num_splits > 1:
+        if num_splits != 1:
             return _mla_split_bsnd_metadata_fake(
                 batch_size,
                 max_seqlen_q,
@@ -3519,10 +3532,14 @@ def get_scheduler_metadata(
     Its legacy ``softcap`` and ``softmax_scale`` arguments are keyword-only; a
     positive legacy softcap enables softcapping even when has_softcap is omitted.
     ``has_softcap=True`` requires a positive legacy softcap for this protocol.
-    MLA requires headdim=64, headdim_v=512, matching qkv_dtype and explicit
-    num_splits=1. cache_seqlens must be a same-device contiguous int32 tensor
-    of shape (batch_size,); None/integer lengths are kvcache conveniences only.
-    Without page_size or cu_seqlens_q, it returns an int32 BSND-cache record:
+    MLA requires headdim=64, headdim_v=512 and matching qkv_dtype.
+    Nonpaged BSND accepts num_splits=0..256; other layouts require 1.
+    cache_seqlens must be a same-device contiguous int32 tensor of shape
+    (batch_size,); None/integer lengths are kvcache conveniences only.
+    Without page_size or cu_seqlens_q, automatic num_splits=0 returns a v18
+    int32 record with 758 + 10 * batch_size words; explicit splits 2..256 use
+    v17 with 416 + 10 * batch_size words. Both bind the normalized window and
+    current lengths. For num_splits=1 it returns an int32 BSND-cache record:
     v2 for unmasked attention or v7 for right-down causal. Causal records contain
     410 + 8 * batch_size words and cannot be reused by an unmasked forward.
     With cu_seqlens_q and no page_size it generates a TND-query/BSND-cache record:
@@ -3566,7 +3583,7 @@ def get_scheduler_metadata(
             allow_window=True,
             allow_split=cu_seqlens_q is None and page_size is None,
         )
-        if num_splits > 1:
+        if num_splits != 1:
             return torch.ops.flash_attn_npu_3._mla_split_bsnd_metadata(
                 batch_size,
                 max_seqlen_q,

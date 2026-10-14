@@ -3,27 +3,30 @@
 from decimal import Decimal
 
 
-def pair_split_kernels(rows, labels, dtype):
+def pair_split_kernels(rows, labels, dtype, *, automatic=False):
     index = 0
     paired = []
     for label in labels:
-        count = 2 if label["name"] == "fa3" else 1
+        count = (3 if automatic else 2) if label["name"] == "fa3" else 1
         group = rows[index : index + count]
         if len(group) != count:
             raise ValueError("Missing split profiler kernel")
-        if count == 2:
-            for row, stage in zip(group, ("partial", "merge")):
-                if f"mla_split_bsnd_{stage}_{dtype}" not in row["Name"]:
+        if count > 1:
+            stages = ("init", "partial", "merge") if automatic else ("partial", "merge")
+            prefix = "mla_auto_split_bsnd" if automatic else "mla_split_bsnd"
+            for row, stage in zip(group, stages):
+                if f"{prefix}_{stage}_{dtype}" not in row["Name"]:
                     raise ValueError("Wrong split profiler kernel order or dtype")
-            first_end = Decimal(group[0]["Start Time(us)"]) + Decimal(group[0]["Duration(us)"])
-            if group[0]["Device_id"] != group[1]["Device_id"] or first_end > Decimal(
-                group[1]["Start Time(us)"]
-            ):
-                raise ValueError("Split phases overlap or run on different devices")
+            for first, second in zip(group, group[1:]):
+                first_end = Decimal(first["Start Time(us)"]) + Decimal(first["Duration(us)"])
+                if first["Device_id"] != second["Device_id"] or first_end > Decimal(
+                    second["Start Time(us)"]
+                ):
+                    raise ValueError("Split phases overlap or run on different devices")
             row = dict(group[0])
             row["Duration(us)"] = str(sum(Decimal(r["Duration(us)"]) for r in group))
             row["Split End Time(us)"] = str(
-                Decimal(group[1]["Start Time(us)"]) + Decimal(group[1]["Duration(us)"])
+                Decimal(group[-1]["Start Time(us)"]) + Decimal(group[-1]["Duration(us)"])
             )
             row["Split Segments"] = [dict(r) for r in group]
         else:

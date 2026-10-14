@@ -55,4 +55,10 @@ def daily_suites():
         f"{split}::test_empty",
         f"{split}::test_fake_and_compile",
     ]
+    auto = "tests/mla/e2e/auto_split_bsnd/test_public.py"
+    suites["auto_split_bsnd"] = [
+        f"{auto}::test_daily",
+        f"{auto}::test_empty",
+        f"{auto}::test_fake_and_compile",
+    ]
     return suites

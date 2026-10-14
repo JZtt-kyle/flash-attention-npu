@@ -57,6 +57,8 @@ USED_SHARED_CPU = [
 SPLIT_KV_ATTENTION = "tests/mla/unit/split_kv_attention/test_attention.py"
 SPLIT_KV_MERGE = "tests/mla/unit/split_kv_merge/test_merge.py"
 SPLIT_KV_MERGE_SUITES = {
+    "auto-split-bsnd",
+    "unit-auto_split_bsnd",
     "split-bsnd",
     "split-bsnd-source",
     "unit-split_kv_bsnd",
@@ -72,6 +74,18 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "auto-split-bsnd-check": [
+        "tests/mla/e2e/auto_split_bsnd/test_public.py",
+        "-k",
+        "representative",
+    ],
+    "auto-split-bsnd": [
+        "tests/mla/e2e/auto_split_bsnd/test_public.py",
+        "tests/mla/unit/auto_split_bsnd/test_source.py",
+    ],
+    "auto-split-bsnd-tools": ["tests/mla/unit/tools/test_mla_auto_split_bsnd_tools.py"],
+    "auto-split-bsnd-trap": ["tests/mla/e2e/auto_split_bsnd/test_trap.py"],
+    "auto-split-bsnd-profile": ["tests/mla/e2e/auto_split_bsnd/test_auto_split_bsnd_profile.py"],
     "auto-split-metadata-sanitize": ["tests/mla/unit/auto_split_bsnd_metadata/test_metadata.py"],
     "auto-split-metadata-tools": ["tests/mla/unit/tools/test_mla_auto_split_metadata_tools.py"],
     "auto-split-metadata-check": [
@@ -628,6 +642,8 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "auto-split-bsnd-profile",
+    "split-bsnd-profile",
     "split-kv-merge-profile",
     "split-kv-attention-profile",
     "window-paged-tnd-profile",
@@ -679,6 +695,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "auto-split-bsnd-tools",
     "unit-auto_split_bsnd_metadata",
     "auto-split-metadata-sanitize",
     "auto-split-metadata-tools",

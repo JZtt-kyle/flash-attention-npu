@@ -19,7 +19,7 @@
 namespace flash_attn::mla::Block {
 using namespace AscendC;
 
-template <typename OutputT>
+template <typename OutputT, bool WriteSingleAccumulator = false>
 class MlaSplitKvMerge {
   public:
     __aicore__ inline void Init(const MlaSplitKvMergeParams& p, GM_ADDR out, GM_ADDR sum, GM_ADDR maximum,
@@ -166,7 +166,7 @@ class MlaSplitKvMerge {
                 }
             }
             PipeBarrier<PIPE_V>();
-            if (params.adapt && params.splits > 1) {
+            if (params.adapt && (params.splits > 1 || WriteSingleAccumulator)) {
                 auto s = sum[split * width], m = maximum[split * width];
                 Tile::ComputeSoftMaxLse(lse, s, m, rows);
                 for (uint32_t row = 0; row < rows; ++row) {

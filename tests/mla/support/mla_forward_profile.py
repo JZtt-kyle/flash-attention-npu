@@ -471,11 +471,12 @@ def profile(
         ]
         rows = [row for row in rows if row not in conversion_rows]
     explicit_split = window_specs is not None and any("splits" in spec for spec in window_specs)
+    automatic_split = explicit_split and all(spec.get("splits") == 0 for spec in window_specs)
     if explicit_split:
         from tests.mla.support.mla_split_bsnd_profile_rows import pair_split_kernels
 
-        assert all(spec.get("splits", 1) > 1 for spec in window_specs)
-        rows = pair_split_kernels(rows, labels, dtype_name)
+        assert automatic_split or all(spec.get("splits", 1) > 1 for spec in window_specs)
+        rows = pair_split_kernels(rows, labels, dtype_name, automatic=automatic_split)
     assert len(rows) == len(labels), (len(rows), len(labels))
     fa3_count = sum(label["name"] == "fa3" for label in labels)
     assert len(metadata_rows) in (0, fa3_count), (len(metadata_rows), fa3_count)
@@ -485,7 +486,9 @@ def profile(
     for row, label in zip(rows, labels):
         expected_name = (
             (
-                f"mla_split_bsnd_partial_{dtype_name}"
+                f"mla_auto_split_bsnd_init_{dtype_name}"
+                if automatic_split
+                else f"mla_split_bsnd_partial_{dtype_name}"
                 if explicit_split
                 else f"mla_{'bsnd_used' if masked else 'dense'}_{dtype_name}"
             )
@@ -613,12 +616,15 @@ def profile(
                     item["func_4_ratio"] = (
                         item["func_4"]["median_e2e_us"] / item["native_cann_4"]["median_e2e_us"]
                     )
+        if automatic_split:
+            item["e2e_applicable"] = item["native_template"] == 5
         results.append(item)
     snapshot("npu-after.log")
     report = dict(
         dtype=dtype_name,
         causal=causal,
         window=window_specs is not None,
+        automatic_split=automatic_split,
         stride_boundary=(
             None
             if stride_profiles is None
@@ -698,6 +704,13 @@ if __name__ == "__main__":
         strides = [s.get("stride", "contiguous") for s in window_specs]
     if os.environ.get("MLA_FORWARD_SPLIT_BSND") == "1":
         from tests.mla.support.mla_split_bsnd_cases import PERFORMANCE_CASES
+
+        window_specs = PERFORMANCE_CASES
+        cases = [(s["shape"], s.get("scale")) for s in window_specs]
+        lengths = [s.get("lengths") for s in window_specs]
+        strides = [s.get("stride", "contiguous") for s in window_specs]
+    if os.environ.get("MLA_FORWARD_AUTO_SPLIT_BSND") == "1":
+        from tests.mla.support.mla_auto_split_bsnd_cases import PERFORMANCE_CASES
 
         window_specs = PERFORMANCE_CASES
         cases = [(s["shape"], s.get("scale")) for s in window_specs]

@@ -41,7 +41,7 @@ using namespace AscendC;
 
 template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false, bool HasUsed = false,
           bool HasStrides = false, bool IsPaged = false, bool IsCausal = false, bool IsWindow = false,
-          bool IsPartial = false>
+          bool IsPartial = false, bool AbsolutePartialOffsets = false>
 class MlaTaskRing {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
@@ -132,7 +132,8 @@ class MlaTaskRing {
             vector.Init(vectorParams, output, lse);
             if constexpr (IsPartial) {
                 vector.InitPartial(workspace + partial->outOffsetBytes, workspace + partial->sumOffsetBytes,
-                                   workspace + partial->maxOffsetBytes, uint64_t(core) * params.mBaseSize);
+                                   workspace + partial->maxOffsetBytes,
+                                   AbsolutePartialOffsets ? 0 : uint64_t(core) * params.mBaseSize);
             }
             vector.InitVec1GlobalTensor(qk, p, pvInt);
             vector.InitVec2GlobalTensor(vec2, pv);
@@ -173,7 +174,7 @@ class MlaTaskRing {
             return;
         }
         const uint32_t rows = Min(chunk, params.mBaseSize - begin);
-        const uint64_t row = uint64_t(core) * params.mBaseSize + begin;
+        const uint64_t row = (AbsolutePartialOffsets ? 0 : uint64_t(core) * params.mBaseSize) + begin;
         GlobalTensor<float> gm;
         gm.SetGlobalBuffer((__gm__ float*)(workspace + partial.outOffsetBytes));
         matmul::InitOutput<float>(gm[row * 512], rows * 512, 0);

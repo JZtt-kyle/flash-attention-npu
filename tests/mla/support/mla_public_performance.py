@@ -34,12 +34,18 @@ def input_identity(row):
     return {name: row[name] for name in keys}
 
 
-def summarize(reports, cases_per_dtype):
+def summarize(reports, cases_per_dtype, *, include_native_fd=False):
     """Equal weight per input/dtype, then equal weight per defined entry/R."""
     if cases_per_dtype <= 0 or cases_per_dtype * 2 > PUBLIC_MAX_CASES:
         raise ValueError("Expected 1..50 input cases per dtype")
     if len(reports) != 2 or {r["dtype"] for r in reports} != {"fp16", "bf16"}:
         raise ValueError("Expected exactly one FP16 and one BF16 report")
+    if include_native_fd and not all(r.get("automatic_split") for r in reports):
+        raise ValueError("Native FD acceptance requires automatic split reports")
+    if include_native_fd and any(
+        row.get("num_splits") != 0 for r in reports for row in r["results"]
+    ):
+        raise ValueError("Native FD acceptance requires num_splits=0")
     identities = []
     cases, excluded = [], []
     segments = defaultdict(list)
@@ -57,7 +63,7 @@ def summarize(reports, cases_per_dtype):
             raise ValueError("Missing window input identity")
         identities.append([input_identity(row) for row in report["results"]])
         for index, row in enumerate(report["results"]):
-            applicable = row["native_template"] == 5 and not row["native_fd"]
+            applicable = row["native_template"] == 5 and (include_native_fd or not row["native_fd"])
             if row["e2e_applicable"] != applicable:
                 raise ValueError("Inconsistent native dispatch classification")
             item = dict(dtype=report["dtype"], index=index, **input_identity(row))
@@ -87,6 +93,7 @@ def summarize(reports, cases_per_dtype):
     mean = statistics.fmean(item["mean_ratio"] for item in cases)
     return dict(
         passed=mean <= 1.0,
+        includes_native_fd=include_native_fd,
         threshold=1.0,
         mean_ratio=mean,
         weighting="equal input/dtype weight; equal entry/R weight within each input",

@@ -298,13 +298,13 @@ def test_length_updates_streams_and_lifetime(dtype):
 
 
 @pytest.mark.parametrize(
-    "option", ["auto", "too-many", "negative", "q-used-record", "metadata-shape", "scale", "grad"]
+    "option", ["too-many", "negative", "q-used-record", "metadata-shape", "scale", "grad"]
 )
 def test_static_rejections(option):
     c = make_case()
     t = c["t"]
-    if option in ("auto", "too-many", "negative"):
-        c["options"]["num_splits"] = {"auto": 0, "too-many": 257, "negative": -1}[option]
+    if option in ("too-many", "negative"):
+        c["options"]["num_splits"] = {"too-many": 257, "negative": -1}[option]
     elif option == "q-used-record":
         c["usedq"] = torch.tensor([7, 7], dtype=torch.int32, device="npu")
     elif option == "scale":

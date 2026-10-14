@@ -31,8 +31,9 @@ class MlaSplitKvBsnd : private MlaTaskRing<InputT, true, false, false, false, fa
 };
 // Production uses allocation/used spans and the existing independent input
 // layouts. The launch wrapper supplies one persistent fragment per iteration.
-template <typename InputT>
-class MlaSplitKvUsedBsnd : private MlaTaskRing<InputT, true, false, false, true, true, false, false, true, true> {
+template <typename InputT, bool AbsolutePartialOffsets = false>
+class MlaSplitKvUsedBsnd
+    : private MlaTaskRing<InputT, true, false, false, true, true, false, false, true, true, AbsolutePartialOffsets> {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
                                       GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace, TPipe* pipe,
