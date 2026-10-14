@@ -699,6 +699,20 @@ host 以 M=256/N=512 预算源 scratch、最多 2×AIC 个持久 FD 槽及 AIC �
 
 公开性能使用预先固定的 [`输入集合`](../../tests/mla/support/mla_auto_split_bsnd_cases.py)，保留 R=1/4、5 次预热、5×20 wall 和完成同步；三段 Kernel 明细与公开调用 wall 分开记录。该自动组将原生 FD 与非 FD 同时纳入配置内及配置间等权平均，不按计时结果筛选，保存所有单例和分段退化。
 
+#### 6.2.16 TND 显式 split 任务与持久布局
+
+[`mla_split_tnd_plan.h/.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_tnd_plan.h) 是独立 CPU 计划，解决 TND Q/KV 紧凑分配与 BSND 固定容量地址的差异。它不生成设备 metadata、不选 Tile 资源、不发射 Kernel，也不开放 TND split。数值 partial/FD、设备同步与公开入口由后续生产接入验收。
+
+静态 `BuildSplitTndPlanLayout` 接收 B、totalQ/totalKV、maxQ/maxKV、H、逻辑 M/N、显式 S=2..256 和 AIC/blockDim/CV 资源。totalQ/totalKV 必须在 int32 内且能由 B 个不超过 max 的段组成；每段行数、总输出地址和 accumulator 字节数沿用既有长度/布局限制。max 是调用级上界，不当作真实分配步长。全局 totalQ 或 totalKV 为零仍检查所有静态边界、保留 `[S,H,totalQ,512]` / `[S,H,totalQ]` FP32 accumulator 描述，任务和 workspace 为零。
+
+令 T=totalQ、A=min(B,T)。最多 A 个样本有 Q token，每个有效 M 尾块最多补 M−1 行，故持久 M 组数上界为 `min(A*ceil(maxQ*H/M), floor((T*H+A*(M-1))/M))`。这是安全上界，不承诺最小分配量；不能仅用 `ceil(T*H/M)`，因为不同样本的尾块不能合并。使用总量也避免把稀疏紧凑输入膨胀为 B×maxQ。复用 6.2.11 的源非 FD scratch、32 字节对齐和 `[group,split,M行,512或8]` 持久 O/sum/max；所有预算乘加和 libApi 总字节数检查 int64 溢出，不分配大 tensor 或逐任务数组。
+
+`BuildSplitTndPlan` 通过 `ParseUsedLengths` 完整校验两组 allocation 前缀、缺省或显式 Q/KV-used，并持有归一化段的副本。有效 Q 生成紧凑 uint64 M 前缀，重复前缀跳过零 Q 段；零 used KV、全遮罩和空尾片仍有初始化任务。Task/Merge 的编号、跨波循环所有者和持久槽顺序沿用显式 BSND 计划，窗口使用调用级 max 归一化、逐段 used 长度做右下对齐。所有 partial 完成之后才可归并，CPU 所有权检查不替代设备同步。
+
+Task 同时返回原始 Q/KV allocation token 起点、段容量与 used 长度，后续四路输入各自使用独立 stride。Row 使用 `allocationQStart+localQuery` 计算连续 TND O、head-major LSE 及 FA3 accumulator，不能累加 used 或用 batch×maxQ；unused Q 间隙不压紧。构造和查询失败均保持输出不变，默认空计划拒绝查询。
+
+[`模块测试`](../../tests/mla/unit/split_tnd_plan/test_plan.py) 新编译固定 CANN 块范围/workspace 与 FA3 显式分片/shape 片段，独立枚举 mask 可见范围、分配 token、持久槽及 merge 覆盖。小分配分区穷举核对静态上界，具名边界覆盖 int32 总量、超过 uint32 的组/任务、int64 字节界、零段、used 间隙、失败原子性和输入生命周期；普通与 ASan/UBSan 运行同一模块集合。不执行历史单元，不以已有无 mask 或 BSND E2E 充当 TND split 验收。
+
 ### 6.3 长度与布局调度
 
 [`BuildDenseSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.cpp) 处理整容量 BSND；以下入口复用同一 `detail/cann_split_core.*`，由 host/CPU 驱动与相应 AICPU 生成器编译同一源码。长度先完整校验，再数值转换为固定源格式；分配起点与 used 分别处理。记录格式见 [第 5 节](#5-metadata-设计)。
