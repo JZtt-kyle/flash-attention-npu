@@ -26,6 +26,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
 #endif
 #ifdef MLA_PAGED_METADATA
 #include "mla/mla_paged_metadata.h"
+#include "mla/mla_window_paged_metadata.h"
 #include "mla_paged_metadata_probe.h"
 extern __global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ProbeMlaPagedMetadata(void* args);
@@ -65,6 +66,15 @@ extern "C" uint32_t causal_paged_metadata_host(const MlaPagedMetadataArgs* args,
                         : BuildCausalPagedBsndMetadata(args->shape, args->platform, args->dtype, output,
                                                        args->outputWords, PagedMetadataInputs(*args));
     return ok ? 0 : 1;
+}
+
+extern "C" uint32_t window_paged_metadata_host(const MlaPagedMetadataArgs* args, uint32_t* output,
+                                               const MlaWindowConfig* window)
+{
+    return BuildWindowPagedBsndMetadata(args->shape, args->platform, args->dtype, output, args->outputWords,
+                                        PagedMetadataInputs(*args), *window)
+               ? 0
+               : 1;
 }
 
 extern "C" int launch_paged_metadata(void* current, void* worker, void* ready, void* done,

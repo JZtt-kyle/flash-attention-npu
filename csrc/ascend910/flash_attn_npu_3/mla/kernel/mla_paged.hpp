@@ -7,14 +7,15 @@
 #include "mla_paged_metadata.hpp"
 
 namespace flash_attn::mla::Kernel {
-template <typename InputT, bool IsTnd, bool IsCausal = false>
-class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, true, IsCausal> {
+template <typename InputT, bool IsTnd, bool IsCausal = false, bool IsWindow = false>
+class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, true, IsCausal, IsWindow> {
   public:
     // The caller has passed LoadPagedMetadata on every core, checked Q/qv
     // storage and matching query layout, and bound cache addresses to this call.
     __aicore__ inline void operator()(const MlaPagedKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
                                       const MlaPagedCacheInputs& cache, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
-                                      TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts& layouts)
+                                      TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts& layouts,
+                                      MlaWindowKernelParams window = {})
     {
         // TND total and allocation starts have been validated to fit int32.
         const uint32_t totalQuery = IsTnd ? schedule.query.totalTokens.low : 0;
@@ -49,11 +50,11 @@ class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, tr
         }
         this->Run(schedule.tiling, scale, qc, qr, reinterpret_cast<GM_ADDR>(cache.v.address),
                   reinterpret_cast<GM_ADDR>(cache.k.address), output, lse, workspace, pipe, spans, totalQuery, &layouts,
-                  false, reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout);
+                  false, reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout, window);
     }
 };
-template <typename InputT, bool IsCausal = false>
-using MlaPagedBsnd = MlaPaged<InputT, false, IsCausal>;
-template <typename InputT, bool IsCausal = false>
-using MlaPagedTnd = MlaPaged<InputT, true, IsCausal>;
+template <typename InputT, bool IsCausal = false, bool IsWindow = false>
+using MlaPagedBsnd = MlaPaged<InputT, false, IsCausal, IsWindow>;
+template <typename InputT, bool IsCausal = false, bool IsWindow = false>
+using MlaPagedTnd = MlaPaged<InputT, true, IsCausal, IsWindow>;
 } // namespace flash_attn::mla::Kernel

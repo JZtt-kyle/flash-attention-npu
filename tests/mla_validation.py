@@ -50,6 +50,49 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "window-paged-cpu": ["tests/test_flash_attn_npu_v3_mla_window_paged_metadata.py"],
+    "window-paged-sanitize": ["tests/test_flash_attn_npu_v3_mla_window_paged_metadata.py"],
+    "window-paged-check": [
+        "tests/test_flash_attn_npu_v3_mla_window_paged_public.py",
+        "-k",
+        "representative or cost_boundary",
+    ],
+    "window-paged-public": [
+        "tests/test_flash_attn_npu_v3_mla_window_paged_public.py",
+        "-k",
+        "not representative and not cost_boundary and not release_trap",
+    ],
+    "window-paged-trap": [
+        "tests/test_flash_attn_npu_v3_mla_window_paged_public.py",
+        "-k",
+        "release_trap",
+    ],
+    "window-paged-profile": ["tests/test_mla_window_paged_profile.py"],
+    "window-paged-boundary": [
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_public.py::test_static_and_unopened_boundaries",
+        "tests/test_flash_attn_npu_v3_mla_causal_paged_tnd_public.py::test_static_and_unopened_boundaries",
+        "tests/test_flash_attn_npu_v3_mla_paged_metadata_public.py::test_unsupported_options",
+        "tests/test_flash_attn_npu_v3_mla_paged_metadata_public.py::test_schema_compile_and_length_updates",
+        "tests/test_flash_attn_npu_v3_mla_paged_public.py::test_compile_and_length_updates",
+        "tests/test_flash_attn_npu_v3_mla_paged_tnd_public.py::test_compile_and_length_updates",
+        "-k",
+        "static_and_unopened_boundaries or window_size or schema_compile_and_length_updates or test_compile_and_length_updates",
+    ],
+    "window-paged-tools": [
+        "tests/test_mla_window_paged_tools.py",
+        "tests/test_mla_validation_policy.py::test_mixed_average_weights_entries_and_keeps_regressions",
+        "tests/test_mla_validation_policy.py::test_mixed_average_rejects_incomplete_evidence",
+        *[
+            f"tests/test_mla_validation.py::test_success_failure_interruption_and_resume[{suite}]"
+            for suite in ("window-paged-tools", "window-paged-cpu", "window-paged-sanitize")
+        ],
+        *[
+            f"tests/test_mla_validation.py::test_causal_dependencies_changing_during_execution_fail[{suite}]"
+            for suite in ("window-paged-cpu", "window-paged-sanitize")
+        ],
+        "tests/test_mla_validation.py::test_performance_always_executes_on_resume[window-paged-profile]",
+        "tests/test_mla_validation.py::test_evidence_missing_changed_failed_or_different_identity_cannot_resume",
+    ],
     "window-mixed-cpu": ["tests/test_flash_attn_npu_v3_mla_window_mixed_metadata.py"],
     "window-mixed-sanitize": ["tests/test_flash_attn_npu_v3_mla_window_mixed_metadata.py"],
     "window-mixed-check": [
@@ -413,6 +456,7 @@ SUITES = {
 }
 SUITES.update(INCREMENTAL_SUITES)
 PERFORMANCE_SUITES = {
+    "window-paged-profile",
     "window-mixed-profile",
     "window-tnd-profile",
     "window-bsnd-profile",
@@ -454,10 +498,13 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "window-paged-cpu",
     "window-mixed-cpu",
     "window-tnd-cpu",
+    "window-paged-sanitize",
     "window-mixed-sanitize",
     "window-tnd-sanitize",
+    "window-paged-tools",
     "window-mixed-tools",
     "window-tnd-tools",
     "window-bsnd-cpu",
@@ -498,8 +545,10 @@ def suite_dependencies(suite):
         "window-sanitize",
         "window-bsnd-cpu",
         "window-bsnd-sanitize",
+        "window-paged-cpu",
         "window-mixed-cpu",
         "window-tnd-cpu",
+        "window-paged-sanitize",
         "window-mixed-sanitize",
         "window-tnd-sanitize",
     }:
@@ -685,8 +734,10 @@ def environment(args, directory, suite):
     if suite in WINDOW_DEVICE_SUITES:
         env["MLA_WINDOW_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "window-paged-cpu",
         "window-mixed-cpu",
         "window-tnd-cpu",
+        "window-paged-sanitize",
         "window-mixed-sanitize",
         "window-tnd-sanitize",
         "window-bsnd-cpu",

@@ -34,10 +34,12 @@ def build_probes(
     causal=False,
     window=False,
     paged_causal=False,
+    paged_window=False,
 ):
     assert dtype in ("fp16", "bf16")
     assert sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride, paged, causal, window)) <= 1
     assert not paged_causal or paged
+    assert not paged_window or (paged and not paged_causal)
     artifacts = Path(artifacts).resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
     source = Path(os.environ.get("MLA_CANN_SOURCE_ROOT", ROOT.parent / "ops-transformer"))
@@ -160,6 +162,8 @@ def build_probes(
             if window
             else "mla_causal_attention_probe.cpp"
             if causal
+            else "mla_window_paged_attention_probe.cpp"
+            if paged_window
             else "mla_paged_attention_probe.cpp"
             if paged
             else "mla_tnd_stride_probe.cpp"
@@ -384,6 +388,7 @@ def build_probes(
         "tnd_stride": tnd_stride,
         "paged": paged,
         "paged_causal": paged_causal,
+        "paged_window": paged_window,
         "ndebug": bsnd or tnd or mixed or used or stride or tnd_stride or paged,
         "oracle_tiling_sha256": sha256(artifacts / "oracle_tiling.h"),
         "libraries": {

@@ -9,7 +9,7 @@ namespace flash_attn::mla {
 namespace {
 template <MlaSequenceLayout Layout>
 MlaScheduleStatus BuildCausalPagedSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
-                                           const MlaPagedInputs& inputs, MlaPagedSchedule& output)
+                                           const MlaPagedInputs& inputs, MlaPagedSchedule& output, const void*)
 {
     if (shape.query.layout != Layout) {
         return MlaScheduleStatus::UnsupportedShape;

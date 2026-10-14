@@ -121,6 +121,8 @@ def build_probe(directory, *, bsnd=False, tnd=False, mixed=False, used=False, pa
                 for name in (
                     "mla_paged_metadata.cpp",
                     "mla_causal_paged_metadata.cpp",
+                    "mla_window_paged_metadata.cpp",
+                    "mla_window.cpp",
                     "mla_causal.cpp",
                 )
             ]
@@ -230,6 +232,10 @@ def build_probe(directory, *, bsnd=False, tnd=False, mixed=False, used=False, pa
                 "mla_paged_metadata_args.h",
                 "mla_paged_metadata.cpp",
                 "mla_causal_paged_metadata.cpp",
+                "mla_window_paged_metadata.cpp",
+                "mla_window_paged_metadata.h",
+                "mla_window.cpp",
+                "mla_window.h",
                 "mla_causal.cpp",
                 "mla_causal.h",
                 "mla_paged_schedule.h",

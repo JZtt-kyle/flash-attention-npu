@@ -87,11 +87,12 @@ bool BuildPagedMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platf
                         uint32_t outputWords, const MlaPagedInputs& inputs, bool fromQueryPrefix = false);
 
 using MlaPagedScheduleBuilder = MlaScheduleStatus (*)(const MlaPagedShape&, const MlaPlatformInfo&,
-                                                      const MlaPagedInputs&, MlaPagedSchedule&);
+                                                      const MlaPagedInputs&, MlaPagedSchedule&, const void*);
 // Internal serialization adapter; retains all descriptor/overlap guarantees.
 bool BuildPagedMetadataWithSchedule(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                                     uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs,
-                                    bool fromQueryPrefix, MlaPagedScheduleBuilder builder);
+                                    bool fromQueryPrefix, MlaPagedScheduleBuilder builder,
+                                    const void* context = nullptr, uint32_t tailWords = 0);
 bool BuildCausalPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                                   uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs);
 

@@ -331,7 +331,7 @@ def test_record_allows_new_pages_stride_and_scale(causal_paged_attention, paged_
 def test_static_and_unopened_boundaries(dtype, fake):
     with FakeTensorMode() if fake else nullcontext():
         args = production.small_inputs(dtype)
-        for change in (dict(num_splits=0), dict(window_size=(1, 0)), dict(softcap=1.0)):
+        for change in (dict(num_splits=0), dict(softcap=1.0)):
             with pytest.raises(RuntimeError, match="not implemented"):
                 call(dict(args, **change))
         record = metadata(args)

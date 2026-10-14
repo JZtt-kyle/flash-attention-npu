@@ -306,7 +306,8 @@ def test_unsupported_options(dtype, kind, field, value):
         args = arguments(dtype, 2)
         args[field] = args["cache_seqlens"] if value == "tensor" else value
         with pytest.raises(
-            RuntimeError, match="MLA (scheduler|causal) metadata is not implemented yet"
+            RuntimeError,
+            match="MLA (scheduler|causal|TND PA window) metadata is not implemented yet",
         ):
             call(kind, args)
 

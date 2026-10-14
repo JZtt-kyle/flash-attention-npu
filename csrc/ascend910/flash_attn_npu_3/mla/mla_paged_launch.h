@@ -3,6 +3,7 @@
 #include "mla_launch.h"
 #include "mla_paged_metadata.h"
 #include "mla_paged_inputs.h"
+#include "mla_window_params.h"
 
 namespace flash_attn::mla {
 struct MlaPagedLaunchArgs {
@@ -15,6 +16,8 @@ struct MlaPagedLaunchArgs {
     MlaBsndInputLayouts layouts;
     float scale;
     bool causal = false;
+    bool isWindow = false;
+    MlaWindowKernelParams window;
 };
 aclError LaunchPagedBsndFp16(const MlaPagedLaunchArgs& args);
 aclError LaunchPagedBsndBf16(const MlaPagedLaunchArgs& args);

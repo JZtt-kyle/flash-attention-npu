@@ -28,10 +28,12 @@ class CausalPagedCall(CannPagedCall):
         self.kwargs.update(sparse_mode=3, next_tokens=0, atten_mask=case["mask"])
 
 
-def identity(case):
+def identity(case, spec=None):
     tensors = dict(case["host"], page_table=case["table_host"])
+    if spec is None:
+        spec = {k: v for k, v in case["config"].items() if k != "causal"}
     return dict(
-        spec={k: v for k, v in case["config"].items() if k != "causal"},
+        spec=json.loads(json.dumps(spec)),
         inputs={
             name: dict(
                 shape=list(t.shape),
@@ -47,9 +49,20 @@ def identity(case):
 
 
 def profile(
-    dtype_name, output, vendor, probe_dir, producer_manifest, dispatch=None, *, layout="bsnd"
+    dtype_name,
+    output,
+    vendor,
+    probe_dir,
+    producer_manifest,
+    dispatch=None,
+    *,
+    layout="bsnd",
+    suite=None,
+    native_class=CausalPagedCall,
+    mask="causal",
+    metadata_name=None,
 ):
-    suite = {"bsnd": bsnd, "tnd": tnd}[layout]
+    suite = suite or {"bsnd": bsnd, "tnd": tnd}[layout]
     component, call, metadata = suite.component, suite.call, suite.metadata
     make_case, compare, forward_args = suite.make_case, suite.compare, suite.forward_args
     masked_rows, PERFORMANCE_CASES = suite.masked_rows, suite.PERFORMANCE_CASES
@@ -69,12 +82,10 @@ def profile(
         cases = [make_case(probes, producer, s) for s in PERFORMANCE_CASES]
     for case in cases:
         case["args"] = forward_args(case)
-    natives = [CausalPagedCall(c) for c in cases]
-    identities = [identity(c) for c in cases]
+    natives = [native_class(c) for c in cases]
     # Physical capacity is filled by make_case; keep the frozen input spec as
     # the public matrix identity and retain materialized descriptors separately.
-    for row, spec in zip(identities, PERFORMANCE_CASES):
-        row["spec"] = spec
+    identities = [identity(c, spec) for c, spec in zip(cases, PERFORMANCE_CASES)]
     if dispatch is None:
         checks = []
         for index, (case, native) in enumerate(zip(cases, natives)):
@@ -193,9 +204,12 @@ def profile(
         names,
         "mla_paged_tnd_" if layout == "tnd" else "mla_paged_bsnd_",
         "FusedInferAttentionScore",
-        "ComputeMlaCausalPagedTndMetadata"
-        if layout == "tnd"
-        else "ComputeMlaCausalPagedBsndMetadata",
+        metadata_name
+        or (
+            "ComputeMlaCausalPagedTndMetadata"
+            if layout == "tnd"
+            else "ComputeMlaCausalPagedBsndMetadata"
+        ),
     )
     results = []
     for index, case in enumerate(cases):
@@ -207,6 +221,8 @@ def profile(
                 for key in ("native_fd", "native_template", "native_tiling_key", "e2e_applicable")
             },
         )
+        if mask == "window":
+            row["native_call"] = natives[index].description()
         row["entries"] = {}
         for entry in entries:
             row["entries"][entry] = {}
@@ -238,7 +254,8 @@ def profile(
         results.append(row)
     report = dict(
         dtype=dtype_name,
-        causal=True,
+        causal=mask == "causal",
+        window=mask == "window",
         layout=layout,
         warmup=5,
         rounds=5,

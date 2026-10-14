@@ -14,6 +14,7 @@
 #pragma once
 #include "mla_paged_inputs.h"
 #include "mla_paged_metadata.h"
+#include "mla_window_paged_metadata.h"
 #include "mla_paged_metadata_args.h"
 #include "mla_paged_layout.h"
 #include "mla_metadata_consumer.h"
@@ -92,25 +93,41 @@ MLA_PAGED_INLINE MlaMetadataReadStatus CheckPagedCacheDescriptor(const MlaPagedM
     return Status::Success;
 }
 
-template <bool IsCausal = false, typename Reader, typename Arrays, typename Pages>
+template <bool IsCausal = false, bool IsWindow = false, typename Reader, typename Arrays, typename Pages>
 MLA_PAGED_INLINE MlaMetadataReadStatus ReadPagedMetadata(const Reader& read, uint32_t words,
                                                          const MlaPagedMetadataContext& c,
                                                          const MlaPagedMetadataInputs& inputs, const Arrays& arrays,
                                                          const MlaPagedCacheInputs& cache, const Pages& pages,
-                                                         MlaPagedKernelSchedule& output)
+                                                         MlaPagedKernelSchedule& output,
+                                                         MlaWindowKernelParams window = {})
 {
     using Status = MlaMetadataReadStatus;
-    if (c.batch > (UINT32_MAX - kMlaPagedMetadataPrefixWords) / kMlaPagedMetadataSequenceWords) {
+    constexpr uint32_t tail = IsWindow ? kMlaWindowPagedMetadataTailWords : 0;
+    static_assert(!IsWindow || !IsCausal);
+    if (c.batch > (UINT32_MAX - kMlaPagedMetadataPrefixWords - tail) / kMlaPagedMetadataSequenceWords) {
         return Status::InvalidBuffer;
     }
     auto status = ReadMetadataHeader(
-        read, words, kMlaPagedMetadataPrefixWords + kMlaPagedMetadataSequenceWords * c.batch,
-        IsCausal ? (c.query.layout == 1 ? kMlaCausalPagedTndMetadataVersion : kMlaCausalPagedBsndMetadataVersion)
-                 : kMlaPagedMetadataVersion,
-        IsCausal ? (c.query.layout == 1 ? kMlaMetadataCausalPagedTnd : kMlaMetadataCausalPagedBsnd) : kMlaMetadataPaged,
+        read, words, kMlaPagedMetadataPrefixWords + kMlaPagedMetadataSequenceWords * c.batch + tail,
+        IsWindow   ? kMlaWindowPagedBsndMetadataVersion
+        : IsCausal ? (c.query.layout == 1 ? kMlaCausalPagedTndMetadataVersion : kMlaCausalPagedBsndMetadataVersion)
+                   : kMlaPagedMetadataVersion,
+        IsWindow   ? kMlaMetadataWindowPagedBsnd
+        : IsCausal ? (c.query.layout == 1 ? kMlaMetadataCausalPagedTnd : kMlaMetadataCausalPagedBsnd)
+                   : kMlaMetadataPaged,
         c.dtype);
     if (status != Status::Success) {
         return status;
+    }
+    if constexpr (IsWindow) {
+        // Invocation identity is checked before geometry, lengths, pages or empty shortcuts.
+        if (c.query.layout != 0 || window.kind > 2 || window.left < -1 || window.right < -1 ||
+            window.left > int64_t(c.logicalKvCapacity) - 1 ||
+            window.right > (c.query.maxLength == 0 ? 0 : int64_t(c.query.maxLength) - 1) ||
+            read(words - 3) != window.kind || int64_t(int32_t(read(words - 2))) != window.left ||
+            int64_t(int32_t(read(words - 1))) != window.right) {
+            return Status::ShapeMismatch;
+        }
     }
 #define MLA_PAGED_WORD(field) read(offsetof(MlaPagedMetadataPrefix, field) / sizeof(uint32_t))
     const uint64_t totalQ = uint64_t(c.query.totalTokens.low) | (uint64_t(c.query.totalTokens.high) << 32);
@@ -276,7 +293,7 @@ MLA_PAGED_INLINE MlaMetadataReadStatus ReadPagedMetadata(const Reader& read, uin
         s.s2End[i] = n;
     }
     // Causal owns every M block, including zero-cost/all-masked rows.
-    if (IsCausal && (previousBatch != c.batch || previousM != 0)) {
+    if ((IsCausal || IsWindow) && (previousBatch != c.batch || previousM != 0)) {
         return Status::InvalidEndpoints;
     }
     // Check the whole omitted suffix, including a partially omitted sample.

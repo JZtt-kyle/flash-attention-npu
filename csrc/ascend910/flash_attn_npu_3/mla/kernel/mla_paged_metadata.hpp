@@ -21,11 +21,11 @@ struct PageTableReader {
     }
 };
 
-template <typename InputT, bool IsCausal = false>
+template <typename InputT, bool IsCausal = false, bool IsWindow = false>
 __aicore__ inline MlaMetadataReadStatus
 ReadPagedMetadata(GM_ADDR address, uint32_t words, const MlaPagedMetadataContext& context,
                   const MlaPagedMetadataInputs& inputs, const MlaPagedCacheInputs& cache,
-                  MlaPagedKernelSchedule& output)
+                  MlaPagedKernelSchedule& output, MlaWindowKernelParams window = {})
 {
     using Status = MlaMetadataReadStatus;
     static_assert(AscendC::IsSameType<InputT, half>::value || AscendC::IsSameType<InputT, bfloat16_t>::value);
@@ -53,15 +53,16 @@ ReadPagedMetadata(GM_ADDR address, uint32_t words, const MlaPagedMetadataContext
     if (cache.table.address != 0) {
         pages.data.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(cache.table.address));
     }
-    return flash_attn::mla::ReadPagedMetadata<IsCausal>(read, words, context, inputs, arrays, cache, pages, output);
+    return flash_attn::mla::ReadPagedMetadata<IsCausal, IsWindow>(read, words, context, inputs, arrays, cache, pages,
+                                                                  output, window);
 }
 
-template <typename InputT, bool IsCausal = false>
+template <typename InputT, bool IsCausal = false, bool IsWindow = false>
 __aicore__ inline bool LoadPagedMetadata(GM_ADDR address, uint32_t words, const MlaPagedMetadataContext& context,
                                          const MlaPagedMetadataInputs& inputs, const MlaPagedCacheInputs& cache,
-                                         MlaPagedKernelSchedule& output)
+                                         MlaPagedKernelSchedule& output, MlaWindowKernelParams window = {})
 {
-    if (ReadPagedMetadata<InputT, IsCausal>(address, words, context, inputs, cache, output) !=
+    if (ReadPagedMetadata<InputT, IsCausal, IsWindow>(address, words, context, inputs, cache, output, window) !=
         MlaMetadataReadStatus::Success) {
         AscendC::Trap();
         return false;

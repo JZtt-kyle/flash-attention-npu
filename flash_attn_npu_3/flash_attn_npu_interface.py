@@ -486,11 +486,25 @@ def _check_mla_forward_metadata(q, cache_seqlens, metadata):
 
 
 def _check_mla_paged_inputs(
-    q, k, page_table, cache_seqlens, metadata, seqused_q=None, cu_seqlens_q=None, max_seqlen_q=None
+    q,
+    k,
+    page_table,
+    cache_seqlens,
+    metadata,
+    seqused_q=None,
+    cu_seqlens_q=None,
+    max_seqlen_q=None,
+    window_left=-1,
+    window_right=-1,
+    causal=False,
 ):
     # Mirror both paged plans and PagedForward's descriptor storage checks.
     # Physical pages and total TND tokens are independent of logical batch.
     tnd = cu_seqlens_q is not None
+    is_window = (window_left, window_right) != (-1, -1)
+    if is_window and tnd:
+        raise RuntimeError("MLA TND PA window forward is not implemented yet")
+    prefix_words = 411 if is_window else 408
     batch, page = q.shape[0], k.shape[1]
     if tnd:
         if max_seqlen_q is None:
@@ -514,7 +528,7 @@ def _check_mla_paged_inputs(
         raise RuntimeError("MLA: page_table must be on the same NPU device")
     capacity = page_table.shape[1] * page
     if (
-        batch > ((1 << 32) - 1 - 408) // 5
+        batch > ((1 << 32) - 1 - prefix_words) // 5
         or k.shape[0] > (1 << 31)
         or not 16 <= page <= 1024
         or page % 16 != 0
@@ -531,6 +545,8 @@ def _check_mla_paged_inputs(
         )
     ):
         raise RuntimeError("MLA: paged shape bounds or page size exceeded")
+    if is_window:
+        _normalize_mla_window(q.shape[1], capacity, window_left, window_right, causal)
     if page_table.stride(0) < 0 or page_table.stride(1) != 1:
         raise RuntimeError(
             "MLA: page_table requires nonnegative row stride and contiguous last dimension"
@@ -552,12 +568,12 @@ def _check_mla_paged_inputs(
         if (
             metadata.dtype != torch.int32
             or metadata.ndim != 1
-            or metadata.numel() != 408 + 5 * batch
+            or metadata.numel() != prefix_words + 5 * batch
             or not metadata.is_contiguous()
             or metadata.device != q.device
         ):
             raise RuntimeError(
-                "MLA: scheduler_metadata must be same-device contiguous int32[408 + 5 * batch_size]"
+                "MLA: scheduler_metadata must be same-device contiguous int32 with the selected paged protocol size"
             )
     if not torch.compiler.is_compiling():
         for tensor in (page_table, cache_seqlens, seqused_q, metadata, cu_seqlens_q):
@@ -592,10 +608,22 @@ def _mla_paged_bsnd_forward_fake(
     seqused_q=None,
     scheduler_metadata=None,
     causal=False,
+    window_left=-1,
+    window_right=-1,
 ):
     _check_mla_inputs(q, k, v, qv, paged_kv=True)
     _check_mla_dense_options(softmax_scale=softmax_scale)
-    _check_mla_paged_inputs(q, k, page_table, cache_seqlens, scheduler_metadata, seqused_q)
+    _check_mla_paged_inputs(
+        q,
+        k,
+        page_table,
+        cache_seqlens,
+        scheduler_metadata,
+        seqused_q,
+        window_left=window_left,
+        window_right=window_right,
+        causal=causal,
+    )
     return (
         q.new_empty((*q.shape[:-1], 512)),
         q.new_empty((q.shape[0], q.shape[2], q.shape[1]), dtype=torch.float32),
@@ -999,7 +1027,7 @@ def _flash_attn_forward(
             softmax_scale=softmax_scale,
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None,
+            allow_window=page_table is None or cu_seqlens_q is None,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -1034,6 +1062,9 @@ def _flash_attn_forward(
                 seqused_q,
                 cu_seqlens_q,
                 max_seqlen_q,
+                window_left=window_size_left,
+                window_right=window_size_right,
+                causal=causal,
             )
         elif cu_seqlens_q is not None:
             if cu_seqlens_k is None:
@@ -1195,7 +1226,7 @@ def _flash_attn_forward_fake(
             softmax_scale=softmax_scale,
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None,
+            allow_window=page_table is None or cu_seqlens_q is None,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -1230,6 +1261,9 @@ def _flash_attn_forward_fake(
                 seqused_q,
                 cu_seqlens_q,
                 max_seqlen_q,
+                window_left=window_size_left,
+                window_right=window_size_right,
+                causal=causal,
             )
         elif cu_seqlens_q is not None:
             if cu_seqlens_k is None:
@@ -2505,7 +2539,7 @@ def flash_attn_with_kvcache(
         _check_mla_dense_options(
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None,
+            allow_window=page_table is None or cu_seqlens_q is None,
             window_size=window_size,
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -2551,6 +2585,9 @@ def flash_attn_with_kvcache(
                     scheduler_metadata,
                     cu_seqlens_q=cu_seqlens_q,
                     max_seqlen_q=max_seqlen_q,
+                    window_left=window_size[0],
+                    window_right=window_size[1],
+                    causal=causal,
                 )
             capacity = k_cache.shape[1] * (page_table.shape[1] if page_table is not None else 1)
             if not 0 <= cache_seqlens <= capacity:
@@ -2586,6 +2623,8 @@ def flash_attn_with_kvcache(
                 cache_seqlens,
                 scheduler_metadata=scheduler_metadata,
                 causal=causal,
+                window_left=window_size[0],
+                window_right=window_size[1],
             )
         elif cu_seqlens_q is not None:
             if max_seqlen_q is None:
@@ -3021,8 +3060,14 @@ def _mla_paged_metadata_fake(
     cache_seqlens,
     cu_seqlens_q,
     causal=False,
+    window_left=-1,
+    window_right=-1,
 ):
-    if not 0 <= batch_size <= (2**32 - 1 - 408) // 5:
+    is_window = (window_left, window_right) != (-1, -1)
+    if is_window and cu_seqlens_q is not None:
+        raise RuntimeError("MLA TND PA window metadata is not implemented yet")
+    prefix_words = 411 if is_window else 408
+    if not 0 <= batch_size <= (2**32 - 1 - prefix_words) // 5:
         raise RuntimeError("MLA: paged metadata word count overflow")
     if not (16 <= page_size <= 1024 and page_size % 16 == 0):
         raise RuntimeError("MLA: page_size must be a multiple of 16 in [16, 1024]")
@@ -3039,7 +3084,11 @@ def _mla_paged_metadata_fake(
     _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
     if cu_seqlens_q is not None:
         _check_mla_metadata_query_prefix(cu_seqlens_q, batch_size, cache_seqlens.device)
-    return torch.empty((408 + 5 * batch_size,), dtype=torch.int32, device=cache_seqlens.device)
+    if is_window:
+        _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
+    return torch.empty(
+        (prefix_words + 5 * batch_size,), dtype=torch.int32, device=cache_seqlens.device
+    )
 
 
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_tnd_bsnd_metadata")
@@ -3190,8 +3239,22 @@ def _get_scheduler_metadata_fake(
                 softmax_scale,
             ),
             allow_causal=True,
-            allow_window=page_size is None,
+            allow_window=page_size is None or cu_seqlens_q is None,
         )
+        if page_size is not None:
+            return _mla_paged_metadata_fake(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                page_size,
+                qkv_dtype,
+                cache_seqlens,
+                cu_seqlens_q,
+                causal,
+                window_size_left,
+                window_size_right,
+            )
         if (window_size_left, window_size_right) != (-1, -1):
             if cu_seqlens_q is not None:
                 return _mla_window_mixed_metadata_fake(
@@ -3215,18 +3278,6 @@ def _get_scheduler_metadata_fake(
                 cache_seqlens,
                 window_size_left,
                 window_size_right,
-                causal,
-            )
-        if page_size is not None:
-            return _mla_paged_metadata_fake(
-                batch_size,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_heads_q,
-                page_size,
-                qkv_dtype,
-                cache_seqlens,
-                cu_seqlens_q,
                 causal,
             )
         if cu_seqlens_q is not None:
@@ -3330,8 +3381,22 @@ def get_scheduler_metadata(
                 softmax_scale,
             ),
             allow_causal=True,
-            allow_window=page_size is None,
+            allow_window=page_size is None or cu_seqlens_q is None,
         )
+        if page_size is not None:
+            return torch.ops.flash_attn_npu_3._mla_paged_metadata(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                page_size,
+                qkv_dtype,
+                cache_seqlens,
+                cu_seqlens_q,
+                causal,
+                window_size[0],
+                window_size[1],
+            )
         if window_size != (-1, -1):
             if cu_seqlens_q is not None:
                 return torch.ops.flash_attn_npu_3._mla_window_mixed_metadata(
@@ -3355,18 +3420,6 @@ def get_scheduler_metadata(
                 cache_seqlens,
                 window_size[0],
                 window_size[1],
-                causal,
-            )
-        if page_size is not None:
-            return torch.ops.flash_attn_npu_3._mla_paged_metadata(
-                batch_size,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_heads_q,
-                page_size,
-                qkv_dtype,
-                cache_seqlens,
-                cu_seqlens_q,
                 causal,
             )
         if cu_seqlens_q is not None:

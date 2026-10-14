@@ -16,14 +16,16 @@ bool PagedMetadataWords(int64_t batch, uint32_t& words)
 
 bool BuildPagedMetadataWithSchedule(const MlaPagedShape& inputShape, const MlaPlatformInfo& platform, uint32_t dtype,
                                     uint32_t* output, uint32_t outputWords, const MlaPagedInputs& inputs,
-                                    bool fromQueryPrefix, MlaPagedScheduleBuilder builder)
+                                    bool fromQueryPrefix, MlaPagedScheduleBuilder builder, const void* context,
+                                    uint32_t tailWords)
 {
     auto shape = inputShape;
     uint32_t expectedWords;
     const uintptr_t outAddress = reinterpret_cast<uintptr_t>(output);
     constexpr auto maxAddress = std::numeric_limits<uintptr_t>::max();
-    if (!PagedMetadataWords(shape.batch, expectedWords) || outputWords != expectedWords || output == nullptr ||
-        outAddress % alignof(int32_t) != 0 || outputWords > (maxAddress - outAddress) / sizeof(int32_t)) {
+    if (!PagedMetadataWords(shape.batch, expectedWords) || tailWords > UINT32_MAX - expectedWords ||
+        outputWords != expectedWords + tailWords || output == nullptr || outAddress % alignof(int32_t) != 0 ||
+        outputWords > (maxAddress - outAddress) / sizeof(int32_t)) {
         return false;
     }
     const size_t outputBytes = size_t(outputWords) * sizeof(int32_t);
@@ -66,7 +68,7 @@ bool BuildPagedMetadataWithSchedule(const MlaPagedShape& inputShape, const MlaPl
             // zero, monotonicity, per-segment bound, used and all KV lengths.
             shape.query.totalTokens = inputs.cuQuery.data[shape.batch];
         }
-        const auto status = builder(shape, platform, inputs, result);
+        const auto status = builder(shape, platform, inputs, result, context);
         prefix.scheduleStatus = uint32_t(status);
         if (status == MlaScheduleStatus::Success) {
             prefix.schedule = SerializeMlaSchedule(result.schedule);
@@ -101,7 +103,9 @@ bool BuildPagedMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platf
                         uint32_t outputWords, const MlaPagedInputs& inputs, bool fromQueryPrefix)
 {
     return BuildPagedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs, fromQueryPrefix,
-                                          BuildPagedSchedule);
+                                          [](const auto& s, const auto& p, const auto& i, auto& r, const void*) {
+                                              return BuildPagedSchedule(s, p, i, r);
+                                          });
 }
 
 } // namespace flash_attn::mla

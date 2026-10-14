@@ -405,7 +405,6 @@ def test_host_rejections(entry, fault):
 @pytest.mark.parametrize(
     "fault",
     (
-        "window",
         "split0",
         "split2",
         "softcap",
@@ -424,9 +423,7 @@ def test_unconnected_options(kind, fault):
     with FakeTensorMode() if kind.endswith("fake") else nullcontext():
         args = small_inputs()
         is_public = kind.startswith("public")
-        if fault == "window":
-            args.update({"window_size": (1, -1)} if is_public else {"window_size_left": 1})
-        elif fault.startswith("split"):
+        if fault.startswith("split"):
             args["num_splits"] = int(fault[-1])
         elif fault == "append":
             if is_public:

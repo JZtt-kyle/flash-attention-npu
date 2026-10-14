@@ -191,7 +191,12 @@ std::vector<at::Tensor> mha_fwd(
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (window_size_left != -1 || window_size_right != -1) {
-            TORCH_CHECK(!page_table_, "MLA window forward is not implemented yet outside nonpaged layouts");
+            if (page_table_) {
+                TORCH_CHECK(!cu_seqlens_q_, "MLA TND PA window forward is not implemented yet");
+                return flash_attn::mla::PagedBsndForward(q, k, v, *q_v_, *page_table_, scale, seqused_k_, seqused_q_,
+                                                         scheduler_metadata_, is_causal, window_size_left,
+                                                         window_size_right);
+            }
             if (cu_seqlens_q_ && !cu_seqlens_k_) {
                 TORCH_CHECK(max_seqlen_q_, "MLA: mixed TND/BSND requires max_seqlen_q");
                 return flash_attn::mla::WindowMixedForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_, scale,
@@ -805,7 +810,12 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                     "legacy numerical options");
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
         if (window_size_left != -1 || window_size_right != -1) {
-            TORCH_CHECK(!page_size, "MLA window metadata is not implemented yet outside nonpaged BSND or mixed cache");
+            if (page_size) {
+                TORCH_CHECK(!cu_seqlens_q, "MLA TND PA window metadata is not implemented yet");
+                return flash_attn::mla::PagedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, *page_size,
+                                                        dtype, cache_seqlens, cu_seqlens_q, causal, window_size_left,
+                                                        window_size_right);
+            }
             if (cu_seqlens_q) {
                 return flash_attn::mla::WindowMixedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q,
                                                               dtype, cache_seqlens, *cu_seqlens_q, window_size_left,
