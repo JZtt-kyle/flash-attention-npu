@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-本页记录实施顺序、每步产物与完成条件。**M10c3b TND Q/KV 显式 split 生产接入已完成；唯一下一步为 M10c4a TND 原生自动 split 任务与持久布局。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。
+本页记录实施顺序、每步产物与完成条件。**M10c4a TND 原生自动 split 任务与持久布局已完成；唯一下一步为 M10c4b TND 原生自动 split 生产接入。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。
 
 ## 已完成：按覆盖目的精简测试
 
@@ -175,14 +175,24 @@ M10a 已交付独立调度/布局组件，设备 partial attention 与合并数�
 
 本步协议/源/双数学、公开行为/真实 accumulator/生命周期、Trap、累计 E2E、普通 FA3 和适用平均公开性能均已闭环。性能工具同时验证实际 C++ 修饰符号中的 stage/dtype 与三阶段顺序；两次工具失败及修复后最终完整证据见 status。当前提交后立即停止，TND 自动路径仍拒绝。
 
-### 唯一下一步 M10c4a：TND 原生自动 split 任务与持久布局
+### 已完成 M10c4a：TND 原生自动 split 任务与持久布局
 
 现有 `MlaAutoSplitKvPlan` 的最终地址和静态布局仍绑定 BSND B×Sq。先独立闭环 TND 双 allocation/used 与原生自动 AIC/FD 任务的映射，再整体接入生产；不能用显式均匀分片或 B×maxQ 代替原生自动端点与紧凑总量。
 
-- 改动与影响路径：在 FA3 910 `mla/` 新增独立 TND 自动 CPU 计划，复用 `ParseUsedLengths`、固定 CANN 原生分区和已闭环 FD 槽/8 行 Vector 归约组件。明确原 allocation token 的 O/LSE/accumulator 地址、总量上界、Direct/Partial/Empty 任务、持久槽及所有权；如需调整共享 CPU 头文件或算法，先把实际影响补入本节。此步不修改数值 Kernel、AICPU、生产发射/公共入口或 CATLASS。
+- 改动与影响路径：在 FA3 910 `mla/mla_auto_split_tnd_plan.h/.cpp` 新增独立 TND 自动 CPU 计划，复用 `ParseUsedLengths`、固定 CANN 原生分区和已闭环 FD 槽/8 行 Vector 归约组件。沿用自动任务/归约/布局结构，保持共享 CPU 文件不变；独立适配原 allocation token 的 O/LSE/accumulator 地址、紧凑总量上界、Direct/Partial/Empty 任务、持久槽及所有权。此步不修改数值 Kernel、AICPU、生产发射/公共入口或 CATLASS。
 - 新增独占 `unit/auto_split_tnd_plan/`、对应 CPU driver/build 与统一验收分组。固定源差分实际执行原生 AIC/FD 分区和 FA3 TND accumulator 片段；独立覆盖三种 mask、非均匀双前缀/used 间隙、零段/全空、Direct/FD 混合、跨 M/归约边界、64 位与溢出、失败原子性及计划所有权。普通和 ASan/UBSan 使用相同集合。
-- 必跑入口均用 `python3 -m tests.mla`，先 dry-run/collect-only：拟新增 `--suite auto-split-tnd-plan-tools`、代表/最大逻辑容量 `--suite auto-split-tnd-plan-check`，固定实现后 `--unit auto_split_tnd_plan`、`--suite auto-split-tnd-plan-sanitize` 和累计 `--suite e2e --device 6`。接手时核对实际文件/命令后实现；不累计历史单元，无新公开能力时不注册伪自动 TND E2E。
-- 证据与完成条件：以 M10c3b 的最终 E2E 为基线，仅在完整原始证据及依赖不变时继承；源码/构建/环境变化时重跑受影响组，沿用数学内容缓存。固定源/独立边界、sanitizer、工具与适用累计 E2E 全通过，更新相关文档与质量检查后一次提交并停止；公开自动、混合和 PA split 在各自接入前仍明确拒绝。
+- 必跑入口均用 `python3 -m tests.mla`，先 dry-run/collect-only：`--suite auto-split-tnd-plan-tools`、代表/最大逻辑容量 `--suite auto-split-tnd-plan-check`，固定实现后 `--unit auto_split_tnd_plan`、`--suite auto-split-tnd-plan-sanitize` 和累计 `--suite e2e --device 6`。新旧集合与普通/sanitizer 节点须一致；本模块只查询 CPU 逻辑容量，无需 attention reference，不分配大 tensor。不累计历史单元，本步无新公开能力，不注册伪自动 TND E2E。
+- 证据与完成条件：基线 `e62e7c1`；M10c3b 最终 E2E 的 13 个原始文件、952 个源码、生产 6,372 个依赖/12 个产物和 230 个加载库共 7,251 个唯一文件已核对无差异，见 `/tmp/mla-m10c4a/takeover.json`。新增 CPU 文件/驱动改变保守源码与构建身份，本步累计小输入 E2E 实跑、继承 0，不累计历史单元/性能。构建/reference 沿用仓库外默认 MLA_WORK_DIR，证据根 `/tmp/mla-m10c4a/`，build 仅留无头状态。固定源/独立边界、sanitizer、工具与适用累计 E2E 全通过，更新相关文档与质量检查后一次提交并停止；公开 TND 自动、混合和 PA split 在各自接入前仍明确拒绝。
+
+本步固定源任务/FD 差分、独立 allocation 地址及容量边界、普通与 ASan/UBSan 同集合、工具和累计小输入 E2E 均已闭环；实际耗时、证据和环境失败处理见 status。CPU 计划不构成自动 TND 生产能力，当前提交后立即停止。
+
+### 唯一下一步 M10c4b：TND 原生自动 split 生产接入
+
+复用 M10c4a 的原生任务/持久布局、现有自动 init/partial/merge 协议和 TND 数值地址特化，在同一可调用行为中接通非 PA TND Q/KV 的 `num_splits=0`。整体完成双 allocation/used、三种 mask、四路 stride、设备 metadata 生成/独立消费及静态真实 FP32 accumulator；不能用显式等分替代原生每 M 的变长分区。接入前明确 TND 记录身份、消费者完整校验、Direct 临时槽和全局空容量行为；如发现独立新算法或共享协议风险，再按验收边界拆分。
+
+- 影响路径：FA3 910 的 TND 自动 metadata/消费者、双 dtype launcher，必要的共享自动任务/FD 地址模板、host/raw/公开 varlen 与 fake/compile、setup。保持 BSND 自动/显式和 TND 显式行为；混合/PA split 在各自步骤前继续拒绝。先核对实际依赖并写明本步文件和必跑命令。
+- 独立验收：新增本模块单元，固定源 AIC/FD/部分结果及双数学、三种 mask、Direct/FD/Empty 混合、长度/stride/空值、真实 accumulator、metadata 复用/损坏/生命周期/Trap；交付公开 real/fake/compile E2E 并注册自己的日常小输入清单。CPU 地址证据不能替代新入口分派和设备数值验收。
+- 完成条件：本模块协议/源/双数学与必要 sanitizer、公开新行为、累计 E2E、相关普通 FA3 和适用平均公开性能通过；该自动路径的原生 FD 纳入性能平均，固定输入及 R/阈值/计时边界不变。复核本步 E2E 原始证据和依赖后决定继承，reference 按内容复用；文档与质量检查后一次提交并停止。
 
 ## 后续里程碑：M10–M17
 
@@ -190,7 +200,7 @@ M10a 已交付独立调度/布局组件，设备 partial attention 与合并数�
 
 | 里程碑 | 依赖与建议提交边界 | 阶段完成条件 |
 | --- | --- | --- |
-| M10：512+64 split-KV | M10a CPU 分区/布局、M10b1 partial attention、M10b2 FD 归并、M10c1a 跨波任务/持久地址和 M10c1b BSND 显式生产、M10c2a 原生自动任务/归约计划、M10c2b1 v18 安全协议和 M10c2b2 BSND 自动生产、M10c3a TND 显式任务/持久布局和 M10c3b TND 显式生产已完成；接着 TND 自动、混合及 PA 的显式/自动接入，不把完整 split 迁移作为一轮 | 自动/1/显式 split、空分片/全空、O/LSE/accumulator/metadata 及已支持 mask 组合；长 KV E2E |
+| M10：512+64 split-KV | M10a CPU 分区/布局、M10b1 partial attention、M10b2 FD 归并、M10c1a 跨波任务/持久地址和 M10c1b BSND 显式生产、M10c2a 原生自动任务/归约计划、M10c2b1 v18 安全协议和 M10c2b2 BSND 自动生产、M10c3a TND 显式任务/持久布局、M10c3b TND 显式生产和 M10c4a TND 原生自动任务/持久布局已完成；接着 TND 自动、混合及 PA 的显式/自动接入，不把完整 split 迁移作为一轮 | 自动/1/显式 split、空分片/全空、O/LSE/accumulator/metadata 及已支持 mask 组合；长 KV E2E |
 | M11：192/128 BSND prefill | 这是新数值表示；先验证独立 K/V、分组头及 192 stride 数值组件，再完成 BSND metadata/生产/公开接入 | qv=None、源通用非量化路径、GQA、真实 stride、O/LSE 和适用 E2E |
 | M12：prefill TND/长度 | 复用 M11 数值；TND varlen 和混合 cache 按可调用行为接入，各自同时覆盖 allocation/used 与 stride | 非均匀长度、seqused、空值/边界/GQA、生产精度和适用 E2E |
 | M13：prefill PA | 复用已有页寻址；BSND PA、TND PA 各自接通 metadata/生产/入口，避免按 Copy/host/API 重复拆层 | 合法 P 的代表边界、内容/RoPE 的真实 stride、长度/复用/生命周期、精度及 PA E2E |
@@ -250,6 +260,7 @@ M10a 已交付独立调度/布局组件，设备 partial attention 与合并数�
 | M10c2b2 | 非 PA BSND 自动 split、v18 AICPU 与 init/partial/merge、原生 AIC/8 行 Vector 归约、真实静态 FP32 accumulator、公开 real/fake/compile；本模块源/双数学、Trap/生命周期、累计 E2E、普通 FA3 与含原生 FD 的平均公开性能 |
 | M10c3a | 独立 TND 显式 split CPU 任务、紧凑分配总量持久上界、双前缀/used 与原 allocation 地址；固定源/独立边界、64 位及溢出、ASan/UBSan 和累计 E2E；尚未接入设备或开放 TND split |
 | M10c3b | 非 PA TND Q/KV 显式 2..256、v19 CPU/AICPU 与独立消费、双前缀/used/stride 和原 allocation token 地址、真实 FP32 accumulator、公开 real/fake/compile；本模块源/双数学、Trap/生命周期、累计 E2E、普通 FA3 与适用平均公开性能 |
+| M10c4a | 独立 TND 原生自动 AIC/FD 任务、紧凑总量预算、双 allocation/used 与原 token O/LSE/accumulator 地址、8 行 Vector 归约；固定源/独立边界、64 位/溢出、普通与 ASan/UBSan、累计 E2E；尚未接通 TND 自动生产 |
 | 测试整理与精简 | 模块所属单元测试、明确的小输入日常 E2E 与共享支持目录；代表组合取代默认数量截断，穷举显式开启、仅继承 E2E；外部产物和可重建原生对照，build 仅保留无头日志与状态 |
 
 M07 的页大小精度覆盖全部 16..1024 的 16 倍数；性能矩阵及原生非 FD/FD 的边界见 [design 7.1](design.md#71-固定性能矩阵与阶段边界)。公开接入包含 None/整数/tensor KV 长度、v6 复用及相关 MLA/普通 FA3 回归，结果只在 status 维护。

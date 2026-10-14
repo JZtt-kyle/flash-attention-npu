@@ -725,6 +725,18 @@ host 用 6.2.16 的紧凑 totalQ 上界预算 workspace，不读取设备长度�
 
 [`模块单元`](../../tests/mla/unit/split_tnd/test_metadata.py) 覆盖普通/ASan/UBSan 协议与源分片，[`设备对照`](../../tests/mla/unit/split_tnd/test_source.py) 将每个原始有效样本映射到固定 CANN partial/FD 执行器，独立检查 TND O/LSE/accumulator 和双数学。193..256 沿用 FD 资源扩展口径。公开真实/fake/compile、长度/stride/空值、复用、无 host readback、流生命周期与 Trap 在 [`e2e/split_tnd`](../../tests/mla/e2e/split_tnd/test_public.py)，日常小输入在 regression_cases 注册。公开性能用预先固定的 [`输入矩阵`](../../tests/mla/support/mla_split_tnd_cases.py) 和既有 TND R=1/4 计时，原生 packing/restoration 包含在调用内；producer/partial/merge 时间分别保留，显式路径的原生 FD 仍按 6.2.12 单列。 全部 KV-used 为零经原生 packing 后走空张量模板；固定源对照包同时编入双 dtype 共用的空 KV key `100000000000000020`，按既有 template=5 的适用口径将该模板单列，仍保留准确性和全部计时结果。
 
+#### 6.2.18 TND 原生自动 split 任务与持久布局
+
+[`MlaAutoSplitTndPlan`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_tnd_plan.h) 是独立 CPU 组件，复用固定 CANN 的原生 AIC/FD 分区和 6.2.13 的任务/8 行 Vector 归约协议，不重新均匀分片。通过 `ParseUsedLengths` 校验并拥有双 allocation 前缀与可选 Q/KV-used 对应的段信息；调用方输入销毁后查询仍有效。本组件尚未生成设备 metadata 或接通自动 TND 生产路径。
+
+静态 `BuildAutoSplitTndPlanLayout` 接收紧凑 totalQ/totalKV、maxQ/maxKV、B/H、逻辑 M/N、AIC/CV 与 libApi 字节数。总量、段界及行数限制沿用 6.2.16；最大 M 组数使用该节的总量上界，不能由 B×maxQ 或仅 `ceil(totalQ*H/M)` 替代。源非 FD scratch 复用既有组件，只有 FD 任务占持久槽，每 AIC 最多首尾两个 FD M，故最多 2×AIC 槽；AIC=1 时没有 FD 持久槽。该 CPU 预算不包含后续设备 Direct 临时槽，生产接入须独立确定并验收。
+
+自动 accumulator 容量为 AIC；AIC>1 时 FP32 shape 为 `[AIC,H,totalQ,512]` / `[AIC,H,totalQ]`，AIC=1 不分配。它是静态资源容量，不代表实际每 M 的片数。原生 Direct/Partial/Empty 分类、独立 Empty 初始化遍历、FD 紧凑前缀及原生 Vector inclusive 端点沿用 6.2.13。只有实际 FD 分片写持久区，所有 partial 完成后才可归并。Direct 对应 accumulator 的第 0 片，未使用片和无贡献行由后续执行层初始化为 0/-inf；CPU 计划不执行数值计算或设备同步。
+
+Task 返回原 allocation Q/KV token 起点、段容量和 used 长度；四路输入各自应用实际 stride。Row 以 `allocationQStart+localQuery` 计算 TND O、`[H,totalQ]` LSE 和 accumulator，保留 Q-used 间隙及 64 位地址。全局 totalQ 或 totalKV 为零时任务/workspace 为零，仍验证全部静态参数、前缀/used 并保留合法 accumulator 描述；仅 used KV 为零则保留 Empty 初始化任务。构造和查询失败不修改输出。
+
+[`本模块单元`](../../tests/mla/unit/auto_split_tnd_plan/test_plan.py) 新编译固定 CANN AIC/FD 分区、workspace 和 FA3 TND accumulator 片段，独立枚举可见 tile、任务/归约所有者及 allocation 地址。覆盖三种 mask、非均匀分配/used 间隙、Direct/FD/Empty 混合、零段/全空、跨 M 与 8 行尾块、int32 总量、超过 uint32 的组前缀、精确 int64 字节边界、输入生命周期及失败原子性；小分配分区穷举核对静态上界，普通和 ASan/UBSan 使用同集合。此组件尚无新公开行为，累计 E2E 只验证已开放路径。
+
 ### 6.3 长度与布局调度
 
 [`BuildDenseSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.cpp) 处理整容量 BSND；以下入口复用同一 `detail/cann_split_core.*`，由 host/CPU 驱动与相应 AICPU 生成器编译同一源码。长度先完整校验，再数值转换为固定源格式；分配起点与 used 分别处理。记录格式见 [第 5 节](#5-metadata-设计)。
