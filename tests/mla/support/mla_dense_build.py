@@ -34,11 +34,15 @@ def build_probes(
     paged=False,
     causal=False,
     window=False,
+    split_kv=False,
     paged_causal=False,
     paged_window=False,
 ):
     assert dtype in ("fp16", "bf16")
-    assert sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride, paged, causal, window)) <= 1
+    assert (
+        sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride, paged, causal, window, split_kv))
+        <= 1
+    )
     assert not paged_causal or paged
     assert not paged_window or (paged and not paged_causal)
     artifacts = Path(artifacts).resolve()
@@ -159,7 +163,9 @@ def build_probes(
         ROOT
         / "tests/mla/support"
         / (
-            "mla_window_attention_probe.cpp"
+            "mla_split_kv_attention_probe.cpp"
+            if split_kv
+            else "mla_window_attention_probe.cpp"
             if window
             else "mla_causal_attention_probe.cpp"
             if causal
@@ -313,21 +319,26 @@ def build_probes(
         "-o",
         str(host_output),
     ]
-    if causal or window:
+    if causal or window or split_kv:
         host_cmd += [
             str(
                 ROOT
                 / (
                     "tests/mla/support/mla_window_attention_schedule.cpp"
-                    if window
+                    if window or split_kv
                     else "tests/mla/support/mla_causal_attention_schedule.cpp"
                 )
             ),
             str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.cpp"),
             str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_schedule.cpp"),
         ]
-    if window:
+    if window or split_kv:
         host_cmd += [str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_window.cpp")]
+    if split_kv:
+        host_cmd += [
+            str(ROOT / "tests/mla/support/mla_split_kv_attention_schedule.cpp"),
+            str(ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_split_kv.cpp"),
+        ]
     (artifacts / "schedule-command.json").write_text(json.dumps(host_cmd, indent=2) + "\n")
     with (artifacts / "schedule-compile.log").open("w") as log:
         subprocess.run(host_cmd, stdout=log, stderr=subprocess.STDOUT, timeout=120, check=True)
@@ -359,12 +370,12 @@ def build_probes(
         ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_bsnd_metadata_consumer.h",
         *sorted((ROOT / "csrc/ascend910/flash_attn_npu_3/mla").glob("*/*.hpp")),
     ]
-    if causal or window:
+    if causal or window or split_kv:
         current += [
             ROOT
             / (
                 "tests/mla/support/mla_window_attention_schedule.cpp"
-                if window
+                if window or split_kv
                 else "tests/mla/support/mla_causal_attention_schedule.cpp"
             ),
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal.h",
@@ -372,12 +383,21 @@ def build_probes(
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_causal_metadata.h",
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla/mla_tnd_schedule.cpp",
         ]
-    if window:
+    if window or split_kv:
         current += [
             ROOT / "csrc/ascend910/flash_attn_npu_3/mla" / p
             for p in ("mla_window.h", "mla_window.cpp", "mla_window_params.h")
         ]
+    if split_kv:
+        current += [
+            ROOT / "tests/mla/support/mla_split_kv_attention_schedule.cpp",
+            *[
+                ROOT / "csrc/ascend910/flash_attn_npu_3/mla" / p
+                for p in ("mla_split_kv.cpp", "mla_split_kv.h", "mla_split_kv_params.h")
+            ],
+        ]
     manifest = {
+        "split_kv": split_kv,
         "causal": causal,
         "window": window,
         "dtype": dtype,
@@ -402,7 +422,7 @@ def build_probes(
             ["git", "-C", str(ROOT / "csrc/catlass"), "rev-parse", "HEAD"], text=True
         ).strip(),
     }
-    if paged or causal or window:
+    if paged or causal or window or split_kv:
         dependencies = set()
         for depfile in artifacts.glob("*-device.d"):
             dependencies.update(

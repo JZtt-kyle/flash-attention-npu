@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-本页记录实施顺序、每步产物与完成条件。**M10a 独立 CPU split-KV 分区与布局已完成；唯一下一步是 M10b1。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。
+本页记录实施顺序、每步产物与完成条件。**M10b1 独立 BSND split-KV partial attention 已完成；唯一下一步是 M10b2。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。
 
 ## 已完成：按覆盖目的精简测试
 
@@ -37,7 +37,7 @@
 
 ### 已完成 M10a：独立 CPU split-KV 分区与 workspace 布局
 
-M10a 已交付独立调度/布局组件，设备 partial attention 与合并数值尚未实现。生产入口仍只接受 `num_splits=1`，没有自动/显式 split 或占位 accumulator。
+M10a 已交付独立调度/布局组件，设备 partial attention 与合并数值由后续独立组件负责。生产入口仍只接受 `num_splits=1`，没有自动/显式 split 或占位 accumulator。
 
 - 改动与影响路径：新增 `mla/mla_split_kv.h/.cpp`，只由独立 CPU 驱动编译；只读复用 `mla_window`、`mla_causal`、`mla_schedule`、`mla_tnd_schedule` 和 `detail/cann_split_core`，不修改共享实现、setup、metadata、生产分派或公开签名。输入为既有长度解析后的有效长度和逻辑 M/S2 基块，不重复实现五布局解析。
 - 独立协议：固定 CANN 自动分区保留全部端点、FD 合并记账及成本；FA3 请求解析为 `<=0` 自动、1 单分片、2..256 显式；显式 S2 片限定于 mask 范围，空片为规范空区间。CANN 内部 workspace 与 FA3 FP32 accumulator shape/stride/地址分开描述。自动分区不能冒充均匀显式分片，源 sum/max 不能冒充 FA3 LSE；设备空片初始化留给下一步。
@@ -45,14 +45,32 @@ M10a 已交付独立调度/布局组件，设备 partial attention 与合并数�
 - 验收入口：`python3 -m tests.mla --unit split_kv`、`--suite split-kv-sanitize split-kv-tools`、`--suite e2e --device 6`，均先 dry-run/collect-only。本模块单元及 sanitizer、累计小输入 E2E 实跑，数学缓存复用，未继承历史单元/性能。没有公开 split 行为，本步不注册伪 split 数值 E2E，接通时再新增。
 - 完成条件：上述固定源/独立边界、sanitizer、工具与累计 E2E 通过；actual load、design 协议、status 证据、链接和仓库质量核对后提交一次。具体结果、环境差异与产物路径只记 [status](status.md)。
 
-### 唯一下一步 M10b1：独立 BSND split-KV partial attention
+### 已完成 M10b1：独立 BSND split-KV partial attention
 
-在 M10a 协议上实现设备分片计算，先独立验收部分结果，再进入 FD 归并。范围为共享 512+64、连续 BSND、FP16/BF16；公开 `num_splits` 和 metadata 仍不开放。
+在 M10a 协议上完成设备分片计算与独立验收，范围为共享 512+64、连续 BSND、FP16/BF16；公开 `num_splits` 和 metadata 仍不开放。产物为源 FD 的真实 FP32 部分 O 与 sum/max，归并和公开 accumulator 适配留到后续步骤。
 
-- 改动与影响路径：在 FA3 的 910 MLA Kernel/Block/Tile 层复用现有矩阵乘、softmax、mask 和任务环，接入 M10a 的分片起止及 workspace。保留固定 CANN FD 的部分 O、sum/max、dtype、舍入和事件顺序；FA3 FP32 accumulator 需要的归一化与布局适配单列，不能将源 sum/max 直接当 LSE。开始前固定实际文件及受影响共享依赖。
+- 改动与影响路径：在 FA3 的 910 MLA Kernel/Block/Tile 层复用现有矩阵乘、softmax、mask 和任务环，接入 M10a 的分片起止及 workspace。保留固定 CANN FD 的部分 O、sum/max、dtype、舍入和事件顺序；FA3 FP32 accumulator 需要的 LSE、空行与布局适配单列，不能将源 sum/max 直接当 LSE。实际文件及受影响共享依赖见下。
 - 本模块测试归 `tests/mla/unit/split_kv_attention/`，probe/reference 放 `support/` 并注册统一入口。先用双 dtype 代表与成本边界固定实现，再跑约定集合；对照固定源的实际部分缓冲与独立双数学，覆盖无 mask/causal/window、非零 S2 起点、尾块、空分片/全遮罩/零 KV、多 M/核间边界和 1/2/8/256 分片的适用路径。做适用组件性能；不能用完整无 split 输出代替分片结果验收。
 - 共享设备依赖变化时实际运行相关累计小输入 E2E，失败后再单点定位所属模块；不累计历史单元。数学 reference 内容缓存同一步复用，待测设备仍实际执行。未接通公开路径前不注册伪 split 公开 E2E，公开接入时再新增自己的日常清单。
 - 完成条件：独立 partial attention 产生真实可验的部分结果，固定源/双数学、边界、组件性能和受影响 E2E 通过，文档及质量检查后只提交一次。FD 归并与各布局生产接入之后分别闭环，不在本步扩大到整个 M10。
+
+本步实施与验收边界如下（结果和耗时见 status）：
+
+- 新增 `mla/mla_split_kv_params.h` 和 `kernel/mla_split_kv.hpp`，通过默认关闭的模板特化复用 `kernel/mla_dense.hpp` 的三槽任务环及 `block/mla_vector.hpp`；Cube/Tile 算法、生产 launcher、metadata、setup 和公开签名不变。独立发射一核一个 M/S2 片，超过物理核数的 1/2/8/256 显式片由 probe 分波验收；每波使用 M10a 的真实 workspace 偏移。CPU 分片复用 `BuildSplitKvBlock`，不新增生产调度。
+- 本步产物是源 FD 的 FP32 部分 O 与分开的八路广播 sum/max。源 `DealBmm2ResBaseBlock` 在 FD 写回前已执行 aMLA `RowDivs`，因此该 O 已归一化；已按源码和实测纠正 M10a 的“未归一化”描述。FA3 accumulator 的重排、空行适配及 LSE 转换在后续归并/接入中完成，不把原始 sum/max 宣称为 LSE。本步数学检查从原始输入独立定义每片的可见键，空片设备初始化，非空片直接比较源实际 FD 缓冲。
+- 新增 `support/mla_split_kv_attention_{probe.cpp,schedule.cpp,cases.py,reference.py}` 和模块单元，复用固定 Git blob 构建驱动并注册 `split-kv-attention-check`、`split-kv-attention`、`split-kv-attention-profile`、`split-kv-attention-tools`。源 probe 调用未修改 CANN Kernel 的 partial 阶段，跳过 FD 合并；保存原始 workspace、实际加载与依赖哈希。测试涵盖双 dtype、三种 mask、非零起点、M/N 尾块、空片/全遮罩/零 KV、多 M/核边界、重复调用、guard 和 aMLA 跨块最大值变化。
+- 必跑命令均为 `python3 -m tests.mla`，先 `--dry-run`、再 `--collect-only`：工具组；`--suite split-kv-attention-check --device 6` 的代表和最大成本边界；实现固定后运行 `--suite split-kv-attention split-kv-attention-profile e2e --device 6`。性能保留预热 5、五轮各 20 wall/10 profiler 样本，只比较同分片源与迁移的组件，不称公开 E2E。完整模块入口为 `--unit split_kv_attention`。
+- 证据：M10a 累计 E2E 原始文件与源码已核对；本步共享 Kernel/Vector 和构建驱动改变，累计 119 项小输入 E2E 实跑，继承为 0。不重跑或继承历史单元/性能。构建和数学 reference 使用仓库外既有内容缓存；本模块相同原始输入的双数学结果在代表/验收之间复用；性能检查双方实际部分缓冲，设备每次执行。证据放 `/tmp/mla-m10b1/`，`build/` 只保留无头状态。
+
+### 唯一下一步 M10b2：独立 FD 归并与 FA3 accumulator 适配
+
+在已验收的 BSND partial 数值之上，实现独立 Vector FD 归并；生产 `num_splits`、自动调度和 metadata 仍不开放。按源 FP32 部分 O 与 sum/max 定义输入，不能再次归一化已经执行过 RowDivs 的 O。
+
+- 复用 CATLASS Block/Tile 与既有向量操作，迁移固定 `fia_block_vec_flashdecode_arch22.h` 的 max/sum 权重、合并顺序和最终 dtype 舍入；单列 FA3 FP32 O/LSE accumulator 的布局转换、`log(sum)+max` 及空行语义，使用 M10a 的 shape/stride/地址协议。
+- 本模块单元放 `tests/mla/unit/split_kv_merge/`，probe/reference/性能与统一入口一起交付。开始前在本步固定实际文件、必跑命令、影响和证据依赖；以本步新生成的真实 partial 以及独立构造的极端统计量，对照固定源实际归并和双数学，不继承 M10b1 单元通过记录代替执行。
+- 覆盖双 dtype、1/2/8/256 的适用组合、不同 M/head/尾行、分片内无效行、无 tile 空片、全空、不同片最大值/权重跨度、重复执行和 workspace 边界。特别区分源有限负值 max 哨兵与规范空片 `max=-inf`，确保最终 O/LSE 和 accumulator 无 NaN；不可忽略不支持的组合。
+- 做适用组件性能并运行受影响累计小输入 E2E；数学 reference 仍按内容复用。未接通公开 split 前不注册伪公开 E2E，不把此独立归并验收称作公开性能或完整 M10 阶段收尾。
+- 完成条件：独立归并与 accumulator 适配的源/双数学、空值/边界、组件性能及相关 E2E 通过，更新文档和质量检查后提交一次并停止。后续再按布局闭环生产显式及自动 split。
 
 ## 后续里程碑：M10–M17
 
@@ -60,7 +78,7 @@ M10a 已交付独立调度/布局组件，设备 partial attention 与合并数�
 
 | 里程碑 | 依赖与建议提交边界 | 阶段完成条件 |
 | --- | --- | --- |
-| M10：512+64 split-KV | M10a CPU 分区/布局已完成；接着独立验证 partial attention、FD 合并，再按 BSND、TND/混合、PA 接入显式及自动调度，不把完整 split 迁移作为一轮 | 自动/1/显式 split、空分片/全空、O/LSE/accumulator/metadata 及已支持 mask 组合；长 KV E2E |
+| M10：512+64 split-KV | M10a CPU 分区/布局、M10b1 partial attention 已完成；接着独立验证 FD 合并与 accumulator 适配，再按 BSND、TND/混合、PA 接入显式及自动调度，不把完整 split 迁移作为一轮 | 自动/1/显式 split、空分片/全空、O/LSE/accumulator/metadata 及已支持 mask 组合；长 KV E2E |
 | M11：192/128 BSND prefill | 这是新数值表示；先验证独立 K/V、分组头及 192 stride 数值组件，再完成 BSND metadata/生产/公开接入 | qv=None、源通用非量化路径、GQA、真实 stride、O/LSE 和适用 E2E |
 | M12：prefill TND/长度 | 复用 M11 数值；TND varlen 和混合 cache 按可调用行为接入，各自同时覆盖 allocation/used 与 stride | 非均匀长度、seqused、空值/边界/GQA、生产精度和适用 E2E |
 | M13：prefill PA | 复用已有页寻址；BSND PA、TND PA 各自接通 metadata/生产/入口，避免按 Copy/host/API 重复拆层 | 合法 P 的代表边界、内容/RoPE 的真实 stride、长度/复用/生命周期、精度及 PA E2E |
@@ -111,6 +129,7 @@ M10a 已交付独立调度/布局组件，设备 partial attention 与合并数�
 | M09d | BSND Q + ND PA KV window cache、v15 metadata 生成/复用与生产/公开接入；全 P、跨页窗口、stride/空值/Trap/compile/生命周期、固定源/双数学及平均公开 E2E |
 | M09e | TND Q + ND PA KV window cache、v16 前缀/used、metadata 生成/复用与全部入口；五种窗口布局的阶段组合、累计 E2E、普通 FA3、源组件及平均公开 E2E；M09 完成 |
 | M10a | 独立 CPU native FD 分区/归约记账、FA3 请求与显式 mask 分片、源 workspace 和 BSND/TND FP32 accumulator 布局/地址；固定源、独立覆盖/溢出及 ASan/UBSan，累计 E2E 实跑；生产 split 仍拒绝 |
+| M10b1 | 独立连续 BSND FP16/BF16 partial attention；真实 FP32 部分 O/sum/max、mask/空片和分波、固定源与双数学、组件性能及累计 E2E；FD 合并和公开 split 仍未开放 |
 | 测试整理与精简 | 模块所属单元测试、明确的小输入日常 E2E 与共享支持目录；代表组合取代默认数量截断，穷举显式开启、仅继承 E2E；外部产物和可重建原生对照，build 仅保留无头日志与状态 |
 
 M07 的页大小精度覆盖全部 16..1024 的 16 倍数；性能矩阵及原生非 FD/FD 的边界见 [design 7.1](design.md#71-固定性能矩阵与阶段边界)。公开接入包含 None/整数/tensor KV 长度、v6 复用及相关 MLA/普通 FA3 回归，结果只在 status 维护。

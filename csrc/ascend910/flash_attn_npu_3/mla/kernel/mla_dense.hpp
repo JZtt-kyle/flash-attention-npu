@@ -33,13 +33,15 @@
 #pragma once
 #include "../mla_dense_params.h"
 #include "../mla_window_params.h"
+#include "../mla_split_kv_params.h"
 #include "../block/mla_vector.hpp"
 
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
 template <typename InputT, bool HasKvLengths, bool IsTnd, bool MixedKv = false, bool HasUsed = false,
-          bool HasStrides = false, bool IsPaged = false, bool IsCausal = false, bool IsWindow = false>
+          bool HasStrides = false, bool IsPaged = false, bool IsCausal = false, bool IsWindow = false,
+          bool IsPartial = false>
 class MlaTaskRing {
     static_assert(IsSameType<InputT, half>::value || IsSameType<InputT, bfloat16_t>::value,
                   "MLA dense only supports FP16 and BF16");
@@ -47,6 +49,7 @@ class MlaTaskRing {
     static_assert(!HasUsed || HasKvLengths);
     static_assert(!IsPaged || (HasKvLengths && HasStrides && !MixedKv && !HasUsed));
     static_assert(!IsWindow || (HasKvLengths && !IsCausal));
+    static_assert(!IsPartial || (IsWindow && !IsTnd && !HasUsed && !HasStrides && !IsPaged));
     static constexpr uint32_t kSpanWords = IsPaged ? 5 : HasUsed ? 8 : MixedKv ? 5 : 4;
     static constexpr bool kQueryLengths = IsTnd || HasUsed || IsPaged;
 
@@ -56,7 +59,7 @@ class MlaTaskRing {
                                GM_ADDR kvLengths, uint32_t totalQuery = 0, const MlaBsndInputLayouts* layouts = nullptr,
                                bool kvIsTnd = IsTnd && !MixedKv, GM_ADDR pageTable = nullptr,
                                const MlaPagedCacheLayout* pagedLayout = nullptr,
-                               MlaWindowKernelParams windowParams = {})
+                               MlaWindowKernelParams windowParams = {}, const MlaSplitKvKernelParams* partial = nullptr)
     {
         params = schedule;
         if constexpr (IsWindow) {
@@ -86,8 +89,22 @@ class MlaTaskRing {
         mEnd = params.gS1End[core];
         sEnd = params.s2End[core];
 
-        if ASCEND_IS_AIV {
-            InitOutputSingleCore(output, lse, ratio);
+        if constexpr (IsPartial) {
+            const auto& task = partial->tasks[core];
+            bStart = bEnd = task.batch;
+            mStart = mEnd = task.m;
+            sStart = task.s2Begin;
+            sEnd = task.s2End;
+            if (sStart == sEnd) {
+                if ASCEND_IS_AIV {
+                    InitEmptyPartial(workspace, *partial, ratio);
+                }
+                return;
+            }
+        } else {
+            if ASCEND_IS_AIV {
+                InitOutputSingleCore(output, lse, ratio);
+            }
         }
         const uint64_t r1 = params.mm1ResSize, r2 = params.mm2ResSize;
         uint64_t offset = 0;
@@ -113,6 +130,10 @@ class MlaTaskRing {
         if ASCEND_IS_AIV {
             Block::VectorParams vectorParams{cubeParams, ratio, scale};
             vector.Init(vectorParams, output, lse);
+            if constexpr (IsPartial) {
+                vector.InitPartial(workspace + partial->outOffsetBytes, workspace + partial->sumOffsetBytes,
+                                   workspace + partial->maxOffsetBytes, uint64_t(core) * params.mBaseSize);
+            }
             vector.InitVec1GlobalTensor(qk, p, pvInt);
             vector.InitVec2GlobalTensor(vec2, pv);
             vector.InitBuffers(pipe);
@@ -131,7 +152,7 @@ class MlaTaskRing {
     using RunInfo = Block::RunInfo;
     static constexpr uint32_t kTaskCount = 3;
     Block::MlaCube<InputT, IsTnd, HasStrides, IsPaged> cube;
-    Block::MlaVector<InputT, IsTnd, IsCausal, IsWindow> vector;
+    Block::MlaVector<InputT, IsTnd, IsCausal, IsWindow, IsPartial> vector;
     MlaDenseKernelSchedule params;
     MlaWindowKernelParams window;
     GlobalTensor<uint32_t> lengths;
@@ -140,6 +161,33 @@ class MlaTaskRing {
     uint64_t kvStart = 0;
     uint32_t core, bStart, mStart, sStart, bEnd, mEnd, sEnd;
     uint32_t bn2IdxInCurCore = 0;
+
+    __aicore__ inline void InitEmptyPartial(GM_ADDR workspace, const MlaSplitKvKernelParams& partial, uint32_t ratio)
+    {
+        // Empty fragments own their slot even when there are no Cube tasks.
+        // Each vector initializes disjoint complete rows; order MTE3 writes
+        // before recycling the initialization scratch.
+        const uint32_t chunk = (params.mBaseSize + ratio - 1) / ratio;
+        const uint32_t begin = (GetBlockIdx() % ratio) * chunk;
+        if (begin >= params.mBaseSize) {
+            return;
+        }
+        const uint32_t rows = Min(chunk, params.mBaseSize - begin);
+        const uint64_t row = uint64_t(core) * params.mBaseSize + begin;
+        GlobalTensor<float> gm;
+        gm.SetGlobalBuffer((__gm__ float*)(workspace + partial.outOffsetBytes));
+        matmul::InitOutput<float>(gm[row * 512], rows * 512, 0);
+        SetFlag<HardEvent::MTE3_V>(0);
+        WaitFlag<HardEvent::MTE3_V>(0);
+        gm.SetGlobalBuffer((__gm__ float*)(workspace + partial.sumOffsetBytes));
+        matmul::InitOutput<float>(gm[row * 8], rows * 8, 0);
+        SetFlag<HardEvent::MTE3_V>(0);
+        WaitFlag<HardEvent::MTE3_V>(0);
+        gm.SetGlobalBuffer((__gm__ float*)(workspace + partial.maxOffsetBytes));
+        matmul::InitOutput<float>(gm[row * 8], rows * 8, -float(1.0 / 0.0));
+        SetFlag<HardEvent::MTE3_V>(0);
+        WaitFlag<HardEvent::MTE3_V>(0);
+    }
 
     __aicore__ inline void InitOutputSingleCore(GM_ADDR output, GM_ADDR lse, uint32_t ratio)
     {
@@ -217,7 +265,7 @@ class MlaTaskRing {
             ++bn2IdxInCurCore;
         }
         info.bn2IdxInCurCore = bn2IdxInCurCore - 1;
-        info.isLastS2Loop = (s + 1 == S2Loops(m));
+        info.isLastS2Loop = (s + 1 == (IsPartial ? sEnd : S2Loops(m)));
         if constexpr (IsCausal) {
             info.nextToken = int64_t(kvLength) - (kQueryLengths ? actualQueryLength : params.sq);
         }
@@ -269,6 +317,10 @@ class MlaTaskRing {
 
     __aicore__ inline void UpdateAxisInfo(uint32_t& b, uint32_t& m, uint32_t& s)
     {
+        if constexpr (IsPartial) {
+            ++s;
+            return;
+        }
         uint32_t mLoops =
             ((kQueryLengths ? actualQueryLength : params.sq) * params.heads + params.mBaseSize - 1) / params.mBaseSize;
         uint32_t sLoops = S2Loops(m);

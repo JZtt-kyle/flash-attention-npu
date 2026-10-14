@@ -54,7 +54,18 @@ USED_SHARED_CPU = [
         "used_metadata",
     )
 ]
+SPLIT_KV_ATTENTION = "tests/mla/unit/split_kv_attention/test_attention.py"
+SPLIT_KV_DEVICE_SUITES = {
+    "unit-split_kv_attention",
+    "split-kv-attention-check",
+    "split-kv-attention",
+    "split-kv-attention-profile",
+}
 SUITES = {
+    "split-kv-attention-check": [SPLIT_KV_ATTENTION, "-k", "representative or cost_boundary"],
+    "split-kv-attention": [SPLIT_KV_ATTENTION, "-k", "not representative and not cost_boundary"],
+    "split-kv-attention-profile": ["tests/mla/unit/split_kv_attention/test_component_profile.py"],
+    "split-kv-attention-tools": ["tests/mla/unit/tools/test_mla_split_kv_attention_tools.py"],
     "window-paged-tnd-cpu": [
         "tests/mla/unit/window_paged_tnd/test_flash_attn_npu_v3_mla_window_paged_tnd_metadata.py"
     ],
@@ -576,6 +587,7 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "split-kv-attention-profile",
     "window-paged-tnd-profile",
     "window-paged-profile",
     "window-mixed-profile",
@@ -602,7 +614,12 @@ WINDOW_DEVICE_SUITES = {
     "window-bsnd-check",
     "window-bsnd-public",
 }
-STANDALONE_CHECK_SUITES = {"causal-smoke", "causal-check", "window-check"}
+STANDALONE_CHECK_SUITES = {
+    "causal-smoke",
+    "causal-check",
+    "window-check",
+    "split-kv-attention-check",
+}
 CAUSAL_DEVICE_SUITES = {
     "causal-tnd-check",
     "causal-mixed-check",
@@ -619,6 +636,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "split-kv-attention-tools",
     "unit-split_kv",
     "split-kv-sanitize",
     "split-kv-tools",
@@ -877,6 +895,8 @@ def environment(args, directory, suite):
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
     if suite in WINDOW_DEVICE_SUITES:
         env["MLA_WINDOW_ATTENTION_DIR"] = str(directory / "probes")
+    if suite in SPLIT_KV_DEVICE_SUITES:
+        env["MLA_SPLIT_KV_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
         "unit-split_kv",
         "split-kv-sanitize",
@@ -1267,12 +1287,14 @@ def run(args):
                         error="Build artifacts or dependencies changed during validation",
                     )
             if (
-                suite in CAUSAL_DEVICE_SUITES | WINDOW_DEVICE_SUITES
+                suite in CAUSAL_DEVICE_SUITES | WINDOW_DEVICE_SUITES | SPLIT_KV_DEVICE_SUITES
                 and not args.collect_only
                 and result["returncode"] == 0
             ):
                 try:
-                    if suite in WINDOW_DEVICE_SUITES:
+                    if suite in SPLIT_KV_DEVICE_SUITES:
+                        validate_causal_builds(directory, kind="split_kv")
+                    elif suite in WINDOW_DEVICE_SUITES:
                         validate_causal_builds(directory, kind="window")
                     else:
                         validate_causal_builds(directory)

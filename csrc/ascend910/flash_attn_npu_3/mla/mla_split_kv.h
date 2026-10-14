@@ -60,7 +60,7 @@ struct MlaSplitKvWorkspaceInput {
 struct MlaSplitKvWorkspace {
     MlaWorkspace attention;
     // Offsets from the user workspace, before libApiBytes is added to the budget.
-    // Source FD stores unnormalized FP32 O and separate sum/max (8 floats/row).
+    // Source FD stores aMLA-normalized FP32 O and separate sum/max (8 floats/row).
     uint64_t fdAccumOffsetBytes, fdSumOffsetBytes, fdMaxOffsetBytes;
 };
 

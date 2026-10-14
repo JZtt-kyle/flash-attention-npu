@@ -585,13 +585,23 @@ M08b1 在 [`MlaTaskRing`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_d
 | `BuildSplitKvWorkspace` | 给出固定 CANN 内部缓冲的元素数、字节偏移及 host 预算；调用方已选定 M/N 和最大有效 Q 行数。它不是全局空 tensor 分派，也不产生公共 accumulator。 |
 | `BuildSplitAccumulatorLayout` / `GetSplitAccumulatorOffsets` | 描述 FA3 公共 FP32 accumulator 的容量 shape、连续元素 stride 与行字节偏移；BSND 为 `[S,B,H,Q,512]` / `[S,B,H,Q]`，TND 为 `[S,H,T,512]` / `[S,H,T]`。Q/T 是分配容量，used 不压紧间隙；TND 查询为绝对分配 token，batch 坐标须为 0。S=1 返回无存储描述，坐标查询拒绝。 |
 
-内部 workspace 仍有每核两个 GM 槽：QK FP32、P FP16/BF16、PV FP32、Vector FP32，其偏移按 `blockDim` 计算。host 正常预算按 `aicNum`，保留源额外的 aMLA nUpdate/softmaxSum 记账。启用 FD 后接续 `aicNum*2*M*512` 个 FP32 O 元素和 `aicNum*2*2*M*8` 个 FP32 sum/max 元素；sum/max 各占后一缓冲的一半。这些是源未归一的部分 O 与 sum/max，不能作为 FA3 O/LSE accumulator 返回。FD 关闭时仍保留 tiling 的元素数字段，但不分配 FD 段。零 Q 行的原始 workspace 公式仍保留 host 记账；全局空分派后续须显式处理，不能套用该公式宣称运行过空值计算。
+内部 workspace 仍有每核两个 GM 槽：QK FP32、P FP16/BF16、PV FP32、Vector FP32，其偏移按 `blockDim` 计算。host 正常预算按 `aicNum`，保留源额外的 aMLA nUpdate/softmaxSum 记账。启用 FD 后接续 `aicNum*2*M*512` 个 FP32 O 元素和 `aicNum*2*2*M*8` 个 FP32 sum/max 元素；sum/max 各占后一缓冲的一半。固定源在 `DealBmm2ResBaseBlock` 中先执行 aMLA `RowDivs`，再由 `Bmm2FDDataCopyOut` 写回，因此部分 O **已归一化、尚未转为输入 dtype**；原始 sum/max 仍不是 LSE，源缓冲也不是 FA3 的 accumulator 布局。FD 关闭时仍保留 tiling 的元素数字段，但不分配 FD 段。零 Q 行的原始 workspace 公式仍保留 host 记账；全局空分派后续须显式处理，不能套用该公式宣称运行过空值计算。
 
 所有构造与地址查询失败均保持输出不变。workspace 总字节数及 accumulator stride/字节数须可表示为非负 int64；乘加前检查，不能依赖 uint64 回绕。S=1 的无存储描述不是一个占位数值 tensor；S>1 的空容量保留 FA3 shape 和 PyTorch 连续 stride。这里只证明布局可表示，实际设备分配、空片初始化、partial attention、合并数值及生产/公开接入分别按后续步骤验收。
 
 [`split_kv 单元测试`](../../tests/mla/unit/split_kv/test_split_kv.py) 编译固定 CANN Git blob 的 `SplitCore` 和 workspace 函数；FA3 请求、shape 和显式分片片段从固定哈希源码提取。独立 Python 枚举检查每个 S2 tile 的唯一归属、FD 归约次数与行拆分、vector 归约端点、mask/空片、buffer 不重叠及 allocation 地址；stride 另与 CPU torch meta tensor 对照。普通与 ASan/UBSan 运行同一集合。源读取及编译身份在 [`mla_split_kv_build.py`](../../tests/mla/support/mla_split_kv_build.py) 管理，读取 CANN 固定 Git blob，不依赖源仓当前 HEAD。
 
 FA3 oracle 与 window 共用 `MLA_FA3_SOURCE_ROOT`（默认 `/tmp/mla-fa3-reference/d15f1531a460ba456f41b01a774f33ab2db8febf`）；本模块另需该提交的 `hopper/block.h`，SHA-256 为 `4c9b132fdbff869716ca673f087cf2ede20f041fa8923c2f181394b716981083`。缺失或哈希不符直接失败；每次验收保存原文件、许可证、提取片段、编译命令、二进制哈希和完整请求/响应，不依赖旧通过记录来跳过编译或执行。
+
+#### 6.2.9 独立 BSND split-KV partial attention
+
+[`MlaSplitKvBsnd`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_split_kv.hpp) 是连续 BSND、共享 512+64、FP16/BF16 的独立组件。通过默认关闭的 `IsPartial` 特化复用任务环、Cube、softmax/aMLA 和逐行 window mask；[`MlaSplitKvKernelParams`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_kv_params.h) 是当次 launch 数据，不是 metadata。调用方先校验有效长度和 6.2.8 的分片/workspace；每个物理 AIC 消费一个 M 块的 `[s2Begin,s2End)`，首尾标志使用该片端点，三槽任务环保留两轮排空。当前独立 launcher 使用 910B C1V2；多于物理核数的显式片由测试驱动分波，尚不是生产 split 调度。
+
+每波的第 `core` 个片写入原生 FD 的第 `core` 个槽。非空片的 FP32 O、每行八路广播 sum/max 保留源 `ComputeLogSumExpAndCopyToGm` / `Bmm2FDDataCopyOut` 的计算、舍入和事件顺序；未分配的槽及 host reserve 不写入。无 S2 tile 的空片由设备写 `O=0、sum=0、max=-inf`，不读取 Q/K/V；有 tile 但某行全遮罩时仍保留源原始 FD 缓冲行为。后续归并必须处理这些行，并完成 `log(sum)+max`、FA3 `[S,B,H,Q,512]` / `[S,B,H,Q]` 布局和空行语义适配，不能直接返回原始 FD 缓冲。`num_splits=1` 的独立片可用于数值检查，不分配公共 accumulator；生产入口仍仅开放既有单片路径。
+
+[`partial probe`](../../tests/mla/support/mla_split_kv_attention_probe.cpp) 编译未修改的固定 CANN Kernel/Block 头文件，执行源初始化、`CreateTask` / `ExecuteTask` 和实际 FD 写回，跳过 FD 合并；仅测试 harness 提供单片边界和空片初始化。源接收真实压缩 mask、原始 int64 KV 长度及独立 mask 参数；双方每个片与原始输入逐行 key 枚举对照。模块 [`split_kv_attention`](../../tests/mla/unit/split_kv_attention/test_attention.py) 比较真实 FP32 部分 O/sum/max，检查八路广播、尾块、空片、全遮罩、重复执行、输入/输出和 workspace guard；不以完整 attention 输出替代分片验收。
+
+[`双数学 reference`](../../tests/mla/support/mla_split_kv_attention_reference.py) 从原始输入计算片内可见键，FP64 与输入 dtype 两条公式分别产生 FP32 O、LSE、max/sum，按内容缓存复用。非空有效行使用第 7 节不变阈值；源逐元素一致但数学超限单列源精度限制，源原始全遮罩行另行保存。组件性能使用相同片边界、预分配 workspace 和固定源 partial 阶段；源初始化保留，host 分片、mask 准备和 H2D 不计时，不称公开或 metadata E2E。完成状态与实测证据见 status。
 
 ### 6.3 长度与布局调度
 
