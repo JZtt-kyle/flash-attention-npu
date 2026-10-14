@@ -226,6 +226,11 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v14](#516-v14混合-window-记录) | 14 / 14 | 413+8B | 非 PA TND Q + BSND KV window；Q 分配前缀/可选内部 used、KV 容量/实际长度及归一化窗口身份 |
 | [v15](#517-v15bsnd-pa-window-记录) | 15 / 15 | 411+5B | BSND Q + ND PA KV window；Q 容量/可选内部 used、P/C、KV 实际长度及归一化窗口身份 |
 | [v16](#518-v16tnd-pa-window-记录) | 16 / 16 | 411+5B | TND Q + ND PA KV window；Q 分配前缀/总量/maxQ、可选内部 used、P/C、KV 实际长度及归一化窗口身份 |
+| [v17](#6212-bsnd-显式-split-生产适配) | 17 / 17 | 416+10B | 非 PA BSND 显式 split；allocation/used、窗口、片数和 M 前缀 |
+| [v18](#6214-bsnd-自动-split-的-v18-安全协议) | 18 / 18 | 758+10B | 非 PA BSND 自动 split；原生 AIC/FD/Vector 端点与 M 前缀 |
+| [v19](#6217-tnd-显式-split-生产适配) | 19 / 19 | 416+10B | 非 PA TND Q/KV 显式 split；双 allocation/used、窗口、片数和紧凑 M 前缀 |
+| [v20](#6219-tnd-自动-split-的-v20-安全协议) | 20 / 20 | 758+10B | 非 PA TND Q/KV 自动 split；双 allocation/used、原生端点与紧凑 M 前缀 |
+| [v21](#6221-混合显式-split-计划与-v21-安全协议) | 21 / 21 | 416+10B | TND Q + BSND KV 显式 split；64 位 KV 起点与紧凑 Q 计划；目前仅 CPU 协议 |
 
 协议能表达某布局，不代表该布局已接通生产入口。生成记录、设备校验、独立 attention、入口调用分别验收；当前接入层次见 [status](status.md)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 使用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
 
@@ -761,6 +766,20 @@ Task 返回原 allocation Q/KV token 起点、段容量和 used 长度；四路�
 [`本模块固定源检查`](../../tests/mla/unit/auto_split_tnd/test_source.py) 从固定 CANN 重新编译 AIC/FD oracle，按原始任务范围实际执行未修改的 partial/FD 源核；双数学 reference 使用原始 allocation/used、mask 与内容缓存。专属 [`公开 E2E`](../../tests/mla/e2e/auto_split_tnd/test_public.py) 和 [`Trap`](../../tests/mla/e2e/auto_split_tnd/test_trap.py) 检查 Direct/FD/Empty、长度/stride/空容量、真实 accumulator、静态溢出、复用/生命周期与 real/fake/compile。小输入三 mask、双 dtype、空值及 fake/compile 在 regression_cases 注册，后续累计回归。
 
 公开性能使用预先固定的 [`TND 自动输入`](../../tests/mla/support/mla_auto_split_tnd_cases.py)，沿用 R=1/4、5 次预热、5×20 wall、完成同步及原生 packing/restoration 的计时边界；记录每个 init/partial/merge 与 AICPU task，三阶段总 Kernel 时间和公开 wall 分开。此组的原生 FD 与非 FD 一并计入配置内/配置间等权平均；其他未迁移路径的分类不变。
+
+#### 6.2.21 混合显式 split 计划与 v21 安全协议
+
+[`MlaSplitMixedPlan`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_mixed_plan.h) 是非 PA TND Q + BSND KV 的独立 CPU 计划，接收紧凑 totalQ、调用级 maxQ、BSND 单样本容量 Sk、B/H、M/N、显式 S=2..256 及平台资源。Q 前缀仍为 int32 `[B+1]`、总量不超过 INT32_MAX；KV 不接受前缀，其总容量是 64 位 `B*Sk`，允许超过 INT32_MAX/UINT32_MAX。可选 Q/KV-used 经既有解析器校验并保存为拥有存储的 span；used 不移动后续样本的原 allocation 起点。
+
+持久预算沿用 6.2.16 的紧凑 Q 上界，不能按 `B*maxQ` 膨胀。每个任务的 KV 起点是 uint64 `b*Sk`；Q/O/LSE 和 `[S,H,totalQ,512]` / `[S,H,totalQ]` FP32 accumulator 坐标仍取原 Q allocation token。源 workspace、三种 mask 的分片、跨波 AIC/Vector 所有权和部分槽顺序复用显式组件。零 totalQ、零 B 或零 Sk 没有任务/workspace；非空容量中的全零 KV-used 保留初始化任务。所有容量/字节数及 libApi 加法独立检查，失败不改写输出，查询不依赖调用方输入生命周期。
+
+[`v21 构造器`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_mixed_metadata.cpp) 复用 `BuildUsedSchedule` 与上述计划，记录为 contiguous int32 `[416+10B]`、version=kind=21。前 `410+8B` 字为 v5 的混合几何、源资源/端点和 allocation/used 快照；尾部为 window kind/left/right、S 及 B+1 个 uint64 M 前缀。不序列化地址、CPU 对象或逐任务数组。非法输出缓冲保持不变；合法缓冲上的生成失败以失败记录返回。
+
+[`独立消费者`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_mixed_consumer.h) 是 CPU/AICore 共用头，先核验真实 v21 头和 TND Q/BSND KV 身份，再由 v5 schema view 逐项核验当次几何、平台、长度与 64 位物理起点；同字数的 v17/v19 不能混用。它重算 M 前缀、持久预算和 FP32 accumulator 上界，不信任生成器的任务数/偏移；即使零 used 或空 KV，也不能绕过 accumulator 溢出。所有失败保持消费结果不变。
+
+本步仅完成 CPU 构造/计划及共享校验协议，尚未编入 AICPU、发射设备 partial/merge 或开放混合 split。公开混合显式/自动与 PA split 仍明确拒绝。后续生产接入须新增专属 E2E、设备固定源/双数学、真实 accumulator、Trap、生命周期和平均公开性能；本组件及历史无 mask 证据不能替代这些验收。
+
+[`本模块单元`](../../tests/mla/unit/split_mixed_protocol/test_plan.py) 新编译固定 CANN 范围/workspace 与 FA3 分片/accumulator 片段，独立枚举三种 mask、allocation/used 间隙、任务归属、原 Q 行及跨 uint32 的 KV 地址；覆盖紧凑静态界限、宽任务号、精确溢出界和失败原子性。另以 [`协议单元`](../../tests/mla/unit/split_mixed_protocol/test_metadata.py) 检查双 dtype、资源/长度/窗口/片数/前缀损坏、旧版本拒绝、非法缓冲、64 位 span 与空值下的独立 accumulator 检查。普通及 ASan/UBSan 运行同一模块集合，后续不累计历史单元。
 
 ### 6.3 长度与布局调度
 

@@ -1,64 +1,50 @@
 # MLA 当前状态
 
-当前分支 `feat/mla-cann-migration`，本步起点 `90d7dac`。**M10c4b2 TND 原生自动 split 生产接入已完成。** 当前闭环提交用 `git log -1 -- docs/mla/status.md` 定位；唯一下一步为 [M10c5 混合布局显式 split](plan.md#唯一下一步-m10c5混合布局显式-split)，本次提交后立即停止。
+当前分支 `feat/mla-cann-migration`，本步起点 `d62d44f`。**M10c5a 混合显式 split 计划与 v21 安全协议已完成。** 当前闭环提交用 `git log -1 -- docs/mla/status.md` 定位；唯一下一步为 [M10c5b 混合显式 split 生产接入](plan.md#唯一下一步-m10c5b混合布局显式-split-生产接入)，本次提交后立即停止。
 
-## 当前能力与边界
+## 当前能力与本步边界
 
-非 PA TND Q/KV 已开放 `num_splits=0`：v20 AICPU 与独立设备消费、共享 init/partial/merge 的 TND 特化、原生 AIC/FD 端点和 8 行 Vector 归约、紧凑 host 预算、原 allocation token 地址以及静态 26 片真实 FP32 accumulator。覆盖无 mask、causal、window、双 allocation/used、四路 stride、real/fake/compile、metadata 复用和流生命周期；全局 totalKV=0 与仅 used KV=0 保持各自空值语义。契约见 [design 6.2.20](design.md#6220-tnd-自动-split-生产适配)。
+本步新增非 PA TND Q + BSND KV 的显式 S=2..256 CPU 计划及 v21 构造/独立消费协议。紧凑 Q 的持久预算和原 allocation 行地址与矩形 KV 的 64 位 `b*Sk` 分开处理，覆盖无 mask、causal、window、allocation/used、空容量及 accumulator 溢出。v19 的双 TND KV 总量受 int32 前缀约束，不能直接代替混合协议；据此按 plan 的风险拆分规则先闭环新协议，再整体接入生产。
 
-混合和 PA split 仍明确拒绝；本步未修改 CPU 计划/协议算法、CANN 源仓或 CATLASS，不代表 M10 阶段结束。新增本模块单元、公开/Trap/性能和 12 个日常 E2E 节点；前步 161 节点全部保留，累计 173 项，无数量截断或按耗时筛选。
+v21 尚未编入 AICPU，也未发射设备 partial/merge。公共能力维持前步：非 PA BSND 与 TND Q/KV 支持自动和显式 split；混合/PA split 仍明确拒绝。当前 CPU 证据不代表混合 split 的设备数值、公开入口或性能通过。未修改既有 v17/v19/v20、生产分派、构建/发射参数、CANN 源仓或 CATLASS；契约见 [design 6.2.21](design.md#6221-混合显式-split-计划与-v21-安全协议)。
 
-## 环境、构建与证据身份
+## 环境与证据身份
 
-接手工作树干净，最近提交与 M10c4b1 一致，宿主机无前轮遗留 MLA 测试/构建，6 号 910B3 空闲。前步 E2E 的 13 个原始文件、1,112 个源码、生产 6,372 个依赖/12 个产物和 230 个加载库，共 7,408 个唯一文件核验无差异，见 `/tmp/mla-m10c4b2/takeover.json`。本步源码和生产身份改变，累计 E2E 实跑、继承 0；不累计历史单元或性能。
+接手工作树干净，HEAD 与交接一致；宿主机无前轮遗留 MLA 测试/构建，6 号 910B3 空闲。前步累计 E2E 的 13 个原始文件、975 个源码依赖、6,383 个生产依赖、12 个产物及 230 个加载库，共 7,271 个唯一文件核验无差异，见 `/tmp/mla-m10c5a/takeover.json`。新增原生文件及驱动改变保守构建/验收身份，本步 E2E 实跑、继承 0，不累计历史单元/性能。
 
-Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`；CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。接手旧扩展 SHA-256 `459f487db89b9a3bb06369d49fc9b6f16adb2245426deefc9c338107fa62079a` 不计本步证据；已用 514.2 秒重建，22.3 秒核验实际加载。最终各设备组均加载仓库 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA-256 **`fecd251a8638cd2b8ff9f40e15c6b1a941294a9ae4200017b617606cd72a3fe2`**。
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`；CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。接手实际加载仓库扩展 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA-256 `fecd251a8638cd2b8ff9f40e15c6b1a941294a9ae4200017b617606cd72a3fe2`。本步以 505.9 秒完成重建，21.2 秒核验实际加载同一路径，最终 SHA-256 **`b9e618f86053327e2ce9eb191931276e49f798b682b9a5ee828e475e43374424`**；构建 manifest、依赖和加载库均已核验。
 
-证据根 **`/tmp/mla-m10c4b2/`**；构建/reference 使用仓库外默认 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`，原生包 `MLA_NATIVE_ROOT=/tmp/mla-m10c3b/native`。`build/` 仅保留 `mla-codex-loop`。原生分派、实际加载、profile/wall 样本及源部分缓冲均保留在各组目录。最终原始证据 971 个、源码快照 1,128 个，加上生产/探针/原生依赖和加载库，共 **8,434 个唯一文件**核验无差异，见 `evidence-final.json`；各组实际节点与 collect-only 完全一致。
+证据根 **`/tmp/mla-m10c5a/`**；构建/reference 使用仓库外默认 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`。`build/` 仅保留 `mla-codex-loop`。最终四组共 122 个原始文件，加上源码快照、固定源 blob、CPU/生产产物、编译依赖和加载库，共 **7,397 个唯一文件**核验无差异，见 `evidence-final.json`。各组实际节点与 collect-only 完全一致；累计 E2E 的 173 项与前步清单逐项相同。CPU 单独审计另保留在 `evidence-cpu.json`。
 
 ## 本次验收
 
-所有下列组本次实际执行，失败/跳过均为 0。先 dry-run/collect-only，工具与代表/最大成本检查后固定实现，再执行最终集合；最终验证期间只整理文档，未修改相关源码。
+先 dry-run/collect-only，完成工具和代表/最大成本检查后固定实现。最终验收期间只修改相关文档；本模块普通与 ASan/UBSan 运行相同 195 节点集合，无数量截断或按耗时筛选。
 
-| 组 | 通过 | 耗时 | 最终证据目录（相对证据根） |
+| 组 | 结果 | 耗时 | 证据目录（相对证据根） |
 | --- | --- | --- | --- |
-| `auto-split-tnd-tools` | 29/29 | 9.0 秒 | `tools-final/attempt-1792011844623937670/` |
-| `unit-auto_split_tnd` | 10/10 | 143.8 秒 | `unit-final/attempt-1792011892876204440/` |
-| `auto-split-tnd-public` | 59/59 | 50.7 秒 | `device-final/attempt-1792012066091031850/` |
-| `auto-split-tnd-trap` | 38/38 | 509.3 秒 | 同上；独立错误子进程 |
-| 累计小输入 `e2e` | 173/173 | 30.4 秒 | 同上 |
-| 普通 FA3 `ordinary` | 516/516 | 25.8 秒 | 同上 |
-| `auto-split-tnd-profile` | 1/1 | 275.4 秒 | `performance-final/attempt-1792013049999206540/` |
+| `unit-split_mixed_protocol` | 195/195 通过 | 37.4 秒 | `cpu-final/attempt-1792014477364294090/` |
+| `split-mixed-protocol-sanitize` | 195/195 通过 | 120.3 秒 | `sanitize-final/attempt-1792014659073072840/` |
+| `split-mixed-protocol-tools` | 14/14 通过 | 8.9 秒 | 同上 |
+| 累计小输入 `e2e` | 173/173 通过 | 30.2 秒 | `e2e-final/attempt-1792014578086860050/` |
 
-固定源单元新编译原生 AIC/FD 分区并实际执行未修改的 CANN partial/FD 核：双 dtype 的 O/LSE 均逐元素一致，双数学通过；真实 accumulator O 逐元素一致，accumulator LSE 按 `rtol=atol=1e-6` 对照源统计量转换，并独立检查双数学。具名用例覆盖三种 mask、Direct/FD/Empty 混合、非零起点、跨 M/尾行、长 KV、Direct 临时槽复用和原 allocation 间隙，无新增源精度限制。
+本模块新编译固定 CANN 范围/workspace 与 FA3 显式分片/accumulator 片段，独立核对三种 mask 的逐行可见集合、所有权、持久槽与原 Q/64 位 KV 地址。具名用例覆盖跨波、尾行、used 间隙、零段、全空、192/193/255/256 分片、宽任务号、精确字节边界、输入生命周期和失败原子性；v21 覆盖双 dtype 标志、长度/资源/窗口/片数/前缀损坏、非法缓冲与旧版本拒绝。普通和宿主机 sanitizer 的 plan、metadata、CANN、FA3 四个执行器均正常退出、stderr 为空。
 
-公开专项包含双 dtype 代表、长度/stride/零容量、max 非零的空 tensor、静态 accumulator 溢出、所有实际入口、metadata 更新/复用、fake/compile 和 stream/allocator 生命周期。Trap 用例在非空场景先确认存在真实原生 FD，覆盖 v20 身份、预算、端点/Vector/片数损坏及非法长度，保留 release Trap 原始日志。工具组验证组选择、失败/身份失效、旧两阶段兼容、新三阶段识别、原生 FD 纳入平均及无效证据拒绝。
+代表/成本检查 9/9、35.3 秒，见 `dev/attempt-1792014348252183330/`。最大实际 CPU 输入为 B=262146、Sk=16384、仅 2 个 Q token；v21 记录 10,487,504 字节，最后 KV 起点超过 uint32。最终普通组该协议用例耗时 0.753 秒，计划用例 0.212 秒；其余大逻辑容量只做静态预算/边界查询，不分配 attention tensor。本模块不执行浮点 attention，因此不新增数学 reference；累计 E2E 数学缓存 hit 326、miss 0，待测实现实际执行，没有重算相同 reference。
 
-开发代表/成本组 `auto-split-tnd-check` 为 8/8、119.6 秒，见 `check/attempt-1792011128351602040/`。最大成本输入 Q=(1,2)、KV=(16384,8193)、H=128，FP16/BF16 冷缓存用例分别 35.9/47.1 秒，返回 accumulator 共 20,487,168 字节；这 8 项也包含在最终公开 59 项中。其后只修正测试错误信息匹配和 Trap 输入，开发快照不作为最终 E2E 继承证据；相同数学输入的内容缓存继续有效。
+未运行历史模块单元、普通 FA3 专项、公开性能、完整矩阵或 910C 实机；本步未改变生产/公开调用行为，它们不计本步通过或继承。M10c5b 必须新增自身设备固定源/双数学、accumulator、真实/fake/compile、Trap、生命周期、日常 E2E 与适用平均公开性能，不能用既有无 mask 证据替代。
 
-最终数学缓存：本模块单元 hit 6/miss 4，公开 hit 14/miss 33，累计 E2E hit 326/miss 0，普通 FA3 hit 31/miss 0，性能 hit 2/miss 12；各 miss 均成功写入。同一步重复输入不重算 reference，待测实现实际执行。未运行历史模块单元/sanitizer、穷举矩阵、910C 实机或 M10 阶段全组合；它们不计本步通过或继承。
+## 已处理问题与复现
 
-## 公开性能与差距
+首次 sanitizer 在沙箱中完成 195 项断言后，LeakSanitizer 退出时因 ptrace 受限报 fatal error；统一驱动正确判该组失败，并停止后续工具组。失败证据保留在 `cpu-final/attempt-1792014477364294090/split-mixed-protocol-sanitize/`，不计通过。未关闭任何 sanitizer 检查，改宿主机重跑同一集合后通过，工具组随后实跑通过。最初登录 shell 初始化延迟，后续均用非登录 shell；三个初始 shell 已正常退出，未终止其他进程。
 
-空闲 6 号 910B3 隔离采样，固定 7 个输入 × FP16/BF16，共 14 配置全部实测。保持 R=1/4、5 次预热、5 轮各 20 wall/10 profiler 样本及完成同步，原生必要 packing/restoration 计入公开 wall。12 个原生 MLA template 5 配置适用，其中 8 个为原生 FD，全部纳入等权平均；2 个全空 used KV 的原生 template 0 Empty 配置单列，未按测得耗时删选。
-
-平均 FA3/CANN 耗时比 **0.794557 ≤ 1**；R=1 为 0.841721，R=4 为 0.747393。适用配置退化 2/12、分段退化 6/24；退化配置为 Q=(1,3)、KV=(16384,17)、H=2，FP16/BF16 配置均值分别 1.341546/1.297686。两个 Empty 配置的 R=1/4 比值分别为 FP16 0.591034/0.526600、BF16 0.567492/0.519467。所有单例和分段保留在 `auto-split-tnd-profile/public-profile/average.json` 及双 dtype `profile.json`。
-
-三阶段 Kernel 总耗时另列，适用配置 FA3/CANN 比为 3.216–9.555；公开 wall 通过不代表设备核已追平。原始 AICPU/init/partial/merge 与原生 task、实际分派和样本均已核验，未用 Kernel 时间代替公开 E2E 门槛。
-
-## 复现、质量与已处理问题
-
-使用宿主机非登录 shell；下列命令均以仓库为 cwd，先追加 `--dry-run`、再 `--collect-only` 核对命令/集合。新结果放独立输出目录，不覆盖上述验收证据：
+以下以仓库为 cwd，使用宿主机非登录 shell；新结果使用独立目录，先追加 `--dry-run`，再 `--collect-only` 核对集合。`--unit` 与 `--suite` 是互斥选择器；合并运行时可用 `--suite unit-split_mixed_protocol split-mixed-protocol-sanitize split-mixed-protocol-tools`。
 
 ```bash
-export MLA_NATIVE_ROOT=/tmp/mla-m10c3b/native
-python3 -m tests.mla --suite auto-split-tnd-tools --output /tmp/mla-m10c4b2-repro/tools
-python3 -m tests.mla --suite auto-split-tnd-check --device 6 --output /tmp/mla-m10c4b2-repro/check
-python3 -m tests.mla --unit auto_split_tnd --device 6 --output /tmp/mla-m10c4b2-repro/unit
-python3 -m tests.mla --suite auto-split-tnd-public auto-split-tnd-trap e2e ordinary --device 6 --output /tmp/mla-m10c4b2-repro/device
-python3 -m tests.mla --suite auto-split-tnd-profile --device 6 --output /tmp/mla-m10c4b2-repro/performance
+python3 -m tests.mla --suite split-mixed-protocol-tools --output /tmp/mla-m10c5a-repro/tools
+python3 -m tests.mla --suite split-mixed-protocol-check --output /tmp/mla-m10c5a-repro/check
+python3 -m tests.mla --unit split_mixed_protocol --output /tmp/mla-m10c5a-repro/unit
+python3 -m tests.mla --suite split-mixed-protocol-sanitize --output /tmp/mla-m10c5a-repro/sanitize
+python3 -m tests.mla --suite e2e --device 6 --output /tmp/mla-m10c5a-repro/e2e
 ```
 
-初次工具注册的语法错误在质量检查中发现，修正后工具及最终检查通过。沙箱 NPU 收集因无法枚举设备而报 device_id=None，改宿主机收集成功；失败目录 `acceptance-collect/` 保留，不计通过。登录 shell 初始化挂起，改非登录 shell；终止四个挂起 PID 的请求曾被自动审批拒绝，之后只读复核确认这些 PID 已退出，未影响其他任务。首次证据审计误按 manifest 所在目录寻找继承的 oracle 头，改按记录的实际 partial/缓存库路径核验后通过；原审计保留为 `evidence-draft.json`，没有重算或改写测试通过证据。
-
-本步相关 design/plan/status、链接/表格和完整差异已核对，`git diff --check` 及仓库适用 pre-commit 检查通过；只暂存本步文件，不绕过已有提交钩子。质量记录见证据根的 `quality-final.log`，最终链接记录见 `doc-links-final.json`。收尾只读进程检查仅发现既有无头循环，无遗留 MLA 验收/构建子进程，见 `processes-final.json` 与 `npu-final.log`。
+本步相关 design/plan/status、协议表格和链接已核对，未作阶段全面审计。完整差异、`git diff --check` 及仓库适用 pre-commit 质量记录分别由提交收尾核验，日志见证据根的 `quality-final.log`，链接记录见 `doc-links-final.json`。质量工具使用仓库要求的 pre-commit 4.6.2 与既有缓存环境；只暂存本步文件，不绕过提交钩子。收尾进程和 NPU 状态记录在 `processes-final.json`、`npu-final.log`；生产构建日志保留在上述仓库外 artifact 目录。
