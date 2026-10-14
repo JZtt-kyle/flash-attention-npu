@@ -930,14 +930,18 @@ CANN 执行器使用 `npu_fused_infer_attention_score_v2.out` 显式分配 Dv �
 | 层级 | 位置 | 运行时机 | 后续继承 |
 | --- | --- | --- | --- |
 | 单元测试 | `tests/mla/unit/<模块>/` | 本模块开发，或 E2E 失败后单点定位；包括 CPU/Kernel/metadata 组件和工具自身检查 | 不继承、不累计加入其他模块开发门槛 |
-| E2E 测试 | `tests/mla/e2e/<能力>/` | 模块接通时新增，后续累计回归；覆盖生产/公开调用、精度、参数、真实/fake/compile、复用和生命周期 | 只继承这一层的正确性证据 |
+| E2E 测试 | `tests/mla/e2e/`，日常清单按能力归属，专项在 `<能力>/` | 模块接通时新增小输入日常回归；专项覆盖生产/公开调用、精度、参数、真实/fake/compile、复用和生命周期 | 只继承这一层的正确性证据 |
 | 共享支持 | `tests/mla/support/` | 上述两层调用的构建、独立 reference、固定源、性能和汇总驱动 | 构建/reference 内容缓存独立于测试通过证据 |
 
 模块接通后必须提供可复现 E2E。以后改动默认跑累计 E2E，必要时按受影响能力选择；不把其他模块的 CPU、probe、sanitizer 等历史单元组一并带入。E2E 失败再运行所属模块的单元用例定位。新算法本步完成自己的单元测试，新入口本步完成自己的 E2E，不因整理层级而减弱精度或接口契约。
 
-正确性默认 **一个累计 E2E 组最多 100 个节点**，多个模块合并去重，先按模块和 dtype 分层，再按函数和固定哈希选择；候选、选中、未选中列表全部保留。单独单元/诊断组仍各自最多 100。只有明确要求全量时使用 `--full-matrix`；阶段结束也不自动展开全矩阵。未选中并不表示通过，关键语义缺口用具体节点补齐。原有用例移动目录后，旧测试组的哈希选择和每用例 RNG seed 使用原 nodeid，避免组织调整改变输入。三个分页公开测试的 64 种页大小已显式参数化，输入范围保持不变，上限不再被用例内部的页大小循环绕过。日常 E2E 优先保留双 dtype 数值路径，最长 reference 的 `test_cost_boundary` 留给显式组或全量选项。
+正确性不设默认固定数量预算。日常只收集 [`regression_cases.py`](../../tests/mla/regression_cases.py) 中明确列出的公开行为节点，多个能力合并去重，选中的清单全部执行；不先展开历史大矩阵再截断。共享 [`test_regression.py`](../../tests/mla/e2e/test_regression.py) 使用小输入、独立双数学 reference 和原精度阈值，覆盖已开放布局的双 dtype、有效长度、空 KV、stride、metadata 复用，以及代表 fake/compile 和未开放参数拒绝。它不冷编译历史组件 probe；固定源差分、长序列和资源边界仍属于受影响模块的专项验收，不能用小输入替代新算法的必要验证。
 
-`--resume` 只在 E2E 正确性组的依赖、输入选择、构建、实际加载扩展、运行环境及原始证据均匹配时记为继承。失败、中断、缺失文件、修改证据或依赖改变都使结果失效；单元测试和性能组不跳过执行。构建缓存命中仍须校验源/编译器/头文件/产物内容；数学缓存命中仍须校验公式/输入身份，待测实现实际执行。缓存复用不是历史通过证据。
+模块单元/专项的 [`matrix.py`](../../tests/mla/matrix.py) 在 pytest 构造测试节点前精简组合：每个 dtype 保留独立错误类型、每个参数值及协议参数两两组合；独立 shape 轴保留各边界和极端角点。完整 64 页 sweep 默认保留 `16/112/128/144/496/512/528/1024`，覆盖最小/最大、非二次幂及 128/512 两侧；公开专项只保留公开真实/fake 入口，内部入口留给组件测试或显式完整矩阵。原 CallSpec 的 fixture、mark、nodeid 和 RNG seed 保持，具名 tuple 用例不拆开。已知依赖更高阶组合的回归应写为具名 tuple 或标记 `mla_full_combinations`，不能依赖两两组合自动覆盖。
+
+新增用例必须说明独立覆盖目的，不凑固定数目；日常回归以分钟内反馈为目标，耗时增长先处理大输入、reference 和重复构建。最长 reference 的 `test_cost_boundary`、性能、Trap 子进程和历史专项不进入日常清单；修改相应算法/协议时按影响范围显式运行。`--full-matrix` 恢复原穷举范围，阶段结束也不自动展开；`--max-cases` 是临时诊断截断，未运行不能记为通过。证据保存实际节点以及每个精简函数的原展开数量、保留数量与参数 ID；全量清单仅在审计或明确需要时收集。
+
+`--resume` 只在 E2E 正确性组的依赖、输入选择、精简/完整模式、构建、实际加载扩展、运行环境及原始证据均匹配时记为继承。失败、中断、缺失文件、修改证据或依赖改变都使结果失效；单元测试和性能组不跳过执行。构建缓存命中仍须校验源/编译器/头文件/产物内容；数学缓存命中仍须校验公式/输入身份，待测实现实际执行。缓存复用不是历史通过证据。
 
 `build/` 的旧验收目录按用户要求清理后，过去 status 中的路径只代表历史记录，不能再用于继承。当前证据位置和实测范围以最新 status 为准。
 
@@ -952,10 +956,13 @@ python3 -m tests.mla --collect-only
 python3 -m tests.mla --output /tmp/mla-step/e2e
 python3 -m tests.mla --e2e window_paged causal_paged --output /tmp/mla-step/affected
 python3 -m tests.mla --unit window_paged --output /tmp/mla-step/unit
+python3 -m tests.mla --suite detail-window_paged --output /tmp/mla-step/detail
 python3 -m tests.mla --suite window-paged-profile --output /tmp/mla-step/performance
 ```
 
-不指定选择参数时运行全部已接通能力的累计 E2E 正确性组。`--unit` 是开发/诊断显式入口；`--suite` 保留旧命名组，用于精确节点、CPU sanitizer 或性能诊断。旧 `python3 -m tests.mla_validation` 是兼容入口。`--list` 的模块和文件清单由目录组织生成，新模块加入相应目录后纳入对应层级；完整模块列表以命令输出为准。`ordinary` 保留普通 FA3 对照回归。旧 `regression-*` 只作组件诊断，不再是累计回归主线。
+不指定选择参数时运行全部已接通能力的小输入日常 E2E。`--e2e <能力...>` 运行相关日常清单；加 `--full-matrix` 才包含对应能力的历史公开专项穷举。`--unit <模块>` 运行该模块精简单元集合，`--suite detail-<能力>` 运行精简公开专项；两者加 `--full-matrix` 恢复穷举。`--suite` 也保留旧命名组，用于 CPU sanitizer 或性能诊断。旧 `python3 -m tests.mla_validation` 是兼容入口。新模块在对应目录添加专项，并在 `regression_cases.py` 显式注册日常覆盖；`--list` 分别输出日常节点、专项文件和单元归属。`ordinary` 保留普通 FA3 对照回归。旧 `regression-*` 只作组件诊断，不再是累计回归主线。
+
+直接用 pytest 定位某个历史参数节点时，设置 `MLA_FULL_MATRIX=1` 再指定完整 nodeid，避免该参数在生成阶段被代表集合省略；这只执行指定节点，不运行整组。统一入口会覆盖继承环境中的该变量，以命令行 `--full-matrix` 为准。
 
 性能文件仍跟随对应 E2E 能力，日常正确性不会自动收集 `*_profile.py`；只有显式性能组运行计时。公开性能仍按 7.1 的固定输入、双 dtype、R=1/4、预热与 5×20 采样、算术平均 ≤1 门槛；单例退化保留记录。已有 profile 中的固定源组件采样保持原对照边界，不当作公开 E2E 计时。
 

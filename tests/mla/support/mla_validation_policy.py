@@ -9,9 +9,9 @@ import os
 from pathlib import Path
 
 
-DEFAULT_MAX_CASES = 100
+DEFAULT_MAX_CASES = 0  # Run the defined representative set; no implicit truncation.
 PUBLIC_MAX_CASES = 100
-POLICY_VERSION = 1
+POLICY_VERSION = 2
 CAUSAL_STAGE_POLICY = 1
 CAUSAL_STAGE_GROUPS = ("bsnd", "tnd", "mixed", "paged-bsnd", "paged-tnd")
 CAUSAL_STAGE_SUITES = dict(

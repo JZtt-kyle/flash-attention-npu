@@ -17,7 +17,7 @@ from tests.mla.support.mla_validation_policy import (
 
 @pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(config, items):
-    limit = int(os.environ.get("MLA_VALIDATION_MAX_CASES", "100"))
+    limit = int(os.environ.get("MLA_VALIDATION_MAX_CASES", "0"))
     candidates = [item.nodeid for item in items]
     selector = select_e2e_nodeids if os.environ.get("MLA_E2E_SELECTION") == "1" else select_nodeids
     chosen = selector(candidates, limit)
@@ -29,9 +29,16 @@ def pytest_collection_modifyitems(config, items):
         json.dumps(
             dict(
                 policy=POLICY_VERSION,
-                selection_mode="e2e-modules-v1"
-                if os.environ.get("MLA_E2E_SELECTION") == "1"
-                else "legacy-functions-v1",
+                full_matrix=os.environ.get("MLA_FULL_MATRIX") == "1",
+                selection_mode="diagnostic-cap-v2"
+                if limit
+                else (
+                    "full-matrix-v1"
+                    if os.environ.get("MLA_FULL_MATRIX") == "1"
+                    else "explicit-daily-v1"
+                    if os.environ.get("MLA_E2E_SELECTION") == "1"
+                    else "representative-pairs-v1"
+                ),
                 limit=limit,
                 candidates=candidates,
                 selected=chosen,

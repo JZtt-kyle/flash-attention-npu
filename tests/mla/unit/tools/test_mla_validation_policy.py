@@ -16,9 +16,10 @@ def test_limit_is_deterministic_stratified_and_full_mode_preserves_all():
     nodes = [
         f"m.py::test_{f}[{d}-{i}]" for f in range(4) for d in ("fp16", "bf16") for i in range(50)
     ]
-    chosen = select_nodeids(nodes)
-    assert len(chosen) == 100
-    assert set(chosen) == set(select_nodeids(list(reversed(nodes))))
+    assert select_nodeids(nodes) == nodes
+    chosen = select_nodeids(nodes, 24)
+    assert len(chosen) == 24
+    assert set(chosen) == set(select_nodeids(list(reversed(nodes)), 24))
     assert all(
         any(f"test_{f}[{d}-" in n for n in chosen) for f in range(4) for d in ("fp16", "bf16")
     )

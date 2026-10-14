@@ -1,6 +1,6 @@
 """Reproducible MLA checks: python -m tests.mla.support.mla_validation --help.
 
-Daily suites select at most 100 deterministic cases; --full-matrix opts into all cases.
+Daily E2E runs its explicit small-input cases; --full-matrix expands diagnostic combinations.
 Builds, golden tensors and successful test evidence have separate identities.
 Performance remains in tests.mla.support.mla_paged_profile and must always be measured.
 """
@@ -24,7 +24,7 @@ import time
 import xml.etree.ElementTree as ET
 
 from tests.mla.paths import relocated
-from tests.mla.catalog import E2E, UNITS, combined, is_e2e
+from tests.mla.catalog import DIAGNOSTIC_E2E, E2E, UNITS, combined, is_e2e
 from tests.mla.support.mla_dense_build import ROOT, sha256
 from tests.mla.support.mla_validation_build import matching_files
 from tests.mla.support.mla_validation_dependencies import suite_sources
@@ -522,6 +522,7 @@ USED_SHARED_CPU = [relocated(path) for path in USED_SHARED_CPU]
 SUITES = {name: [relocated(arg) for arg in args] for name, args in SUITES.items()}
 SUITES["e2e"] = combined(E2E, E2E)
 SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
+SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
     "window-paged-profile",
@@ -802,6 +803,7 @@ def environment(args, directory, suite):
     if getattr(args, "causal_stage_performance", False) and suite in CAUSAL_STAGE_SUITES:
         env["MLA_CAUSAL_STAGE_PERFORMANCE"] = "1"
     env["MLA_VALIDATION_MAX_CASES"] = str(getattr(args, "max_cases", DEFAULT_MAX_CASES))
+    env["MLA_FULL_MATRIX"] = "1" if getattr(args, "full_matrix", False) else "0"
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
     if suite in CAUSAL_DEVICE_SUITES:
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
@@ -919,8 +921,9 @@ def run(args):
     }:
         raise ValueError("--causal-stage-performance requires causal performance suites")
     args.max_cases = getattr(args, "max_cases", DEFAULT_MAX_CASES)
-    if not 0 <= args.max_cases <= DEFAULT_MAX_CASES:
-        raise ValueError("--max-cases must be 1..100; use --full-matrix for all cases")
+    args.full_matrix = getattr(args, "full_matrix", False)
+    if args.max_cases < 0:
+        raise ValueError("--max-cases must be positive")
     args.output = args.output.resolve()
     args.artifacts = args.artifacts.resolve()
     args.suite = list(dict.fromkeys(args.suite))
@@ -936,6 +939,7 @@ def run(args):
             json.dumps(
                 dict(
                     max_cases_per_suite=args.max_cases,
+                    full_matrix=args.full_matrix,
                     selection_policy=POLICY_VERSION,
                     causal_stage_performance=args.causal_stage_performance,
                     causal_stage_policy=CAUSAL_STAGE_POLICY,
@@ -994,6 +998,7 @@ def run(args):
             state = {}
         summary = dict(
             max_cases_per_suite=args.max_cases,
+            full_matrix=args.full_matrix,
             selection_policy=POLICY_VERSION,
             causal_stage_performance=args.causal_stage_performance,
             causal_stage_policy=CAUSAL_STAGE_POLICY,
@@ -1095,6 +1100,7 @@ def run(args):
                     environment=semantic_env,
                     selection=SUITES[suite],
                     case_limit=args.max_cases,
+                    full_matrix=args.full_matrix,
                     selection_policy=POLICY_VERSION,
                     causal_stage_performance=args.causal_stage_performance,
                     causal_stage_policy=CAUSAL_STAGE_POLICY,
@@ -1211,8 +1217,8 @@ def run(args):
 
 def case_limit(value):
     count = int(value)
-    if not 1 <= count <= DEFAULT_MAX_CASES:
-        raise argparse.ArgumentTypeError("expected 1..100; use --full-matrix for all cases")
+    if count < 1:
+        raise argparse.ArgumentTypeError("expected a positive diagnostic limit")
     return count
 
 
@@ -1229,7 +1235,7 @@ def main():
         "--suite", nargs="+", choices=SUITES, help="Explicit diagnostic or performance groups"
     )
     selection.add_argument(
-        "--e2e", nargs="+", choices=E2E, help="Completed modules; one combined case budget"
+        "--e2e", nargs="+", choices=E2E, help="Public regression for completed modules"
     )
     selection.add_argument(
         "--unit", nargs="+", choices=UNITS, help="Only units owned by these modules"
@@ -1247,14 +1253,12 @@ def main():
         "--max-cases",
         type=case_limit,
         default=DEFAULT_MAX_CASES,
-        help="Maximum deterministic pytest cases per suite (default: 100)",
+        help="Optional diagnostic truncation; default runs the complete representative set",
     )
     limits.add_argument(
         "--full-matrix",
-        dest="max_cases",
-        action="store_const",
-        const=0,
-        help="Explicitly run all correctness cases; performance keeps its fixed cap",
+        action="store_true",
+        help="Explicit exhaustive diagnostic combinations; performance inputs stay fixed",
     )
     parser.add_argument("--artifacts", type=Path, default=work_dir() / "mla-validation-artifacts")
     parser.add_argument("--device", default="6", choices=[str(i) for i in range(8)])
@@ -1276,7 +1280,12 @@ def main():
     )
     args = parser.parse_args()
     if args.list:
-        print(json.dumps(dict(e2e=E2E, unit=UNITS, suites=list(SUITES)), indent=2))
+        print(
+            json.dumps(
+                dict(e2e=E2E, diagnostic_e2e=DIAGNOSTIC_E2E, unit=UNITS, suites=list(SUITES)),
+                indent=2,
+            )
+        )
         return 0
     if args.e2e:
         SUITES["e2e"] = combined(args.e2e, E2E)
@@ -1285,6 +1294,9 @@ def main():
         args.suite = list(dict.fromkeys(f"unit-{name}" for name in args.unit))
     elif not args.suite:
         args.suite = ["e2e"]
+    if args.full_matrix and args.suite == ["e2e"]:
+        modules = args.e2e or E2E
+        SUITES["e2e"] = combined(modules, E2E) + combined(modules, DIAGNOSTIC_E2E)
     try:
         return run(args)
     except (OSError, ValueError, RuntimeError) as exc:

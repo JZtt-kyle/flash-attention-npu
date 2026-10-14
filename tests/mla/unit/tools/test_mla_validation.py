@@ -229,15 +229,37 @@ sys.exit(code)
             json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"]
             == "passed"
         )
+    if suite == "e2e":
+        config.full_matrix = True
+        assert runner.run(config) == 0
+        assert (
+            json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"]
+            == "passed"
+        )
+        assert runner.run(config) == 0
+        assert (
+            json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"]
+            == "inherited"
+        )
+        config.full_matrix = False
+        assert runner.run(config) == 0
+        assert (
+            json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"]
+            == "passed"
+        )
 
 
 def test_environment_cannot_inherit_sampling_or_old_fixture_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_ADDOPTS", "--random-sample=1 -k nothing")
     monkeypatch.setenv("MLA_PAGED_ATTENTION_DIR", "/old/probes")
+    monkeypatch.setenv("MLA_FULL_MATRIX", "1")
     config = args(tmp_path)
     env = runner.environment(config, tmp_path, "public")
     assert env["PYTEST_ADDOPTS"] == ""
     assert env["MLA_PAGED_ATTENTION_DIR"] == str(tmp_path / "probes")
+    assert env["MLA_FULL_MATRIX"] == "0"
+    config.full_matrix = True
+    assert runner.environment(config, tmp_path, "public")["MLA_FULL_MATRIX"] == "1"
     assert "--random-sample=0" in runner.pytest_command("public", tmp_path)
     assert runner.SUITES["public"] == [runner.PUBLIC, "-k", "not public_release_trap"]
 

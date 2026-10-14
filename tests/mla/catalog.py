@@ -1,6 +1,7 @@
 """Module ownership: unit tests are opt-in, completed behaviors accumulate in E2E."""
 
 from tests.mla.paths import ROOT
+from tests.mla.regression_cases import daily_suites
 
 
 def module_suites(layer, *, performance=False):
@@ -19,12 +20,13 @@ def module_suites(layer, *, performance=False):
 
 
 UNITS = module_suites("unit")
-E2E = module_suites("e2e")
+DIAGNOSTIC_E2E = module_suites("e2e")
+E2E = daily_suites()
 PERFORMANCE = module_suites("e2e", performance=True)
 
 
 def combined(modules, catalog):
-    """One pytest process and one case budget, with no duplicate selections."""
+    """One pytest process, with no duplicate selections."""
     return list(dict.fromkeys(path for module in modules for path in catalog[module]))
 
 

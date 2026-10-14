@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from tests.mla.catalog import E2E, PERFORMANCE, UNITS, combined, is_e2e
+from tests.mla.catalog import DIAGNOSTIC_E2E, E2E, PERFORMANCE, UNITS, combined, is_e2e
 from tests.mla.paths import LEGACY_PATHS, ROOT, original_nodeid, relocated, work_dir
 from tests.mla.support.mla_validation_policy import select_e2e_nodeids, select_nodeids
 
@@ -15,7 +15,11 @@ def test_every_moved_source_is_present_and_uniquely_owned():
     assert len(LEGACY_PATHS.values()) == len(set(LEGACY_PATHS.values()))
     assert all((ROOT / path).is_file() for path in LEGACY_PATHS.values())
     tests = {p for p in LEGACY_PATHS.values() if Path(p).name.startswith("test_")}
-    owned = combined(E2E, E2E) + combined(PERFORMANCE, PERFORMANCE) + combined(UNITS, UNITS)
+    owned = (
+        combined(DIAGNOSTIC_E2E, DIAGNOSTIC_E2E)
+        + combined(PERFORMANCE, PERFORMANCE)
+        + combined(UNITS, UNITS)
+    )
     assert tests <= set(owned)
     assert len(owned) == len(set(owned))
     assert is_e2e(combined(E2E, E2E))
@@ -39,13 +43,14 @@ def test_e2e_budget_covers_modules_and_dtypes_without_performance():
         for dtype in ("fp16", "bf16")
         for i in range(30)
     ]
-    chosen = select_e2e_nodeids(nodes)
-    assert len(chosen) == 100 == len(set(chosen))
+    assert select_e2e_nodeids(nodes) == nodes
+    chosen = select_e2e_nodeids(nodes, 60)
+    assert len(chosen) == 60 == len(set(chosen))
     assert {n.split("/")[3] for n in chosen} == set(E2E)
     for module in E2E:
         for dtype in ("fp16", "bf16"):
             assert any(f"/{module}/" in n and dtype in n for n in chosen)
-    assert set(select_e2e_nodeids(list(reversed(nodes)))) == set(chosen)
+    assert set(select_e2e_nodeids(list(reversed(nodes)), 60)) == set(chosen)
     assert all(not p.endswith("_profile.py") for p in combined(E2E, E2E))
     modules = list(E2E)
     assert combined(modules + modules, E2E) == combined(modules, E2E)
@@ -60,7 +65,8 @@ def test_default_cli_is_one_e2e_group_and_external_artifacts(tmp_path):
     )
     preview = json.loads(output)
     assert list(preview["suites"]) == ["e2e"]
-    assert preview["max_cases_per_suite"] == 100
+    assert preview["max_cases_per_suite"] == 0
+    assert preview["full_matrix"] is False
     assert Path(preview["artifacts"]).is_relative_to(tmp_path)
     assert not any(
         "/unit/" in arg or arg.endswith("_profile.py") for arg in preview["suites"]["e2e"]
@@ -132,7 +138,7 @@ def test_daily_e2e_cost_boundary_is_explicit_even_below_budget():
         "tests/mla/e2e/window_paged/test_api.py::test_representative[fp16]",
         "tests/mla/e2e/window_paged/test_api.py::test_cost_boundary[fp16]",
     ]
-    assert select_e2e_nodeids(nodes) == nodes[:1]
+    assert select_e2e_nodeids(nodes, 1) == nodes[:1]
     assert select_e2e_nodeids(nodes, 0) == nodes
     with pytest.raises(ValueError):
         select_e2e_nodeids(nodes, -1)
