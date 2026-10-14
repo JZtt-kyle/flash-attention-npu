@@ -3,18 +3,37 @@
 // Explicit ownership/persistent storage: mla_split_kv_plan.h. Numerical source
 // provenance remains in the partial and merge Kernel/Block/Tile components.
 #pragma once
+#if defined(MLA_SPLIT_MIXED)
+#include "mla_split_mixed_launch.h"
+#else
 #include "mla_split_tnd_launch.h"
+#endif
 #include "kernel_operator.h"
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #include "kernel/mla_used_metadata.hpp"
+#if defined(MLA_SPLIT_MIXED)
+#include "mla_split_mixed_consumer.h"
+#else
 #include "mla_split_tnd_consumer.h"
+#endif
 #include "kernel/mla_split_kv.hpp"
 #include "block/mla_split_kv_merge.hpp"
 #endif
 namespace flash_attn::mla {
+#if defined(MLA_SPLIT_MIXED)
+#define MLA_SPLIT_CONTEXT MlaSplitMixedContext
+#define MLA_SPLIT_SCHEDULE MlaSplitMixedSchedule
+#define MLA_SPLIT_READ ReadSplitMixedMetadata
+#define MLA_SPLIT_ARGS MlaSplitMixedLaunchArgs
+#else
+#define MLA_SPLIT_CONTEXT MlaSplitTndContext
+#define MLA_SPLIT_SCHEDULE MlaSplitTndSchedule
+#define MLA_SPLIT_READ ReadSplitTndMetadata
+#define MLA_SPLIT_ARGS MlaSplitTndLaunchArgs
+#endif
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-__aicore__ inline bool LoadSplitTnd(GM_ADDR metadata, const MlaSplitTndContext& c, const MlaUsedMetadataInputs& inputs,
-                                    MlaSplitTndSchedule& s, Kernel::MetadataReader& read)
+__aicore__ inline bool LoadSplitTnd(GM_ADDR metadata, const MLA_SPLIT_CONTEXT& c, const MlaUsedMetadataInputs& inputs,
+                                    MLA_SPLIT_SCHEDULE& s, Kernel::MetadataReader& read)
 {
     const uint32_t dtype = AscendC::IsSameType<MLA_SPLIT_TYPE, half>::value ? uint32_t(MlaMetadataDtype::Fp16)
                                                                             : uint32_t(MlaMetadataDtype::Bf16);
@@ -31,7 +50,7 @@ __aicore__ inline bool LoadSplitTnd(GM_ADDR metadata, const MlaSplitTndContext& 
     for (uint32_t i = 0; i < 4; ++i)
         if (addresses[i])
             arrays.data[i].data.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(addresses[i]));
-    if (ReadSplitTndMetadata(read, 416 + 10 * c.used.batch, c, inputs, arrays, s) != MlaMetadataReadStatus::Success) {
+    if (MLA_SPLIT_READ(read, 416 + 10 * c.used.batch, c, inputs, arrays, s) != MlaMetadataReadStatus::Success) {
         AscendC::Trap();
         return false;
     }
@@ -56,11 +75,11 @@ __aicore__ inline uint32_t SplitBatch(const Kernel::MetadataReader& read, uint32
 // Each core has its own scratch and each task has a persistent raw slot.
 __global__ __aicore__ __mix__(1, 2) void MLA_SPLIT_PARTIAL(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv,
                                                            GM_ADDR kr, GM_ADDR workspace, GM_ADDR metadata,
-                                                           MlaSplitTndContext c, MlaUsedMetadataInputs inputs,
+                                                           MLA_SPLIT_CONTEXT c, MlaUsedMetadataInputs inputs,
                                                            float scale, MlaBsndInputLayouts layouts)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    MlaSplitTndSchedule s{};
+    MLA_SPLIT_SCHEDULE s{};
     Kernel::MetadataReader read;
     if (!LoadSplitTnd(metadata, c, inputs, s, read))
         return;
@@ -89,16 +108,16 @@ __global__ __aicore__ __mix__(1, 2) void MLA_SPLIT_PARTIAL(uint64_t ffts, GM_ADD
         AscendC::TPipe pipe;
         Kernel::MlaSplitKvUsedTnd<MLA_SPLIT_TYPE> op;
         op(tiling, partial, scale, qc, qr, kv, kr, workspace, &pipe, metadata + kMlaUsedMetadataPrefixWords * 4,
-           layouts, c.used.query.totalTokens.low);
+           layouts, c.used.query.totalTokens.low, c.used.kv.layout == uint32_t(MlaSequenceLayout::Tnd));
     }
 #endif
 }
 __global__ __aicore__ __mix__(1, 2) void MLA_SPLIT_MERGE(uint64_t ffts, GM_ADDR workspace, GM_ADDR metadata,
-                                                         MlaSplitTndContext c, MlaUsedMetadataInputs inputs,
-                                                         GM_ADDR out, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse)
+                                                         MLA_SPLIT_CONTEXT c, MlaUsedMetadataInputs inputs, GM_ADDR out,
+                                                         GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    MlaSplitTndSchedule s{};
+    MLA_SPLIT_SCHEDULE s{};
     Kernel::MetadataReader read;
     if (!LoadSplitTnd(metadata, c, inputs, s, read))
         return;
@@ -147,10 +166,10 @@ __global__ __aicore__ __mix__(1, 2) void MLA_SPLIT_MERGE(uint64_t ffts, GM_ADDR 
     }
 #endif
 }
-aclError MLA_SPLIT_LAUNCH(const MlaSplitTndLaunchArgs& args)
+aclError MLA_SPLIT_LAUNCH(const MLA_SPLIT_ARGS& args)
 {
     const auto& a = args.used;
-    MlaSplitTndContext c{a.context, a.window, args.splits};
+    MLA_SPLIT_CONTEXT c{a.context, a.window, args.splits};
     {
         MlaBatchLaunchScope launch;
         MLA_SPLIT_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.workspace,
@@ -165,3 +184,8 @@ aclError MLA_SPLIT_LAUNCH(const MlaSplitTndLaunchArgs& args)
     return launch.Result();
 }
 } // namespace flash_attn::mla
+
+#undef MLA_SPLIT_CONTEXT
+#undef MLA_SPLIT_SCHEDULE
+#undef MLA_SPLIT_READ
+#undef MLA_SPLIT_ARGS

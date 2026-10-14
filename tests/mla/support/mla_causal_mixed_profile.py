@@ -125,6 +125,7 @@ def profile(
     check_accuracy=accuracy,
     mask="causal",
     metadata_name="ComputeMlaCausalMixedMetadata",
+    production_name="mla_tnd_used_",
 ):
     prepare, metadata, call = prepare_case, generate_metadata, call_forward
     output = Path(output)
@@ -231,7 +232,7 @@ def profile(
         len(cases),
         output,
         names,
-        "mla_tnd_used_",
+        production_name,
         "FusedInferAttentionScore",
         metadata_name,
     )

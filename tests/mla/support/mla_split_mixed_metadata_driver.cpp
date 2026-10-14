@@ -46,8 +46,11 @@ int main()
         auto* destination = mode == 18   ? nullptr
                             : mode == 19 ? reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(data.data()) + 1)
                                          : data.data();
-        const bool built = BuildSplitMixedMetadata(shape, p, dtype, destination, mode == 17 ? words - 1 : words, in,
-                                                   window, mode == 21 ? 2 : s);
+        auto producerShape = shape;
+        if (mode == 25)
+            producerShape.query.totalTokens = 0;
+        const bool built = BuildSplitMixedMetadata(producerShape, p, dtype, destination, mode == 17 ? words - 1 : words,
+                                                   in, window, mode == 21 ? 2 : s, mode == 25);
         const bool intact = data.front() == 0xdeadbeef;
         const uint32_t generated = data[5];
         if (mode == 21)

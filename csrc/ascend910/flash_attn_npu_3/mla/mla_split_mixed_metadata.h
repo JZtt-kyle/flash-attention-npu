@@ -26,7 +26,9 @@ struct MlaSplitMixedMetadataArgs {
     MlaUsedMetadataArgs input;
     MlaWindowConfig window;
     int64_t splits;
+    bool queryTotalFromPrefix = false;
 };
 bool BuildSplitMixedMetadata(const MlaUsedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
-                             uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&, int64_t splits);
+                             uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&, int64_t splits,
+                             bool queryTotalFromPrefix = false);
 } // namespace flash_attn::mla

@@ -75,4 +75,9 @@ def daily_suites():
         f"{auto_tnd}::test_fake",
         f"{auto_tnd}::test_compile",
     ]
+    mixed_split = "tests/mla/e2e/split_mixed/test_public.py"
+    suites["split_mixed"] = [
+        f"{mixed_split}::{name}"
+        for name in ("test_daily", "test_empty", "test_fake", "test_compile")
+    ]
     return suites

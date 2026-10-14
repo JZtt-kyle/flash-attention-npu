@@ -8,7 +8,7 @@
 namespace flash_attn::mla {
 bool BuildSplitMixedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                              uint32_t* output, uint32_t words, const MlaUsedInputs& inputs,
-                             const MlaWindowConfig& window, int64_t splits)
+                             const MlaWindowConfig& window, int64_t splits, bool queryTotalFromPrefix)
 {
     uint32_t expected;
     if (!SplitMixedMetadataWords(shape.batch, expected) || words != expected)
@@ -40,8 +40,8 @@ bool BuildSplitMixedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& p
                                    c.window, in, c.plan);
     };
     const uint32_t base = kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * uint32_t(shape.batch);
-    if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, builder, &context, false,
-                                       words - base))
+    if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, builder, &context,
+                                       queryTotalFromPrefix, words - base))
         return false;
     output[1] = output[2] = kMlaSplitMixedVersion;
     if (output[5] == 0) {

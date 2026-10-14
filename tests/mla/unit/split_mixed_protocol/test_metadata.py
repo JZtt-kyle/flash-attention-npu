@@ -256,3 +256,22 @@ def test_other_protocols_are_rejected(metadata_drivers, field, version):
 def test_invalid_dtype(metadata_drivers, dtype):
     got = metadata_drivers[0].evaluate([request(dtype=dtype)])[0]
     assert got["generated"] != 0 and got["read"] != 0 and got["unchanged"]
+
+
+@pytest.mark.parametrize("dtype", [1, 2])
+@pytest.mark.parametrize("spec", CASES)
+def test_public_prefix_total(metadata_drivers, dtype, spec):
+    # The public generator has no host totalQ; prefix parsing must reproduce
+    # the full record, including empty capacity, mask, used and persistent M.
+    rows = [request(dtype=dtype, mode=mode, **spec) for mode in (0, 25)]
+    a, b = metadata_drivers[0].evaluate(rows)
+    assert a == b
+
+
+@pytest.mark.parametrize("index,value", [(16, 1), (17, -1), (19, -1), (17, 73)])
+def test_public_prefix_failure(metadata_drivers, index, value):
+    row = request(mode=25)
+    row[index] = value
+    result = metadata_drivers[0].evaluate([row])[0]
+    assert result["built"] and result["generated"] != 0
+    assert not any(result["record"][8:])

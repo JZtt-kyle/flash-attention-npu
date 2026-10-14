@@ -897,6 +897,86 @@ def _mla_causal_tnd_forward_fake(
     return result
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_split_mixed_forward")
+def _mla_split_mixed_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    cu_seqlens_q,
+    max_seqlen_q,
+    num_splits,
+    window_left=-1,
+    window_right=-1,
+    causal=False,
+    softmax_scale=None,
+    cache_seqlens=None,
+    seqused_q=None,
+    scheduler_metadata=None,
+):
+    _check_mla_inputs(q, k, v, qv, varlen_q=True)
+    _check_mla_dense_options(softmax_scale=softmax_scale)
+    _check_mla_mixed_inputs(q, k, cu_seqlens_q, max_seqlen_q, cache_seqlens, None, seqused_q)
+    _check_mla_used(q, k.shape[0], seqused_q, cache_seqlens)
+    if not 2 <= num_splits <= 256:
+        raise RuntimeError("MLA: mixed split requires num_splits in [2,256]")
+    words = _mla_split_bsnd_words(k.shape[0])
+    _normalize_mla_window(max_seqlen_q, k.shape[1], window_left, window_right, causal)
+    if scheduler_metadata is not None and (
+        scheduler_metadata.dtype != torch.int32
+        or scheduler_metadata.ndim != 1
+        or scheduler_metadata.numel() != words
+        or not scheduler_metadata.is_contiguous()
+        or scheduler_metadata.device != q.device
+    ):
+        raise RuntimeError(
+            "MLA: mixed split metadata must be same-device contiguous int32 with the selected protocol size"
+        )
+    total, heads = q.shape[:2]
+    limit = 2**63 - 1
+    if num_splits * heads * max(total, 1) * 512 * 4 > limit:
+        raise RuntimeError("MLA: mixed split accumulator overflow")
+    if total and k.shape[0] and k.shape[1]:
+        active = min(k.shape[0], total)
+        groups = min(
+            active * ((max_seqlen_q * heads + 255) // 256), (total * heads + active * 255) // 256
+        )
+        if (
+            groups * num_splits * 256 * 528 * 4 + 2 * 26 * (6 * 256 * 512 + 8 * 256 * 512 + 8 * 256)
+            > limit
+        ):
+            raise RuntimeError("MLA: mixed split workspace overflow")
+    return (
+        q.new_empty((total, heads, 512)),
+        q.new_empty((heads, total), dtype=torch.float32),
+        q.new_empty((num_splits, heads, total, 512), dtype=torch.float32),
+        q.new_empty((num_splits, heads, total), dtype=torch.float32),
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_split_mixed_metadata")
+def _mla_split_mixed_metadata_fake(
+    batch_size,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_heads_q,
+    qkv_dtype,
+    cache_seqlens,
+    cu_seqlens_q,
+    window_left,
+    window_right,
+    causal,
+    num_splits,
+):
+    _mla_tnd_bsnd_metadata_fake(
+        batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens, cu_seqlens_q
+    )
+    _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
+    if not 2 <= num_splits <= 256:
+        raise RuntimeError("MLA: mixed split requires num_splits in [2,256]")
+    return cache_seqlens.new_empty((_mla_split_bsnd_words(batch_size),))
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_split_tnd_forward")
 def _mla_split_tnd_forward_fake(
     q,
@@ -1243,6 +1323,7 @@ def _flash_attn_forward(
             and (
                 (cu_seqlens_q is None and cu_seqlens_k is None)
                 or (cu_seqlens_q is not None and cu_seqlens_k is not None)
+                or (cu_seqlens_q is not None and num_splits >= 2)
             ),
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
@@ -1265,6 +1346,23 @@ def _flash_attn_forward(
             ),
         )
         if num_splits != 1:
+            if cu_seqlens_q is not None and cu_seqlens_k is None:
+                return torch.ops.flash_attn_npu_3._mla_split_mixed_forward(
+                    q,
+                    k,
+                    v,
+                    qv,
+                    cu_seqlens_q,
+                    max_seqlen_q,
+                    num_splits,
+                    window_size_left,
+                    window_size_right,
+                    causal,
+                    softmax_scale,
+                    seqused_k,
+                    seqused_q,
+                    scheduler_metadata,
+                )
             if cu_seqlens_q is not None:
                 return torch.ops.flash_attn_npu_3._mla_split_tnd_forward(
                     q,
@@ -1481,6 +1579,7 @@ def _flash_attn_forward_fake(
             and (
                 (cu_seqlens_q is None and cu_seqlens_k is None)
                 or (cu_seqlens_q is not None and cu_seqlens_k is not None)
+                or (cu_seqlens_q is not None and num_splits >= 2)
             ),
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
@@ -1503,6 +1602,23 @@ def _flash_attn_forward_fake(
             ),
         )
         if num_splits != 1:
+            if cu_seqlens_q is not None and cu_seqlens_k is None:
+                return _mla_split_mixed_forward_fake(
+                    q,
+                    k,
+                    v,
+                    qv,
+                    cu_seqlens_q,
+                    max_seqlen_q,
+                    num_splits,
+                    window_size_left,
+                    window_size_right,
+                    causal,
+                    softmax_scale,
+                    seqused_k,
+                    seqused_q,
+                    scheduler_metadata,
+                )
             if cu_seqlens_q is not None:
                 return _mla_split_tnd_forward_fake(
                     q,
@@ -2865,7 +2981,7 @@ def flash_attn_with_kvcache(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
-            allow_split=cu_seqlens_q is None and page_table is None,
+            allow_split=page_table is None and (cu_seqlens_q is None or num_splits >= 2),
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -2921,6 +3037,24 @@ def flash_attn_with_kvcache(
                 device=k_cache.device,
             )
         if num_splits != 1:
+            if cu_seqlens_q is not None:
+                result = torch.ops.flash_attn_npu_3._mla_split_mixed_forward(
+                    q,
+                    k_cache,
+                    v_cache,
+                    qv,
+                    cu_seqlens_q,
+                    max_seqlen_q,
+                    num_splits,
+                    window_size[0],
+                    window_size[1],
+                    causal,
+                    softmax_scale,
+                    cache_seqlens,
+                    None,
+                    scheduler_metadata,
+                )
+                return result if return_softmax_lse else result[0]
             result = torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
                 q,
                 k_cache,
@@ -3605,9 +3739,23 @@ def _get_scheduler_metadata_fake(
             ),
             allow_causal=True,
             allow_window=True,
-            allow_split=cu_seqlens_q is None and page_size is None,
+            allow_split=page_size is None and (cu_seqlens_q is None or num_splits >= 2),
         )
         if num_splits != 1:
+            if cu_seqlens_q is not None:
+                return _mla_split_mixed_metadata_fake(
+                    batch_size,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    num_heads_q,
+                    qkv_dtype,
+                    cache_seqlens,
+                    cu_seqlens_q,
+                    window_size_left,
+                    window_size_right,
+                    causal,
+                    num_splits,
+                )
             return _mla_split_bsnd_metadata_fake(
                 batch_size,
                 max_seqlen_q,
@@ -3765,9 +3913,23 @@ def get_scheduler_metadata(
             ),
             allow_causal=True,
             allow_window=True,
-            allow_split=cu_seqlens_q is None and page_size is None,
+            allow_split=page_size is None and (cu_seqlens_q is None or num_splits >= 2),
         )
         if num_splits != 1:
+            if cu_seqlens_q is not None:
+                return torch.ops.flash_attn_npu_3._mla_split_mixed_metadata(
+                    batch_size,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    num_heads_q,
+                    qkv_dtype,
+                    cache_seqlens,
+                    cu_seqlens_q,
+                    window_size[0],
+                    window_size[1],
+                    causal,
+                    num_splits,
+                )
             return torch.ops.flash_attn_npu_3._mla_split_bsnd_metadata(
                 batch_size,
                 max_seqlen_q,
