@@ -1,0 +1,551 @@
+"""Internal production BSND PA: real storage, v6 reuse, source/math and lifetime."""
+
+import gc
+import hashlib
+import itertools
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from unittest.mock import patch
+
+import pytest
+import torch
+
+from flash_attn_npu_3 import flash_attn_npu_interface as api
+from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
+from tests.mla.unit.paged_bsnd import test_flash_attn_npu_v3_mla_paged_attention as component
+from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_attention import (
+    paged_attention as paged_attention,
+    paged_probe as paged_probe,
+    paged_artifacts as paged_artifacts,
+    paged_oracles as paged_oracles,
+)
+from tests.mla.e2e.bsnd.test_flash_attn_npu_v3_mla_bsnd_stride_production import (
+    storage_fault as storage_fault,
+)
+
+
+PERFORMANCE_CASES = [dict(c, aic=None) for c in component.PERFORMANCE_CASES]
+
+
+def make_case(probes, producer, spec, **kwargs):
+    spec = dict(spec, aic=None)
+    if spec["capacity"] is None:
+        p = spec["page"]
+        spec["capacity"] = ((max(spec["lengths"], default=0) + p - 1) // p + 1) * p
+    return component.make_case(probes, producer, spec, full_launch=True, **kwargs)
+
+
+def forward_args(case):
+    return dict(
+        case["devices"]["migrated"],
+        page_table=case["tables"]["migrated"],
+        softmax_scale=case["scale"],
+        cache_seqlens=case["inputs"][2],
+        seqused_q=case["inputs"][1],
+    )
+
+
+def forward(args, metadata=None):
+    return torch.ops.flash_attn_npu_3._mla_paged_bsnd_forward(**args, scheduler_metadata=metadata)
+
+
+def generate(args):
+    q, k, table = (args[n] for n in ("q", "k", "page_table"))
+    return api.get_scheduler_metadata(
+        q.shape[0],
+        q.shape[1],
+        table.shape[1] * k.shape[1],
+        q.shape[2],
+        1,
+        64,
+        args["cache_seqlens"],
+        qkv_dtype=q.dtype,
+        headdim_v=512,
+        page_size=k.shape[1],
+        num_splits=1,
+    )
+
+
+def source_available(case):
+    return bool(
+        case["context"].batch and case["context"].query.maximum and case["schedule"].tiling.sk
+    )
+
+
+def check_result(case, result, *, source=True):
+    q = case["devices"]["migrated"]["q"]
+    assert result[0].shape == (*q.shape[:-1], 512) and result[0].dtype == q.dtype
+    assert result[1].shape == (q.shape[0], q.shape[2], q.shape[1])
+    assert result[1].dtype == torch.float32
+    actual = component.valid_outputs(case, [t.cpu() for t in result])
+    used = case["item"]["q"] if case["item"]["uq"] is None else case["item"]["uq"]
+    if source and source_available(case):
+        expected = component.valid_outputs(
+            case, [t.cpu() for t in case["outputs"]["oracle"]], source=True
+        )
+        empty = torch.tensor(
+            [k == 0 for q, k in zip(used, case["config"]["lengths"]) for _ in range(q)],
+            dtype=torch.bool,
+        )
+        torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+        torch.testing.assert_close(actual[1][:, ~empty], expected[1][:, ~empty], rtol=0, atol=0)
+        assert expected[1][:, empty].isposinf().all()
+    refs = component.references(case)
+    errors = component.check_math(actual, refs)
+    return dict(errors=errors, source_compared=source and source_available(case))
+
+
+def check_case(probes, case, *, metadata=None):
+    args = forward_args(case)
+    with (
+        forbid_host_readback(),
+        patch.object(torch.Tensor, "contiguous", side_effect=AssertionError("input copy")),
+    ):
+        if source_available(case):
+            assert component.launch(probes, case, "oracle") == 0
+        record = metadata
+        if args["seqused_q"] is None and record is None:
+            record = generate(args)
+        results = [forward(args), forward(args, record)]
+    if record is not None:
+        assert [v & 0xFFFFFFFF for v in record.cpu().tolist()] == case["expected"]
+    report = check_result(case, results[-1])
+    for a, b in zip(*[component.valid_outputs(case, [t.cpu() for t in r]) for r in results]):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+    for before, after in case["input_checks"]:
+        torch.testing.assert_close(after.cpu(), before, rtol=0, atol=0, equal_nan=True)
+    report.update(config=case["config"], scale=case["scale"], expected_metadata=case["expected"])
+    digest = hashlib.sha256(json.dumps(report, sort_keys=True).encode()).hexdigest()[:20]
+    target = probes[1] / "production-accuracy"
+    target.mkdir(exist_ok=True)
+    torch.save(
+        dict(
+            host=case["host"],
+            pages=case["table_host"],
+            actual=[t.cpu() for t in results[-1]],
+            source=[t.cpu() for t in case["outputs"]["oracle"]] if source_available(case) else None,
+            report=report,
+        ),
+        target / (digest + ".pt"),
+    )
+    with (target / "results.jsonl").open("a") as f:
+        f.write(json.dumps(report) + "\n")
+    return report
+
+
+def small_inputs(dtype=torch.float16, *, sq=3, pool=7, width=4, used=False):
+    args = {}
+    for name, dim in (("q", 64), ("qv", 512), ("k", 64), ("v", 512)):
+        b, s, h = (2, sq, 8) if name in ("q", "qv") else (pool, 112, 1)
+        base = torch.zeros((b, 2 * s + 1, h, dim + 16), dtype=dtype, device="npu")
+        args[name] = base[:, 1::2, :, :dim]
+    table = torch.full((2, width + 3), -1, dtype=torch.int32, device="npu")
+    args["page_table"] = table[:, 1 : 1 + width]
+    if width and pool:
+        args["page_table"].copy_(
+            torch.arange(width, dtype=torch.int32, device="npu").remainder(pool)
+        )
+    args["cache_seqlens"] = torch.tensor(
+        [min(113, width * 112), 0], dtype=torch.int32, device="npu"
+    )
+    if used:
+        args["seqused_q"] = torch.tensor([min(2, sq), 0], dtype=torch.int32, device="npu")
+    return args
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize(
+    "mode", ("implicit-full", "full-reused", "generated", "reused", "used", "used-full")
+)
+def test_smoke(dtype, mode):
+    used = mode in ("used", "used-full")
+    args = small_inputs(dtype, used=used)
+    args["v"].fill_(3)
+    lengths = [113, 0]
+    record = None
+    if mode in ("implicit-full", "full-reused", "used-full"):
+        if mode == "full-reused":
+            args["cache_seqlens"].fill_(448)
+            record = generate(args)
+        del args["cache_seqlens"]
+        lengths = [448, 448]
+    with forbid_host_readback():
+        out, lse = forward(args, generate(args) if mode == "reused" else record)
+    for b, n in enumerate(lengths):
+        qlen = (2, 0)[b] if used else 3
+        torch.testing.assert_close(
+            out[b, :qlen].cpu(), torch.full((qlen, 8, 512), 3 if n else 0, dtype=dtype)
+        )
+        torch.testing.assert_close(lse[b, :, :qlen].cpu(), torch.full((8, qlen), float(n)).log())
+
+
+@pytest.mark.parametrize("page", range(16, 1025, 16))
+@pytest.mark.parametrize("profile", ("contiguous", "pa02_k", "pa02_v", "pa02_both"))
+def test_all_page_sizes(paged_attention, paged_probe, page, profile):
+    check_case(
+        paged_attention,
+        make_case(
+            paged_attention,
+            paged_probe,
+            component.config(page, profile, uq=None if profile == "contiguous" else (3, 1)),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "profile",
+    ["bnsd", "independent", "broadcast", "overlap", "table_broadcast", "table_overlap"]
+    + [
+        f"{axis}_{s}"
+        for axis, s in itertools.product(
+            ("row", "matrix", "head", "combined"), (65535, 65536, 65537)
+        )
+    ],
+)
+def test_independent_strides(paged_attention, paged_probe, profile):
+    lengths = (257, 257) if profile == "table_broadcast" else (257, 17)
+    check_case(
+        paged_attention,
+        make_case(paged_attention, paged_probe, component.config(112, profile, lengths=lengths)),
+    )
+
+
+@pytest.mark.parametrize(
+    "profile", ("wide_q_0", "wide_qv_1", "wide_k_0", "wide_v_1", "table_wide", "singleton")
+)
+def test_wide_addresses(paged_attention, paged_probe, profile):
+    torch.npu.empty_cache()
+    spec = component.config(16, profile, q=(2, 2), lengths=(17, 17), uq=(2, 1), heads=2, pool=2)
+    if profile == "singleton":
+        spec = component.config(16, profile, q=(1,), lengths=(1,), uq=None, heads=1, pool=1)
+    check_case(paged_attention, make_case(paged_attention, paged_probe, spec))
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        component.config(
+            112, "independent", (9,) * 5, (17, 65, 513, 0, 1), (3, 0, 1, 7, 0), 171, repeat=True
+        ),
+        component.config(528, "independent", (3,) * 3, (512, 0, 513), (2, 0, 1), 256),
+        component.config(16, "independent", (3, 3), (16384, 8193), (1, 2), 8, capacity=16384),
+        *[
+            component.config(112, "independent", (3, 3), (127, 129), (1, 2), h)
+            for h in (1, 15, 16, 127, 128, 129, 255, 256)
+        ],
+    ],
+)
+def test_task_ring(paged_attention, paged_probe, spec):
+    check_case(paged_attention, make_case(paged_attention, paged_probe, spec))
+
+
+@pytest.mark.parametrize("pool,capacity", ((7, 0), (0, 0), (0, 224), (7, 224)))
+@pytest.mark.parametrize("used", (None, (3, 1), (0, 0)))
+def test_empty_cache(paged_attention, paged_probe, pool, capacity, used):
+    case = make_case(
+        paged_attention,
+        paged_probe,
+        component.config(lengths=(0, 0), uq=used, pool=pool, capacity=capacity),
+    )
+    check_case(paged_attention, case)
+    # PA never uses the nonpaged global-empty +inf branch, even at C=0/Np=0.
+    out, lse = component.valid_outputs(case, [t.cpu() for t in forward(forward_args(case))])
+    assert (out == 0).all() and lse.isneginf().all()
+
+
+@pytest.mark.parametrize(
+    "q,kv,used,capacity",
+    (
+        ([], [], None, 0),
+        ([], [], [], 224),
+        ([0, 0], [257, 1], None, 448),
+        ([3, 3], [257, 1], [0, 0], 448),
+    ),
+)
+def test_empty_query(paged_attention, paged_probe, q, kv, used, capacity):
+    check_case(
+        paged_attention,
+        make_case(
+            paged_attention,
+            paged_probe,
+            component.config(q=q, lengths=kv, uq=used, capacity=capacity),
+        ),
+    )
+
+
+@pytest.mark.parametrize("scale", (0.0, -0.125, 0.25, None))
+@pytest.mark.parametrize("perturb", range(4))
+def test_scale_halves(paged_attention, paged_probe, scale, perturb):
+    check_case(
+        paged_attention,
+        make_case(
+            paged_attention,
+            paged_probe,
+            component.config(lengths=(1025, 513)),
+            scale=scale,
+            perturb=perturb,
+            amplitude=4,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "profile", ("contiguous", "pa02_both", "independent", "broadcast", "table_overlap")
+)
+def test_record_reuse_with_other_pool_table_and_strides(paged_attention, paged_probe, profile):
+    old = make_case(paged_attention, paged_probe, component.config(uq=None, lengths=(257, 17)))
+    new = make_case(
+        paged_attention,
+        paged_probe,
+        component.config(profile=profile, uq=None, pool=11, lengths=(257, 17)),
+        scale=-0.125,
+    )
+    record = generate(forward_args(old))
+    before = record.cpu().clone()
+    check_case(paged_attention, new, metadata=record)
+    torch.testing.assert_close(record.cpu(), before, rtol=0, atol=0)
+
+
+def test_source_schedules(paged_attention, paged_probe, paged_oracles):
+    cases = [
+        make_case(paged_attention, paged_probe, spec)
+        for spec in PERFORMANCE_CASES + [component.config(p, uq=None) for p in range(16, 1025, 16)]
+    ]
+    items = [c["item"] for c in cases]
+    source = component.execute(paged_oracles[0], items)
+    native = component.execute(paged_oracles[0], items, native=True)
+    kind = 1 if paged_attention[0]["dtype"] == torch.float16 else 2
+    for case, wanted in zip(cases, source):
+        component.decode_record(case["expected"], case["item"], kind, wanted)
+        if case["config"]["uq"] is None:
+            assert [x & 0xFFFFFFFF for x in generate(forward_args(case)).cpu().tolist()] == case[
+                "expected"
+            ]
+    (paged_attention[1] / "production-schedules.json").write_text(
+        json.dumps(
+            dict(
+                items=items, source=source, native=native, metadata=[c["expected"] for c in cases]
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("mode", ("generated", "reused", "used"))
+def test_stream_lifetime(dtype, mode):
+    creator, consumer = torch.npu.Stream(), torch.npu.Stream()
+    results = []
+    for step in range(4):
+        with torch.npu.stream(creator):
+            args = small_inputs(dtype, used=mode == "used")
+            args["v"].fill_(step + 1)
+            record = generate(args) if mode == "reused" else None
+        consumer.wait_stream(creator)
+        with torch.npu.stream(consumer), forbid_host_readback():
+            results.append(forward(args, record))
+        del args, record
+        gc.collect()
+        with torch.npu.stream(creator):
+            churn = [torch.full((8192,), -77, dtype=dtype, device="npu") for _ in range(16)]
+        del churn
+    consumer.synchronize()
+    for step, (out, lse) in enumerate(results):
+        lengths = (2, 0) if mode == "used" else (3, 3)
+        torch.testing.assert_close(
+            out[0, : lengths[0]].cpu(), torch.full((lengths[0], 8, 512), step + 1, dtype=dtype)
+        )
+        assert (out[1, : lengths[1]].cpu() == 0).all() and lse[
+            1, :, : lengths[1]
+        ].cpu().isneginf().all()
+        torch.testing.assert_close(
+            lse[0, :, : lengths[0]].cpu(), torch.full((8, lengths[0]), 113.0).log()
+        )
+    creator.synchronize()
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+def test_lengths_regenerated_on_current_stream(dtype):
+    args = small_inputs(dtype, used=True)
+    args["v"].fill_(2)
+    for used, kv in (([3, 1], [113, 17]), ([1, 0], [0, 0]), ([0, 3], [224, 113])):
+        args["seqused_q"].copy_(torch.tensor(used, dtype=torch.int32))
+        args["cache_seqlens"].copy_(torch.tensor(kv, dtype=torch.int32))
+        with forbid_host_readback():
+            out, lse = forward(args)
+        for b in range(2):
+            torch.testing.assert_close(
+                out[b, : used[b]].cpu(),
+                torch.full((used[b], 8, 512), 2 if kv[b] else 0, dtype=dtype),
+            )
+            torch.testing.assert_close(
+                lse[b, :, : used[b]].cpu(), torch.full((8, used[b]), float(kv[b])).log()
+            )
+
+
+@pytest.mark.parametrize("name", ("q", "qv", "k", "v", "page_table"))
+def test_complete_storage_before_launch(name, storage_fault):
+    args = small_inputs(used=True)
+    args["seqused_q"].zero_()
+    args["cache_seqlens"].zero_()
+    with (
+        storage_fault(args[name]),
+        forbid_host_readback(),
+        pytest.raises(RuntimeError, match="storage"),
+    ):
+        forward(args)
+
+
+@pytest.mark.parametrize("name", ("cache_seqlens", "seqused_q", "scheduler_metadata"))
+def test_descriptor_storage_before_launch(name, storage_fault):
+    # Reuse the existing host-only storage metadata injector, without resizing
+    # or freeing the real allocation or poisoning the NPU runtime.
+    args = small_inputs(used=name == "seqused_q")
+    record = generate(args) if name == "scheduler_metadata" else None
+    t = record if record is not None else args[name]
+    # The fixture truncates to numel bytes; alias a longer allocated view to
+    # expose a positive stride span beyond it, then restore the original size.
+    fault = torch.empty_strided((2, t.numel()), (2 * t.numel(), 1), dtype=torch.int32, device="npu")
+    fault[1].copy_(t)
+    if record is not None:
+        record = fault[1]
+    else:
+        args[name] = fault[1]
+    with storage_fault(fault), pytest.raises(RuntimeError, match="storage"):
+        forward(args, record)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "rank",
+        "dtype",
+        "device",
+        "shape",
+        "table_dtype",
+        "table_device",
+        "table_inner",
+        "q_inner",
+        "k_shape",
+        "page",
+        "length_dtype",
+        "length_shape",
+        "length_stride",
+        "length_device",
+        "used_shape",
+        "used_dtype",
+        "used_device",
+        "used_stride",
+        "used_reuse",
+        "metadata_shape",
+        "metadata_dtype",
+        "metadata_stride",
+        "metadata_device",
+        "grad",
+        "nan",
+        "inf",
+        "overflow",
+    ),
+)
+def test_host_rejections(fault):
+    args = small_inputs()
+    record = None
+    if fault == "rank":
+        args["q"] = args["q"][0]
+    elif fault == "dtype":
+        args["q"] = args["q"].float()
+    elif fault == "device":
+        args["qv"] = args["qv"].cpu()
+    elif fault == "shape":
+        args["qv"] = args["qv"][:, :1]
+    elif fault == "table_dtype":
+        args["page_table"] = args["page_table"].long()
+    elif fault == "table_device":
+        args["page_table"] = args["page_table"].cpu()
+    elif fault == "table_inner":
+        args["page_table"] = args["page_table"][:, ::2]
+    elif fault == "q_inner":
+        args["q"] = torch.zeros((2, 3, 8, 128), dtype=torch.float16, device="npu")[..., ::2]
+    elif fault == "k_shape":
+        args["k"] = args["k"][:1]
+    elif fault == "page":
+        args["k"], args["v"] = args["k"][:, :17], args["v"][:, :17]
+    elif fault == "length_dtype":
+        args["cache_seqlens"] = args["cache_seqlens"].long()
+    elif fault == "length_shape":
+        args["cache_seqlens"] = args["cache_seqlens"][:1]
+    elif fault == "length_stride":
+        args["cache_seqlens"] = torch.zeros(4, dtype=torch.int32, device="npu")[::2]
+    elif fault == "length_device":
+        args["cache_seqlens"] = args["cache_seqlens"].cpu()
+    elif fault == "used_shape":
+        args["seqused_q"] = torch.zeros(1, dtype=torch.int32, device="npu")
+    elif fault == "used_dtype":
+        args["seqused_q"] = torch.zeros(2, dtype=torch.int64, device="npu")
+    elif fault == "used_device":
+        args["seqused_q"] = torch.zeros(2, dtype=torch.int32)
+    elif fault == "used_stride":
+        args["seqused_q"] = torch.zeros(4, dtype=torch.int32, device="npu")[::2]
+    elif fault == "used_reuse":
+        record = generate(args)
+        args["seqused_q"] = torch.zeros(2, dtype=torch.int32, device="npu")
+    elif fault.startswith("metadata"):
+        record = generate(args)
+        if fault == "metadata_shape":
+            record = record[:-1]
+        elif fault == "metadata_dtype":
+            record = record.long()
+        elif fault == "metadata_stride":
+            record = torch.zeros(2 * record.numel(), dtype=torch.int32, device="npu")[::2]
+        else:
+            record = record.cpu()
+    elif fault == "grad":
+        args["v"].requires_grad_()
+    else:
+        args["softmax_scale"] = {"nan": float("nan"), "inf": float("inf"), "overflow": 1e100}[fault]
+    with forbid_host_readback(), pytest.raises(RuntimeError, match="MLA"):
+        forward(args, record)
+
+
+@pytest.mark.parametrize("kind", ("fp16", "bf16"))
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "page_negative",
+        "page_over",
+        "unused_q_page",
+        "empty_q_page",
+        "stale_k",
+        "bad_k",
+        "bad_q",
+        "zero_k_bad_q",
+        "empty_pool",
+        "magic",
+        "dtype",
+        "empty_payload",
+        "v5",
+    ),
+)
+def test_release_trap(kind, fault, tmp_path):
+    directory = (
+        Path(os.environ.get("MLA_PAGED_PRODUCTION_DIR", tmp_path)) / kind / ("trap-" + fault)
+    )
+    directory.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        "-m",
+        "tests.mla.support.mla_paged_bsnd_production_error_probe",
+        kind,
+        fault,
+        str(directory),
+    ]
+    (directory / "command.json").write_text(json.dumps(command, indent=2) + "\n")
+    with (directory / "process.log").open("w") as log:
+        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=120)
+    assert result.returncode == 0, (directory / "process.log").read_text()[-4000:]
+    report = json.loads((directory / "runtime-error.json").read_text())
+    assert "trap error" in report["error"] and report["elapsed_seconds"] < 15

@@ -184,7 +184,7 @@ def pytest_runtest_setup(item):
 
 @pytest.fixture(scope="session", autouse=True)
 def _mla_cpu_driver_session():
-    from tests.mla_cpu_driver import cpu_driver_session
+    from tests.mla.support.mla_cpu_driver import cpu_driver_session
 
     with cpu_driver_session():
         yield
@@ -249,9 +249,14 @@ def _seed_per_case(request):
     """
     import torch
     import zlib
+    from tests.mla.paths import original_nodeid
 
     env_seed = os.environ.get("CI_TORCH_SEED")
-    seed = int(env_seed) if env_seed else zlib.crc32(request.node.nodeid.encode("utf-8"))
+    seed = (
+        int(env_seed)
+        if env_seed
+        else zlib.crc32(original_nodeid(request.node.nodeid).encode("utf-8"))
+    )
     torch.manual_seed(seed)
     if hasattr(torch, "npu") and hasattr(torch.npu, "manual_seed"):
         torch.npu.manual_seed(seed)
