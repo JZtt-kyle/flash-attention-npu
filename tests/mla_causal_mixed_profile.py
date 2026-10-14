@@ -109,14 +109,29 @@ def accuracy(case, actual, source):
     return reports
 
 
-def profile(dtype_name, output, vendor, dispatch=None):
+def profile(
+    dtype_name,
+    output,
+    vendor,
+    dispatch=None,
+    *,
+    specs=PERFORMANCE_CASES,
+    prepare_case=prepare,
+    generate_metadata=metadata,
+    call_forward=call,
+    native_class=CausalMixedCall,
+    check_accuracy=accuracy,
+    mask="causal",
+    metadata_name="ComputeMlaCausalMixedMetadata",
+):
+    prepare, metadata, call = prepare_case, generate_metadata, call_forward
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     vendor = check_vendor_configuration(vendor)
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype_name]
     torch.npu.set_device(0)
-    cases = [prepare(dtype, s) for s in PERFORMANCE_CASES]
-    natives = [CausalMixedCall(c) for c in cases]
+    cases = [prepare(dtype, s) for s in specs]
+    natives = [native_class(c) for c in cases]
     identities = [identity(c) for c in cases]
     if dispatch is None:
         checks = []
@@ -127,7 +142,7 @@ def profile(dtype_name, output, vendor, dispatch=None):
             source = native()
             torch.npu.synchronize()
             os.write(1, f"MLA_STRIDE_NATIVE_END {dtype_name} {index}\n".encode())
-            checks.append(accuracy(case, actual, source))
+            checks.append(check_accuracy(case, actual, source))
         (output / "accuracy.json").write_text(
             json.dumps(dict(inputs=identities, comparisons=checks), indent=2) + "\n"
         )
@@ -216,7 +231,7 @@ def profile(dtype_name, output, vendor, dispatch=None):
         names,
         "mla_tnd_used_",
         "FusedInferAttentionScore",
-        "ComputeMlaCausalMixedMetadata",
+        metadata_name,
     )
     results = []
     for index, case in enumerate(cases):
@@ -228,6 +243,8 @@ def profile(dtype_name, output, vendor, dispatch=None):
                 for key in ("native_fd", "native_template", "native_tiling_key", "e2e_applicable")
             },
         )
+        if hasattr(natives[index], "description"):
+            row["native_call"] = natives[index].description()
         row["entries"] = {}
         for entry in entries:
             row["entries"][entry] = {}
@@ -259,7 +276,8 @@ def profile(dtype_name, output, vendor, dispatch=None):
         results.append(row)
     report = dict(
         dtype=dtype_name,
-        causal=True,
+        causal=mask == "causal",
+        window=mask == "window",
         warmup=5,
         rounds=5,
         wall_iterations=20,

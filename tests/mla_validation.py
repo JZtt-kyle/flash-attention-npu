@@ -50,6 +50,43 @@ USED_SHARED_CPU = [
     )
 ]
 SUITES = {
+    "window-mixed-cpu": ["tests/test_flash_attn_npu_v3_mla_window_mixed_metadata.py"],
+    "window-mixed-sanitize": ["tests/test_flash_attn_npu_v3_mla_window_mixed_metadata.py"],
+    "window-mixed-check": [
+        "tests/test_flash_attn_npu_v3_mla_window_mixed_public.py",
+        "-k",
+        "representative or cost_boundary",
+    ],
+    "window-mixed-public": [
+        "tests/test_flash_attn_npu_v3_mla_window_mixed_public.py",
+        "-k",
+        "not representative and not cost_boundary and not release_trap",
+    ],
+    "window-mixed-trap": [
+        "tests/test_flash_attn_npu_v3_mla_window_mixed_public.py",
+        "-k",
+        "release_trap",
+    ],
+    "window-mixed-profile": ["tests/test_mla_window_mixed_profile.py"],
+    "window-mixed-tools": [
+        "tests/test_mla_window_mixed_tools.py",
+        "tests/test_mla_validation_policy.py::test_mixed_average_weights_entries_and_keeps_regressions",
+        "tests/test_mla_validation_policy.py::test_mixed_average_rejects_incomplete_evidence",
+        *[
+            f"tests/test_mla_validation.py::test_success_failure_interruption_and_resume[{suite}]"
+            for suite in ("window-mixed-tools", "window-mixed-cpu", "window-mixed-sanitize")
+        ],
+        *[
+            f"tests/test_mla_validation.py::test_causal_dependencies_changing_during_execution_fail[{suite}]"
+            for suite in ("window-mixed-cpu", "window-mixed-sanitize")
+        ],
+        *[
+            f"tests/test_mla_validation.py::test_causal_device_groups_use_new_probe_and_device_identity[{suite}]"
+            for suite in ("window-mixed-check", "window-mixed-public")
+        ],
+        "tests/test_mla_validation.py::test_performance_always_executes_on_resume[window-mixed-profile]",
+        "tests/test_mla_validation.py::test_evidence_missing_changed_failed_or_different_identity_cannot_resume",
+    ],
     "window-tnd-cpu": ["tests/test_flash_attn_npu_v3_mla_window_tnd_metadata.py"],
     "window-tnd-sanitize": ["tests/test_flash_attn_npu_v3_mla_window_tnd_metadata.py"],
     "window-tnd-check": [
@@ -210,9 +247,8 @@ SUITES = {
     "causal-paged-profile": ["tests/test_mla_causal_paged_profile.py"],
     "causal-mixed-boundary": [
         "tests/test_flash_attn_npu_v3_mla_causal_paged_public.py",
-        "tests/test_flash_attn_npu_v3_mla_mixed_used.py",
         "-k",
-        "static_and_unopened_boundaries or (unconnected_combinations and window)",
+        "static_and_unopened_boundaries",
     ],
     "causal-mixed-tools": ["tests/test_mla_validation_policy.py", "-k", "mixed_average"],
     "causal-mixed-cpu": ["tests/test_flash_attn_npu_v3_mla_causal_mixed_metadata.py"],
@@ -377,6 +413,7 @@ SUITES = {
 }
 SUITES.update(INCREMENTAL_SUITES)
 PERFORMANCE_SUITES = {
+    "window-mixed-profile",
     "window-tnd-profile",
     "window-bsnd-profile",
     "window-profile",
@@ -390,7 +427,9 @@ PERFORMANCE_SUITES = {
     "causal-bsnd-native-check",
 }
 WINDOW_DEVICE_SUITES = {
+    "window-mixed-check",
     "window-tnd-check",
+    "window-mixed-public",
     "window-tnd-public",
     "window-check",
     "window-attention",
@@ -415,8 +454,11 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "window-mixed-cpu",
     "window-tnd-cpu",
+    "window-mixed-sanitize",
     "window-tnd-sanitize",
+    "window-mixed-tools",
     "window-tnd-tools",
     "window-bsnd-cpu",
     "window-bsnd-sanitize",
@@ -456,7 +498,9 @@ def suite_dependencies(suite):
         "window-sanitize",
         "window-bsnd-cpu",
         "window-bsnd-sanitize",
+        "window-mixed-cpu",
         "window-tnd-cpu",
+        "window-mixed-sanitize",
         "window-tnd-sanitize",
     }:
         from tests.mla_window_build import window_toolchain_identity
@@ -641,7 +685,9 @@ def environment(args, directory, suite):
     if suite in WINDOW_DEVICE_SUITES:
         env["MLA_WINDOW_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "window-mixed-cpu",
         "window-tnd-cpu",
+        "window-mixed-sanitize",
         "window-tnd-sanitize",
         "window-bsnd-cpu",
         "window-bsnd-sanitize",

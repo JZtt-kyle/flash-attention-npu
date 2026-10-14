@@ -200,7 +200,7 @@ def test_explicit_metadata_rejected(entry, dtype, words):
         _forward(entry, args)
 
 
-@pytest.mark.parametrize("fault", ["max_q", "max_k", "stride", "window", "split", "out", "grad"])
+@pytest.mark.parametrize("fault", ["max_q", "max_k", "stride", "split", "out", "grad"])
 def test_unconnected_combinations(entry, dtype, fault):
     args = inputs(dtype)
     if fault == "max_q":
@@ -209,8 +209,6 @@ def test_unconnected_combinations(entry, dtype, fault):
         args["max_seqlen_k"] = 33
     elif fault == "stride":
         args["k"] = torch.empty((2, 33, 1, 128), dtype=dtype, device="npu")[..., ::2]
-    elif fault == "window":
-        args["window_size_left"] = 0
     elif fault == "split":
         args["num_splits"] = 0
     elif fault == "out":

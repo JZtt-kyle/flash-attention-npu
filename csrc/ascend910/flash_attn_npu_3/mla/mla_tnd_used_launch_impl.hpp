@@ -9,7 +9,8 @@
 #endif
 
 namespace flash_attn::mla {
-template <bool HasStrides, bool IsCausal = false, bool IsMixedCausal = false, bool IsWindow = false>
+template <bool HasStrides, bool IsCausal = false, bool IsMixedCausal = false, bool IsWindow = false,
+          bool IsMixedWindow = false>
 __global__ __aicore__ __mix__(1, 2) void MLA_USED_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
                                                         GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
                                                         GM_ADDR metadata, MlaUsedMetadataContext context,
@@ -21,7 +22,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_USED_ENTRY(uint64_t ffts, GM_ADDR q
     const uint32_t words = kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * context.batch +
                            (IsWindow ? kMlaWindowMetadataTailWords : 0);
     if (!Kernel::LoadUsedMetadata < MLA_USED_TYPE, IsCausal, IsCausal && !IsMixedCausal, IsMixedCausal, IsWindow,
-        IsWindow > (metadata, words, context, inputs, schedule, window)) {
+        IsWindow && !IsMixedWindow, IsMixedWindow > (metadata, words, context, inputs, schedule, window)) {
         return;
     }
     // Every core validates before TPipe, synchronization or output writes,
@@ -37,7 +38,15 @@ __global__ __aicore__ __mix__(1, 2) void MLA_USED_ENTRY(uint64_t ffts, GM_ADDR q
 aclError MLA_USED_LAUNCH(const MlaUsedLaunchArgs& a)
 {
     MlaBatchLaunchScope launch;
-    if (a.isWindow && a.hasStrides) {
+    if (a.isWindow && a.context.kv.layout == uint32_t(MlaSequenceLayout::Bsnd) && a.hasStrides) {
+        MLA_USED_ENTRY<true, false, false, true, true>
+            <<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse, a.workspace,
+                                                        a.metadata, a.context, a.inputs, a.scale, a.layouts, a.window);
+    } else if (a.isWindow && a.context.kv.layout == uint32_t(MlaSequenceLayout::Bsnd)) {
+        MLA_USED_ENTRY<false, false, false, true, true>
+            <<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse, a.workspace,
+                                                        a.metadata, a.context, a.inputs, a.scale, a.layouts, a.window);
+    } else if (a.isWindow && a.hasStrides) {
         MLA_USED_ENTRY<true, false, false, true>
             <<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.output, a.lse, a.workspace,
                                                         a.metadata, a.context, a.inputs, a.scale, a.layouts, a.window);

@@ -9,6 +9,8 @@ constexpr uint32_t kMlaWindowBsndMetadataVersion = 12;
 constexpr uint32_t kMlaMetadataWindowBsnd = 12;
 constexpr uint32_t kMlaWindowTndMetadataVersion = 13;
 constexpr uint32_t kMlaMetadataWindowTnd = 13;
+constexpr uint32_t kMlaWindowMixedMetadataVersion = 14;
+constexpr uint32_t kMlaMetadataWindowMixed = 14;
 // Three signed int32 tail words: normalized kind, left, right. Allocations in
 // the used prefix retain the call-level bounds independently of used lengths.
 constexpr uint32_t kMlaWindowMetadataTailWords = 3;
@@ -32,4 +34,7 @@ bool BuildWindowBsndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& p
 bool BuildWindowTndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                             uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
                             const MlaWindowConfig& window);
+bool BuildWindowMixedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                              uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
+                              const MlaWindowConfig& window, bool queryTotalFromPrefix = false);
 } // namespace flash_attn::mla

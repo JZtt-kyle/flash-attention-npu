@@ -292,7 +292,6 @@ def test_static_rejections(entry, dtype, fault, match):
     [
         "max_missing",
         "max_k",
-        "window",
         "split0",
         "split2",
         "softcap",
@@ -312,10 +311,6 @@ def test_unconnected_options(entry, fault):
             args["max_seqlen_q"] = None
         elif fault == "max_k":
             args["max_seqlen_k"] = 64
-        elif fault == "window":
-            args.update(
-                {"window_size": (1, -1)} if entry.startswith("public") else {"window_size_left": 1}
-            )
         elif fault.startswith("split"):
             args["num_splits"] = int(fault[-1])
         elif fault == "page":

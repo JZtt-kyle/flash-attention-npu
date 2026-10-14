@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-本页记录实施顺序、每步产物与完成条件。**流程 W01–W05、功能 M00–M08（含阶段限量平均验收）、M09a/M09b1/M09b2/M09c1 已完成；唯一下一步是 M09c2。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。功能开发按当前下一步执行，不重新启动流程优化任务。
+本页记录实施顺序、每步产物与完成条件。**流程 W01–W05、功能 M00–M08（含阶段限量平均验收）、M09a/M09b1/M09b2/M09c1/M09c2 已完成；唯一下一步是 M09d。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。功能开发按当前下一步执行，不重新启动流程优化任务。
 
 ## 提交边界
 
@@ -85,7 +85,7 @@ M09a 已完成独立 CPU 窗口归一化、逐样本范围和完整 M 分核；�
 - 统一命令：`python3 -m tests.mla_validation --output build/mla-m09b2/<批次> --device 6 --suite <组>`；先 dry-run/collect 核对候选、选中和未选中，默认每组最多 100。先工具/CPU 和窗口代表，再冻结实现并运行正式集合。生产重建后核验实际加载；共享回归选 `regression-nonpaged`（BSND/TND/混合 used、stride、空值）、五布局 `causal-*-check`、`ordinary` 和 `causal-mixed-boundary`。独立 dense/PA 数值环未改，不因 host/协议接入重跑全部组件矩阵。
 - 继承经原始产物和依赖核验的 M09a `window-cpu/window-sanitize/causal-cpu/causal-sanitize` 与 M09b1 独立 `window-check/window-attention/window-profile`；不把新增 `MlaUsed` window stride/used 接入视为已由连续 probe 证明。保留源精度限制；最长 reference/内存成本边界与公式不变时继承。统一复用 `build/mla-validation-artifacts/golden`，开发、代表及正式验收不刷新相同 reference。必要组全部通过且平均公开性能达标后更新相关契约/状态、质量检查并提交一次；失败或中断保留证据，只续未完成或失效组。
 
-### 最近完成 M09c1：非 PA TND Q/KV window varlen
+### 已完成 M09c1：非 PA TND Q/KV window varlen
 
 以 M09b2 的稳定 window 数值路径和 M08c1 的 TND allocation/used 接入为基础，已完成 **非 PA TND Q/KV** 的窗口 varlen 行为、必要正确性、共享回归和平均公开 E2E，证据见 [status](status.md)。混合 cache 与 PA window 留在后续布局步骤，M09 阶段组合验收在该阶段收尾实测。
 
@@ -101,14 +101,33 @@ M09a 已完成独立 CPU 窗口归一化、逐样本范围和完整 M 分核；�
 - 统一命令为 `python3 -m tests.mla_validation --output build/mla-m09c1/<批次> --device 6 --suite <组>`，每批先 dry-run/collect 核对候选、选中及未选中，默认每组最多 100。生产重建并核对实际加载；共享设备选择 `regression-nonpaged`、`window-bsnd-check`、五布局 `causal-*-check`、`ordinary` 和 `causal-mixed-boundary`，分别检查 used/stride/空值、已有 window、masked 分派、普通入口及未开放混合/PA window。固定输入的 TND varlen R=1/4 E2E 保持 5 次预热、5 轮×20 次 wall 与既有同步/转换边界，原生 FD 单列，适用配置等权平均 ≤1。
 - 继承 M09a window/causal CPU 算法及 M09b1 独立连续 window 数值/性能证据，核验原始产物、执行输入、编译依赖/参数、工具链和实际加载身份；M09b2 的 BSND window 新入口记录作为基线。未变的 reference 最长成本边界可继承；新增 TND 输入成本边界先实测且不重复冷算。必要组全部通过后核对相关契约/文档、质量检查并提交一次；失败只续未完成或失效部分，不能提交为闭环。
 
-### 唯一下一步 M09c2：非 PA 混合 window cache
+### 最近完成 M09c2：非 PA 混合 window cache
 
-以 M09c1 的稳定 TND/window 接入和 M08c2 的混合 cache 契约为基础，在一个提交中接通 **TND Q + BSND KV** 的非 PA 窗口只读 cache，当前未启动。PA window 留在后续布局步骤，M09 的已开放组合在阶段收尾实测。
+以 M09c1 的稳定 TND/window 接入和 M08c2 的混合 cache 契约为基础，在一个提交中接通 **TND Q + BSND KV** 的非 PA 窗口只读 cache，已完成必要验收。PA window 留在后续布局步骤，M09 的已开放组合在阶段收尾实测。
 
 - 保持 Q 分配前缀/调用级 maxQ 与实际 Q-used 分离，KV 使用 BSND 容量及实际长度；接通有限/单侧窗口、causal 叠加、非零 S2 起点和四路 stride。窗口记录绑定混合布局、allocation/used 与归一化窗口，不能冒用 v12/v13 或旧 causal 记录。
 - 公开只读 cache、metadata 生成/复用及内部 Q-used 一次接通。内部 Q-used 仍每次生成且拒绝显式 metadata；公开 cache/生成器不增加 Q-used 参数。复用稳定 CPU 分核和数值核，按实际影响完成 host/AICPU、消费者、launcher、Python/C++ real/fake。
 - 实现前列明实际统一组/命令、共享调用路径和继承依赖。新增前缀间隙/poison、非均匀 used、空段/空行、窗口与长度更新、记录复用/互斥、stride、compile/生命周期及真实 Trap；当步实测双 dtype 固定源/双数学、适用 R=1/4 平均公开 E2E。日常共享回归优先 `regression-*`，清单缺口补明确边界。
 - 继承经原始证据与依赖核验的稳定 CPU/连续数值/地址组件，复用数学内容缓存；新混合入口和原生转换不能由 TND varlen 结果替代。必要正确性与平均性能通过后更新相关契约、状态和唯一下一步，质量检查后只提交一次并停止；验收未完成则如实交接，不提交为闭环。
+
+**M09c2 实施边界与验收选择：**
+
+- 新增 `version=kind=14` 混合 window 记录，复用 `413+8B` 编码、Q 分配前缀/used、BSND KV 快照及归一化窗口尾部。生成器同时支持公开 metadata 的设备前缀推导总 Q 和内部显式总 Q；扩展 window AICPU、共享消费者默认关闭分支、TND used launcher、host 与 Python/C++ real/fake 路由。沿用 CPU window/causal 分核、地址/Copy、Block/Tile、当前 stream 和 allocator 生命周期，不修改 CATLASS 或固定源。
+- 新增 `window-mixed-cpu/window-mixed-sanitize`，以真实 AICPU 源 CPU 桥对照固定源切块/完整窗口分核，覆盖两种总 Q 来源、非均匀/空前缀、used、归一化、失败清零/原子性、重叠/溢出、v9/v12/v13/v14 互斥及消费者当次长度校验。共享生成/消费回归采用 `window-bsnd/tnd-cpu/sanitize` 和 `causal-bsnd/tnd/mixed-cpu/sanitize`，覆盖所有受影响非分页协议。
+- 新增 `window-mixed-check/public/trap/profile/tools`。check 与 public 互斥；双 dtype 专项覆盖混合地址/poison、有限/单侧/causal 叠加、非零 S2 起点、调用级上界、四路 stride/offset、空段/空行/空容量、None/整数/tensor KV 长度、metadata 生成/复用/更新、内部 Q-used、真实/fake/compile/多流/生命周期及隔离 release Trap。源 probe 实际传 band 参数；数学从原始前缀/容量/used 独立映射，沿用最多四样本并行和默认内容缓存。原生混合 packing/restoration 和三种公开入口的 R=1/4 E2E 均当步实测，原生 FD 单列，配置内分段和跨配置等权平均 ≤1。
+- 统一命令 `python3 -m tests.mla_validation --output build/mla-m09c2/<批次> --device 6 --suite <组>`，每批先 `--dry-run` / `--collect-only` 核对候选、选中和未选中，默认每组最多 100。先工具/CPU/代表，固定实现后跑正式集合。共享设备选 `regression-nonpaged`、`window-bsnd-check/window-tnd-check`、五布局 `causal-*-check`、`ordinary` 和 `causal-mixed-boundary`，分别覆盖 used/stride/空值、已有窗口、masked 分派、普通入口及剩余 PA 未开放选项；移除旧混合 window 拒绝项，由新专项替代。
+- 复核 M09c1 的完整闭环及构建/实际加载身份；继承 M09a 稳定 CPU 算法、M09b1 独立连续 window 数值/性能，以及未改 reference 执行策略的最长/最大成本边界，逐项核对原始产物、依赖、工具链与执行条件。新混合输入先检查成本，再复用同一 reference。全部必要组通过后更新相关契约/文档、执行质量检查并提交一次；未完成必要验收则只更新交接，不提交为闭环。
+
+**M09c2 验收工具补充边界：** 为应对 profiler 输出分区的空间限制，仅为新增 `window-mixed-profile` 的计时子进程增加临时输出与按哈希归档，使用标准 `TMPDIR` 选择单 dtype 暂存目录；大日志和最终证据仍在本步忽略目录，三入口/R、预热、重复次数与同步边界不变。工具专项覆盖归档成功、子进程失败保留及复制损坏检测；该改动复验 `window-mixed-tools/tools/cpu` 和失效性能组，数学参考复用缓存。保留不依赖这两个新增 profile/工具文件的正确性证据，核对依赖后重新冻结；实际环境与恢复结果见 status。
+
+### 唯一下一步 M09d：BSND PA window cache
+
+复用 M09 的稳定窗口组件和 M08d 的 BSND PA cache 契约，在一个提交中接通 **BSND Q + ND PA KV** 的窗口只读 cache；TND PA 留给后续 M09e，届时按 design 实测 M09 已开放组合。本步未启动。
+
+- 保持全部合法页大小 P、逻辑 KV 容量/实际长度、页表与物理页池校验，接通有限/单侧窗口、causal 叠加、跨页 mask 和非零 S2 起点。窗口记录绑定 BSND PA 布局、P/C、allocation/used 与归一化窗口，不能冒用旧 PA causal 或非分页 window 记录。
+- 公开 cache、metadata 生成/复用、内部 Q-used 与 host/AICPU/消费者/launcher/real/fake 一次闭环；公开签名不增加 Q-used，内部 Q-used 仍每次生成且拒绝显式 metadata。优先复用窗口分核、已验收 PA 地址/Copy 和 Block/Tile；若发现需独立验收的新共享算法，先在当前步拆分边界。
+- 实现前列明实际统一组、共享调用路径、继承依赖和新增用例。按每组最多 100 的固定选择覆盖全部合法 P 的双 dtype、跨页/页尾窗口、非均匀 used、四路 stride、空值、metadata 互斥/更新/复用、fake/compile/生命周期及真实 Trap；共享回归优先 `regression-*` 并补清单缺口。新入口固定源/双数学和适用 R=1/4 平均公开 E2E 当步完成，不能由非分页或无 mask 结果替代。
+- 核验并继承未变 CPU、window 数值及 PA 地址/Copy 证据，复用数学内容缓存；仅为新输入或改变的执行策略检查最长 reference/最大内存边界。必要验收、相关文档和质量检查完成后只提交一次并停止；无法闭环则更新交接，不提交为已完成。
 
 ## 后续里程碑：M09–M17
 
@@ -164,6 +183,7 @@ M09a 已完成独立 CPU 窗口归一化、逐样本范围和完整 M 分核；�
 | M09b1 | 独立连续 BSND window 数值组件；非零 S2 起点、双侧 mask、任务环/空值、固定源/双数学与源精度限制、共享回归及代表组件性能；公共窗口仍拒绝 |
 | M09b2 | 非 PA BSND window func/只读 cache、v12 metadata 生成/复用及内部 Q-used；四路 stride、真实/fake/compile/Trap/生命周期、固定源/双数学、共享回归和平均公开 E2E |
 | M09c1 | 非 PA TND Q/KV window varlen、v13 双前缀/used 与调用级窗口身份；四路 stride、真实/fake/compile/Trap/生命周期、固定源/双数学、共享回归及平均公开 E2E |
+| M09c2 | 非 PA TND Q + BSND KV window cache、v14 公开 metadata 生成/复用及内部 Q-used；混合地址/四路 stride、真实/fake/compile/Trap/生命周期、固定源/双数学、共享回归及平均公开 E2E |
 
 M07 的页大小精度覆盖全部 16..1024 的 16 倍数；性能矩阵及原生非 FD/FD 的边界见 [design 7.1](design.md#71-固定性能矩阵与阶段边界)。公开接入包含 None/整数/tensor KV 长度、v6 复用及相关 MLA/普通 FA3 回归，结果只在 status 维护。
 

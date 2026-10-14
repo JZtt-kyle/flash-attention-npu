@@ -294,7 +294,6 @@ def test_boundaries(dtype, fake):
                     e,
                 )
         for opts in (
-            dict(window_size=(0, 0)),
             dict(num_splits=2),
             dict(softcap=1.0),
             dict(pack_gqa=True),

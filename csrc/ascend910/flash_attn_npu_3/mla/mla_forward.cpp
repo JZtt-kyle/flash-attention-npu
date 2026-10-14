@@ -35,6 +35,8 @@ extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowTndMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaWindowMixedMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaWindowMixedMetadataFromPrefix(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalMixedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalMixedMetadataFromPrefix(void* args);
@@ -156,7 +158,16 @@ struct MetadataSubmission {
             if (window) {
                 MlaWindowMetadataArgs windowArgs{args, *window};
                 if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
-                    ComputeMlaWindowTndMetadata<<<1, nullptr, current>>>(&windowArgs, sizeof(windowArgs));
+                    if (args.shape.kv.layout == MlaSequenceLayout::Bsnd) {
+                        if (queryTotalFromPrefix) {
+                            ComputeMlaWindowMixedMetadataFromPrefix<<<1, nullptr, current>>>(&windowArgs,
+                                                                                             sizeof(windowArgs));
+                        } else {
+                            ComputeMlaWindowMixedMetadata<<<1, nullptr, current>>>(&windowArgs, sizeof(windowArgs));
+                        }
+                    } else {
+                        ComputeMlaWindowTndMetadata<<<1, nullptr, current>>>(&windowArgs, sizeof(windowArgs));
+                    }
                 } else {
                     ComputeMlaWindowBsndMetadata<<<1, nullptr, current>>>(&windowArgs, sizeof(windowArgs));
                 }
@@ -464,6 +475,40 @@ at::Tensor CausalMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_
                                       std::optional<at::Tensor>(cacheSeqlens), true);
     producer.queryTotalFromPrefix = true;
     RunCausalLaunch("ascendc_mla_causal_mixed_metadata", [producer]() mutable -> int {
+        producer.Enqueue();
+        return 0;
+    });
+    return metadata;
+}
+
+at::Tensor WindowMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,
+                                 const at::Tensor& cacheSeqlens, const at::Tensor& cuQ, int64_t windowLeft,
+                                 int64_t windowRight, bool causal)
+{
+    CheckTndBsndMetadataInputs(batch, maxQ, sk, heads, dtype, cacheSeqlens, cuQ);
+    CheckUsedInputs(cacheSeqlens, batch, std::nullopt, cacheSeqlens);
+    uint32_t words;
+    TORCH_CHECK(WindowMetadataWords(batch, words), "MLA: window metadata word count overflow");
+    MlaWindowConfig config{maxQ, sk, windowLeft, windowRight, causal};
+    CheckWindow(config);
+    const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
+    auto metadata = at::empty({words}, cacheSeqlens.options());
+    const auto address = reinterpret_cast<uint64_t>(batch == 0 ? metadata.data_ptr() : cacheSeqlens.data_ptr());
+    MlaUsedMetadataArgs args{
+        reinterpret_cast<uint64_t>(metadata.data_ptr()),
+        words,
+        uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),
+        {batch, heads, {MlaSequenceLayout::Tnd, 0, maxQ}, {MlaSequenceLayout::Bsnd, batch * sk, sk}},
+        CausalPlatform(cacheSeqlens.device().index(), false),
+        {reinterpret_cast<uint64_t>(cuQ.data_ptr()), uint64_t(cuQ.numel())},
+        {},
+        {},
+        {address, uint64_t(batch)}};
+    auto producer = PrepareSubmission(metadata, args, std::nullopt, std::optional<at::Tensor>(cuQ), true, std::nullopt,
+                                      std::optional<at::Tensor>(cacheSeqlens), true);
+    producer.queryTotalFromPrefix = true;
+    producer.window = config;
+    RunCausalLaunch("ascendc_mla_window_mixed_metadata", [producer]() mutable -> int {
         producer.Enqueue();
         return 0;
     });
@@ -1105,6 +1150,69 @@ CausalMixedCacheOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v
     return {std::get<0>(result), std::get<1>(result), at::empty({0}, options), at::empty({0}, options)};
 }
 
+std::vector<at::Tensor> WindowMixedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                           const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ, float scale,
+                                           int64_t windowLeft, int64_t windowRight, bool causal,
+                                           const std::optional<at::Tensor>& cacheSeqlens,
+                                           const std::optional<at::Tensor>& usedQuery,
+                                           const std::optional<at::Tensor>& schedulerMetadata)
+{
+    CheckForwardBoundary(q, k, v, qv, true, false, false);
+    TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
+    CheckTndBsndForwardInputs(q, k, cuQ, maxQ, cacheSeqlens, std::nullopt);
+    TORCH_CHECK(!usedQuery || !schedulerMetadata,
+                "MLA compressed forward is not implemented yet for Q-used with explicit metadata");
+    const int64_t batch = k.size(0), sk = k.size(1), heads = q.size(1);
+    CheckUsedInputs(q, batch, usedQuery, cacheSeqlens);
+    uint32_t words;
+    TORCH_CHECK(WindowMetadataWords(batch, words), "MLA: window metadata word count overflow");
+    MlaWindowConfig config{maxQ, sk, windowLeft, windowRight, causal};
+    CheckWindow(config);
+    if (schedulerMetadata) {
+        TORCH_CHECK(schedulerMetadata->scalar_type() == at::kInt && schedulerMetadata->dim() == 1 &&
+                        schedulerMetadata->numel() == words && schedulerMetadata->is_contiguous(),
+                    "MLA: window scheduler_metadata must be contiguous int32[413 + 8 * batch_size]");
+        TORCH_CHECK(schedulerMetadata->device() == q.device(),
+                    "MLA: scheduler_metadata must be on the same NPU device");
+    }
+    const c10::OptionalDeviceGuard deviceGuard(device_of(q));
+    auto lengths = cacheSeqlens;
+    if (schedulerMetadata && !lengths) {
+        lengths = at::full({batch}, sk, q.options().dtype(at::kInt));
+    }
+    return UsedForward(
+        q, k, v, qv,
+        {batch, heads, {MlaSequenceLayout::Tnd, q.size(0), maxQ}, {MlaSequenceLayout::Bsnd, batch * sk, sk}}, cuQ,
+        std::nullopt, usedQuery, lengths, scale, false, schedulerMetadata, config);
+}
+
+std::tuple<at::Tensor, at::Tensor>
+WindowMixedForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
+                     const at::Tensor& cuQ, int64_t maxQ, int64_t windowLeft, int64_t windowRight, bool causal,
+                     std::optional<double> softmaxScale, const std::optional<at::Tensor>& cacheSeqlens,
+                     const std::optional<at::Tensor>& usedQuery, const std::optional<at::Tensor>& schedulerMetadata)
+{
+    TORCH_CHECK(!softmaxScale ||
+                    (std::isfinite(*softmaxScale) && std::abs(*softmaxScale) <= std::numeric_limits<float>::max()),
+                "MLA: softmax_scale must be finite in FP32");
+    auto result =
+        WindowMixedForward(q, k, v, qv, cuQ, maxQ, softmaxScale ? float(*softmaxScale) : 1.0f / std::sqrt(576.0f),
+                           windowLeft, windowRight, causal, cacheSeqlens, usedQuery, schedulerMetadata);
+    return {result[0], result[1]};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+WindowMixedCacheOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
+                   const at::Tensor& cuQ, int64_t maxQ, int64_t windowLeft, int64_t windowRight, bool causal,
+                   std::optional<double> softmaxScale, const std::optional<at::Tensor>& cacheSeqlens,
+                   const std::optional<at::Tensor>& schedulerMetadata)
+{
+    auto result = WindowMixedForwardOp(q, k, v, qv, cuQ, maxQ, windowLeft, windowRight, causal, softmaxScale,
+                                       cacheSeqlens, std::nullopt, schedulerMetadata);
+    const auto options = at::TensorOptions().device(q.device());
+    return {std::get<0>(result), std::get<1>(result), at::empty({0}, options), at::empty({0}, options)};
+}
+
 std::tuple<at::Tensor, at::Tensor> WindowBsndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                                        const at::Tensor& qv, int64_t windowLeft, int64_t windowRight,
                                                        bool causal, std::optional<double> softmaxScale,
@@ -1440,6 +1548,17 @@ std::tuple<at::Tensor, at::Tensor> DenseForwardOp(const at::Tensor& q, const at:
 
 TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 {
+    m.def("_mla_window_mixed_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
+          "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q, int window_left, int window_right, bool "
+          "causal) -> Tensor");
+    m.def("_mla_window_mixed_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, int max_seqlen_q, "
+          "int window_left, int window_right, bool causal, "
+          "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? seqused_q=None, Tensor? "
+          "scheduler_metadata=None) -> (Tensor, Tensor)");
+    m.def("_mla_window_mixed_cache(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, int max_seqlen_q, int "
+          "window_left, int window_right, bool causal, "
+          "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor, "
+          "Tensor, Tensor)");
     m.def("_mla_causal_mixed_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
           "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q) -> Tensor");
     m.def("_mla_causal_mixed_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, int max_seqlen_q, "
@@ -1492,6 +1611,7 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
 {
+    m.impl("_mla_window_mixed_metadata", &flash_attn::mla::WindowMixedMetadataOp);
     m.impl("_mla_causal_mixed_metadata", &flash_attn::mla::CausalMixedMetadataOp);
     m.impl("_mla_window_bsnd_metadata", &flash_attn::mla::WindowBsndMetadataOp);
     m.impl("_mla_causal_bsnd_metadata", &flash_attn::mla::CausalBsndMetadataOp);
@@ -1504,6 +1624,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
 {
+    m.impl("_mla_window_mixed_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_causal_mixed_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_window_bsnd_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_causal_bsnd_metadata", torch::CppFunction::makeFallthrough());
@@ -1516,7 +1637,9 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
 {
+    m.impl("_mla_window_mixed_forward", &flash_attn::mla::WindowMixedForwardOp);
     m.impl("_mla_causal_mixed_forward", &flash_attn::mla::CausalMixedForwardOp);
+    m.impl("_mla_window_mixed_cache", &flash_attn::mla::WindowMixedCacheOp);
     m.impl("_mla_causal_mixed_cache", &flash_attn::mla::CausalMixedCacheOp);
     m.impl("_mla_window_bsnd_forward", &flash_attn::mla::WindowBsndForwardOp);
     m.impl("_mla_causal_bsnd_forward", &flash_attn::mla::CausalBsndForwardOp);
@@ -1533,7 +1656,9 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, AutogradPrivateUse1, m)
 {
+    m.impl("_mla_window_mixed_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_causal_mixed_forward", torch::CppFunction::makeFallthrough());
+    m.impl("_mla_window_mixed_cache", torch::CppFunction::makeFallthrough());
     m.impl("_mla_causal_mixed_cache", torch::CppFunction::makeFallthrough());
     m.impl("_mla_window_bsnd_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_causal_bsnd_forward", torch::CppFunction::makeFallthrough());

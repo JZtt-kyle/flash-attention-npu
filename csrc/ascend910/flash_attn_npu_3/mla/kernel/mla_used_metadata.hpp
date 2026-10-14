@@ -14,7 +14,7 @@ struct UsedMetadataReaders {
 };
 
 template <typename InputT, bool IsCausal = false, bool IsTndCausal = false, bool IsMixedCausal = false,
-          bool IsWindow = false, bool IsTndWindow = false>
+          bool IsWindow = false, bool IsTndWindow = false, bool IsMixedWindow = false>
 __aicore__ inline MlaMetadataReadStatus
 ReadUsedMetadata(GM_ADDR address, uint32_t words, const MlaUsedMetadataContext& context,
                  const MlaUsedMetadataInputs& inputs, MlaUsedKernelSchedule& output, MlaWindowKernelParams window = {})
@@ -42,17 +42,17 @@ ReadUsedMetadata(GM_ADDR address, uint32_t words, const MlaUsedMetadataContext& 
             arrays.data[i].data.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(addresses[i]));
         }
     }
-    return flash_attn::mla::ReadUsedMetadata<IsCausal, IsTndCausal, IsMixedCausal, IsWindow, IsTndWindow>(
-        read, words, context, inputs, arrays, output, window);
+    return flash_attn::mla::ReadUsedMetadata<IsCausal, IsTndCausal, IsMixedCausal, IsWindow, IsTndWindow,
+                                             IsMixedWindow>(read, words, context, inputs, arrays, output, window);
 }
 
 template <typename InputT, bool IsCausal = false, bool IsTndCausal = false, bool IsMixedCausal = false,
-          bool IsWindow = false, bool IsTndWindow = false>
+          bool IsWindow = false, bool IsTndWindow = false, bool IsMixedWindow = false>
 __aicore__ inline bool LoadUsedMetadata(GM_ADDR address, uint32_t words, const MlaUsedMetadataContext& context,
                                         const MlaUsedMetadataInputs& inputs, MlaUsedKernelSchedule& output,
                                         MlaWindowKernelParams window = {})
 {
-    if (ReadUsedMetadata<InputT, IsCausal, IsTndCausal, IsMixedCausal, IsWindow, IsTndWindow>(
+    if (ReadUsedMetadata<InputT, IsCausal, IsTndCausal, IsMixedCausal, IsWindow, IsTndWindow, IsMixedWindow>(
             address, words, context, inputs, output, window) != MlaMetadataReadStatus::Success) {
         AscendC::Trap();
         return false;

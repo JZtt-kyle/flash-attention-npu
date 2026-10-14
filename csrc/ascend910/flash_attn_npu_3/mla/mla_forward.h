@@ -20,6 +20,15 @@ at::Tensor WindowBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t h
 
 at::Tensor CausalBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, at::ScalarType dtype,
                                 const at::Tensor& cacheSeqlens);
+std::vector<at::Tensor> WindowMixedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                           const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ, float scale,
+                                           int64_t windowLeft, int64_t windowRight, bool causal,
+                                           const std::optional<at::Tensor>& cacheSeqlens,
+                                           const std::optional<at::Tensor>& usedQuery,
+                                           const std::optional<at::Tensor>& schedulerMetadata);
+at::Tensor WindowMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,
+                                 const at::Tensor& cacheSeqlens, const at::Tensor& cuQ, int64_t windowLeft,
+                                 int64_t windowRight, bool causal);
 std::vector<at::Tensor> CausalMixedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                            const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ, float scale,
                                            const std::optional<at::Tensor>& cacheSeqlens,

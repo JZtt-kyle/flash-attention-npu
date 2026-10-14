@@ -334,6 +334,30 @@ def _check_mla_causal_mixed_inputs(q, k, cu_q, max_q, lengths, metadata, seqused
         )
 
 
+def _check_mla_window_mixed_inputs(
+    q, k, cu_q, max_q, lengths, metadata, seqused_q=None, *, window_left, window_right, causal
+):
+    _check_mla_mixed_inputs(q, k, cu_q, max_q, lengths, None, seqused_q)
+    _check_mla_used(q, k.shape[0], seqused_q, lengths)
+    if seqused_q is not None and metadata is not None:
+        raise RuntimeError(
+            "MLA compressed forward is not implemented yet for Q-used with explicit metadata"
+        )
+    if metadata is not None and (
+        metadata.dtype != torch.int32
+        or metadata.device != q.device
+        or metadata.ndim != 1
+        or metadata.numel() != _mla_window_bsnd_words(k.shape[0])
+        or not metadata.is_contiguous()
+    ):
+        raise RuntimeError(
+            "MLA: window scheduler_metadata must be same-device contiguous int32[413 + 8 * batch_size]"
+        )
+
+    _mla_window_bsnd_words(k.shape[0])
+    _normalize_mla_window(max_q, k.shape[1], window_left, window_right, causal)
+
+
 def _check_mla_metadata(headdim, headdim_v):
     if headdim == headdim_v:
         return False
@@ -786,6 +810,73 @@ def _mla_window_tnd_forward_fake(
     return result
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_window_mixed_forward")
+def _mla_window_mixed_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    cu_seqlens_q,
+    max_seqlen_q,
+    window_left,
+    window_right,
+    causal,
+    softmax_scale=None,
+    cache_seqlens=None,
+    seqused_q=None,
+    scheduler_metadata=None,
+):
+    _check_mla_inputs(q, k, v, qv, varlen_q=True)
+    _check_mla_dense_options(softmax_scale=softmax_scale, causal=True, allow_causal=True)
+    _check_mla_window_mixed_inputs(
+        q,
+        k,
+        cu_seqlens_q,
+        max_seqlen_q,
+        cache_seqlens,
+        scheduler_metadata,
+        seqused_q,
+        window_left=window_left,
+        window_right=window_right,
+        causal=causal,
+    )
+    return q.new_empty((*q.shape[:-1], 512)), q.new_empty(
+        (q.shape[1], q.shape[0]), dtype=torch.float32
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_window_mixed_cache")
+def _mla_window_mixed_cache_fake(
+    q,
+    k,
+    v,
+    qv,
+    cu_seqlens_q,
+    max_seqlen_q,
+    window_left,
+    window_right,
+    causal,
+    softmax_scale=None,
+    cache_seqlens=None,
+    scheduler_metadata=None,
+):
+    out, lse = _mla_window_mixed_forward_fake(
+        q,
+        k,
+        v,
+        qv,
+        cu_seqlens_q,
+        max_seqlen_q,
+        window_left,
+        window_right,
+        causal,
+        softmax_scale,
+        cache_seqlens,
+        scheduler_metadata=scheduler_metadata,
+    )
+    return out, lse, torch.empty(0, device=q.device), torch.empty(0, device=q.device)
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_causal_mixed_forward")
 def _mla_causal_mixed_forward_fake(
     q,
@@ -908,7 +999,7 @@ def _flash_attn_forward(
             softmax_scale=softmax_scale,
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None and ((cu_seqlens_q is None) == (cu_seqlens_k is None)),
+            allow_window=page_table is None,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -946,9 +1037,23 @@ def _flash_attn_forward(
             )
         elif cu_seqlens_q is not None:
             if cu_seqlens_k is None:
-                (_check_mla_causal_mixed_inputs if causal else _check_mla_mixed_inputs)(
-                    q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata, seqused_q
-                )
+                if (window_size_left, window_size_right) != (-1, -1):
+                    _check_mla_window_mixed_inputs(
+                        q,
+                        k,
+                        cu_seqlens_q,
+                        max_seqlen_q,
+                        seqused_k,
+                        scheduler_metadata,
+                        seqused_q,
+                        window_left=window_size_left,
+                        window_right=window_size_right,
+                        causal=causal,
+                    )
+                else:
+                    (_check_mla_causal_mixed_inputs if causal else _check_mla_mixed_inputs)(
+                        q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata, seqused_q
+                    )
             else:
                 if scheduler_metadata is not None:
                     raise RuntimeError(
@@ -1090,7 +1195,7 @@ def _flash_attn_forward_fake(
             softmax_scale=softmax_scale,
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None and ((cu_seqlens_q is None) == (cu_seqlens_k is None)),
+            allow_window=page_table is None,
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -1128,9 +1233,23 @@ def _flash_attn_forward_fake(
             )
         elif cu_seqlens_q is not None:
             if cu_seqlens_k is None:
-                (_check_mla_causal_mixed_inputs if causal else _check_mla_mixed_inputs)(
-                    q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata, seqused_q
-                )
+                if (window_size_left, window_size_right) != (-1, -1):
+                    _check_mla_window_mixed_inputs(
+                        q,
+                        k,
+                        cu_seqlens_q,
+                        max_seqlen_q,
+                        seqused_k,
+                        scheduler_metadata,
+                        seqused_q,
+                        window_left=window_size_left,
+                        window_right=window_size_right,
+                        causal=causal,
+                    )
+                else:
+                    (_check_mla_causal_mixed_inputs if causal else _check_mla_mixed_inputs)(
+                        q, k, cu_seqlens_q, max_seqlen_q, seqused_k, scheduler_metadata, seqused_q
+                    )
             else:
                 if scheduler_metadata is not None:
                     raise RuntimeError(
@@ -2256,7 +2375,8 @@ def flash_attn_with_kvcache(
     NPU compressed MLA supports read-only BSND or ND paged caches with BSND/TND
     queries. Set num_splits=1 explicitly; current MLA limits are documented in
     docs/mla/status.md. Right-down causal supports nonpaged and paged BSND/TND queries;
-    generic FA3 append, rotary and local-window options below remain unsupported.
+    generic FA3 append and rotary options below remain unsupported; window is supported
+    for nonpaged BSND and mixed cache.
 
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
     k and v. This is useful for incremental decoding: you can pass in the cached keys/values from
@@ -2385,7 +2505,7 @@ def flash_attn_with_kvcache(
         _check_mla_dense_options(
             causal=causal,
             allow_causal=True,
-            allow_window=page_table is None and cu_seqlens_q is None,
+            allow_window=page_table is None,
             window_size=window_size,
             attention_chunk=attention_chunk,
             softcap=softcap,
@@ -2470,7 +2590,37 @@ def flash_attn_with_kvcache(
         elif cu_seqlens_q is not None:
             if max_seqlen_q is None:
                 raise RuntimeError("MLA: mixed TND/BSND requires max_seqlen_q")
-            if causal:
+            if window_size != (-1, -1):
+                if return_softmax_lse:
+                    return torch.ops.flash_attn_npu_3._mla_window_mixed_cache(
+                        q,
+                        k_cache,
+                        v_cache,
+                        qv,
+                        cu_seqlens_q,
+                        max_seqlen_q,
+                        window_size[0],
+                        window_size[1],
+                        causal,
+                        softmax_scale,
+                        cache_seqlens,
+                        scheduler_metadata,
+                    )
+                out, softmax_lse = torch.ops.flash_attn_npu_3._mla_window_mixed_forward(
+                    q,
+                    k_cache,
+                    v_cache,
+                    qv,
+                    cu_seqlens_q,
+                    max_seqlen_q,
+                    window_size[0],
+                    window_size[1],
+                    causal,
+                    softmax_scale,
+                    cache_seqlens,
+                    scheduler_metadata=scheduler_metadata,
+                )
+            elif causal:
                 if return_softmax_lse:
                     return torch.ops.flash_attn_npu_3._mla_causal_mixed_cache(
                         q,
@@ -2756,6 +2906,28 @@ def _mla_bsnd_metadata_words(batch):
     return 401 + batch
 
 
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_window_mixed_metadata")
+def _mla_window_mixed_metadata_fake(
+    batch_size,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_heads_q,
+    qkv_dtype,
+    cache_seqlens,
+    cu_seqlens_q,
+    window_left,
+    window_right,
+    causal,
+):
+    _mla_tnd_bsnd_metadata_fake(
+        batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens, cu_seqlens_q
+    )
+    _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
+    return torch.empty(
+        (_mla_window_bsnd_words(batch_size),), dtype=torch.int32, device=cache_seqlens.device
+    )
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_causal_mixed_metadata")
 def _mla_causal_mixed_metadata_fake(
     batch_size,
@@ -3018,9 +3190,22 @@ def _get_scheduler_metadata_fake(
                 softmax_scale,
             ),
             allow_causal=True,
-            allow_window=page_size is None and cu_seqlens_q is None,
+            allow_window=page_size is None,
         )
         if (window_size_left, window_size_right) != (-1, -1):
+            if cu_seqlens_q is not None:
+                return _mla_window_mixed_metadata_fake(
+                    batch_size,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    num_heads_q,
+                    qkv_dtype,
+                    cache_seqlens,
+                    cu_seqlens_q,
+                    window_size_left,
+                    window_size_right,
+                    causal,
+                )
             return _mla_window_bsnd_metadata_fake(
                 batch_size,
                 max_seqlen_q,
@@ -3145,9 +3330,22 @@ def get_scheduler_metadata(
                 softmax_scale,
             ),
             allow_causal=True,
-            allow_window=page_size is None and cu_seqlens_q is None,
+            allow_window=page_size is None,
         )
         if window_size != (-1, -1):
+            if cu_seqlens_q is not None:
+                return torch.ops.flash_attn_npu_3._mla_window_mixed_metadata(
+                    batch_size,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    num_heads_q,
+                    qkv_dtype,
+                    cache_seqlens,
+                    cu_seqlens_q,
+                    window_size[0],
+                    window_size[1],
+                    causal,
+                )
             return torch.ops.flash_attn_npu_3._mla_window_bsnd_metadata(
                 batch_size,
                 max_seqlen_q,

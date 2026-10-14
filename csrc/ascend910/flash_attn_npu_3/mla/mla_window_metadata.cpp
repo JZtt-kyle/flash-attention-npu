@@ -5,7 +5,7 @@
 
 namespace flash_attn::mla {
 namespace {
-template <bool IsTnd>
+template <bool IsTnd, bool IsMixed = false>
 MlaScheduleStatus BuildWindowAllocationSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
                                                 const MlaUsedInputs& inputs, MlaUsedSchedule& output,
                                                 const void* context)
@@ -13,8 +13,9 @@ MlaScheduleStatus BuildWindowAllocationSchedule(const MlaUsedShape& shape, const
     const auto& config = *static_cast<const MlaWindowConfig*>(context);
     MlaWindow window{};
     constexpr auto layout = IsTnd ? MlaSequenceLayout::Tnd : MlaSequenceLayout::Bsnd;
-    if (shape.query.layout != layout || shape.kv.layout != layout || shape.query.maxLength != config.maxQueryLength ||
-        shape.kv.maxLength != config.maxKvLength || NormalizeWindow(config, window) != MlaCausalStatus::Success) {
+    if (shape.query.layout != layout || shape.kv.layout != (IsMixed ? MlaSequenceLayout::Bsnd : layout) ||
+        shape.query.maxLength != config.maxQueryLength || shape.kv.maxLength != config.maxKvLength ||
+        NormalizeWindow(config, window) != MlaCausalStatus::Success) {
         return MlaScheduleStatus::UnsupportedShape;
     }
     try {
@@ -61,17 +62,20 @@ MlaScheduleStatus BuildWindowAllocationSchedule(const MlaUsedShape& shape, const
     }
 }
 } // namespace
-template <bool IsTnd>
+template <bool IsTnd, bool IsMixed = false>
 bool BuildWindowMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype, uint32_t* output,
-                         uint32_t outputWords, const MlaUsedInputs& inputs, const MlaWindowConfig& window)
+                         uint32_t outputWords, const MlaUsedInputs& inputs, const MlaWindowConfig& window,
+                         bool queryTotalFromPrefix = false)
 {
     if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, outputWords, inputs,
-                                       BuildWindowAllocationSchedule<IsTnd>, &window, false,
+                                       BuildWindowAllocationSchedule<IsTnd, IsMixed>, &window, queryTotalFromPrefix,
                                        kMlaWindowMetadataTailWords)) {
         return false;
     }
-    output[1] = IsTnd ? kMlaWindowTndMetadataVersion : kMlaWindowBsndMetadataVersion;
-    output[2] = IsTnd ? kMlaMetadataWindowTnd : kMlaMetadataWindowBsnd;
+    output[1] = IsMixed ? kMlaWindowMixedMetadataVersion
+                : IsTnd ? kMlaWindowTndMetadataVersion
+                        : kMlaWindowBsndMetadataVersion;
+    output[2] = IsMixed ? kMlaMetadataWindowMixed : IsTnd ? kMlaMetadataWindowTnd : kMlaMetadataWindowBsnd;
     if (output[5] == 0) {
         MlaWindow normalized{};
         NormalizeWindow(window, normalized); // Already checked by the partitioner, including empty allocations.
@@ -92,5 +96,12 @@ bool BuildWindowTndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& pl
                             const MlaWindowConfig& window)
 {
     return BuildWindowMetadata<true>(shape, platform, dtype, output, outputWords, inputs, window);
+}
+bool BuildWindowMixedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
+                              uint32_t* output, uint32_t outputWords, const MlaUsedInputs& inputs,
+                              const MlaWindowConfig& window, bool queryTotalFromPrefix)
+{
+    return BuildWindowMetadata<true, true>(shape, platform, dtype, output, outputWords, inputs, window,
+                                           queryTotalFromPrefix);
 }
 } // namespace flash_attn::mla

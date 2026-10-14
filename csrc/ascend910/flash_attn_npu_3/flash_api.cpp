@@ -191,8 +191,13 @@ std::vector<at::Tensor> mha_fwd(
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (window_size_left != -1 || window_size_right != -1) {
-            TORCH_CHECK(!page_table_ && (cu_seqlens_q_.has_value() == cu_seqlens_k_.has_value()),
-                        "MLA window forward is not implemented yet outside nonpaged BSND or TND Q/KV");
+            TORCH_CHECK(!page_table_, "MLA window forward is not implemented yet outside nonpaged layouts");
+            if (cu_seqlens_q_ && !cu_seqlens_k_) {
+                TORCH_CHECK(max_seqlen_q_, "MLA: mixed TND/BSND requires max_seqlen_q");
+                return flash_attn::mla::WindowMixedForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_, scale,
+                                                           window_size_left, window_size_right, is_causal, seqused_k_,
+                                                           seqused_q_, scheduler_metadata_);
+            }
             if (cu_seqlens_q_) {
                 TORCH_CHECK(!scheduler_metadata_, "MLA window TND explicit metadata is not implemented yet");
                 TORCH_CHECK(max_seqlen_q_ && max_seqlen_k_, "MLA: window TND requires max_seqlen_q/k");
@@ -800,8 +805,12 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                     "legacy numerical options");
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
         if (window_size_left != -1 || window_size_right != -1) {
-            TORCH_CHECK(!page_size && !cu_seqlens_q,
-                        "MLA window metadata is not implemented yet outside nonpaged BSND");
+            TORCH_CHECK(!page_size, "MLA window metadata is not implemented yet outside nonpaged BSND or mixed cache");
+            if (cu_seqlens_q) {
+                return flash_attn::mla::WindowMixedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q,
+                                                              dtype, cache_seqlens, *cu_seqlens_q, window_size_left,
+                                                              window_size_right, causal);
+            }
             return flash_attn::mla::WindowBsndMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, dtype,
                                                          cache_seqlens, window_size_left, window_size_right, causal);
         }
