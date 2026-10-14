@@ -33,6 +33,7 @@
 - [C++ 校验与调度](https://github.com/Dao-AILab/flash-attention/blob/d15f1531a460ba456f41b01a774f33ab2db8febf/hopper/flash_api.cpp)：`mha_fwd`、`mha_fwd_get_scheduler_metadata`；以实际分支为准，不仅看 docstring。
 - [官方测试](https://github.com/Dao-AILab/flash-attention/blob/d15f1531a460ba456f41b01a774f33ab2db8febf/hopper/test_flash_attn.py)：`has_qv`、异维 Q/V、varlen、kvcache、metadata 的组合。
 - [split 合并](https://github.com/Dao-AILab/flash-attention/blob/d15f1531a460ba456f41b01a774f33ab2db8febf/hopper/flash_fwd_combine_kernel.h)：部分结果与 LSE 的合并行为。
+- [split 块范围](https://github.com/Dao-AILab/flash-attention/blob/d15f1531a460ba456f41b01a774f33ab2db8febf/hopper/block.h)：在 mask 范围内按 ceil-div 分片；M10a 只复用分片规则，逻辑 tile 与 mask 范围仍取 CANN。
 - [softmax](https://github.com/Dao-AILab/flash-attention/blob/d15f1531a460ba456f41b01a774f33ab2db8febf/hopper/softmax.h) 的 `finalize` 与 [写回](https://github.com/Dao-AILab/flash-attention/blob/d15f1531a460ba456f41b01a774f33ab2db8febf/hopper/epilogue_fwd.hpp) 的 `store` / `store_zero`：全遮罩行及 kernel 内空 KV 的 O/LSE；不能只参考 host 的全局空张量分支。
 
 CANN 根目录：`/home/zhangqijia/repo/ops-transformer/attention/fused_infer_attention_score`。下列路径均相对于此目录：
@@ -571,6 +572,26 @@ M08b1 在 [`MlaTaskRing`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_d
 [`WindowMask`](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_causal_mask.hpp) 对齐 S1G 行，在既有右界遮罩上增加左界遮罩；沿用源 `ElewiseCompute` 的有限负值哨兵和原 softmax/aMLA 舍入。规范窗口没有额外空尾行，前导全遮罩行复用 causal epilogue：O=0、LSE=-inf；全局空非 PA KV 容量仍为 +inf。归一化为 causal/无 mask 的情况由同一组件显式分类处理，不将调用级上界替换成当前 used 长度。窗口数值特化不改变共享 Cube、Copy、地址或 CPU 调度算法；v12 的 metadata 接入另见 [5.14](#514-v12bsnd-window-记录)。
 
 [`独立 window probe`](../../tests/mla/support/mla_window_attention_probe.cpp) 编译未修改的固定 CANN Kernel，传真实 2048×2048 bool 压缩三角 mask、band sparse mode 4 和独立归一化的 pre/next；causal/无 mask 分别使用 3/0。双方使用同一非 FD 完整 M 调度，源的 int64 KV 长度直接来自原始用例。双数学 reference 从原始有效长度切片、按调用级参数独立归一化，并复用内容缓存；不读取迁移后的范围或任务描述。检查非空 O/LSE 逐元素源一致，空行先单独验源 +inf 与 FA3 符号适配，源精度限制仍按第 7 节记录。组件性能只比较同调度固定源与迁移 Kernel 和预分配 probe 调用，不称公开 E2E。验收结果只在 status 维护。
+
+#### 6.2.8 独立 CPU split-KV 分区与布局
+
+[`mla_split_kv.h/.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_kv.h) 是 M10a 独立 CPU 组件，只由测试驱动编译。它不定义 metadata、不发射设备计算，也未加入生产构建；公开入口仍只接受 `num_splits=1`。调用方先完成既有 allocation/used 解析，传入有效长度、调用级窗口上界和逻辑 M/S2 基块。复用 6.2.6 的归一化、mask 范围及 6.2.4 的字段/tile/核数校验，不改变这些共享组件。
+
+| 接口 | 独立协议与边界 |
+| --- | --- |
+| `BuildNativeSplitKvSchedule` | 保留固定源 `SplitCore` 的完整三元端点、所有 FD 归约字段、最大/总成本、M/S2 块数；FD 归约行基块为 8，C1V1/C1V2 按真实 vector 长度复制并清零余项。原生端点允许省略零成本行，后续设备步骤必须独立初始化其输出。 |
+| `ResolveSplitKvRequest` | 固定 FA3 的 `<=0` 为自动、1 禁止 split、2..256 显式。自动数量由后端传入，须为 1..256；原生无 FD 时取 1，有 FD 时可用 `maxS2SplitNum` 作为上界。这里不实现 CUDA occupancy heuristic，也不把 CANN 原生变长分区说成均匀显式分片。正请求超过 256 在窄化前拒绝。 |
+| `BuildSplitKvBlock` | 接收已解析的分片数和索引，在每个 M 块的 mask S2 区间 `[a,b)` 中按 `ceil((b-a)/S)` 分片。空尾片规范为 `[b,b)`，key 区间规范为 `[kvEnd,kvEnd)`，成本为零；非空片沿用正常/尾块成本，所有片覆盖且不重叠。边界 tile 仍需逐行 mask。 |
+| `BuildSplitKvWorkspace` | 给出固定 CANN 内部缓冲的元素数、字节偏移及 host 预算；调用方已选定 M/N 和最大有效 Q 行数。它不是全局空 tensor 分派，也不产生公共 accumulator。 |
+| `BuildSplitAccumulatorLayout` / `GetSplitAccumulatorOffsets` | 描述 FA3 公共 FP32 accumulator 的容量 shape、连续元素 stride 与行字节偏移；BSND 为 `[S,B,H,Q,512]` / `[S,B,H,Q]`，TND 为 `[S,H,T,512]` / `[S,H,T]`。Q/T 是分配容量，used 不压紧间隙；TND 查询为绝对分配 token，batch 坐标须为 0。S=1 返回无存储描述，坐标查询拒绝。 |
+
+内部 workspace 仍有每核两个 GM 槽：QK FP32、P FP16/BF16、PV FP32、Vector FP32，其偏移按 `blockDim` 计算。host 正常预算按 `aicNum`，保留源额外的 aMLA nUpdate/softmaxSum 记账。启用 FD 后接续 `aicNum*2*M*512` 个 FP32 O 元素和 `aicNum*2*2*M*8` 个 FP32 sum/max 元素；sum/max 各占后一缓冲的一半。这些是源未归一的部分 O 与 sum/max，不能作为 FA3 O/LSE accumulator 返回。FD 关闭时仍保留 tiling 的元素数字段，但不分配 FD 段。零 Q 行的原始 workspace 公式仍保留 host 记账；全局空分派后续须显式处理，不能套用该公式宣称运行过空值计算。
+
+所有构造与地址查询失败均保持输出不变。workspace 总字节数及 accumulator stride/字节数须可表示为非负 int64；乘加前检查，不能依赖 uint64 回绕。S=1 的无存储描述不是一个占位数值 tensor；S>1 的空容量保留 FA3 shape 和 PyTorch 连续 stride。这里只证明布局可表示，实际设备分配、空片初始化、partial attention、合并数值及生产/公开接入分别按后续步骤验收。
+
+[`split_kv 单元测试`](../../tests/mla/unit/split_kv/test_split_kv.py) 编译固定 CANN Git blob 的 `SplitCore` 和 workspace 函数；FA3 请求、shape 和显式分片片段从固定哈希源码提取。独立 Python 枚举检查每个 S2 tile 的唯一归属、FD 归约次数与行拆分、vector 归约端点、mask/空片、buffer 不重叠及 allocation 地址；stride 另与 CPU torch meta tensor 对照。普通与 ASan/UBSan 运行同一集合。源读取及编译身份在 [`mla_split_kv_build.py`](../../tests/mla/support/mla_split_kv_build.py) 管理，读取 CANN 固定 Git blob，不依赖源仓当前 HEAD。
+
+FA3 oracle 与 window 共用 `MLA_FA3_SOURCE_ROOT`（默认 `/tmp/mla-fa3-reference/d15f1531a460ba456f41b01a774f33ab2db8febf`）；本模块另需该提交的 `hopper/block.h`，SHA-256 为 `4c9b132fdbff869716ca673f087cf2ede20f041fa8923c2f181394b716981083`。缺失或哈希不符直接失败；每次验收保存原文件、许可证、提取片段、编译命令、二进制哈希和完整请求/响应，不依赖旧通过记录来跳过编译或执行。
 
 ### 6.3 长度与布局调度
 

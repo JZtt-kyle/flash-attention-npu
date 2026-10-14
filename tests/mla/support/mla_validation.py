@@ -561,6 +561,12 @@ SUITES = {
     "causal-cpu": [CAUSAL_CPU],
     "causal-sanitize": [CAUSAL_CPU],
 }
+INCREMENTAL_SUITES.update(
+    {
+        "split-kv-sanitize": ["tests/mla/unit/split_kv/test_split_kv.py"],
+        "split-kv-tools": ["tests/mla/unit/tools/test_mla_split_kv_tools.py"],
+    }
+)
 SUITES.update(INCREMENTAL_SUITES)
 USED_SHARED_CPU = [relocated(path) for path in USED_SHARED_CPU]
 
@@ -613,6 +619,9 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "unit-split_kv",
+    "split-kv-sanitize",
+    "split-kv-tools",
     "unit-tools",
     "unit-window_paged_tnd",
     "window-paged-tnd-cpu",
@@ -660,6 +669,10 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
+    if suite in {"unit-split_kv", "split-kv-sanitize"}:
+        from tests.mla.support.mla_split_kv_build import split_toolchain_identity
+
+        return split_toolchain_identity(suite.endswith("sanitize"))
     if suite in {
         "window-cpu",
         "window-sanitize",
@@ -865,6 +878,8 @@ def environment(args, directory, suite):
     if suite in WINDOW_DEVICE_SUITES:
         env["MLA_WINDOW_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "unit-split_kv",
+        "split-kv-sanitize",
         "unit-window_paged_tnd",
         "window-paged-tnd-cpu",
         "window-paged-cpu",
