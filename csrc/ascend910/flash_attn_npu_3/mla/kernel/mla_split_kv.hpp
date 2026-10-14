@@ -29,4 +29,17 @@ class MlaSplitKvBsnd : private MlaTaskRing<InputT, true, false, false, false, fa
                   nullptr, nullptr, partial.window, &partial);
     }
 };
+// Production uses allocation/used spans and the existing independent input
+// layouts. The launch wrapper supplies one persistent fragment per iteration.
+template <typename InputT>
+class MlaSplitKvUsedBsnd : private MlaTaskRing<InputT, true, false, false, true, true, false, false, true, true> {
+  public:
+    __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
+                                      GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace, TPipe* pipe,
+                                      GM_ADDR spans, const MlaBsndInputLayouts& layouts)
+    {
+        this->Run(s, scale, qc, qr, kv, kr, workspace, workspace, workspace, pipe, spans, 0, &layouts, false, nullptr,
+                  nullptr, p.window, &p);
+    }
+};
 } // namespace flash_attn::mla::Kernel

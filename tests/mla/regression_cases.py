@@ -49,4 +49,10 @@ def daily_suites():
     suites["dense"] += [
         f"{path}::test_unopened_options[{name}]" for name in ("num_splits", "softcap")
     ]
+    split = "tests/mla/e2e/split_kv_bsnd/test_public.py"
+    suites["split_kv_bsnd"] = [
+        f"{split}::test_daily",
+        f"{split}::test_empty",
+        f"{split}::test_fake_and_compile",
+    ]
     return suites

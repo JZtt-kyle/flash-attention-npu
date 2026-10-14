@@ -26,8 +26,10 @@ FUNC_SEGMENTS = {
 
 
 def input_identity(row):
-    keys = ("shape", "scale", "lengths", "stride_profile") + (
-        ("window", "causal") if "window" in row else ()
+    keys = (
+        ("shape", "scale", "lengths", "stride_profile")
+        + (("window", "causal") if "window" in row else ())
+        + (("num_splits",) if "num_splits" in row else ())
     )
     return {name: row[name] for name in keys}
 

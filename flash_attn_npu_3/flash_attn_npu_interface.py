@@ -249,6 +249,7 @@ def _check_mla_dense_options(
     sm_margin=0,
     rotary_interleaved=True,
     optional_tensors=(),
+    allow_split=False,
 ):
     if any(t is not None for t in optional_tensors) or not rotary_interleaved:
         raise RuntimeError(
@@ -259,7 +260,7 @@ def _check_mla_dense_options(
         or (window_size != (-1, -1) and not allow_window)
         or attention_chunk != 0
         or softcap != 0.0
-        or num_splits != 1
+        or (num_splits != 1 and not (allow_split and 2 <= num_splits <= 256))
         or pack_gqa is not None
         or sm_margin != 0
     ):
@@ -666,6 +667,80 @@ def _mla_paged_tnd_forward_fake(
     )
 
 
+def _mla_split_bsnd_words(batch):
+    if not 0 <= batch <= (2**32 - 1 - 416) // 10:
+        raise RuntimeError("MLA: split metadata word count overflow")
+    return 416 + 10 * batch
+
+
+def _check_mla_split_bsnd(q, k, lengths, used_q, metadata, splits, left, right, causal):
+    if not 2 <= splits <= 256:
+        raise RuntimeError("MLA: explicit split requires num_splits in [2,256]")
+    batch, sq, heads = q.shape[:3]
+    _normalize_mla_window(sq, k.shape[1], left, right, causal)
+    _check_mla_used(q, batch, used_q, lengths)
+    words = _mla_split_bsnd_words(batch)
+    if metadata is not None:
+        if used_q is not None:
+            raise RuntimeError(
+                "MLA compressed forward is not implemented yet for Q-used with explicit metadata"
+            )
+        if (
+            metadata.device != q.device
+            or metadata.dtype != torch.int32
+            or metadata.ndim != 1
+            or metadata.numel() != words
+            or not metadata.is_contiguous()
+        ):
+            raise RuntimeError(
+                "MLA: split scheduler_metadata must be same-device contiguous int32[416 + 10 * batch_size]"
+            )
+    # Match the host's conservative M=256,N=512 envelope before allocating fake tensors.
+    if batch and sq and k.shape[1]:
+        rows = batch * ((sq * heads + 255) // 256) * splits * 256
+        if rows * 528 * 4 + 2 * 26 * (6 * 256 * 512 + 8 * 256 * 512 + 8 * 256) > 2**63 - 1:
+            raise RuntimeError("MLA: split workspace or accumulator overflow")
+    if splits * batch * heads * sq * 512 * 4 > 2**63 - 1:
+        raise RuntimeError("MLA: split workspace or accumulator overflow")
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_split_bsnd_forward")
+def _mla_split_bsnd_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    num_splits,
+    window_left=-1,
+    window_right=-1,
+    causal=False,
+    softmax_scale=None,
+    cache_seqlens=None,
+    seqused_q=None,
+    scheduler_metadata=None,
+):
+    _check_mla_inputs(q, k, v, qv)
+    _check_mla_dense_options(softmax_scale=softmax_scale)
+    _check_mla_split_bsnd(
+        q,
+        k,
+        cache_seqlens,
+        seqused_q,
+        scheduler_metadata,
+        num_splits,
+        window_left,
+        window_right,
+        causal,
+    )
+    batch, sq, heads = q.shape[:3]
+    return (
+        q.new_empty((batch, sq, heads, 512)),
+        q.new_empty((batch, heads, sq), dtype=torch.float32),
+        q.new_empty((num_splits, batch, heads, sq, 512), dtype=torch.float32),
+        q.new_empty((num_splits, batch, heads, sq), dtype=torch.float32),
+    )
+
+
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_window_bsnd_forward")
 def _mla_window_bsnd_forward_fake(
     q,
@@ -1042,6 +1117,7 @@ def _flash_attn_forward(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
+            allow_split=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -1062,6 +1138,21 @@ def _flash_attn_forward(
                 v_descale,
             ),
         )
+        if num_splits > 1:
+            return torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
+                q,
+                k,
+                v,
+                qv,
+                num_splits,
+                window_size_left,
+                window_size_right,
+                causal,
+                softmax_scale,
+                seqused_k,
+                seqused_q,
+                scheduler_metadata,
+            )
         if page_table is not None:
             _check_mla_paged_inputs(
                 q,
@@ -1241,6 +1332,7 @@ def _flash_attn_forward_fake(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
+            allow_split=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -1261,6 +1353,21 @@ def _flash_attn_forward_fake(
                 v_descale,
             ),
         )
+        if num_splits > 1:
+            return _mla_split_bsnd_forward_fake(
+                q,
+                k,
+                v,
+                qv,
+                num_splits,
+                window_size_left,
+                window_size_right,
+                causal,
+                softmax_scale,
+                seqused_k,
+                seqused_q,
+                scheduler_metadata,
+            )
         if page_table is not None:
             _check_mla_paged_inputs(
                 q,
@@ -2224,7 +2331,11 @@ def flash_attn_func(
     """
     # Causal MLA is forward-only. Its real/fake dispatcher validates every
     # tensor, including rejecting gradients, without an autograd context.
-    if (causal or window_size != (-1, -1)) and qv is not None and q.device.type == "npu":
+    if (
+        (causal or window_size != (-1, -1) or num_splits > 1)
+        and qv is not None
+        and q.device.type == "npu"
+    ):
         _check_mla_dense_options(
             causal=causal,
             allow_causal=True,
@@ -2233,11 +2344,16 @@ def flash_attn_func(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
+            allow_split=True,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             optional_tensors=(q_descale, k_descale, v_descale),
         )
-        if window_size != (-1, -1):
+        if num_splits > 1:
+            out, softmax_lse, _, _ = torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
+                q, k, v, qv, num_splits, window_size[0], window_size[1], causal, softmax_scale
+            )
+        elif window_size != (-1, -1):
             out, softmax_lse = torch.ops.flash_attn_npu_3._mla_window_bsnd_forward(
                 q, k, v, qv, window_size[0], window_size[1], causal, softmax_scale
             )
@@ -2554,6 +2670,7 @@ def flash_attn_with_kvcache(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
+            allow_split=cu_seqlens_q is None and page_table is None,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -2608,6 +2725,22 @@ def flash_attn_with_kvcache(
                 dtype=torch.int32,
                 device=k_cache.device,
             )
+        if num_splits > 1:
+            result = torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
+                q,
+                k_cache,
+                v_cache,
+                qv,
+                num_splits,
+                window_size[0],
+                window_size[1],
+                causal,
+                softmax_scale,
+                cache_seqlens,
+                None,
+                scheduler_metadata,
+            )
+            return result if return_softmax_lse else result[0]
         if page_table is not None and cu_seqlens_q is not None:
             out, softmax_lse = torch.ops.flash_attn_npu_3._mla_paged_tnd_forward(
                 q,
@@ -2918,6 +3051,7 @@ def _check_mla_metadata_options(
     optional_args,
     allow_causal=False,
     allow_window=False,
+    allow_split=False,
 ):
     if num_heads_kv != 1:
         raise RuntimeError(
@@ -2930,7 +3064,7 @@ def _check_mla_metadata_options(
         or (window_size != (-1, -1) and not allow_window)
         or attention_chunk != 0
         or has_softcap
-        or num_splits != 1
+        or (num_splits != 1 and not (allow_split and 2 <= num_splits <= 256))
         or sm_margin != 0
     ):
         raise RuntimeError(
@@ -2994,6 +3128,30 @@ def _mla_causal_mixed_metadata_fake(
     )
     return torch.empty(
         (_mla_causal_bsnd_words(batch_size),), dtype=torch.int32, device=cache_seqlens.device
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_split_bsnd_metadata")
+def _mla_split_bsnd_metadata_fake(
+    batch_size,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_heads_q,
+    qkv_dtype,
+    cache_seqlens,
+    window_left,
+    window_right,
+    causal,
+    num_splits,
+):
+    _mla_causal_bsnd_metadata_fake(
+        batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
+    )
+    _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
+    if not 2 <= num_splits <= 256:
+        raise RuntimeError("MLA: explicit split requires num_splits in [2,256]")
+    return torch.empty(
+        (_mla_split_bsnd_words(batch_size),), dtype=torch.int32, device=cache_seqlens.device
     )
 
 
@@ -3250,7 +3408,21 @@ def _get_scheduler_metadata_fake(
             ),
             allow_causal=True,
             allow_window=True,
+            allow_split=cu_seqlens_q is None and page_size is None,
         )
+        if num_splits > 1:
+            return _mla_split_bsnd_metadata_fake(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                qkv_dtype,
+                cache_seqlens,
+                window_size_left,
+                window_size_right,
+                causal,
+                num_splits,
+            )
         if page_size is not None:
             return _mla_paged_metadata_fake(
                 batch_size,
@@ -3392,7 +3564,21 @@ def get_scheduler_metadata(
             ),
             allow_causal=True,
             allow_window=True,
+            allow_split=cu_seqlens_q is None and page_size is None,
         )
+        if num_splits > 1:
+            return torch.ops.flash_attn_npu_3._mla_split_bsnd_metadata(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                qkv_dtype,
+                cache_seqlens,
+                window_size[0],
+                window_size[1],
+                causal,
+                num_splits,
+            )
         if page_size is not None:
             return torch.ops.flash_attn_npu_3._mla_paged_metadata(
                 batch_size,

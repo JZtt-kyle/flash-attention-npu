@@ -7,6 +7,9 @@
 #include "mla_used_metadata_args.h"
 #include "mla_causal_metadata.h"
 #include "mla_window_metadata.h"
+#include "mla_split_bsnd_metadata.h"
+#include "mla_split_bsnd_launch.h"
+#include "mla_split_kv_plan.h"
 #include "mla_window_paged_metadata.h"
 #include "mla_paged_metadata_args.h"
 #include "mla_paged_launch.h"
@@ -33,6 +36,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadataFromPrefix(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaSplitBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowTndMetadata(void* args);
@@ -154,10 +158,16 @@ struct MetadataSubmission {
     std::shared_ptr<const MlaCausalFullSchedule> fullSchedule;
     bool queryTotalFromPrefix = false;
     std::optional<MlaWindowConfig> window;
+    int64_t splits = 1;
 
     void Enqueue()
     {
         if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs>) {
+            if (splits > 1) {
+                MlaSplitBsndMetadataArgs splitArgs{args, *window, splits};
+                ComputeMlaSplitBsndMetadata<<<1, nullptr, current>>>(&splitArgs, sizeof(splitArgs));
+                return;
+            }
             if (window) {
                 MlaWindowMetadataArgs windowArgs{args, *window};
                 if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
@@ -400,6 +410,43 @@ MlaWindowKernelParams CheckWindow(const MlaWindowConfig& config)
     return {uint32_t(normalized.kind), normalized.left, normalized.right};
 }
 } // namespace
+
+at::Tensor SplitBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, at::ScalarType dtype,
+                               const at::Tensor& cacheSeqlens, int64_t windowLeft, int64_t windowRight, bool causal,
+                               int64_t splits)
+{
+    TORCH_CHECK(FitsDenseShape(batch, sq, heads, sk), "MLA: causal BSND shape bounds exceeded");
+    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
+    CheckCacheLengths(cacheSeqlens, batch, cacheSeqlens.device());
+    CheckUsedInputs(cacheSeqlens, batch, std::nullopt, cacheSeqlens);
+    TORCH_CHECK(splits >= 2 && splits <= 256, "MLA: explicit split requires num_splits in [2,256]");
+    uint32_t words;
+    TORCH_CHECK(SplitBsndMetadataWords(batch, words), "MLA: window metadata word count overflow");
+    MlaWindowConfig config{sq, sk, windowLeft, windowRight, causal};
+    CheckWindow(config);
+    const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
+    auto metadata = at::empty({words}, cacheSeqlens.options());
+    const auto address = reinterpret_cast<uint64_t>(batch == 0 ? metadata.data_ptr() : cacheSeqlens.data_ptr());
+    MlaUsedMetadataArgs args{
+        reinterpret_cast<uint64_t>(metadata.data_ptr()),
+        words,
+        uint32_t(dtype == at::kBFloat16 ? MlaMetadataDtype::Bf16 : MlaMetadataDtype::Fp16),
+        {batch, heads, {MlaSequenceLayout::Bsnd, batch * sq, sq}, {MlaSequenceLayout::Bsnd, batch * sk, sk}},
+        CausalPlatform(cacheSeqlens.device().index(), batch != 0 && sq != 0 && sk != 0),
+        {},
+        {},
+        {},
+        {address, uint64_t(batch)}};
+    auto producer = PrepareSubmission(metadata, args, std::nullopt, std::nullopt, true, std::nullopt,
+                                      std::optional<at::Tensor>(cacheSeqlens), true);
+    producer.window = config;
+    producer.splits = splits;
+    RunCausalLaunch("ascendc_mla_split_metadata", [producer]() mutable -> int {
+        producer.Enqueue();
+        return 0;
+    });
+    return metadata;
+}
 
 at::Tensor WindowBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, at::ScalarType dtype,
                                 const at::Tensor& cacheSeqlens, int64_t windowLeft, int64_t windowRight, bool causal)
@@ -921,11 +968,14 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
                                     const std::optional<at::Tensor>& cuK, const std::optional<at::Tensor>& usedQuery,
                                     const std::optional<at::Tensor>& usedKv, float scale, bool causal = false,
                                     const std::optional<at::Tensor>& schedulerMetadata = std::nullopt,
-                                    const std::optional<MlaWindowConfig>& window = std::nullopt)
+                                    const std::optional<MlaWindowConfig>& window = std::nullopt, int64_t splits = 1)
 {
     uint32_t words = CheckUsedInputs(q, shape.batch, usedQuery, usedKv);
     if (window) {
         TORCH_CHECK(WindowMetadataWords(shape.batch, words), "MLA: window metadata word count overflow");
+    }
+    if (splits > 1) {
+        TORCH_CHECK(SplitBsndMetadataWords(shape.batch, words), "MLA: split metadata word count overflow");
     }
     const int64_t batch = shape.batch, sq = shape.query.maxLength, heads = shape.queryHeads, sk = shape.kv.maxLength;
     const bool tnd = shape.query.layout == MlaSequenceLayout::Tnd;
@@ -937,13 +987,23 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     // Static allocation bounds only; source scheduling reads used on AICPU.
     const uint64_t m = (std::min(uint64_t(sq) * heads, uint64_t(256)) + 15) / 16 * 16;
     const uint64_t n = (std::min(uint64_t(sk), uint64_t(512)) + 31) / 32 * 32;
-    const uint64_t userBytes = nonempty ? uint64_t(2) * p.aicNum * (6 * m * n + 8 * m * 512 + 8 * 256) : 0;
+    uint64_t userBytes = nonempty ? uint64_t(2) * p.aicNum * (6 * m * n + 8 * m * 512 + 8 * 256) : 0;
     const uint64_t libBytes = nonempty ? p.libApiWorkspaceBytes : 0;
+    if (splits > 1) {
+        MlaSplitKvPlanLayout layout{};
+        TORCH_CHECK(BuildSplitKvPlanLayout({batch, sq, sk, heads, 256, 512, splits, p.aicNum,
+                                            p.blockDims[nonempty ? p.aicNum - 1 : 0], 2, libBytes},
+                                           layout) == MlaScheduleStatus::Success,
+                    "MLA: split workspace or accumulator overflow");
+        userBytes = layout.userBytes;
+    }
     TORCH_CHECK(libBytes <= uint64_t(INT64_MAX) - userBytes, "MLA: workspace overflow");
     auto out = tnd ? at::empty({shape.query.totalTokens, heads, 512}, q.options())
                    : at::empty({batch, sq, heads, 512}, q.options());
     auto lse = tnd ? at::empty({heads, shape.query.totalTokens}, q.options().dtype(at::kFloat))
                    : at::empty({batch, heads, sq}, q.options().dtype(at::kFloat));
+    auto accum = splits > 1 ? at::empty({splits, batch, heads, sq, 512}, q.options().dtype(at::kFloat)) : at::Tensor();
+    auto accumLse = splits > 1 ? at::empty({splits, batch, heads, sq}, q.options().dtype(at::kFloat)) : at::Tensor();
     auto workspace = at::empty({static_cast<int64_t>(userBytes + libBytes)}, q.options().dtype(at::kByte));
     auto metadata = schedulerMetadata ? *schedulerMetadata : at::empty({words}, q.options().dtype(at::kInt));
     const auto checkAddress = [](const at::Tensor& t) {
@@ -982,6 +1042,7 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     if (!schedulerMetadata) {
         producer = PrepareSubmission(metadata, args, cuK, cuQ, true, usedQuery, usedKv, causal || window.has_value());
         producer->window = window;
+        producer->splits = splits;
         if (causal && !tnd) {
             producer->fullSchedule = CausalFullSchedule(shape, p, q.device().index(), dtype);
         }
@@ -1036,13 +1097,19 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
                  p.localMemory};
     a.inputs = {args.cuQuery, args.cuKv, args.usedQuery, args.usedKv};
     a.scale = scale;
-    const auto launch = [a, producer, q, k, v, qv, out, lse, workspace, metadata, cuQ, cuK, usedQuery, usedKv,
-                         tnd]() mutable -> int {
+    const auto launch = [a, producer, q, k, v, qv, out, lse, workspace, metadata, cuQ, cuK, usedQuery, usedKv, tnd,
+                         splits, accum, accumLse]() mutable -> int {
         if (producer) {
             producer->Enqueue();
         }
-        auto error = tnd ? (q.scalar_type() == at::kBFloat16 ? LaunchTndUsedBf16(a) : LaunchTndUsedFp16(a))
-                         : (q.scalar_type() == at::kBFloat16 ? LaunchBsndUsedBf16(a) : LaunchBsndUsedFp16(a));
+        aclError error;
+        if (splits > 1) {
+            MlaSplitBsndLaunchArgs splitArgs{a, uint32_t(splits), static_cast<uint8_t*>(accum.data_ptr()),
+                                             static_cast<uint8_t*>(accumLse.data_ptr())};
+            error = q.scalar_type() == at::kBFloat16 ? LaunchSplitBsndBf16(splitArgs) : LaunchSplitBsndFp16(splitArgs);
+        } else
+            error = tnd ? (q.scalar_type() == at::kBFloat16 ? LaunchTndUsedBf16(a) : LaunchTndUsedFp16(a))
+                        : (q.scalar_type() == at::kBFloat16 ? LaunchBsndUsedBf16(a) : LaunchBsndUsedFp16(a));
         TORCH_CHECK(error == ACL_SUCCESS, "MLA: used BATCH_MODE kernel launch failed (", error, ")");
         return 0;
     };
@@ -1051,7 +1118,14 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
     } else {
         at_npu::native::OpCommand::RunOpApiV2(tnd ? "ascendc_mla_tnd_used" : "ascendc_mla_bsnd_used", launch);
     }
-    return {out, lse, at::Tensor(), at::Tensor()};
+    if (splits > 1 && !nonempty) {
+        // Stream-ordered after both consumers validate even an empty record.
+        out.zero_();
+        lse.fill_(std::numeric_limits<float>::infinity());
+        accum.zero_();
+        accumLse.fill_(-std::numeric_limits<float>::infinity());
+    }
+    return {out, lse, accum, accumLse};
 }
 } // namespace
 
@@ -1064,6 +1138,55 @@ std::vector<at::Tensor> BsndUsedForward(const at::Tensor& q, const at::Tensor& k
         q, k, v, qv,
         {batch, heads, {MlaSequenceLayout::Bsnd, batch * sq, sq}, {MlaSequenceLayout::Bsnd, batch * sk, sk}},
         std::nullopt, std::nullopt, usedQuery, usedKv, scale);
+}
+
+std::vector<at::Tensor> SplitBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                         const at::Tensor& qv, float scale, int64_t windowLeft, int64_t windowRight,
+                                         bool causal, int64_t splits, const std::optional<at::Tensor>& cacheSeqlens,
+                                         const std::optional<at::Tensor>& usedQuery,
+                                         const std::optional<at::Tensor>& schedulerMetadata)
+{
+    CheckForwardBoundary(q, k, v, qv, false, false, false);
+    TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
+    TORCH_CHECK(!usedQuery || !schedulerMetadata,
+                "MLA compressed forward is not implemented yet for Q-used with explicit metadata");
+    const int64_t batch = q.size(0), sq = q.size(1), heads = q.size(2), sk = k.size(1);
+    CheckUsedInputs(q, batch, usedQuery, cacheSeqlens);
+    TORCH_CHECK(splits >= 2 && splits <= 256, "MLA: explicit split requires num_splits in [2,256]");
+    uint32_t words;
+    TORCH_CHECK(SplitBsndMetadataWords(batch, words), "MLA: window metadata word count overflow");
+    MlaWindowConfig config{sq, sk, windowLeft, windowRight, causal};
+    CheckWindow(config);
+    if (schedulerMetadata) {
+        TORCH_CHECK(schedulerMetadata->scalar_type() == at::kInt && schedulerMetadata->dim() == 1 &&
+                        schedulerMetadata->numel() == words && schedulerMetadata->is_contiguous(),
+                    "MLA: split scheduler_metadata must be contiguous int32[416 + 10 * batch_size]");
+        TORCH_CHECK(schedulerMetadata->device() == q.device(),
+                    "MLA: scheduler_metadata must be on the same NPU device");
+    }
+    const c10::OptionalDeviceGuard deviceGuard(device_of(q));
+    // Explicit public records carry KV lengths. Only their None-length reuse
+    // needs a matching array; private records can use the existing absent-KV
+    // semantics to derive full capacity without a separate fill task.
+    auto lengths = cacheSeqlens;
+    if (schedulerMetadata && !lengths) {
+        lengths = at::full({batch}, sk, q.options().dtype(at::kInt));
+    }
+    return UsedForward(
+        q, k, v, qv,
+        {batch, heads, {MlaSequenceLayout::Bsnd, batch * sq, sq}, {MlaSequenceLayout::Bsnd, batch * sk, sk}},
+        std::nullopt, std::nullopt, usedQuery, lengths, scale, false, schedulerMetadata, config, splits);
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+SplitBsndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv, int64_t splits,
+                   int64_t left, int64_t right, bool causal, std::optional<double> scale,
+                   const std::optional<at::Tensor>& lengths, const std::optional<at::Tensor>& usedQ,
+                   const std::optional<at::Tensor>& metadata)
+{
+    auto r = SplitBsndForward(q, k, v, qv, scale ? float(*scale) : 1.0f / std::sqrt(576.0f), left, right, causal,
+                              splits, lengths, usedQ, metadata);
+    return {r[0], r[1], r[2], r[3]};
 }
 
 std::vector<at::Tensor> WindowBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -1592,6 +1715,13 @@ std::tuple<at::Tensor, at::Tensor> DenseForwardOp(const at::Tensor& q, const at:
 
 TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 {
+    m.def("_mla_split_bsnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, int num_splits, "
+          "int window_left=-1, int window_right=-1, bool causal=False, float? softmax_scale=None, "
+          "Tensor? cache_seqlens=None, Tensor? seqused_q=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor, "
+          "Tensor, Tensor)");
+    m.def("_mla_split_bsnd_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
+          "ScalarType qkv_dtype, Tensor cache_seqlens, int window_left, int window_right, bool causal, int num_splits) "
+          "-> Tensor");
     m.def("_mla_window_mixed_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
           "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q, int window_left, int window_right, bool "
           "causal) -> Tensor");
@@ -1658,6 +1788,7 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
 {
+    m.impl("_mla_split_bsnd_metadata", &flash_attn::mla::SplitBsndMetadataOp);
     m.impl("_mla_window_mixed_metadata", &flash_attn::mla::WindowMixedMetadataOp);
     m.impl("_mla_causal_mixed_metadata", &flash_attn::mla::CausalMixedMetadataOp);
     m.impl("_mla_window_bsnd_metadata", &flash_attn::mla::WindowBsndMetadataOp);
@@ -1671,6 +1802,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
 {
+    m.impl("_mla_split_bsnd_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_window_mixed_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_causal_mixed_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_window_bsnd_metadata", torch::CppFunction::makeFallthrough());
@@ -1684,6 +1816,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
 {
+    m.impl("_mla_split_bsnd_forward", &flash_attn::mla::SplitBsndForwardOp);
     m.impl("_mla_window_mixed_forward", &flash_attn::mla::WindowMixedForwardOp);
     m.impl("_mla_causal_mixed_forward", &flash_attn::mla::CausalMixedForwardOp);
     m.impl("_mla_window_mixed_cache", &flash_attn::mla::WindowMixedCacheOp);
@@ -1703,6 +1836,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, AutogradPrivateUse1, m)
 {
+    m.impl("_mla_split_bsnd_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_window_mixed_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_causal_mixed_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_window_mixed_cache", torch::CppFunction::makeFallthrough());

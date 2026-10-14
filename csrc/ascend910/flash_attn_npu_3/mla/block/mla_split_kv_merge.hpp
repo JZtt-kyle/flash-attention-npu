@@ -59,7 +59,7 @@ class MlaSplitKvMerge {
         }
         int64_t lo = params.begin[split], hi = params.end[split];
         const int64_t query = (params.rowStart + row) / params.heads;
-        const int64_t center = query + int64_t(params.kvLength) - params.sq;
+        const int64_t center = query + int64_t(params.kvLength) - (params.queryLength ? params.queryLength : params.sq);
         if (params.maskKind == 1) {
             hi = Min(hi, center + 1);
         } else if (params.maskKind == 2) {

@@ -57,6 +57,9 @@ USED_SHARED_CPU = [
 SPLIT_KV_ATTENTION = "tests/mla/unit/split_kv_attention/test_attention.py"
 SPLIT_KV_MERGE = "tests/mla/unit/split_kv_merge/test_merge.py"
 SPLIT_KV_MERGE_SUITES = {
+    "split-bsnd",
+    "split-bsnd-source",
+    "unit-split_kv_bsnd",
     "unit-split_kv_merge",
     "split-kv-merge-check",
     "split-kv-merge",
@@ -69,6 +72,17 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "split-bsnd-cpu": ["tests/mla/unit/split_kv_bsnd/test_metadata.py"],
+    "split-bsnd-sanitize": ["tests/mla/unit/split_kv_bsnd/test_metadata.py"],
+    "split-bsnd-tools": ["tests/mla/unit/tools/test_mla_split_bsnd_tools.py"],
+    "split-bsnd-check": ["tests/mla/e2e/split_kv_bsnd/test_public.py", "-k", "representative"],
+    "split-bsnd": [
+        "tests/mla/e2e/split_kv_bsnd/test_public.py",
+        "tests/mla/unit/split_kv_bsnd/test_source.py",
+    ],
+    "split-bsnd-profile": ["tests/mla/e2e/split_kv_bsnd/test_split_bsnd_profile.py"],
+    "split-bsnd-trap": ["tests/mla/e2e/split_kv_bsnd/test_trap.py"],
+    "split-bsnd-source": ["tests/mla/unit/split_kv_bsnd/test_source.py"],
     "split-kv-plan-sanitize": ["tests/mla/unit/split_kv_plan/test_plan.py"],
     "split-kv-plan-tools": ["tests/mla/unit/tools/test_mla_split_kv_plan_tools.py"],
     "split-kv-merge-check": [SPLIT_KV_MERGE, "-k", "representative or cost_boundary"],
@@ -651,6 +665,9 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "split-bsnd-cpu",
+    "split-bsnd-sanitize",
+    "split-bsnd-tools",
     "unit-split_kv_plan",
     "split-kv-plan-sanitize",
     "split-kv-plan-tools",
@@ -709,6 +726,8 @@ def suite_dependencies(suite):
     if suite in {
         "unit-split_kv",
         "split-kv-sanitize",
+        "split-bsnd-cpu",
+        "split-bsnd-sanitize",
         "unit-split_kv_plan",
         "split-kv-plan-sanitize",
     }:
@@ -924,6 +943,8 @@ def environment(args, directory, suite):
     if suite in SPLIT_KV_DEVICE_SUITES:
         env["MLA_SPLIT_KV_ATTENTION_DIR"] = str(directory / "probes")
     if suite in {
+        "split-bsnd-cpu",
+        "split-bsnd-sanitize",
         "unit-split_kv_plan",
         "split-kv-plan-sanitize",
         "unit-split_kv",

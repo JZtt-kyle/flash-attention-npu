@@ -234,7 +234,7 @@ def test_public_rejects_before_metadata_or_dispatch(
 def test_mla_options_cannot_fall_through(entry, representation, option, dtype):
     args = _inputs(representation, dtype=dtype)
     if option == "split":
-        args["num_splits"] = 256
+        args["num_splits"] = 0
     elif option == "chunk":
         args.update(causal=True, attention_chunk=1)
     elif option == "softcap":

@@ -199,6 +199,6 @@ def test_public_compile(capability):
 @pytest.mark.parametrize("option", ["num_splits", "softcap"])
 def test_unopened_options(option):
     case = prepare("dense", "fp16", "lengths")
-    case["options"][option] = 2
+    case["options"][option] = 0 if option == "num_splits" else 2
     with pytest.raises((ValueError, RuntimeError), match="not implemented"):
         invoke(case)

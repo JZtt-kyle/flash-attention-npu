@@ -130,6 +130,9 @@ def profile(
     if stride_profiles is not None:
         assert len(stride_profiles) == len(cases)
 
+    def split_count(index):
+        return window_specs[index].get("splits", 1) if window_specs is not None else 1
+
     def generate(index):
         q, k = inputs[index]["q"], inputs[index]["k"]
         return api.get_scheduler_metadata(
@@ -142,7 +145,7 @@ def profile(
             lengths[index],
             qkv_dtype=dtype,
             headdim_v=512,
-            num_splits=1,
+            num_splits=split_count(index),
             **mask_options(index),
         )
 
@@ -156,7 +159,7 @@ def profile(
             cache_seqlens=lengths[index],
             scheduler_metadata=record,
             softmax_scale=cases[index][1],
-            num_splits=1,
+            num_splits=split_count(index),
             **mask_options(index),
             return_softmax_lse=True,
         )
@@ -210,7 +213,7 @@ def profile(
             actual = api.flash_attn_func(
                 **device,
                 softmax_scale=scale,
-                num_splits=1,
+                num_splits=split_count(index),
                 return_attn_probs=True,
                 **mask_options(index),
             )
@@ -229,6 +232,8 @@ def profile(
                     actual, source, cpu, shape, scale, kv_lengths[index], window_specs[index]
                 )
             )
+            if "splits" in window_specs[index]:
+                accuracy[-1]["num_splits"] = split_count(index)
             continue
         if masked:
             accuracy.append(
@@ -321,7 +326,7 @@ def profile(
                 api.flash_attn_func(
                     **inputs[index],
                     softmax_scale=cases[index][1],
-                    num_splits=1,
+                    num_splits=split_count(index),
                     return_attn_probs=True,
                     **mask_options(index),
                 )
@@ -345,7 +350,7 @@ def profile(
         return api.flash_attn_func(
             **inputs[index],
             softmax_scale=cases[index][1],
-            num_splits=1,
+            num_splits=split_count(index),
             return_attn_probs=True,
             **mask_options(index),
         )
@@ -446,6 +451,7 @@ def profile(
                 "ComputeMlaBsndKvLengthMetadata",
                 "ComputeMlaCausalBsndMetadata",
                 "ComputeMlaWindowBsndMetadata",
+                "ComputeMlaSplitBsndMetadata",
             )
         )
 
@@ -464,6 +470,12 @@ def profile(
             and row["Name"].endswith(("_Slice", "_AsStrided", "_BroadcastTo"))
         ]
         rows = [row for row in rows if row not in conversion_rows]
+    explicit_split = window_specs is not None and any("splits" in spec for spec in window_specs)
+    if explicit_split:
+        from tests.mla.support.mla_split_bsnd_profile_rows import pair_split_kernels
+
+        assert all(spec.get("splits", 1) > 1 for spec in window_specs)
+        rows = pair_split_kernels(rows, labels, dtype_name)
     assert len(rows) == len(labels), (len(rows), len(labels))
     fa3_count = sum(label["name"] == "fa3" for label in labels)
     assert len(metadata_rows) in (0, fa3_count), (len(metadata_rows), fa3_count)
@@ -472,12 +484,18 @@ def profile(
     conversion_index = 0
     for row, label in zip(rows, labels):
         expected_name = (
-            f"mla_{'bsnd_used' if masked else 'dense'}_{dtype_name}"
+            (
+                f"mla_split_bsnd_partial_{dtype_name}"
+                if explicit_split
+                else f"mla_{'bsnd_used' if masked else 'dense'}_{dtype_name}"
+            )
             if label["name"] == "fa3"
             else "FusedInferAttentionScore"
         )
         assert expected_name in row["Name"]
         label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
+        if "Split Segments" in row:
+            label["kernel_segments"] = row["Split Segments"]
         if stride_profiles is not None:
             copies = []
             begin = Decimal(row["Start Time(us)"].strip())
@@ -514,7 +532,12 @@ def profile(
             end = begin + Decimal(producer["Duration(us)"].strip())
             assert previous_end <= begin < end <= Decimal(row["Start Time(us)"].strip())
             label["metadata_kernel_us"] = float(producer["Duration(us)"])
-        previous_end = Decimal(row["Start Time(us)"].strip()) + Decimal(row["Duration(us)"].strip())
+        previous_end = Decimal(
+            row.get(
+                "Split End Time(us)",
+                str(Decimal(row["Start Time(us)"].strip()) + Decimal(row["Duration(us)"].strip())),
+            )
+        )
     assert conversion_index == len(conversion_rows)
     results = []
     for index, (shape, scale) in enumerate(cases):
@@ -530,6 +553,8 @@ def profile(
                 window=window_specs[index]["window"],
                 causal=window_specs[index].get("causal", False),
             )
+            if "splits" in window_specs[index]:
+                item["num_splits"] = split_count(index)
         for name in case_modes(index):
             kernels = [x for x in labels if x["case"] == index and x["name"] == name]
             walls = [x for x in wall if x["case"] == index and x["name"] == name]
@@ -666,6 +691,13 @@ if __name__ == "__main__":
     window_specs = None
     if os.environ.get("MLA_FORWARD_WINDOW") == "1":
         from tests.mla.support.mla_window_public_cases import PERFORMANCE_CASES
+
+        window_specs = PERFORMANCE_CASES
+        cases = [(s["shape"], s.get("scale")) for s in window_specs]
+        lengths = [s.get("lengths") for s in window_specs]
+        strides = [s.get("stride", "contiguous") for s in window_specs]
+    if os.environ.get("MLA_FORWARD_SPLIT_BSND") == "1":
+        from tests.mla.support.mla_split_bsnd_cases import PERFORMANCE_CASES
 
         window_specs = PERFORMANCE_CASES
         cases = [(s["shape"], s.get("scale")) for s in window_specs]
