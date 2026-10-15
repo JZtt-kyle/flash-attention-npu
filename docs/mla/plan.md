@@ -2,37 +2,29 @@
 
 本页只记录实施顺序、产物和完成条件。功能基线为 **M10c9b TND PA 显式 split 生产接入已完成**；M10 尚未阶段收尾。当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
 
-## 本轮已完成 M10c9b：TND PA 显式 split 生产接入
+## 唯一下一步 M10c10：TND PA 原生自动 split 完整接入
 
-在 v25 上交付 TND Q + ND PA KV、512+64、FP16/BF16、显式 S=2..256 的无 mask/右下 causal/window 公开行为，自动 0 继续拒绝。
+原 M10c10a/b 合为一次可调用行为提交：512+64、Hkv=1、FP16/BF16 的 TND Q + ND PA KV 支持 `num_splits=0`，覆盖无 mask、右下 causal/window、公开 cache/metadata 与真实 accumulator。当前尚未实现，完成验收前继续明确拒绝自动值。
 
-- 影响路径：新增 v25 AICPU、TND PA init/partial/merge launcher 与双 dtype 实例；复用 PA ring 和 TND merge 数值组件，按原 allocation token 初始化、写回 O/LSE 和真实 accumulator。修改 host 紧凑预算、生产/公开 real/fake/metadata 分派及构建清单；共享路径通过累计 E2E 和普通 FA3 回归验证。
-- 设备前缀适配：公开 metadata 在验证描述符后取得 totalQ，前向内部生成核对已知总量；空总量仍生成有效证书并校验有效页。改动所属 v25 CPU 单元普通/sanitizer 实跑，不继承旧单元结果。
-- 新增独立验收：`unit/split_paged_tnd` 的固定源 partial/FD 与双数学；`e2e/split_paged_tnd` 的三 mask、非均匀/空 allocation、Q-used 间隙、页边界、stride/storage、metadata 复用、长度更新、fake/compile、生命周期、多流和 release Trap。在 `regression_cases.py` 注册本能力的日常小输入，累计清单增至 243 项。
-- 实现前固定的命令全部用 `python3 -m tests.mla`，先 dry-run/collect-only：`--unit split_paged_tnd_protocol`、`--suite split-paged-tnd-protocol-sanitize split-paged-tnd-tools`、`--unit split_paged_tnd`、`--suite split-paged-tnd-check`，冻结后执行 `split-paged-tnd-public split-paged-tnd-trap e2e ordinary split-paged-tnd-profile`。代表组含最长 reference/最大 accumulator；性能固定 6 种形状×双 dtype，三入口、R=1/4，原生自动 FD 按既有口径单列，保留全部原始数据。
-- 本步共享生产/构建改变，累计 E2E 实跑，继承为 0；数学内容缓存继续复用。必要组和平均公开性能通过，失败修正、环境身份及证据见 status；文档和质量检查后只提交本步并停止。
-
-## 唯一下一步 M10c10a：TND PA 原生自动 split 计划与安全协议
-
-独立闭环 TND Q + ND PA KV 的固定源原生自动任务/持久布局及 CPU/AICore 共用协议；自动生产接入随后作为 M10c10b 独立完成。本步不开放 `num_splits=0` 的公开行为。
-
-- 复用已验收的 TND PA 几何、allocation/used、有效页校验以及 BSND PA/非 PA TND 的原生自动分区依据，保留原生 Direct/FD 端点和跨波次所有权。新增协议须与 v25 显式记录严格区分；host 静态预算覆盖动态任务与真实 TND accumulator，保持原 allocation token 地址、空行和未用槽语义。
-- 实施前在本节列明具体新文件、共享头/地址/构建影响、必跑组及完成条件；新增所属 `unit/auto_split_paged_tnd_protocol/` 与工具归属。新协议先独立验收，不提前修改生产 launcher 或注册伪公开 E2E。
-- 普通和 ASan/UBSan 使用同一集合：固定源三 mask/PA 几何/原生分核差分，独立 task/merge/row 枚举，非均匀/空前缀、Q-used、有效页和空成本，跨 M/片段/核边界、uint64 地址/预算溢出、陈旧或破坏记录及失败原子性；双 dtype、协议参数两两覆盖，具名高阶组合单列。
-- 统一入口先 dry-run/collect-only，代表和成本边界后固定实现并执行所属完整组。已有公开路径通过累计日常 E2E；仅在依赖与原始证据完整有效时继承 E2E 正确性，不继承历史单元或性能。数学内容缓存与本步有效 native 包路径从 status 复核。
-- 完成条件：独立计划/协议的源差分、边界、sanitizer、工具、适用 E2E 和文档/质量检查全部通过，状态更新后提交一次并停止。若触及共享数值或生产路径，先按影响范围补入本步验收；必要验证受限则保留交接且不提交为闭环。
+- 复用 BSND PA/非 PA TND 的原生 Direct/FD 分区、TND PA allocation/used 和有效页校验、PA partial 与 TND merge 数值组件；保留跨波次所有权、原 allocation token、空行及未用槽语义。自动任务记录必须与 v25 显式记录严格区分，说明所需表示域差异；不改造全部历史协议。
+- 影响路径：在 FA3 的 910 `mla/` 下补 `mla_auto_split_paged_tnd_*` 计划、CPU/AICPU 共用记录构造/校验、launcher 与双 dtype 实例；接入 `mla_forward.cpp`、`flash_api.cpp`、Python real/fake/metadata 分派及 `setup.py`。host 静态预算覆盖动态任务和真实 TND accumulator，动态长度留在设备。实现前补齐实际文件和受影响的共享头/地址/构建项。
+- 同一轮先做协议单元，再接通生产并验收。所属 `unit/auto_split_paged_tnd_protocol/` 保留固定源计划差分、task/merge/row 独立枚举、三 mask、非均匀/空前缀、Q-used、有效页、跨片段/核/波次、地址/预算溢出、陈旧或破坏记录及失败原子性；普通与 ASan/UBSan 同集合。
+- 所属 `unit/auto_split_paged_tnd/` 检查双 dtype 固定源和双数学、Direct/FD、边界及适用组件性能；`e2e/auto_split_paged_tnd/` 检查实际公开分派、O/LSE/accumulator、长度/stride/空值、metadata 更新/复用、生命周期、多流、real/fake/compile 和 release Trap，并注册日常 E2E。先测代表及适用的最大内存/最长 reference 成本边界。
+- 拟新增并注册的必跑组：`--unit auto_split_paged_tnd_protocol`、协议 sanitizer/所属工具，`--unit auto_split_paged_tnd`、代表组，以及公开专项、Trap、`e2e ordinary`、公开 profile。注册后在本节固定完整命令与输入集合，先 dry-run/collect-only，再执行；不因合并提交重复跑未变化的组件组。
+- 公开性能在采样前固定双 dtype 配置和三入口 R=1/4，覆盖原生 Direct/FD；按 design 的平均公开 E2E 门槛和原计时边界验收。共享生产/构建变化时累计 E2E 与普通 FA3 回归实跑；仅依赖和原始证据有效的 E2E 正确性可继承，数学缓存可复用。native 包先按 status 的路径和配方核验。
+- 完成条件：协议、生产数值、公开行为、日常回归、适用性能、文档及质量检查全部通过，再提交一次并停止。只有发现既有组件未覆盖的新增算法/共享协议风险，才按 AGENTS 在此说明风险和独立产物后调整边界；不恢复原来的机械分层拆法。
 
 ## 后续里程碑：M10–M17
 
-每行是能力里程碑，不等于一次提交。临近该阶段时按独立验收风险细化当前步；稳定组件的一种布局接入可整体完成 host、AICPU、Kernel、公开入口及必要验收。基础精度、普通回归与生命周期随入口交付。
+每行是能力里程碑，不等于一次提交。以下布局步默认各交付一个完整行为，稳定的 mask/split 随布局接入，host/AICPU/Kernel/公开入口在同一轮完成。新数值组件可先独立闭环；进一步拆分须写明新增风险，不能以文件数、层数或开关数机械展开。精度、安全、普通回归、生命周期和适用公开性能均随入口交付。
 
 | 里程碑 | 剩余产物与边界 | 完成条件 |
 | --- | --- | --- |
-| M10：512+64 split-KV | 闭环 TND PA 原生自动计划/协议与生产，再执行阶段收尾；已有布局见下表 | 五种布局的自动/1/显式 split、三种 mask、空分片/全空、O/LSE/真实 accumulator/metadata 及长 KV E2E；阶段约定组合与性能 |
-| M11：192/128 BSND prefill | 先验证独立 K/V、分组头及 192 stride 数值组件，再完成 BSND metadata/生产/公开接入 | qv=None、源通用非量化路径、GQA、真实 stride、O/LSE 和适用 E2E |
-| M12：prefill TND/长度 | 复用 M11 数值，TND varlen 和混合 cache 按可调用行为接入 | allocation/used、非均匀/空长度、stride/GQA、生产精度及适用 E2E |
-| M13：prefill PA | BSND PA、TND PA 各自接通 metadata/生产/入口 | 合法 P 代表边界、内容/RoPE 独立 stride、长度/复用/生命周期、精度及 PA E2E |
-| M14：prefill mask/split | 分别闭环 causal、window、split 的受影响布局，再验收组合 | 右下 mask、自动/显式 split、metadata 和前序布局的必迁组合 |
+| M10：512+64 split-KV | M10c10 完整接入后做一次阶段收尾；不再拆协议/生产轮 | 五种布局的自动/1/显式 split、三 mask、空分片/全空、O/LSE/真实 accumulator/metadata、长 KV 及阶段性能；有效 E2E 按规则继承 |
+| M11：192/128 共享数值与 BSND | M11a 闭环固定源通用非量化数值组件及 mask/partial/merge 所需适配；M11b 一次接通 BSND 的 metadata/生产/公开调用 | qv=None、独立 K/V、GQA、192 stride、双 dtype、O/LSE/accumulator；BSND 三 mask 和自动/1/显式 split，新增算法单元及公开 E2E/性能 |
+| M12：prefill 非 PA TND/混合 | M12a TND varlen，M12b TND Q + BSND cache；各复用 M11 数值和已有调度，一次接通长度、metadata、mask/split 与公开行为 | allocation/used、非均匀/空长度、stride/GQA、三 mask、自动/1/显式 split、生产精度、生命周期及公开 E2E/性能 |
+| M13：prefill PA | M13a BSND PA，M13b TND PA；各一次接通页访问、metadata、三 mask、自动/1/显式 split 和公开行为 | 合法 P 代表边界、独立 K/V 与内容/RoPE stride、长度/空值/复用/生命周期、数值及 PA 公开 E2E/性能 |
+| M14：prefill 组合收尾 | 核对 M11–M13 的必迁组合、补明确缺口并完成阶段验收；不再按 mask × split × 布局重复开接入轮 | 前序入口已实测必要组合；新发现的算法缺口按风险单列，已有有效 E2E 按规则继承，阶段性能实际执行 |
 | M15：softcap/调度选项 | softcap 数学独立闭环；pack_gqa、sm_margin 按共享调度影响划分 | 有效数学/调度语义、资源校验及适用 E2E，不能忽略参数 |
 | M16：图执行 | 固定输入重放与图内长度更新/metadata 重生成分别闭环 | eager/图一致、跨层复用、多 stream 与 fake/真实输出一致 |
 | M17：全范围收尾 | 冻结能力，按覆盖矩阵验收并补用户示例；实现问题先修复再验收 | 必迁组合、精度/平均公开 E2E/普通 FA3 回归；910B/C 实现与资源兼容，实机仍用 910B；README 调用与边界 |
