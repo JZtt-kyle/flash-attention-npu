@@ -3,6 +3,7 @@
 // PA source geometry and native AIC/FD provenance: mla_auto_split_paged_bsnd_plan.h.
 #pragma once
 #include "mla_paged_metadata.h"
+#include "mla_paged_metadata_args.h"
 #include "mla_auto_split_bsnd_metadata.h"
 
 namespace flash_attn::mla {
@@ -20,6 +21,10 @@ inline bool AutoSplitPagedBsndMetadataWords(int64_t batch, uint32_t& words)
 struct MlaAutoSplitPagedBsndContext {
     MlaPagedMetadataContext paged;
     MlaWindowKernelParams window;
+};
+struct MlaAutoSplitPagedBsndMetadataArgs {
+    MlaPagedMetadataArgs input;
+    MlaWindowConfig window;
 };
 // False leaves output untouched for unsafe output/overlap. True writes a
 // complete success or zero-payload failure record, including empty inputs.

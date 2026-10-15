@@ -18,6 +18,10 @@ struct MlaAutoSplitPagedBsndBudget {
 MlaScheduleStatus BuildAutoSplitPagedBsndBudget(const MlaPagedShape&, const MlaPlatformInfo&,
                                                 MlaAutoSplitPagedBsndBudget&);
 
+// Production adds one Direct slot per AIC and a static 26-slice public accumulator.
+MlaScheduleStatus BuildAutoSplitPagedBsndProductionBudget(const MlaPagedShape&, const MlaPlatformInfo&,
+                                                          MlaAutoSplitPagedBsndBudget&);
+
 struct MlaAutoSplitPagedBsndPlan {
     MlaAutoSplitPagedBsndBudget budget{};
     MlaPagedSchedule paged;

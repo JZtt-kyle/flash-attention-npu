@@ -55,10 +55,11 @@ def test_cpu_protocol_and_final_sanitizer_exit(tmp_path, mode):
     check_protocol(tmp_path, mode, False)
 
 
-def test_existing_commands_and_e2e_are_unchanged():
+def test_existing_commands_and_production_registration():
     assert runner.SUITES["unit-split_tnd_plan"] == runner.SUITES["split-tnd-plan-sanitize"]
     assert runner.SUITES["split-tnd-cpu"] == runner.SUITES["split-tnd-sanitize"]
     assert all("auto_split_paged_bsnd_protocol" not in path for path in runner.SUITES["e2e"])
     setup = (runner.ROOT / "setup.py").read_text()
-    assert '"mla_auto_split_paged_bsnd_plan.cpp"' not in setup
+    assert '"mla_auto_split_paged_bsnd_plan.cpp"' in setup
+    assert '"mla_auto_split_paged_bsnd_metadata.aicpu"' in setup
     assert '"mla_auto_split_paged_bsnd_metadata.cpp"' not in setup

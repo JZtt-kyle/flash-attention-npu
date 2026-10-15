@@ -59,7 +59,7 @@ CANN 根目录：`/home/zhangqijia/repo/ops-transformer/attention/fused_infer_at
 
 ### 2.1 入口与记录选择
 
-下表描述 512+64 的单 split 入口映射；非 PA BSND 显式 `num_splits=2..256` 优先使用 v17，自动 `num_splits=0` 优先使用 v18；混合 TND Q + BSND KV 显式/自动 split 分别使用 v21/v22（[6.2.24](#6224-混合原生自动-split-生产适配)）；非 PA TND Q/KV 显式 split 使用 v19，自动使用 v20（[6.2.20](#6220-tnd-自动-split-生产适配)），见 [6.2.17](#6217-tnd-显式-split-生产适配) 及 [6.2.12](#6212-bsnd-显式-split-生产适配) 与 [6.2.15](#6215-bsnd-自动-split-生产适配)。BSND PA 显式 split 使用 v23（[6.2.26](#6226-bsnd-pa-显式-split-生产适配)）。可调用能力及验收状态以 [status](status.md) 为准。长度 tensor 均为同设备连续 int32，分配前缀为 `[B+1]`，实际长度为 `[B]`。**公开 varlen 支持 `seqused_q/k`；公开 kvcache 与 metadata 生成器没有 Q-used 参数。**
+下表描述 512+64 的单 split 入口映射；非 PA BSND 显式 `num_splits=2..256` 优先使用 v17，自动 `num_splits=0` 优先使用 v18；混合 TND Q + BSND KV 显式/自动 split 分别使用 v21/v22（[6.2.24](#6224-混合原生自动-split-生产适配)）；非 PA TND Q/KV 显式 split 使用 v19，自动使用 v20（[6.2.20](#6220-tnd-自动-split-生产适配)），见 [6.2.17](#6217-tnd-显式-split-生产适配) 及 [6.2.12](#6212-bsnd-显式-split-生产适配) 与 [6.2.15](#6215-bsnd-自动-split-生产适配)。BSND PA 显式/自动 split 分别使用 v23/v24（[6.2.26](#6226-bsnd-pa-显式-split-生产适配)、[6.2.28](#6228-bsnd-pa-原生自动-split-生产适配)）。可调用能力及验收状态以 [status](status.md) 为准。长度 tensor 均为同设备连续 int32，分配前缀为 `[B+1]`，实际长度为 `[B]`。**公开 varlen 支持 `seqused_q/k`；公开 kvcache 与 metadata 生成器没有 Q-used 参数。**
 
 | 公开入口 | 输入与长度 | 记录选择 |
 | --- | --- | --- |
@@ -75,9 +75,9 @@ CANN 根目录：`/home/zhangqijia/repo/ops-transformer/attention/fused_infer_at
 
 ### 2.2 后端选项与返回值
 
-512+64 后端接受 `causal=False`，非 PA BSND、TND Q/KV varlen 和 TND Q + BSND KV cache 及 BSND/TND Q + PA KV 接通 `causal=True`。非 PA BSND、TND Q/KV varlen、TND Q + BSND KV cache 及 BSND/TND Q + ND PA KV cache 支持有限/单侧 `window_size` 及 causal 叠加，按 [6.2.6](#626-独立-cpu-window-归一化与范围) 归一化。非 PA BSND 另支持自动 `num_splits=0` 和显式 `num_splits=2..256`，无 mask/causal/window 分别使用 v18/v17；非 PA TND Q/KV 支持自动 `num_splits=0` 和显式 `num_splits=2..256`，分别使用 v20/v19。混合 TND Q + BSND KV 显式 `num_splits=2..256` 使用 v21，见 [6.2.22](#6222-混合显式-split-生产适配)。混合自动使用 v22，见 [6.2.24](#6224-混合原生自动-split-生产适配)；BSND PA 显式 `num_splits=2..256` 使用 v23，见 [6.2.26](#6226-bsnd-pa-显式-split-生产适配)；PA 自动和 TND PA split 继续拒绝。其他选项限定为 `softcap=0`、`pack_gqa=None`、`sm_margin=0`、`attention_chunk=0` 和 `rotary_interleaved=True`。追加 KV、rotary/量化输入、cache 重映射/leftpad 等选项由 Python 与 C++ 明确拒绝。metadata 生成器要求 `has_softcap=False`、`max_seqlen_k_new=0`，拒绝数值 scale/softcap 兼容关键字。单 split 时，`page_size=None` 的无 mask 使用 v2/v4、BSND/混合 causal 使用 v7/v9；指定合法 P 时无 mask 生成 v6、BSND/TND causal 分别生成 v10/v11、BSND/TND 非默认窗口分别生成 v15/v16，按相应布局/mask 显式复用。
+512+64 后端接受 `causal=False`，非 PA BSND、TND Q/KV varlen 和 TND Q + BSND KV cache 及 BSND/TND Q + PA KV 接通 `causal=True`。非 PA BSND、TND Q/KV varlen、TND Q + BSND KV cache 及 BSND/TND Q + ND PA KV cache 支持有限/单侧 `window_size` 及 causal 叠加，按 [6.2.6](#626-独立-cpu-window-归一化与范围) 归一化。非 PA BSND 另支持自动 `num_splits=0` 和显式 `num_splits=2..256`，无 mask/causal/window 分别使用 v18/v17；非 PA TND Q/KV 支持自动 `num_splits=0` 和显式 `num_splits=2..256`，分别使用 v20/v19。混合 TND Q + BSND KV 显式 `num_splits=2..256` 使用 v21，见 [6.2.22](#6222-混合显式-split-生产适配)。混合自动使用 v22，见 [6.2.24](#6224-混合原生自动-split-生产适配)；BSND PA 显式 `num_splits=2..256` 使用 v23，见 [6.2.26](#6226-bsnd-pa-显式-split-生产适配)；BSND PA 自动使用 v24，见 [6.2.28](#6228-bsnd-pa-原生自动-split-生产适配)；TND PA split 继续拒绝。其他选项限定为 `softcap=0`、`pack_gqa=None`、`sm_margin=0`、`attention_chunk=0` 和 `rotary_interleaved=True`。追加 KV、rotary/量化输入、cache 重映射/leftpad 等选项由 Python 与 C++ 明确拒绝。metadata 生成器要求 `has_softcap=False`、`max_seqlen_k_new=0`，拒绝数值 scale/softcap 兼容关键字。单 split 时，`page_size=None` 的无 mask 使用 v2/v4、BSND/混合 causal 使用 v7/v9；指定合法 P 时无 mask 生成 v6、BSND/TND causal 分别生成 v10/v11、BSND/TND 非默认窗口分别生成 v15/v16，按相应布局/mask 显式复用。
 
-func/varlen/内部前向的 `num_splits` 默认 1，kvcache/metadata 默认 0；非 PA BSND/混合的默认 cache/metadata 请求因此使用自动路径，BSND PA 须显式传 1..256，TND PA 须传 1。三种非 PA 布局的前向接受 0..256，负值明确拒绝。生成器 `qkv_dtype` 默认 BF16，必须匹配当次输入。前向默认 scale 见 [3.3](#33-共同契约)，显式值须能表示为有限 FP32；scale 不进入 MLA metadata。
+func/varlen/内部前向的 `num_splits` 默认 1，kvcache/metadata 默认 0；非 PA BSND/混合及 BSND PA 的默认 cache/metadata 请求因此使用自动路径，TND PA 须传 1。三种非 PA 布局及 BSND PA 的前向接受 0..256，负值明确拒绝。生成器 `qkv_dtype` 默认 BF16，必须匹配当次输入。前向默认 scale 见 [3.3](#33-共同契约)，显式值须能表示为有限 FP32；scale 不进入 MLA metadata。
 
 请求 LSE 的开关分别为 func/varlen 的 `return_attn_probs=True` 和 kvcache 的 `return_softmax_lse=True`。前两者返回 `(O,LSE)`，kvcache 返回 `(O,LSE,out_accum,lse_accum)`；单 split 时两个 accumulator 为同设备空 tensor，dtype 随 PyTorch 默认浮点 dtype（通常 FP32），真实/fake 一致。BSND 显式 S>1 的 accumulator 为真实 FP32 `[S,B,H,Sq,512]` / `[S,B,H,Sq]`，不压紧 Q-used；func 仍只返回 `(O,LSE)`。BSND 自动请求采用静态后端容量 26，返回 FP32 `[26,B,H,Sq,512]` / `[26,B,H,Sq]`，实际每 M 片数由设备决定；Direct 写第 0 片，未使用片初始化为 0/-inf。混合显式 cache/raw/私有入口返回 FP32 `[S,H,totalQ,512]` / `[S,H,totalQ]`，按原 Q allocation 放置，见 6.2.22。TND 自动 raw/私有入口返回 `[26,H,totalQ,512]` / `[26,H,totalQ]`，保留原 allocation 间隙；公开 varlen 仍返回二元结果。容量不是均匀分片数量，具体适配见 6.2.15 和 6.2.20。O/LSE 的维度、dtype 与空值见 [3.3](#33-共同契约)。
 
@@ -233,7 +233,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v21](#6221-混合显式-split-计划与-v21-安全协议) | 21 / 21 | 416+10B | TND Q + BSND KV 显式 split；64 位 KV 起点与紧凑 Q 计划；生产接入见 [6.2.22](#6222-混合显式-split-生产适配) |
 | [v22](#6223-混合原生自动-split-计划与-v22-安全协议) | 22 / 22 | 758+10B | TND Q + BSND KV 自动 split；紧凑 Q、64 位 KV 起点和原生 AIC/FD/Vector 端点；生产接入见 [6.2.24](#6224-混合原生自动-split-生产适配) |
 | [v23](#6225-bsnd-pa-显式-split-计划与-v23-安全协议) | 23 / 23 | 414+7B | BSND Q + ND PA KV 显式 S=2..256；逻辑页几何、allocation/used 与宽 M 前缀；生产接入见 [6.2.26](#6226-bsnd-pa-显式-split-生产适配) |
-| [v24](#6227-bsnd-pa-原生自动计划与-v24-安全协议) | 24 / 24 | 756+7B | BSND Q + ND PA KV 原生自动 CPU 计划/安全协议；尚未编入 AICPU 或公开前向 |
+| [v24](#6227-bsnd-pa-原生自动计划与-v24-安全协议) | 24 / 24 | 756+7B | BSND Q + ND PA KV 原生自动 split；PA span、原生 AIC/FD/Vector 端点与 M 前缀 |
 
 协议能表达某布局，不代表该布局已接通生产入口。生成记录、设备校验、独立 attention、入口调用分别验收；当前接入层次见 [status](status.md)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 使用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
 
@@ -467,7 +467,7 @@ v2 消费后将快照传给 `MlaDense<InputT, true, HasStrides>` 实际长度特
 | TND Q + BSND KV causal、可选内部 Q-used | TND used launcher 的混合 causal 特化消费 v9 | 同一 `MlaUsed` 数值核，KV 以物理容量定位、以实际长度计算 mask |
 | 分配与 used：TND Q/KV 或 TND Q + BSND KV | `mla_tnd_used_launch_impl.hpp` 消费 v5；独立对照使用 `mla_used_attention_probe.cpp` | 两布局共用 `MlaUsed<InputT, true, HasStrides>` → `MlaNonPaged<InputT, true, true, false, true, HasStrides>`；按 span 分离分配起点与有效长度，按四路独立 stride 计算元素地址 |
 
-v3/v4 各自使用独立 context 和 Kernel 调度类型，防止将布局不同的起点快照误传给 BSND 或紧凑 TND。混合 span 的 KV 起点从两个 uint32 字恢复为 uint64，并在任务环 `RunInfo` 与 Tile 坐标中保持 64 位。三种非 PA 布局的显式与自动 split 已接入 FD Block；BSND PA 显式 split 见 6.2.26；PA 自动、TND PA split 与 192/128 通用路径继续按计划迁移。
+v3/v4 各自使用独立 context 和 Kernel 调度类型，防止将布局不同的起点快照误传给 BSND 或紧凑 TND。混合 span 的 KV 起点从两个 uint32 字恢复为 uint64，并在任务环 `RunInfo` 与 Tile 坐标中保持 64 位。三种非 PA 布局的显式与自动 split 已接入 FD Block；BSND PA 显式/自动 split 见 6.2.26/6.2.28；TND PA split 与 192/128 通用路径继续按计划迁移。
 
 PA 链路通过编译期特化复用上述任务环和 Cube/Vector：
 
@@ -618,7 +618,7 @@ FA3 oracle 与 window 共用 `MLA_FA3_SOURCE_ROOT`（默认 `/tmp/mla-fa3-refere
 
 #### 6.2.10 独立 BSND FD 归并与 accumulator 适配
 
-[`MlaSplitKvMerge`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_split_kv_merge.hpp) 消费一个 BSND M 块的源布局 FP32 部分 O 和八路广播 sum/max。独立 probe 每次发射一个 Vector 归并任务；BSND 显式 split 的生产多任务与 metadata 接入见 [6.2.12](#6212-bsnd-显式-split-生产适配)，自动接入见 [6.2.15](#6215-bsnd-自动-split-生产适配)。调用方校验原始长度、分片端点、缓冲容量和 M10a 地址协议；[`launch 参数`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_kv_merge_params.h) 只保存当次 BSND 几何、mask 和逻辑 KV 半开区间，不保存跨调用状态。TND 生产地址特化见 [6.2.17](#6217-tnd-显式-split-生产适配)，BSND PA 显式生产见 6.2.26，其他 PA split 留给后续步骤。
+[`MlaSplitKvMerge`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_split_kv_merge.hpp) 消费一个 BSND M 块的源布局 FP32 部分 O 和八路广播 sum/max。独立 probe 每次发射一个 Vector 归并任务；BSND 显式 split 的生产多任务与 metadata 接入见 [6.2.12](#6212-bsnd-显式-split-生产适配)，自动接入见 [6.2.15](#6215-bsnd-自动-split-生产适配)。调用方校验原始长度、分片端点、缓冲容量和 M10a 地址协议；[`launch 参数`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_kv_merge_params.h) 只保存当次 BSND 几何、mask 和逻辑 KV 半开区间，不保存跨调用状态。TND 生产地址特化见 [6.2.17](#6217-tnd-显式-split-生产适配)，BSND PA 显式/自动生产见 6.2.26/6.2.28，TND PA split 留给后续步骤。
 
 [`Block`](../../csrc/ascend910/flash_attn_npu_3/mla/block/mla_split_kv_merge.hpp) 保留固定 `fia_block_vec_flashdecode_arch22.h` 的 max、exp、乘 sum、顺序 ColAdd、除总权重及按片顺序 RowMuls/Add。部分 O 已归一化，不再除以片内 sum；保留两槽 O 预取及 MTE2/Vector 事件，按 query 分段写回 LSE 和 accumulator。[`FD Tile`](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_fd_ops.hpp) 迁移原向量指令，复用既有 RowMuls 和 LSE；最终 FP16 用 CAST_ROUND、BF16 用 CAST_RINT。行块按 `max(1,min(8,192/S))` 限制统计容量，256 片使用 8 KiB 统计缓冲；重复次数超过 uint8 范围的指令分为 255+余项，保持片顺序。
 
@@ -648,7 +648,7 @@ S>1 时，同一设备任务按 M10a 的 `[S,B,H,Q,512]` / `[S,B,H,Q]` 连续 FP
 
 #### 6.2.12 BSND 显式 split 生产适配
 
-本节描述 M10c1b 的实现协议，完整验收证据见 [status](status.md)。范围为非 PA BSND、共享 512+64、FP16/BF16、显式 `S=2..256`，复用无 mask、causal/window、四路独立 stride 和 allocation/used；自动路径另见 6.2.15，TND 显式/自动 split 见 6.2.17/6.2.20，混合自动见 6.2.24，BSND PA 显式见 6.2.26，PA 自动和 TND PA split 继续拒绝。
+本节描述 M10c1b 的实现协议，完整验收证据见 [status](status.md)。范围为非 PA BSND、共享 512+64、FP16/BF16、显式 `S=2..256`，复用无 mask、causal/window、四路独立 stride 和 allocation/used；自动路径另见 6.2.15，TND 显式/自动 split 见 6.2.17/6.2.20，混合自动见 6.2.24，BSND PA 显式/自动见 6.2.26/6.2.28，TND PA split 继续拒绝。
 
 [`v17 生成器`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_bsnd_metadata.h) 使用 `version=kind=17`，记录为 contiguous int32 `[416+10B]`。前 `410+8B` 字沿用 v5 的静态几何、资源、源基本块、无 FD 端点及 allocation/used 快照；尾部依次保存归一化窗口 kind/left/right、S 和 B+1 个 low/high uint64 紧凑 M 前缀。源端点仅作为原调度身份校验，显式任务由前缀与 S 决定。记录不保存 CPU 对象、地址、scale 或跨调用状态，失败状态与清空 payload 沿用既有序列化规则。
 
@@ -689,7 +689,7 @@ host 用 M=256、N=512 给出静态上界，AICPU 的实际源 M 为 256 或容�
 
 #### 6.2.15 BSND 自动 split 生产适配
 
-本节描述 M10c2b2 的实现协议，验收状态见 [status](status.md)。范围为非 PA BSND、共享 512+64、FP16/BF16、`num_splits=0`，覆盖无 mask/causal/window、四路独立 stride 和内部 Q-used。公开 func、只读 cache、metadata 与通用 real/fake/compile 共用生产分派；TND 自动接入见 6.2.20，混合自动见 6.2.24，BSND PA 显式见 6.2.26，PA 自动和 TND PA split 仍明确拒绝。
+本节描述 M10c2b2 的实现协议，验收状态见 [status](status.md)。范围为非 PA BSND、共享 512+64、FP16/BF16、`num_splits=0`，覆盖无 mask/causal/window、四路独立 stride 和内部 Q-used。公开 func、只读 cache、metadata 与通用 real/fake/compile 共用生产分派；TND 自动接入见 6.2.20，混合自动见 6.2.24，BSND PA 显式/自动见 6.2.26/6.2.28，TND PA split 仍明确拒绝。
 
 [`v18 AICPU`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_bsnd_metadata.aicpu) 在当前 stream 上读取当次长度，生成 6.2.14 的记录并执行设备写屏障。显式记录允许跨输入内容和 scale 复用；当次长度、窗口或几何不匹配必须失败。内部 Q-used 每次生成新记录，拒绝与显式 metadata 同用。真实和 fake 返回相同静态 shape，不读取设备长度、FD 数量或最大片数决定 host 分配。
 
@@ -723,7 +723,7 @@ Task 同时返回原始 Q/KV allocation token 起点、段容量与 used 长度�
 
 #### 6.2.17 TND 显式 split 生产适配
 
-范围为非 PA TND Q/KV、512+64、FP16/BF16、显式 S=2..256，支持三种 mask、独立 stride 及双 allocation/used；完成情况和原始证据以 [status](status.md) 为准。公开 varlen 签名和二元返回不变，每次内部生成记录。通用 Python/C++ raw 和私有前向返回真实 `[S,H,totalQ,512]` / `[S,H,totalQ]` FP32 accumulator；TND 自动见 6.2.20，混合自动见 6.2.24，BSND PA 显式见 6.2.26，PA 自动和 TND PA split 继续明确拒绝。
+范围为非 PA TND Q/KV、512+64、FP16/BF16、显式 S=2..256，支持三种 mask、独立 stride 及双 allocation/used；完成情况和原始证据以 [status](status.md) 为准。公开 varlen 签名和二元返回不变，每次内部生成记录。通用 Python/C++ raw 和私有前向返回真实 `[S,H,totalQ,512]` / `[S,H,totalQ]` FP32 accumulator；TND 自动见 6.2.20，混合自动见 6.2.24，BSND PA 显式/自动见 6.2.26/6.2.28，TND PA split 继续明确拒绝。
 
 [`v19 生成器`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_tnd_metadata.h) 使用 contiguous int32 `[416+10B]`、version=kind=19。前 `410+8B` 字保留 v5 完整 TND 几何、源资源/端点及双 allocation/used 快照，尾部为窗口 kind/left/right、S 和 B+1 个 uint64 紧凑 M 前缀。CPU/AICPU 复用 `BuildUsedSchedule` 和 `BuildSplitTndPlan`；[`消费者`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_tnd_consumer.h) 先检查真实 v19 头，再用 v5 schema view 独立验证几何/长度/端点，重算 M 前缀和 6.2.16 的持久上界。相同字段数量不允许 v17 与 v19 混用；不信任序列化任务数量或偏移。
 
@@ -760,7 +760,7 @@ Task 返回原 allocation Q/KV token 起点、段容量和 used 长度；四路�
 
 #### 6.2.20 TND 自动 split 生产适配
 
-非 PA TND Q/KV 的 `num_splits=0` 复用固定 CANN 原生 AIC/FD 分区，支持 512+64、FP16/BF16、三种 mask、双 allocation/used 和四路独立 stride；完成情况及本轮实测范围见 [status](status.md)。公开 varlen 每次内部生成 v20 并保持 `(O,LSE)` 返回；通用 raw/私有入口还返回真实 FP32 `[26,H,totalQ,512]` / `[26,H,totalQ]` accumulator，并允许完整校验的 v20 复用。容量 26 是后端静态资源上界，不改变每个 M 的原生片数；混合自动见 6.2.24，BSND PA 显式见 6.2.26，PA 自动和 TND PA split 仍拒绝。
+非 PA TND Q/KV 的 `num_splits=0` 复用固定 CANN 原生 AIC/FD 分区，支持 512+64、FP16/BF16、三种 mask、双 allocation/used 和四路独立 stride；完成情况及本轮实测范围见 [status](status.md)。公开 varlen 每次内部生成 v20 并保持 `(O,LSE)` 返回；通用 raw/私有入口还返回真实 FP32 `[26,H,totalQ,512]` / `[26,H,totalQ]` accumulator，并允许完整校验的 v20 复用。容量 26 是后端静态资源上界，不改变每个 M 的原生片数；混合自动见 6.2.24，BSND PA 显式/自动见 6.2.26/6.2.28，TND PA split 仍拒绝。
 
 [`v20 AICPU`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_tnd_metadata.aicpu) 复用 6.2.18 的计划和 6.2.19 的生成器。host 使用紧凑 totalQ/totalKV 预算源 scratch、最多 2×AIC 个 FD 槽与每核一个 Direct 临时槽，再独立检查固定 26 片的 accumulator 字节/stride 上界；不读取设备长度或 FD 数量。四路输入使用已校验的 TND allocation 起点与真实 stride；归并的 batchIndex 表示原 Q token 起点，sq 表示 totalQ。
 
@@ -786,7 +786,7 @@ M10c5a 独立闭环 CPU 构造/计划及共享校验协议，M10c5b 的生产适
 
 #### 6.2.22 混合显式 split 生产适配
 
-非 PA TND Q + BSND KV 支持 512+64、FP16/BF16、显式 `S=2..256`，覆盖无 mask、右下 causal、窗口及 causal 叠加、Q allocation/used、实际 KV 长度与四路独立 stride。公开 `flash_attn_with_kvcache` 及 `get_scheduler_metadata` 保持固定 FA3 签名；混合自动见 6.2.24，BSND PA 显式见 6.2.26，PA 自动和 TND PA split 继续明确拒绝。完成状态和实际验收证据以 [status](status.md) 为准。
+非 PA TND Q + BSND KV 支持 512+64、FP16/BF16、显式 `S=2..256`，覆盖无 mask、右下 causal、窗口及 causal 叠加、Q allocation/used、实际 KV 长度与四路独立 stride。公开 `flash_attn_with_kvcache` 及 `get_scheduler_metadata` 保持固定 FA3 签名；混合自动见 6.2.24，BSND PA 显式/自动见 6.2.26/6.2.28，TND PA split 继续明确拒绝。完成状态和实际验收证据以 [status](status.md) 为准。
 
 [`v21 AICPU`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_mixed_metadata.aicpu) 使用同一构造器；隐式生成由 Q tensor 得到静态 totalQ，公开生成只在设备上读取 Q allocation 前缀的尾值。公开模式复用 `BuildUsedMetadataWithSchedule` 的描述符、输出重叠、前缀及失败记录校验，重算完整 M 前缀；没有 host 回读。记录不含地址、输入指针或 tensor stride，可在相同逻辑 allocation/used、mask、S 和 dtype 的不同 storage view 上复用。公开生成器不接收 Q-used，内部 Q-used 通过当次生成验收；传入记录仍须逐字段与当前调用校验。
 
@@ -810,7 +810,7 @@ M10c5a 独立闭环 CPU 构造/计划及共享校验协议，M10c5b 的生产适
 
 #### 6.2.24 混合原生自动 split 生产适配
 
-非 PA TND Q + BSND KV 的 `num_splits=0` 保留固定 CANN 每 M 的原生变长 AIC 分片和 FD/8 行 Vector 归约；支持 512+64、FP16/BF16、无 mask/causal/window、Q allocation/used、实际 KV 长度与四路独立 stride。公开 cache/metadata 保持 FA3 签名；内部 Q-used 每次生成，不能与显式 metadata 同用。BSND PA 显式见 6.2.26，PA 自动和 TND PA split 仍明确拒绝。实际验收状态见 [status](status.md)。
+非 PA TND Q + BSND KV 的 `num_splits=0` 保留固定 CANN 每 M 的原生变长 AIC 分片和 FD/8 行 Vector 归约；支持 512+64、FP16/BF16、无 mask/causal/window、Q allocation/used、实际 KV 长度与四路独立 stride。公开 cache/metadata 保持 FA3 签名；内部 Q-used 每次生成，不能与显式 metadata 同用。BSND PA 显式/自动见 6.2.26/6.2.28，TND PA split 仍明确拒绝。实际验收状态见 [status](status.md)。
 
 [`v22 AICPU`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_mixed_metadata.aicpu) 编入同一 CPU 构造器。隐式生成以 Q tensor 的 totalQ 为静态界；公开生成通过安全 prefix 模式在设备上读取前缀尾值，再完整核验原始前缀/长度并构造记录。失败记录保留 v22 身份并清空 payload，长度恢复后可重生成。记录不绑定内容、scale 或 stride，但复用须匹配当次 allocation/used、窗口和几何，三个设备阶段各自校验。
 
@@ -837,7 +837,7 @@ M10c5a 独立闭环 CPU 构造/计划及共享校验协议，M10c5b 的生产适
 
 #### 6.2.26 BSND PA 显式 split 生产适配
 
-BSND Q + ND PA KV 的 512+64、FP16/BF16、显式 S=2..256 复用 v23 和原 allocation 行地址，支持无 mask、右下 causal/window、Q-used、实际 KV 长度及合法 Q/qv/cache/页表 stride。实际验收状态以 [status](status.md) 为准；PA 自动与 TND PA split 不开放。
+BSND Q + ND PA KV 的 512+64、FP16/BF16、显式 S=2..256 复用 v23 和原 allocation 行地址，支持无 mask、右下 causal/window、Q-used、实际 KV 长度及合法 Q/qv/cache/页表 stride。实际验收状态以 [status](status.md) 为准；BSND PA 自动见 6.2.28，TND PA split 不开放。
 
 - [`AICPU`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_paged_bsnd_metadata.aicpu) 编译同一 CPU 构造器，当前 stream 上写入 v23；公开 metadata 仍只接收逻辑 P/C 和长度，不读取物理页。host 用独立静态预算分配 workspace/accumulator，不读取设备长度。内部 Q-used 每次生成；显式 metadata 与 Q-used 同用仍拒绝。
 - [`launcher`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_paged_bsnd_launch_impl.hpp) 的 partial 与 merge 是两个同 stream 发射的独立 Kernel。每阶段每个 Cube/Vector 都先验证记录、长度和全部有效页，再设置同步地址或写入。partial 使用 v23 宽任务号查询持久槽，跨波复用每核 scratch；[`PA partial`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_split_kv.hpp) 在逻辑 token 端点上运行共享任务环，Copy 负责每次页寻址。
@@ -847,14 +847,25 @@ BSND Q + ND PA KV 的 512+64、FP16/BF16、显式 S=2..256 复用 v23 和原 all
 
 #### 6.2.27 BSND PA 原生自动计划与 v24 安全协议
 
-[`原生 PA 计划`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_plan.h) 组合 BSND Q + ND PA KV 的固定源 PA 几何与已有原生自动计划。P/C、有效 KV 上界及 M/N 选择沿用 6.2.25；每 M 的 AIC 分片、FD 持久槽和 8 行 Vector 归约保留固定 CANN 顺序。它是独立 CPU 计划和 CPU/AICore 共用协议；v24 尚未编入 AICPU 或生产前向，公开 PA 自动与 TND PA split 仍拒绝。
+[`原生 PA 计划`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_plan.h) 组合 BSND Q + ND PA KV 的固定源 PA 几何与已有原生自动计划。P/C、有效 KV 上界及 M/N 选择沿用 6.2.25；每 M 的 AIC 分片、FD 持久槽和 8 行 Vector 归约保留固定 CANN 顺序。本节定义独立 CPU 计划和 CPU/AICore 共用协议；v24 AICPU 和 BSND PA 自动生产接入见 6.2.28，TND PA split 仍拒绝。
 
 - 三种 mask 使用实际 Q/KV 长度求逻辑 token 区间。原生 AIC 的 `(batch,M,N)` 端点为独占上界，Vector 的 `(FD head,8-row part)` 端点为包含上界；查询分别返回 Direct、Partial 和 Empty。Direct 不占持久 FD 槽；零成本 M 有唯一 Empty 初始化所有者，包括源计算端点之外的零尾部。全零 KV-used 使用 M=256 与容量对应 PA N；静态 B/Q/C 任一为零时无任务/workspace，仍校验全部输入。
-- 静态 M 上界为 `B*ceil(Qcap*H/128)`；AIC>1 时最多 `2*AIC` 个持久槽，每槽最多 256 行，AIC=1 无 FD 槽。scratch 按最大 M=256 与容量对应 N 保守预留，计划使用实际 M/N 的偏移。FP32 accumulator 容量为 AIC，形状 `[AIC,B,H,Qcap,512]` / `[AIC,B,H,Qcap]`，AIC=1 沿用空 accumulator；独立核验 int64 stride/字节及 workspace+libapi 边界，Q-used 不压紧原 allocation 地址。预算仅含计划 scratch 和 FD 持久槽，后续生产所需 Direct 临时槽须另行预算及验收。
+- 静态 M 上界为 `B*ceil(Qcap*H/128)`；AIC>1 时最多 `2*AIC` 个持久槽，每槽最多 256 行，AIC=1 无 FD 槽。scratch 按最大 M=256 与容量对应 N 保守预留，计划使用实际 M/N 的偏移。FP32 accumulator 容量为 AIC，形状 `[AIC,B,H,Qcap,512]` / `[AIC,B,H,Qcap]`，AIC=1 沿用空 accumulator；独立核验 int64 stride/字节及 workspace+libapi 边界，Q-used 不压紧原 allocation 地址。预算仅含计划 scratch 和 FD 持久槽，生产 Direct 临时槽和固定 26 片 accumulator 的独立预算见 6.2.28。
 - [`v24 构造器`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_metadata.h) 写 `756+7*B` 个 int32：v6 的 408 字 prefix、B 个五字 PA span、346 字窗口/AIC/FD/Vector tail，以及 B+1 个 uint64 M prefix。版本/kind 均为 24，区别于 v23 显式 split。输出字数/地址不安全或输入输出重叠时保留输出；安全描述符下的失败写完整失败 header 并清空 payload。计划、消费者及查询失败均保留目标对象。
 - [`独立消费者`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_consumer.h) 先核验 v24 header/窗口，再通过 v6 view 校验逻辑几何、原分配/当前 used、平台、完整 cache 描述符及全部有效页；即使 Q-used=0 或全遮罩也不跳过页校验。随后复用独立分区安全检查，核对 AIC 覆盖、FD/Vector 所有权、持久槽及 accumulator 静态预算。它不调用生产计划或源调度器，不证明划分最优性。记录不绑定页号、物理地址或 stride，合法更换按当次调用重新校验；所有输入在查询/使用期间保持稳定，设备接入须在写入或同步前完成验证。
 
-[`本模块单元`](../../tests/mla/unit/auto_split_paged_bsnd_protocol/test_plan.py) 从固定 Git blob 重编译 PA 几何、原生 AIC/FD/Vector、workspace 和 FA3 accumulator oracle，独立枚举行/token/page 与原 allocation 地址；[`协议单元`](../../tests/mla/unit/auto_split_paged_bsnd_protocol/test_metadata.py) 覆盖双 dtype、三 mask、页边界、Direct/Partial/Empty、Q-used/空容量、宽 group、精确 accumulator/总预算溢出、记录损坏/陈旧长度/坏页及合法页表/stride 更换。普通和 ASan/UBSan 使用同一集合；共享 v18/v20/v22 消费者变化由重建后的累计小输入 E2E 回归。生产数值、真实 Trap、生命周期及平均公开性能属于后续接入验收。
+[`本模块单元`](../../tests/mla/unit/auto_split_paged_bsnd_protocol/test_plan.py) 从固定 Git blob 重编译 PA 几何、原生 AIC/FD/Vector、workspace 和 FA3 accumulator oracle，独立枚举行/token/page 与原 allocation 地址；[`协议单元`](../../tests/mla/unit/auto_split_paged_bsnd_protocol/test_metadata.py) 覆盖双 dtype、三 mask、页边界、Direct/Partial/Empty、Q-used/空容量、宽 group、精确 accumulator/总预算溢出、记录损坏/陈旧长度/坏页及合法页表/stride 更换。普通和 ASan/UBSan 使用同一集合；共享 v18/v20/v22 消费者变化由重建后的累计小输入 E2E 回归。生产数值、真实 Trap、生命周期及平均公开性能由 6.2.28 的所属集合验收。
+
+#### 6.2.28 BSND PA 原生自动 split 生产适配
+
+BSND Q + ND PA KV 的 `num_splits=0` 接通 v24、512+64、FP16/BF16 和无 mask/右下 causal/window，保留固定 CANN 每 M 的原生变长 AIC 分区及 FD/8 行 Vector 归约。公开只读 cache/metadata 的默认自动请求、通用 raw/custom op 与 real/fake/compile 汇入同一生产路径；实际验收状态见 [status](status.md)。内部 Q-used 每次生成且拒绝显式 metadata；TND PA split 继续明确拒绝。
+
+- [`生产预算`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_plan.cpp) 在原生计划 scratch/FD 预算后追加每 AIC 最多 256 行的 Direct raw 临时槽，独立检查总 workspace/libapi 与公开 accumulator 的 int64 边界。公开及 fake 始终返回 FP32 `[26,B,H,Qcap,512]` / `[26,B,H,Qcap]`，静态容量 26 不改变实际每 M 的片数，也不随空容量的单核发射而缩减。
+- [`AICPU`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_metadata.aicpu) 生成 `756+7B` 字 v24，双 dtype 的独立 [`launcher`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_launch_impl.hpp) 执行 init/partial/merge。每阶段在写入或同步前核验窗口、当前长度、原生端点、完整 storage 和全部有效页，包括 Q-used=0/全遮罩样本。记录可随合法物理页重排、stride、地址或 scale 更换复用；长度或归一化窗口改变须重建。
+- init 初始化原 allocation 的 O/LSE 为 `0/-inf`，accumulator 为 `0/-inf`，含未使用 Q 槽、零 KV-used 和合法 C=0。静态 B/Q/C 为空时仍先运行验证和初始化，再省略 partial/merge。partial 复用 `MlaSplitKvPagedBsnd`、实际 PA 几何和页内 Copy，FD 保存原生持久槽，Direct 使用独立 per-AIC 临时槽并立即归并；merge 只处理原生 FD Vector 所有权。输出与 accumulator 的地址始终保留原 Q 分配行，不压紧 Q-used。
+- 分配、metadata 提交与三阶段发射遵循现有 current stream 顺序，持有输入、页表、长度、记录、workspace、O/LSE 和 accumulator 的 storage；不读回动态长度、不物化完整 KV、不调用 CANN attention。
+
+[`所属源数值单元`](../../tests/mla/unit/auto_split_paged_bsnd/test_source.py) 在真实页上执行固定源 PA partial/FD，比较原生端点、O/LSE、真实 accumulator 及内容缓存的双数学；[`公开专项`](../../tests/mla/e2e/auto_split_paged_bsnd/test_public.py) 验收新入口的 mask、页边界、空值、stride、长度/metadata 复用、失败恢复和生命周期，并新增本模块累计日常 E2E。release Trap 逐 fault 启动全新解释器/设备 context，保存完整日志、超时、退出和事件证据；不 fork 已初始化 NPU 的进程。公开性能固定输入包含原生 FD，遵守 R=1/4 和既有预热/重复、分配及页表/cache 转换边界；按全部适用配置平均比 ≤1 验收，源表示域限制单列。
 
 ### 6.3 长度与布局调度
 
@@ -930,7 +941,7 @@ Copy Tile 沿用固定 CANN 源 `attention/common/op_kernel/memcopy/attn_copy_gm
 
 #### 6.4.3 ND paged cache 契约与来源
 
-本节定义 512+64 无 mask、单 split PA 的基础接口及组件职责；BSND/TND causal 及 window 复用这些页地址/Copy 契约，增量见 [5.12](#512-v10bsnd-pa-causal-记录) / [5.13](#513-v11tnd-pa-causal-记录) / [5.17](#517-v15bsnd-pa-window-记录) / [5.18](#518-v16tnd-pa-window-记录)。BSND PA 显式 split 见 [6.2.26](#6226-bsnd-pa-显式-split-生产适配)，192/128、PA 自动和 TND PA split 按计划推进。设备校验见 [5.7](#57-v6nd-pa-记录)，生产入口见 [6.7](#67-生产接入与构建)，实测结果见 [status](status.md)。本节基础链路适用 FP16/BF16、512+64 共享 KV、Hkv=1、无 mask、`num_splits=1`。Q/qv 复用 BSND 或 TND stride 描述；cache 为 `k:[Np,P,1,64]`、`v:[Np,P,1,512]`，页表为同设备 `int32[B,M]`，末维 stride=1，行 stride 可为合法非负值。K/V 各自末维连续、外层非负 stride 和独立 storage offset，沿用完整 storage/字节校验；只读广播、重叠和重复页号不因地址相同而拒绝。
+本节定义 512+64 无 mask、单 split PA 的基础接口及组件职责；BSND/TND causal 及 window 复用这些页地址/Copy 契约，增量见 [5.12](#512-v10bsnd-pa-causal-记录) / [5.13](#513-v11tnd-pa-causal-记录) / [5.17](#517-v15bsnd-pa-window-记录) / [5.18](#518-v16tnd-pa-window-记录)。BSND PA 显式/自动 split 见 [6.2.26](#6226-bsnd-pa-显式-split-生产适配)/[6.2.28](#6228-bsnd-pa-原生自动-split-生产适配)，192/128 和 TND PA split 按计划推进。设备校验见 [5.7](#57-v6nd-pa-记录)，生产入口见 [6.7](#67-生产接入与构建)，实测结果见 [status](status.md)。本节基础链路适用 FP16/BF16、512+64 共享 KV、Hkv=1、无 mask、`num_splits=1`。Q/qv 复用 BSND 或 TND stride 描述；cache 为 `k:[Np,P,1,64]`、`v:[Np,P,1,512]`，页表为同设备 `int32[B,M]`，末维 stride=1，行 stride 可为合法非负值。K/V 各自末维连续、外层非负 stride 和独立 storage offset，沿用完整 storage/字节校验；只读广播、重叠和重复页号不因地址相同而拒绝。
 
 ##### 入口、容量与固定来源
 
@@ -1084,11 +1095,11 @@ v2/v3/v4/v5/v7/v8/v9/v12/v13/v14 的非空物理容量按平台全核 blockDim �
 
 #### 6.7.3 实例与构建依赖
 
-[`generate_kernels.py`](../../csrc/ascend910/flash_attn_npu_3/autogen/generate_kernels.py) 生成 FP16/BF16 C1V2 实例，BSND、TND、混合布局、BSND/TND used 及 BSND/TND PA 各用对应 launcher，混合 Q-used 复用 TND used launcher，共用 Kernel / Block / Tile。两种 dtype 均为 2 字节，调度/workspace 相同，数值舍入按 [6.5](#65-数值路径与资源布局)。修改这些生成实例应改生成器，不仅手改 autogen。显式 split 使用单独的 `mla_dispatch_fp16_split_bsnd.cpp` / `mla_dispatch_bf16_split_bsnd.cpp` 和对应 `split_tnd.cpp` / `split_mixed.cpp` / `split_paged_bsnd.cpp` 薄实例，复用同一 launcher 并由 setup 显式编入。自动 split 使用对应的 `mla_dispatch_fp16_auto_split_bsnd.cpp` / `mla_dispatch_bf16_auto_split_bsnd.cpp` 及 `auto_split_tnd.cpp` / `auto_split_mixed.cpp` 薄实例，复用共享三阶段 launcher。
+[`generate_kernels.py`](../../csrc/ascend910/flash_attn_npu_3/autogen/generate_kernels.py) 生成 FP16/BF16 C1V2 实例，BSND、TND、混合布局、BSND/TND used 及 BSND/TND PA 各用对应 launcher，混合 Q-used 复用 TND used launcher，共用 Kernel / Block / Tile。两种 dtype 均为 2 字节，调度/workspace 相同，数值舍入按 [6.5](#65-数值路径与资源布局)。修改这些生成实例应改生成器，不仅手改 autogen。显式 split 使用单独的 `mla_dispatch_fp16_split_bsnd.cpp` / `mla_dispatch_bf16_split_bsnd.cpp` 和对应 `split_tnd.cpp` / `split_mixed.cpp` / `split_paged_bsnd.cpp` 薄实例，复用同一 launcher 并由 setup 显式编入。自动 split 使用对应的 `mla_dispatch_fp16_auto_split_bsnd.cpp` / `mla_dispatch_bf16_auto_split_bsnd.cpp` 及 `auto_split_tnd.cpp` / `auto_split_mixed.cpp` 薄实例，复用共享三阶段 launcher；`auto_split_paged_bsnd.cpp` 薄实例使用 PA 三阶段 launcher，复用既有 PA partial 与 FD Block。
 
 CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射使用线程局部作用域给实际 ACL launch 设置源 `BATCH_MODE`，保留其他属性及错误码，普通 FA3 发射原样透传。绕过已验收 ACL 路径或作用域内不恰好发射一次时明确失败。显式 split 的 partial 与 merge、自动 split 的 init/partial/merge 各使用独立发射作用域，保持同一 stream 顺序。
 
-[`setup.py`](../../setup.py) 的 910 FA3 构建包含十六个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v23 的 `mla_metadata.aicpu`、`mla_bsnd_metadata.aicpu`、`mla_tnd_metadata.aicpu`、`mla_tnd_bsnd_metadata.aicpu`、`mla_used_metadata.aicpu`、`mla_paged_metadata.aicpu`、`mla_causal_metadata.aicpu`、`mla_window_metadata.aicpu`、`mla_split_bsnd_metadata.aicpu`、`mla_auto_split_bsnd_metadata.aicpu`、`mla_split_tnd_metadata.aicpu`、`mla_auto_split_tnd_metadata.aicpu`、`mla_split_mixed_metadata.aicpu`、`mla_auto_split_mixed_metadata.aicpu`、`mla_split_paged_bsnd_metadata.aicpu`。v23 单元复用 PA 调度、显式分片和原 allocation 计划。v22 单元复用混合原生计划、used 调度和安全 prefix 模式。v21 单元复用混合显式计划、used 调度和安全 prefix 模式。v20 单元复用 TND 原生自动计划、used 调度和 v20 构造器。v19 单元复用 TND 显式计划与 used 调度。v18 单元复用自动计划与 v18 构造器，保留原生 AIC/FD 端点。v17 单元复用 used/window 调度和 split 计划；window 单元分别生成 v12 BSND / v13 TND / v14 混合 window；v6/v10/v11/v15/v16 由 PA AICPU 单元生成：v6 用于无 mask BSND/TND，v10/v11 分别用于 BSND/TND causal，v15/v16 分别用于 BSND/TND PA window；生产构建同时包含 PA 静态计划、布局适配器和双 dtype PA attention 实例。生产 v4 生成器由 metadata 入口和混合前向共用，v5 由内部 BSND/混合 Q-used 和公开 varlen used 前向共用，v7 由 BSND causal 生成器与前向共用；同一 causal AICPU 单元另提供 v8 TND 内部生成器及 v9 mixed 内部/公开前缀生成器。编译选项、包含的头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，复现须核对加载路径、哈希和链接对象。
+[`setup.py`](../../setup.py) 的 910 FA3 构建包含十七个 AICPU 单元：普通 FA 的 `fa_metadata.aicpu`，以及 MLA v1–v24 的 `mla_metadata.aicpu`、`mla_bsnd_metadata.aicpu`、`mla_tnd_metadata.aicpu`、`mla_tnd_bsnd_metadata.aicpu`、`mla_used_metadata.aicpu`、`mla_paged_metadata.aicpu`、`mla_causal_metadata.aicpu`、`mla_window_metadata.aicpu`、`mla_split_bsnd_metadata.aicpu`、`mla_auto_split_bsnd_metadata.aicpu`、`mla_split_tnd_metadata.aicpu`、`mla_auto_split_tnd_metadata.aicpu`、`mla_split_mixed_metadata.aicpu`、`mla_auto_split_mixed_metadata.aicpu`、`mla_split_paged_bsnd_metadata.aicpu`、`mla_auto_split_paged_bsnd_metadata.aicpu`。v24 单元复用原生 PA 计划、PA 调度及独立安全协议。v23 单元复用 PA 调度、显式分片和原 allocation 计划。v22 单元复用混合原生计划、used 调度和安全 prefix 模式。v21 单元复用混合显式计划、used 调度和安全 prefix 模式。v20 单元复用 TND 原生自动计划、used 调度和 v20 构造器。v19 单元复用 TND 显式计划与 used 调度。v18 单元复用自动计划与 v18 构造器，保留原生 AIC/FD 端点。v17 单元复用 used/window 调度和 split 计划；window 单元分别生成 v12 BSND / v13 TND / v14 混合 window；v6/v10/v11/v15/v16 由 PA AICPU 单元生成：v6 用于无 mask BSND/TND，v10/v11 分别用于 BSND/TND causal，v15/v16 分别用于 BSND/TND PA window；生产构建同时包含 PA 静态计划、布局适配器和双 dtype PA attention 实例。生产 v4 生成器由 metadata 入口和混合前向共用，v5 由内部 BSND/混合 Q-used 和公开 varlen used 前向共用，v7 由 BSND causal 生成器与前向共用；同一 causal AICPU 单元另提供 v8 TND 内部生成器及 v9 mixed 内部/公开前缀生成器。编译选项、包含的头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，复现须核对加载路径、哈希和链接对象。
 
 #### 6.7.4 BSND/TND PA 静态发射计划
 
@@ -1104,19 +1115,20 @@ CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射使用线�
 
 #### 6.7.5 BSND/TND PA 前向
 
-公开 kvcache、通用 `_flash_attn_forward` / raw C++ `fwd` 和专用算子汇入同一 [`PagedForward`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp)。host 校验四路完整 storage、页表/长度/记录描述符和地址，调用静态计划，分配 O/LSE/workspace，再内部生成或复用无 mask v6 / BSND causal v10 / TND causal v11 / BSND/TND window v15/v16；v15/v16 在静态计划字数上增加三字窗口身份，预算与页布局不变。BSND 显式 S=2..256 选择 v23，叠加独立持久预算和真实 FP32 accumulator 分配，见 [6.2.26](#6226-bsnd-pa-显式-split-生产适配)。动态长度、前缀和页号始终留给设备校验。
+公开 kvcache、通用 `_flash_attn_forward` / raw C++ `fwd` 和专用算子汇入同一 [`PagedForward`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp)。host 校验四路完整 storage、页表/长度/记录描述符和地址，调用静态计划，分配 O/LSE/workspace，再内部生成或复用无 mask v6 / BSND causal v10 / TND causal v11 / BSND/TND window v15/v16；v15/v16 在静态计划字数上增加三字窗口身份，预算与页布局不变。BSND 显式 S=2..256 选择 v23，叠加独立持久预算和真实 FP32 accumulator 分配，见 [6.2.26](#6226-bsnd-pa-显式-split-生产适配)。BSND 自动 S=0 选择 v24、原生 AIC/FD 计划及三阶段 launcher，见 [6.2.28](#6228-bsnd-pa-原生自动-split-生产适配)。动态长度、前缀和页号始终留给设备校验。
 
 | Q 布局 | 专用算子 / C++ 入口 | 静态计划 / launcher / Kernel |
 | --- | --- | --- |
 | BSND，无 mask / causal / window | `_mla_paged_bsnd_forward` / `PagedBsndForward`，默认窗口按 causal 选择 v6/v10，非默认窗口选择 v15 | `BuildPagedBsndPlan` / [`mla_paged_bsnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_bsnd_launch_impl.hpp) / `MlaPagedBsnd` |
 | TND，无 mask / causal / window | `_mla_paged_tnd_forward` / `PagedTndForward`，默认窗口按 causal 选择 v6/v11，非默认窗口选择 v16；另传 Q 前缀和 max Q | `BuildPagedTndPlan` / [`mla_paged_tnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_tnd_launch_impl.hpp) / `MlaPagedTnd` |
 | BSND，显式 split，三种 mask | `_mla_split_paged_bsnd_forward` / `PagedBsndForward`，选择 v23 | `BuildPagedBsndPlan` + `BuildSplitPagedBsndBudget` / [`mla_split_paged_bsnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_paged_bsnd_launch_impl.hpp) / `MlaSplitKvPagedBsnd` + `MlaSplitKvMerge` |
+| BSND，自动 split，三种 mask | `_mla_split_paged_bsnd_forward` / `PagedBsndForward`，选择 v24 | `BuildPagedBsndPlan` + `BuildAutoSplitPagedBsndProductionBudget` / [`mla_auto_split_paged_bsnd_launch_impl.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_launch_impl.hpp) / `MlaSplitKvPagedBsnd` + `MlaSplitKvMerge` |
 
-专用算子接收 None 或 tensor KV 长度，不接收整数。None 在当前流物化为逻辑容量 C；公开 kvcache 的整数先验证几何及 `0..C`，再按逻辑 B 物化。BSND 的 B 来自 Q batch，TND 的 Q 前缀元素数减一须与页表行数一致；Python 从前缀推导 B，C++ 静态计划从页表推导 B，分别检查另一侧。公开入口使用完整 Q 分配段；内部可传 `seqused_q`，存在时每次生成 v6（BSND/TND causal 为 v10/v11，BSND/TND window 为 v15/v16，BSND 显式 split 为 v23），拒绝显式复用。其他选项和返回数量见 [2.2](#22-后端选项与返回值)。
+专用算子接收 None 或 tensor KV 长度，不接收整数。None 在当前流物化为逻辑容量 C；公开 kvcache 的整数先验证几何及 `0..C`，再按逻辑 B 物化。BSND 的 B 来自 Q batch，TND 的 Q 前缀元素数减一须与页表行数一致；Python 从前缀推导 B，C++ 静态计划从页表推导 B，分别检查另一侧。公开入口使用完整 Q 分配段；内部可传 `seqused_q`，存在时每次生成 v6（BSND/TND causal 为 v10/v11，BSND/TND window 为 v15/v16，BSND 显式/自动 split 为 v23/v24），拒绝显式复用。其他选项和返回数量见 [2.2](#22-后端选项与返回值)。
 
-生成和发射遵循 [5.8](#58-stream-与内存生命周期)：持有输入、页表、前缀/长度、记录、输出和 workspace，单 split 无 mask 登记 current/worker stream 并用双 event 保证先生成后消费，causal/window 和 BSND 显式 split 在 current stream 顺序提交，split 额外持有 accumulator。共享 host 参数位于 [`mla_paged_inputs.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_inputs.h)。每个 Cube/Vector 在 TPipe 和 attention 之前运行对应 v6/v10/v11/v15/v16/v23 消费者，再进入既有 Kernel / Block / Tile；不读回长度、不物化完整 cache、不调用 CANN attention。
+生成和发射遵循 [5.8](#58-stream-与内存生命周期)：持有输入、页表、前缀/长度、记录、输出和 workspace，单 split 无 mask 登记 current/worker stream 并用双 event 保证先生成后消费，causal/window 和 BSND 显式/自动 split 在 current stream 顺序提交，split 额外持有 accumulator。共享 host 参数位于 [`mla_paged_inputs.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_inputs.h)。每个 Cube/Vector 在 TPipe 和 attention 之前运行对应 v6/v10/v11/v15/v16/v23/v24 消费者，再进入既有 Kernel / Block / Tile；不读回长度、不物化完整 cache、不调用 CANN attention。
 
-专用/通用 fake 校验几何、P/C、完整 storage、前缀/长度/记录外形，并返回与真实路径相同的 O/LSE，BSND 显式 split 另返回真实 shape 的 FP32 accumulator。公开 `torch.compile(..., fullgraph=True)` 保留真实算子边界，执行时重新核对 storage 和动态值；这不等于完整图重放验收。PA 有效零 KV 行（含合法 C=0/空池）为 `O=0、LSE=-inf`，未使用 Q 槽位不新增值承诺。生产与公开验收分别见 [BSND 生产](../../tests/mla/e2e/paged_bsnd/test_flash_attn_npu_v3_mla_paged_bsnd_production.py)、[TND 生产](../../tests/mla/e2e/paged_tnd/test_flash_attn_npu_v3_mla_paged_tnd_production.py)、[BSND 公开](../../tests/mla/e2e/paged_bsnd/test_flash_attn_npu_v3_mla_paged_public.py)、[TND 公开](../../tests/mla/e2e/paged_tnd/test_flash_attn_npu_v3_mla_paged_tnd_public.py)。
+专用/通用 fake 校验几何、P/C、完整 storage、前缀/长度/记录外形，并返回与真实路径相同的 O/LSE，BSND 显式/自动 split 另返回真实 shape 的 FP32 accumulator。公开 `torch.compile(..., fullgraph=True)` 保留真实算子边界，执行时重新核对 storage 和动态值；这不等于完整图重放验收。PA 有效零 KV 行（含合法 C=0/空池）为 `O=0、LSE=-inf`，未使用 Q 槽位不新增值承诺。生产与公开验收分别见 [BSND 生产](../../tests/mla/e2e/paged_bsnd/test_flash_attn_npu_v3_mla_paged_bsnd_production.py)、[TND 生产](../../tests/mla/e2e/paged_tnd/test_flash_attn_npu_v3_mla_paged_tnd_production.py)、[BSND 公开](../../tests/mla/e2e/paged_bsnd/test_flash_attn_npu_v3_mla_paged_public.py)、[TND 公开](../../tests/mla/e2e/paged_tnd/test_flash_attn_npu_v3_mla_paged_tnd_public.py)。
 
 #### 6.7.6 TND PA 前缀与空 Q
 
@@ -1134,7 +1146,7 @@ Tq=0 而 B/maxQ/C 均非零时，生产适配器将静态计划的单核发射�
 
 **阶段范围：** 性能只验收本步已迁移的能力和执行路径。在 FD 迁移完成前，全部约定形状均用固定 CANN 源的非 FD Kernel、相同逻辑输入/基本块/核数/端点，与迁移 Kernel 对照；布局转换的边界按 [7.1](#71-固定性能矩阵与阶段边界) 和 [7.2](#72-参考工具与对照边界) 单列。记录逐例 Kernel 耗时及独立 probe 调用耗时，不能把预分配 probe 的调用时间当成公开 E2E。原生 CANN 自动调度同样不启用 FD 的用例，另按下述公开 metadata E2E 门槛验收。原生 CANN 会启用尚未迁移 FD 的用例，其原生 E2E 仅记录能力差距，不作为非 FD 迁移的阻塞项；不因此前置 FD、开放 `num_splits=0` 或改变 `num_splits=1` 语义。
 
-源执行路径是否已迁移，按固定源调度字段和分派证据判定，不能按耗时结果筛选。保留完整预定矩阵和原始数据；FD、mask、PA 等能力接通后，对应路径再纳入验收。BSND、TND Q/KV 和混合 TND Q + BSND KV 自动 split 组已接通原生自动 FD，因此这三组把 FD 与非 FD 一并纳入平均，保留逐例与分类结果；其他布局的未迁移原生 FD 仍单列。CANN 没有公开的 FA3 `num_splits=1` 等价开关时，使用明确标识的独立源 probe 作组件对照，保留原生 CANN 分派及库，不将改装调用冒充原生 E2E。
+源执行路径是否已迁移，按固定源调度字段和分派证据判定，不能按耗时结果筛选。保留完整预定矩阵和原始数据；FD、mask、PA 等能力接通后，对应路径再纳入验收。非 PA BSND、TND Q/KV、混合 TND Q + BSND KV 及 BSND PA 自动 split 组已接通原生自动 FD，因此这些组把 FD 与非 FD 一并纳入平均，保留逐例与分类结果；其他布局的未迁移原生 FD 仍单列。CANN 没有公开的 FA3 `num_splits=1` 等价开关时，使用明确标识的独立源 probe 作组件对照，保留原生 CANN 分派及库，不将改装调用冒充原生 E2E。
 
 **公开 E2E：** 用户明确的“不劣化”指 **走 MLA metadata 路径的 FA3 公开调用端到端（E2E）延迟**。在同一健康、空闲的 910B、同一输入/精度/软件栈上比较。固定 seed、预热、计时次数和同步方式，交替重复测量 CANN/新实现；保存每例耗时及运行信息。按用户调整，固定集合最多 100 个输入配置（dtype、shape、scale、长度、stride），不足 100 个时保留实际数量。双方执行路径均已迁移的配置参与验收：每个入口/R 的比值为两侧 5 轮×20 次 wall 样本中位数之比；先在一个配置内等权平均已定义的入口/R，再对所有适用配置等权取算术平均，目标 `mean_ratio <= 1.0`。单例退化只记录，不作为提交阻塞；同时报告逐例、各入口/R 均值和退化数量，不按测得耗时筛选用例。缺失结果、空集合、NaN/非正耗时或计时协议不符仍失败。原生 FD 等未迁移路径按上述规则单列，不填充平均值。
 

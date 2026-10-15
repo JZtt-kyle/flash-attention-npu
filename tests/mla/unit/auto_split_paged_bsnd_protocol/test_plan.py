@@ -484,3 +484,34 @@ def test_exact_total_workspace_overflow(drivers):
     c[7] += 1
     got = drivers[0].evaluate([[0, *c]])[0]
     assert got["status"] and got["unchanged"]
+
+
+@pytest.mark.parametrize("cores", [1, 7, 26])
+@pytest.mark.parametrize("empty", [None, "b", "q", "k"])
+def test_production_budget(drivers, cores, empty):
+    c = config(cores=cores, **({empty: 0} if empty else {}))
+    before = drivers[0].evaluate([[0, *c]])[0]
+    got = drivers[0].evaluate([[5, *c]])[0]
+    assert before["status"] == got["status"] == 0
+    old, new = before["layout"], got["layout"]
+    direct = 0 if empty else cores * 256 * 528 * 4
+    assert new["bounds"] == old["bounds"][:4] + [v + direct for v in old["bounds"][4:]]
+    for key in ("accum", "lse_accum"):
+        shape = [26, c[0], c[4], c[1]] + ([512] if key == "accum" else [])
+        assert new[key]["shape"][: len(shape)] == shape
+        assert new[key]["bytes"] == math.prod(shape) * 4
+
+
+def test_production_budget_exact_overflow(drivers):
+    c = config(cores=1, lib=0)
+    base = drivers[0].evaluate([[5, *c]])[0]["layout"]["bounds"][-1]
+    c[7] = 2**63 - 1 - base
+    assert drivers[0].evaluate([[5, *c]])[0]["status"] == 0
+    c[7] += 1
+    bad = drivers[0].evaluate([[5, *c]])[0]
+    assert bad["status"] != 0 and bad["unchanged"]
+    # One physical AIC needs no FD accumulator, but public static capacity is 26.
+    c = config(b=2**25, q=65536, h=128, k=0, p=16, cores=1)
+    assert drivers[0].evaluate([[0, *c]])[0]["status"] == 0
+    bad = drivers[0].evaluate([[5, *c]])[0]
+    assert bad["status"] != 0 and bad["unchanged"]

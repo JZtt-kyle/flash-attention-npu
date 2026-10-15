@@ -186,8 +186,7 @@ std::vector<at::Tensor> mha_fwd(
                         is_rotary_interleaved,
                     "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
         TORCH_CHECK(attention_chunk == 0 && softcap == 0.0f &&
-                        (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 &&
-                                             (!page_table_ || (num_splits >= 2 && !cu_seqlens_q_)) &&
+                        (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 && (!page_table_ || !cu_seqlens_q_) &&
                                              (!cu_seqlens_k_ || cu_seqlens_q_))) &&
                         !pack_gqa_.has_value() && sm_margin == 0,
                     "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
@@ -836,8 +835,7 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
         TORCH_CHECK(num_heads_kv == 1, "MLA scheduler metadata is not implemented yet outside the dense shape bounds");
         TORCH_CHECK(!cu_seqlens_k && !cu_seqlens_k_new && !seqused_q && !cache_leftpad && max_seqlen_k_new == 0 &&
                         attention_chunk == 0 && !has_softcap &&
-                        (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 &&
-                                             (!page_size || (num_splits >= 2 && !cu_seqlens_q)))) &&
+                        (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 && (!page_size || !cu_seqlens_q))) &&
                         !pack_gqa.has_value() && sm_margin == 0 && !softcap_ && !softmax_scale,
                     "MLA scheduler metadata is not implemented yet for these length, mask, split, scheduling or "
                     "legacy numerical options");

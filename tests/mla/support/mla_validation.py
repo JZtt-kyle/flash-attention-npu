@@ -57,6 +57,7 @@ USED_SHARED_CPU = [
 SPLIT_KV_ATTENTION = "tests/mla/unit/split_kv_attention/test_attention.py"
 SPLIT_KV_MERGE = "tests/mla/unit/split_kv_merge/test_merge.py"
 SPLIT_KV_MERGE_SUITES = {
+    "unit-auto_split_paged_bsnd",
     "unit-split_paged_bsnd",
     "unit-auto_split_mixed",
     "unit-split_mixed",
@@ -80,6 +81,17 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "auto-split-paged-bsnd-tools": [
+        "tests/mla/unit/tools/test_mla_auto_split_paged_bsnd_production_tools.py"
+    ],
+    "auto-split-paged-bsnd-check": [
+        "tests/mla/e2e/auto_split_paged_bsnd/test_public.py",
+        "-k",
+        "representative",
+    ],
+    "auto-split-paged-bsnd-public": ["tests/mla/e2e/auto_split_paged_bsnd/test_public.py"],
+    "auto-split-paged-bsnd-trap": ["tests/mla/e2e/auto_split_paged_bsnd/test_trap.py"],
+    "auto-split-paged-bsnd-profile": ["tests/mla/e2e/auto_split_paged_bsnd/test_profile.py"],
     "auto-split-paged-bsnd-protocol-tools": [
         "tests/mla/unit/tools/test_mla_auto_split_paged_bsnd_tools.py"
     ],
@@ -760,6 +772,7 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "auto-split-paged-bsnd-profile",
     "split-paged-bsnd-profile",
     "auto-split-mixed-profile",
     "split-mixed-profile",
@@ -818,6 +831,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "auto-split-paged-bsnd-tools",
     "auto-split-paged-bsnd-protocol-tools",
     "split-paged-bsnd-tools",
     "split-paged-bsnd-protocol-tools",

@@ -57,6 +57,28 @@ MlaScheduleStatus BuildAutoSplitPagedBsndBudget(const MlaPagedShape& s, const Ml
     return MlaScheduleStatus::Success;
 }
 
+MlaScheduleStatus BuildAutoSplitPagedBsndProductionBudget(const MlaPagedShape& s, const MlaPlatformInfo& p,
+                                                          MlaAutoSplitPagedBsndBudget& output)
+{
+    MlaAutoSplitPagedBsndBudget result{};
+    auto status = BuildAutoSplitPagedBsndBudget(s, p, result);
+    if (status != MlaScheduleStatus::Success)
+        return status;
+    status = BuildSplitAccumulatorLayout(
+        {MlaAccumulatorQueryLayout::Bsnd, s.batch, s.query.maxLength, s.query.totalTokens, s.queryHeads, kMlaMaxAic},
+        result.accumulator);
+    if (status != MlaScheduleStatus::Success)
+        return status;
+    const uint64_t direct =
+        s.batch && s.query.maxLength && s.logicalKvCapacity ? uint64_t(p.aicNum) * 256 * 528 * sizeof(float) : 0;
+    if (direct > uint64_t(INT64_MAX) - result.totalBytes)
+        return MlaScheduleStatus::WorkspaceOverflow;
+    result.userBytes += direct;
+    result.totalBytes += direct;
+    output = result;
+    return MlaScheduleStatus::Success;
+}
+
 MlaScheduleStatus BuildAutoSplitPagedBsndPlan(const MlaPagedShape& shape, const MlaPlatformInfo& platform,
                                               const MlaPagedInputs& inputs, const MlaWindowConfig& window,
                                               MlaAutoSplitPagedBsndPlan& output)

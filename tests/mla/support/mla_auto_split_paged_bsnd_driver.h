@@ -155,11 +155,14 @@ int PlanMain()
     auto& plan = owned.split;
     int mode;
     while (std::cin >> mode) {
-        if (mode == 0) {
+        if (mode == 0 || mode == 5) {
             const auto c = Config();
             MlaAutoSplitPagedBsndBudget l{};
             l.totalBytes = 987;
-            Checked(l, [&] { return BuildAutoSplitPagedBsndBudget(c.shape, c.platform, l); });
+            Checked(l, [&] {
+                return mode == 5 ? BuildAutoSplitPagedBsndProductionBudget(c.shape, c.platform, l)
+                                 : BuildAutoSplitPagedBsndBudget(c.shape, c.platform, l);
+            });
             std::cout << ",\"layout\":";
             Budget(std::cout, l);
         } else if (mode == 1) {

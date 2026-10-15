@@ -382,7 +382,6 @@ def test_metadata_entries(dtype, fake):
 @pytest.mark.parametrize(
     "fault",
     [
-        "zero",
         "one",
         "over",
         "negative",
@@ -401,7 +400,7 @@ def test_reject(fake, fault):
         c = prepare(torch.float16, DAILY_CASES[0])
         a = c["args"]
         md = None
-        if fault in ("zero", "one", "over", "negative"):
+        if fault in ("one", "over", "negative"):
             a["num_splits"] = dict(zero=0, one=1, over=257, negative=-1)[fault]
         elif fault == "grad":
             a["q"].requires_grad_()
@@ -487,12 +486,6 @@ def test_layout_extremes(dtype, layout):
 def test_unopened_paged_split(fake):
     with FakeTensorMode() if fake else nullcontext():
         c = prepare(torch.float16, DAILY_CASES[0])
-        a = dict(c["args"], num_splits=0)
-        for entry in ("public", "eager", "cpp"):
-            with pytest.raises(RuntimeError, match="MLA"):
-                call(a, entry)
-        with pytest.raises(RuntimeError, match="MLA"):
-            metadata(dict(c, spec=dict(c["spec"], splits=0), args=a))
         a = dict(c["args"])
         a["q"] = a["q"].flatten(0, 1)
         a["qv"] = a["qv"].flatten(0, 1)

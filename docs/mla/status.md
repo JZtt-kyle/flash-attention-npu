@@ -1,52 +1,64 @@
 # MLA 当前状态
 
-当前分支 `feat/mla-cann-migration`。**M10c8a BSND PA 原生自动计划与 v24 安全协议已闭环。** 本轮基线为 `f65820ad05d8e1e986db22d125e0638886ce6022`；闭环提交用 `git log -1 -- docs/mla/status.md` 定位。唯一下一步为 [M10c8b：BSND PA 原生自动生产接入](plan.md#唯一下一步-m10c8bbsnd-pa-原生自动生产接入)，本轮不开始该步。
+M10c8b **BSND Q + ND PA KV 原生自动 split 生产接入已完成**：公开 `num_splits=0` 使用 v24、固定 CANN 原生变长分区及 init/partial/merge；支持 FP16/BF16、无 mask/causal/window、原 allocation/Q-used、页与四路 stride、metadata 复用及真实 accumulator。TND PA split 仍明确拒绝。本步基线 `0dacc51d7061fcaba5fa69c79c04593f6d225ff1`，分支 `feat/mla-cann-migration`；当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
 
-## 本步产物与开放边界
+唯一功能下一步为 [M10c9a：TND PA 显式 split 计划与安全协议](plan.md#唯一下一步-m10c9atnd-pa-显式-split-计划与安全协议)。本步不开始该任务，也不作阶段收尾；无头循环按已确认规则另行安排到期文档修正轮。
 
-BSND Q + ND PA KV 的独立原生自动 CPU 计划、静态预算、v24 构造与 CPU/AICore 共用消费/查询协议已完成。保留固定 CANN PA 的 M/N 几何、每 M 变长 AIC 分区、FD 持久槽和 8 行 Vector 所有权；支持三种 mask、实际 KV/Q-used、空容量与原 Q allocation 地址。v24 为 `756+7*B` 字，独立校验当前长度、完整 cache 描述符和所有有效页，合法页表/stride 更换不改变记录身份。详见 [design 6.2.27](design.md#6227-bsnd-pa-原生自动计划与-v24-安全协议)。
+## 实现与边界
 
-本步复用既有原生任务/行地址查询，并从共享消费者提取独立分区校验，v18/v20/v22 的既有行为经重建后的累计 E2E 验证。静态预算覆盖计划 scratch、最多 `2*AIC` 个 FD 持久槽及独立 FP32 accumulator 上界；后续生产的每 AIC Direct 临时槽须另行预算。
-
-公开能力保持上一闭环：BSND PA 单 split 与显式 `num_splits=2..256` 可用；三种非 PA 布局显式/自动及既有 mask 行为保留。**PA 自动 `num_splits=0` 与 TND PA split 继续明确拒绝。** v24 尚未编入 AICPU 或生产 launcher，不能将本步 CPU 证据表述为新路径数值、真实 Trap 或公开性能通过。未扩展 192/128、其他调度选项或完整图重放；CANN/CATLASS 未修改。
+- v24 AICPU 和双 dtype 独立三阶段 launcher 接通 host、公开 cache/metadata、通用 raw/custom op 与 fake/compile；复用 PA partial/Copy、原生 AIC/FD 查询和 FD Block，不调用原生 CANN attention。
+- 生产预算在 FD 持久槽后增加独立 Direct 临时槽，公开 accumulator 固定为 FP32 `[26,B,H,Qcap,512]` / `[26,B,H,Qcap]`，实际分区按物理 AIC 数。各阶段在写入/同步前检查完整记录及当前有效页；原 Q 分配行保持不变，空容量/未使用行初始化 `O=0、LSE=-inf`，accumulator 为 `0/-inf`。
+- 所属单元、公开/Trap/性能专项和日常 E2E 已注册。累计小输入清单由 215 项增至 229 项；新增 14 项覆盖本模块三 mask、双 dtype、空值及 fake/compile，未按固定数量填充或截断。CANN/CATLASS 未修改。
 
 ## 环境与证据身份
 
-- Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，6 号 Ascend910B3。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`；固定 CANN `ca18aee610729ca5270a44e2d84c751bc687fbf0`，固定 FA3 与原有约定一致。
-- 实际加载 `/home/zhangqijia/repo/flash-attention-npu/flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA-256 `fe99163f6889800a810b20c9681ed3da973577aa48b461defb6a09e1c238c76b`。源码、编译依赖、链接产物和实际加载由本轮统一驱动记录并校验。
-- 证据根 `/tmp/mla-m10c8a/`；构建和数学缓存沿用 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`。`build/` 只保留 `mla-codex-loop/` 日志、锁与恢复状态。证据位于 `/tmp`，缺失后不可继承。
-- 接手时工作树干净、HEAD 与上步闭环一致，无遗留 MLA 验收进程，6 号卡空闲。`takeover.json` 复核上步累计 E2E 的 7,346 个源码/依赖/产物/原始证据文件，无差异；上步最小闭环命令和结果仍对应其基线。本步共享源码变化，旧 E2E 不继承。
+- Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1；CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。实机为 6 号 Ascend910B3，实际 20 AIC；返回容量 26 不代表物理核数。
+- 实际加载本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA-256 `dd1e0745d29ea659d83909fb7148c29c9b64dba40071a03990caba9d669c0f78`。生产扩展已重建；后续按完整输入/依赖/产物哈希复用。环境及加载记录在各 attempt 的 `runtime.json`/`loaded.json`。
+- 性能显式设置 `MLA_NATIVE_ROOT=/tmp/mla-m10c3b/native`：固定 CANN `ca18aee610729ca5270a44e2d84c751bc687fbf0`，当前配方、输入声明及 2,027 个包文件有效（`native-audit.json`）。默认 native 目录是旧配方包，不可作为本步证据。
+- 本步结果根 `/tmp/mla-m10c8b/`；构建/数学内容缓存沿用 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`。`build/` 仅有 `mla-codex-loop/` 日志与状态；原始证据缺失后不可继续继承。
+- 接手复核上步 7,104 个原始证据/依赖文件（`takeover.json`），恢复时 HEAD 未变且卡 6 空闲。本步生产源码/构建改变，**继承 E2E 为 0**；下列均为本步实际执行，不累计历史单元或继承性能。独立循环修复的已有改动保留，不纳入本提交。
 
-## 本轮实际验收
+## 本步验收
 
-全部使用 `python3 -m tests.mla`，先 dry-run/collect-only。下表最终有效组均为 0 failed、0 skipped；所有 CPU 单元均本轮实际执行，历史单元继承 0，历史 E2E 继承 0。
+全部测试通过 `python3 -m tests.mla`，选择均已 dry-run/collect-only；没有 `--max-cases` 截断。表中耗时包含统一驱动的该组执行与结果检查。
 
-| 组 | 结果 | 耗时 | 证据目录（相对结果根） |
+| 检查 | 结果 | 耗时 | 结果子目录 / attempt |
 | --- | --- | --- | --- |
-| auto-split-paged-bsnd-protocol-tools | 14 passed | 9.2 s | check-fixed/attempt-1792033125982726400 |
-| auto-split-paged-bsnd-protocol-check | 13 passed | 43.1 s | 同上 |
-| unit-auto_split_paged_bsnd_protocol | 407 passed | 44.7 s | cpu-final/attempt-1792033203337139090 |
-| auto-split-paged-bsnd-protocol-sanitize | 407 passed | 145.6 s | sanitize-host/attempt-1792033401559699500 |
-| 新扩展构建 / 实际加载 | passed | 533.5 / 21.2 s | e2e-final/attempt-1792033271188555370 |
-| e2e | 215 passed | 41.7 s | 同上 |
+| 所属 protocol CPU | 420 passed | 44.9 s | cpu-final/attempt-1792035120695968580 |
+| 同集合 ASan/UBSan | 420 passed | 147.6 s | sanitize-final/attempt-1792035124516212300 |
+| protocol 工具 | 14 passed | 8.9 s | sanitize-final/attempt-1792035124516212300 |
+| 新模块工具/进程隔离 | 26 passed | 7.2 s | tools-exec/attempt-1792039313913419540 |
+| 固定源 PA/原生 FD 与双数学 | 12 passed | 228.2 s | acceptance-cores/attempt-1792038650808043040 |
+| 公开专项 | 80 passed | 102.8 s | acceptance-cores/attempt-1792038650808043040 |
+| release Trap | 40 passed | 530.8 s | trap-exec-regression/attempt-1792039328781886560 |
+| 累计小输入 E2E | 229 passed | 49.2 s | trap-exec-regression/attempt-1792039328781886560 |
+| ordinary FA3 | 516 passed | 28.5 s | trap-exec-regression/attempt-1792039328781886560 |
+| 原生自动公开性能 | 1 汇总用例、12 配置通过 | 285.2 s | profile-native/attempt-1792040165109145570 |
 
-- 固定源 PA tiling、AIC/FD/Vector、workspace 与 FA3 accumulator oracle 本轮重新编译执行；独立枚举三 mask 的可见行、逻辑 tile/page、FD 持久槽和原 allocation 地址。覆盖 P=16/112/512/528/1024、非整除 M、尾行/尾页/跨页、1/7/26 AIC、Direct/Partial/Empty、空值/Q-used、超过 uint32 的 group 与地址、精确 accumulator/总 workspace 溢出。协议覆盖双 dtype、损坏 header/端点/FD/Vector/宽前缀、陈旧长度/坏页、完整资源/描述符及查询失败原子性。
-- 代表与成本检查先通过后固定实现；普通与 ASan/UBSan 是同一组 407 项，两组分别与自身收集顺序一致。最长 CPU 元数据输入的溢出检查包含双 dtype、零/非零逻辑容量；设备数值算法和数学执行策略未改，不重复计算历史最长数学 reference。
-- 累计日常 E2E 保持 215 项，覆盖已接通路径。新模块尚未接入生产，其 E2E 在 M10c8b 接通时新增；本次不以旧无 mask/非 PA E2E 替代新协议的源差分/边界验收。数学 reference 共 **361 hit，0 重算**，待测实现全部实际执行。
-- `selection-audit.json` 核对 247 个既有测试组/命令和日常选择均未改变；仅新增本模块工具、代表、所属单元和 sanitizer 入口。`cpu-evidence-audit.json` 核对 1,214 个源码/原始文件及收集/执行清单，无差异。`e2e-evidence-audit.json` 另核对 7,357 个 E2E 源码、构建/运行依赖及原始文件，无差异，215 项执行清单与收集一致。
-- 本轮未运行历史组件单元、完整穷举、ordinary、v24 设备数值/Trap/公开性能、910C 实机或完整图重放，不计通过。普通 FA3 入口/调度/数值未改，本步相关设备回归为累计 E2E。
+各最终组均 0 failed、0 skipped。前置代表/最大 accumulator/最长 KV 成本检查 10 项通过，随后被完整公开组覆盖。源数值 12 项的 O/LSE 与固定源逐元素一致，真实 accumulator、双数学及 canary 均通过，无源精度例外。Trap 每例用全新解释器/设备 context，40 项均在预期事件阶段失败，PID/退出/超时和加载身份检查通过。
 
-## 环境失败与收尾
+数学缓存：固定源组 10 hit / 2 个新输入，公开组 21 hit / 46 个新输入，累计 E2E 374 hit、ordinary 31 hit，后两组 0 重算；性能诊断只为 12 个新配置各计算一次 reference，采样复用已验证输入/精度证明。待测实现始终实际执行。
 
-开发时新组注册语法和工具的所属路径断言已修复，最终工具与代表组通过。沙箱内 E2E 收集因 NPU 不可见失败，宿主环境重做收集并完成实际执行；沙箱 sanitizer 的 407 项断言后，LeakSanitizer 在退出检查报环境错误，整组记失败。保持 ASan/UBSan/泄漏检查开启，在宿主环境完整重跑同一集合并通过。失败日志保留在 `dry-dev.log`、`check-dev/`、`collect-final/` 和 `cpu-final/`，均未转记为通过。
+### 公开性能
 
-本次只核对 v24 记录/计划、共享消费者和相关验收契约；design 新增 6.2.27 与协议表，plan 推进唯一下一步。提交前检查记录见 `quality-final.log`、`doc-links-final.json` 和最终进程/设备记录；不为写自身 commit ID 再提交。
+预先固定 6 个输入 × 双 dtype，隐式生成、显式生成加前向、显式复用各 R=1/4；5 次预热、5×20 wall、10 次 profiler，CPU affinity `[0]`，卡 6 隔离采样。双方必要分配及原生 ND PA 页表/cache 转换计入公开调用；AICPU/init/partial/merge、原生分派、逐例和分段原始数据均保存。
 
-复现命令（各选择先加 `--dry-run`、再 `--collect-only`；sanitizer 与设备组需可用宿主环境，输出用新目录）：
+全部 12 个配置适用，包含 8 个原生 FD 配置，无排除项。配置内/配置间等权平均比 **0.852969 ≤ 1**；4/12 配置、25/72 分段退化，按约定记录且不单独阻塞提交。分段平均依次为 implicit R1/R4 `0.926921/0.830605`、generate R1/R4 `1.054680/0.793031`、reuse R1/R4 `0.797773/0.714805`。完整结果在性能组的 `public-profile/average.json`、双 dtype `profile.json`、dispatch、wall 和 profiler CSV；未按耗时选择输入。
+
+## 恢复、失败与收尾
+
+本轮恢复未发现已完成提交；原失败记录保留。CPU 首轮溢出用例输入仍可表示，修正为真正越界后重跑 420 项；首轮构建期间测试源变化使外层验收失败，随后完整核验构建复用。源数值首轮把静态返回容量 26 当作物理 AIC 数，改为从已校验 metadata 读取实际 20 核后完整重跑。fork 优化被 seed/包导入的 NPU 初始化断言拦截，改为全新解释器并重跑工具与全部 40 个 Trap；没有复用失败 context。性能首轮仅因默认包配方过期而在采样前失败，核验有效包并显式选择后完整重跑；失败/未执行组未转记为通过。
+
+`preclose-evidence.json` 与 `final-evidence-audit.json` 核验原始证据、构建/依赖/实际加载及 native 包/性能归档共 10,357 文件，无差异或哈希冲突；双 dtype 各 90 个性能归档文件完整。通过数值组之后仅独立 Trap 工具改变，未改变其生产实现、数学函数或源 oracle；CPU 后续快照中的设备参考/无关工具归属变化不影响 CPU 集合。`selection-completion-final.json` 核对实际节点与原收集清单，`selection-audit.json` 保存新增/旧清单差异依据。相关契约同步至 design，plan 仅推进唯一功能下一步；适用 `git diff --check` / `ci/code_quality.sh --staged` 的日志为 `quality-final.log`，481 个本地链接及 151 个锚点检查见 `doc-links-final.json`，最终进程/设备记录为 `processes-final.log`、`npu-final.log`。
+
+复现（按需选择本模块单元；日常只运行累计 E2E）：
 
 ```bash
-python3 -m tests.mla --suite auto-split-paged-bsnd-protocol-tools auto-split-paged-bsnd-protocol-check --output /tmp/mla-m10c8a/repro-check
-python3 -m tests.mla --unit auto_split_paged_bsnd_protocol --output /tmp/mla-m10c8a/repro-unit
-python3 -m tests.mla --suite auto-split-paged-bsnd-protocol-sanitize --output /tmp/mla-m10c8a/repro-sanitize
-python3 -m tests.mla --suite e2e --device 6 --output /tmp/mla-m10c8a/repro-e2e
+python3 -m tests.mla --unit auto_split_paged_bsnd_protocol --output /tmp/mla-m10c8b/repro-cpu
+python3 -m tests.mla --suite auto-split-paged-bsnd-protocol-sanitize auto-split-paged-bsnd-protocol-tools auto-split-paged-bsnd-tools --output /tmp/mla-m10c8b/repro-tools
+python3 -m tests.mla --unit auto_split_paged_bsnd --device 6 --output /tmp/mla-m10c8b/repro-source
+python3 -m tests.mla --suite auto-split-paged-bsnd-public auto-split-paged-bsnd-trap e2e ordinary --device 6 --output /tmp/mla-m10c8b/repro-public
+MLA_NATIVE_ROOT=/tmp/mla-m10c3b/native python3 -m tests.mla --suite auto-split-paged-bsnd-profile --device 6 --output /tmp/mla-m10c8b/repro-profile
 ```
+
+先对所选命令加 `--dry-run`、`--collect-only`；不得以截断代替完整集合。上述原始证据和依赖完整有效时，后续仅按规则继承 E2E 正确性。
