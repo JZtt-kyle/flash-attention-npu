@@ -386,7 +386,7 @@ def flash_attn_varlen_func(
 BSND 使用 `flash_attn_func`，紧凑 TND 使用 `flash_attn_varlen_func`；
 `flash_attn_with_kvcache` 接收 BSND/TND query 及只读的普通或分页 cache，
 拒绝追加 KV、rotary 输入及 cache 重映射。支持 FP16/BF16、causal 和 window。
-func/varlen 的 `num_splits` 默认 1，cache 默认 0（自动）；分页 TND 当前须显式传 1..256。
+func/varlen 的 `num_splits` 默认 1，cache 默认 0（自动）；五种布局均接受 0..256，包含分页 TND。
 要求 `softcap=0`、`attention_chunk=0`、`pack_gqa=None`、`sm_margin=0`、
 `rotary_interleaved=True`；192/128 prefill 尚未接通。
 布局、页大小、长度和空值规则见 [MLA 契约](docs/mla/design.md#2-fa3-入口与后端边界)，

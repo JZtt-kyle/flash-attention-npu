@@ -57,6 +57,7 @@ USED_SHARED_CPU = [
 SPLIT_KV_ATTENTION = "tests/mla/unit/split_kv_attention/test_attention.py"
 SPLIT_KV_MERGE = "tests/mla/unit/split_kv_merge/test_merge.py"
 SPLIT_KV_MERGE_SUITES = {
+    "unit-auto_split_paged_tnd",
     "unit-auto_split_paged_bsnd",
     "unit-split_paged_bsnd",
     "unit-auto_split_mixed",
@@ -81,6 +82,37 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "auto-split-paged-tnd-tools": [
+        "tests/mla/unit/tools/test_mla_auto_split_paged_tnd_production_tools.py",
+        "tests/mla/unit/tools/test_flash_attn_npu_v3_mla_build.py::test_aicpu_sources_by_backend",
+        "tests/mla/unit/tools/test_organization.py",
+    ],
+    "auto-split-paged-tnd-check": [
+        "tests/mla/e2e/auto_split_paged_tnd/test_public.py",
+        "-k",
+        "representative",
+    ],
+    "auto-split-paged-tnd-public": [
+        "tests/mla/e2e/auto_split_paged_tnd/test_public.py",
+        "tests/mla/e2e/split_paged_bsnd/test_public.py::test_invalid_tnd_paged_split",
+        "tests/mla/e2e/auto_split_paged_bsnd/test_public.py::test_invalid_tnd_paged_split",
+        "tests/mla/e2e/split_paged_tnd/test_public.py::test_invalid_paged_split",
+    ],
+    "auto-split-paged-tnd-trap": ["tests/mla/e2e/auto_split_paged_tnd/test_trap.py"],
+    "auto-split-paged-tnd-profile": ["tests/mla/e2e/auto_split_paged_tnd/test_profile.py"],
+    "auto-split-paged-tnd-protocol-tools": [
+        "tests/mla/unit/tools/test_mla_auto_split_paged_tnd_tools.py"
+    ],
+    "auto-split-paged-tnd-protocol-sanitize": [
+        "tests/mla/unit/auto_split_paged_tnd_protocol/test_plan.py",
+        "tests/mla/unit/auto_split_paged_tnd_protocol/test_metadata.py",
+    ],
+    "auto-split-paged-tnd-protocol-check": [
+        "tests/mla/unit/auto_split_paged_tnd_protocol/test_plan.py",
+        "tests/mla/unit/auto_split_paged_tnd_protocol/test_metadata.py",
+        "-k",
+        "representative or capacity_cost_boundary",
+    ],
     "auto-split-paged-bsnd-tools": [
         "tests/mla/unit/tools/test_mla_auto_split_paged_bsnd_production_tools.py"
     ],
@@ -794,6 +826,7 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "auto-split-paged-tnd-profile",
     "auto-split-paged-bsnd-profile",
     "split-paged-bsnd-profile",
     "split-paged-tnd-profile",
@@ -854,7 +887,9 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "auto-split-paged-tnd-tools",
     "auto-split-paged-bsnd-tools",
+    "auto-split-paged-tnd-protocol-tools",
     "auto-split-paged-bsnd-protocol-tools",
     "split-paged-bsnd-tools",
     "split-paged-tnd-tools",
@@ -872,8 +907,11 @@ CPU_SUITES = {
     "unit-auto_split_mixed_protocol",
     "auto-split-mixed-protocol-sanitize",
     "auto-split-mixed-protocol-check",
+    "unit-auto_split_paged_tnd_protocol",
     "unit-auto_split_paged_bsnd_protocol",
+    "auto-split-paged-tnd-protocol-sanitize",
     "auto-split-paged-bsnd-protocol-sanitize",
+    "auto-split-paged-tnd-protocol-check",
     "auto-split-paged-bsnd-protocol-check",
     "unit-split_paged_tnd_protocol",
     "split-paged-tnd-protocol-sanitize",
@@ -964,8 +1002,11 @@ CPU_SUITES = {
 
 def suite_dependencies(suite):
     if suite in {
+        "unit-auto_split_paged_tnd_protocol",
         "unit-auto_split_paged_bsnd_protocol",
+        "auto-split-paged-tnd-protocol-sanitize",
         "auto-split-paged-bsnd-protocol-sanitize",
+        "auto-split-paged-tnd-protocol-check",
         "auto-split-paged-bsnd-protocol-check",
         "unit-split_paged_tnd_protocol",
         "split-paged-tnd-protocol-sanitize",
@@ -1227,8 +1268,11 @@ def environment(args, directory, suite):
         "unit-auto_split_mixed_protocol",
         "auto-split-mixed-protocol-sanitize",
         "auto-split-mixed-protocol-check",
+        "unit-auto_split_paged_tnd_protocol",
         "unit-auto_split_paged_bsnd_protocol",
+        "auto-split-paged-tnd-protocol-sanitize",
         "auto-split-paged-bsnd-protocol-sanitize",
+        "auto-split-paged-tnd-protocol-check",
         "auto-split-paged-bsnd-protocol-check",
         "unit-split_paged_tnd_protocol",
         "split-paged-tnd-protocol-sanitize",

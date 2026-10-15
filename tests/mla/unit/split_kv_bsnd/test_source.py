@@ -3,7 +3,7 @@
 import json
 import torch
 import pytest
-from tests.mla.support.components import split_kv_merge_merge as source
+from tests.mla.support.components import split_kv_merge as source
 from tests.mla.support.public_cases.split_kv_bsnd_public import make_case, metadata, invoke
 from tests.mla.support.mla_split_bsnd_reference import references
 from tests.mla.support.mla_source_compare import assert_mla_source_close

@@ -682,8 +682,6 @@ def _mla_paged_tnd_forward_fake(
 
 
 def _check_mla_paged_split_budget(batch, sq, heads, capacity, page, splits, total_q=None):
-    if total_q is not None and splits == 0:
-        raise RuntimeError("MLA: TND paged automatic split is not implemented yet")
     if splits != 0 and not 2 <= splits <= 256:
         raise RuntimeError("MLA: paged split requires num_splits=0 or [2,256]")
     fixed = 756 if splits == 0 else 414
@@ -705,7 +703,7 @@ def _check_mla_paged_split_budget(batch, sq, heads, capacity, page, splits, tota
         n = ((min(capacity, base) + 31) // 32) * 32
         reserve = 2 * 26 * (6 * m * n + 8 * m * 512 + 8 * 256)
         rows = (3 * 26 if splits == 0 else batch * ((sq * heads + 255) // 256) * splits) * 256
-        if total_q is not None:
+        if total_q is not None and splits != 0:
             rows = (total_q * heads + min(batch, total_q) * 255) * splits
         if reserve + rows * 528 * 4 > 2**63 - 1:
             raise RuntimeError("MLA: paged split workspace overflow")
@@ -772,8 +770,8 @@ def _mla_split_paged_tnd_forward_fake(
     seqused_q=None,
     scheduler_metadata=None,
 ):
-    if not 2 <= num_splits <= 256:
-        raise RuntimeError("MLA: TND paged split requires num_splits in [2,256]")
+    if num_splits != 0 and not 2 <= num_splits <= 256:
+        raise RuntimeError("MLA: TND paged split requires num_splits=0 or [2,256]")
     _check_mla_inputs(q, k, v, qv, varlen_q=True, paged_kv=True)
     _check_mla_dense_options(softmax_scale=softmax_scale)
     _check_mla_paged_inputs(
@@ -791,11 +789,12 @@ def _mla_split_paged_tnd_forward_fake(
         num_splits,
     )
     total, heads = q.shape[:2]
+    count = 26 if num_splits == 0 else num_splits
     return (
         q.new_empty((total, heads, 512)),
         q.new_empty((heads, total), dtype=torch.float32),
-        q.new_empty((num_splits, heads, total, 512), dtype=torch.float32),
-        q.new_empty((num_splits, heads, total), dtype=torch.float32),
+        q.new_empty((count, heads, total, 512), dtype=torch.float32),
+        q.new_empty((count, heads, total), dtype=torch.float32),
     )
 
 
@@ -1512,10 +1511,6 @@ def _mla_forward(
     for name, value in unsupported_options:
         if value is not None:
             raise RuntimeError(f"MLA compressed forward is not implemented yet for {name}")
-    if num_splits == 0 and page_table is not None and cu_seqlens_q is not None:
-        raise RuntimeError(
-            "MLA compressed forward is not implemented yet for num_splits=0 with TND paged KV"
-        )
     _check_mla_dense_options(
         softmax_scale=softmax_scale,
         causal=causal,
@@ -1733,8 +1728,7 @@ def _flash_attn_forward(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
-            allow_split=(page_table is None or cu_seqlens_q is None or num_splits > 1)
-            and (cu_seqlens_k is None or cu_seqlens_q is not None),
+            allow_split=cu_seqlens_k is None or cu_seqlens_q is not None,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -1953,8 +1947,7 @@ def _flash_attn_forward_fake(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
-            allow_split=(page_table is None or cu_seqlens_q is None or num_splits > 1)
-            and (cu_seqlens_k is None or cu_seqlens_q is not None),
+            allow_split=cu_seqlens_k is None or cu_seqlens_q is not None,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -3086,7 +3079,7 @@ def flash_attn_with_kvcache(
     NPU compressed MLA supports read-only BSND or ND paged caches with BSND/TND
     queries, including right-down causal and window masks. Nonpaged BSND/TND queries
     support automatic num_splits=0, single split 1, and explicit splits 2..256.
-    BSND paged MLA caches support num_splits=0..256; TND paged caches support num_splits=1..256. Automatic requests return 26 FP32
+    BSND/TND paged MLA caches also support num_splits=0..256. Automatic requests return 26 FP32
     accumulator slots; the native partition determines the actual splits per M
     block and unused slots are 0/-inf. Current limits are in docs/mla/status.md.
     Generic FA3 append and rotary options below remain unsupported for MLA.
@@ -3597,8 +3590,8 @@ def _mla_paged_metadata_fake(
     sequence_words = 7 if num_splits != 1 else 5
     if num_splits != 1:
         if cu_seqlens_q is not None:
-            if not 2 <= num_splits <= 256:
-                raise RuntimeError("MLA: TND paged split requires num_splits in [2,256]")
+            if num_splits != 0 and not 2 <= num_splits <= 256:
+                raise RuntimeError("MLA: TND paged split requires num_splits=0 or [2,256]")
             # The total allocation is device data; AICPU checks its budget.
         else:
             _check_mla_paged_split_budget(
@@ -3779,7 +3772,7 @@ def _get_scheduler_metadata_fake(
             ),
             allow_causal=True,
             allow_window=True,
-            allow_split=page_size is None or cu_seqlens_q is None or num_splits > 1,
+            allow_split=True,
         )
         if num_splits != 1:
             if page_size is not None:
@@ -3920,7 +3913,7 @@ def get_scheduler_metadata(
     positive legacy softcap enables softcapping even when has_softcap is omitted.
     ``has_softcap=True`` requires a positive legacy softcap for this protocol.
     MLA requires headdim=64, headdim_v=512 and matching qkv_dtype.
-    Nonpaged BSND/TND and paged BSND queries accept num_splits=0..256; paged TND accepts 1..256 (v25 for explicit split).
+    Nonpaged and paged BSND/TND queries accept num_splits=0..256.
     cache_seqlens must be a same-device contiguous int32 tensor of shape
     (batch_size,); None/integer lengths are kvcache conveniences only.
     Without page_size or cu_seqlens_q, automatic num_splits=0 returns a v18
@@ -3940,6 +3933,9 @@ def get_scheduler_metadata(
     page_size must be a
     multiple of 16 in [16, 1024], and max_seqlen_k is logical capacity, divisible
     by page_size and at most 16384. No page table or physical cache is inspected.
+    Paged automatic split uses v24 for BSND queries or v26 for TND queries,
+    both with 756 + 7 * batch_size words. Explicit splits use v23/v25,
+    respectively, with 414 + 7 * batch_size words.
     Read-only MLA paged kvcache accepts the matching v6/v10 record; TND also
     requires cu_seqlens_q and max_seqlen_q at forward. The record does not bind
     a page table or physical cache; each forward validates current lengths,
@@ -3969,7 +3965,7 @@ def get_scheduler_metadata(
             ),
             allow_causal=True,
             allow_window=True,
-            allow_split=page_size is None or cu_seqlens_q is None or num_splits > 1,
+            allow_split=True,
         )
         if num_splits != 1:
             if page_size is not None:

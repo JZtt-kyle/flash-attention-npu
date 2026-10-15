@@ -15,7 +15,7 @@ from tests.mla.support.mla_dense_build import ROOT, sha256
 from tests.mla.support.mla_ref import normalize_fa3_window
 from tests.mla.support.mla_split_kv_merge_build import build_merge
 from tests.mla.support.mla_split_kv_attention_reference import fragments
-from tests.mla.support.components import split_kv_attention_attention as partial
+from tests.mla.support.components import split_kv_attention as partial
 
 
 class Params(ct.Structure):

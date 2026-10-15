@@ -397,8 +397,8 @@ Use `flash_attn_func` for BSND, `flash_attn_varlen_func` for packed TND, and
 `flash_attn_with_kvcache` for read-only dense or paged caches with BSND/TND queries.
 The cache entry rejects KV appends, rotary inputs and cache remapping. FP16/BF16,
 causal and window masks are supported. `num_splits` defaults to 1 for func/varlen
-and 0 (automatic) for cache. Paged TND currently requires an explicit value in
-1..256. `softcap=0`, `attention_chunk=0`, `pack_gqa=None`, `sm_margin=0` and
+and 0 (automatic) for cache. All five layouts accept 0..256, including paged TND.
+`softcap=0`, `attention_chunk=0`, `pack_gqa=None`, `sm_margin=0` and
 `rotary_interleaved=True` are required; 192/128 prefill remains unsupported.
 See the [MLA contract](docs/mla/design.md#2-fa3-入口与后端边界) for layout, page-size,
 length and empty-output rules, and [status](docs/mla/status.md) for validation limits.

@@ -30,6 +30,8 @@
 #include "mla_split_paged_tnd_plan.h"
 #include "mla_auto_split_paged_bsnd_launch.h"
 #include "mla_auto_split_paged_bsnd_plan.h"
+#include "mla_auto_split_paged_tnd_launch.h"
+#include "mla_auto_split_paged_tnd_plan.h"
 #include "mla_validation.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
@@ -70,6 +72,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaSplitPagedBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaSplitPagedTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaAutoSplitPagedBsndMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaAutoSplitPagedTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowPagedBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowPagedTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalPagedBsndMetadata(void* args);
@@ -255,8 +258,13 @@ struct MetadataSubmission {
         }
         if constexpr (std::is_same_v<Args, MlaPagedMetadataArgs>) {
             if (splits == 0) {
-                MlaAutoSplitPagedBsndMetadataArgs autoArgs{args, *window};
-                ComputeMlaAutoSplitPagedBsndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
+                if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
+                    MlaAutoSplitPagedTndMetadataArgs autoArgs{args, *window, queryTotalFromPrefix};
+                    ComputeMlaAutoSplitPagedTndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
+                } else {
+                    MlaAutoSplitPagedBsndMetadataArgs autoArgs{args, *window};
+                    ComputeMlaAutoSplitPagedBsndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
+                }
                 return;
             }
             if (splits > 1) {
@@ -679,18 +687,18 @@ at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_
                            bool causal, int64_t windowLeft, int64_t windowRight, int64_t splits)
 {
     auto words = CheckPagedMetadataInputs(batch, maxQ, capacity, heads, pageSize, dtype, cacheSeqlens, cuQ);
-    TORCH_CHECK(splits >= 0 && splits <= 256 && (!cuQ || splits != 0),
-                "MLA: paged num_splits must be in [0,256]; TND automatic split is not implemented yet");
+    TORCH_CHECK(splits >= 0 && splits <= 256, "MLA: paged num_splits must be in [0,256]");
     const bool isSplit = splits != 1;
     const bool isWindow = windowLeft != -1 || windowRight != -1;
     MlaWindowConfig config{maxQ, capacity, windowLeft, windowRight, causal};
     if (isWindow || isSplit) {
         CheckWindow(config);
-        TORCH_CHECK(splits == 0 ? AutoSplitPagedBsndMetadataWords(batch, words)
-                    : isSplit
-                        ? (cuQ ? SplitPagedTndMetadataWords(batch, words) : SplitPagedBsndMetadataWords(batch, words))
-                        : WindowPagedMetadataWords(batch, words),
-                    "MLA: window paged metadata word count overflow");
+        TORCH_CHECK(
+            splits == 0
+                ? (cuQ ? AutoSplitPagedTndMetadataWords(batch, words) : AutoSplitPagedBsndMetadataWords(batch, words))
+            : isSplit ? (cuQ ? SplitPagedTndMetadataWords(batch, words) : SplitPagedBsndMetadataWords(batch, words))
+                      : WindowPagedMetadataWords(batch, words),
+            "MLA: window paged metadata word count overflow");
     }
     const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
     auto metadata = at::empty({words}, cacheSeqlens.options().dtype(at::kInt));
@@ -712,7 +720,7 @@ at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_
                               {reinterpret_cast<uint64_t>(cacheSeqlens.data_ptr()), uint64_t(cacheSeqlens.numel())}};
     if (isSplit) {
         args.platform.blockDims.fill(batch && maxQ && capacity ? args.platform.aicNum : 1);
-        if (splits == 0) {
+        if (splits == 0 && !cuQ) {
             MlaAutoSplitPagedBsndBudget budget{};
             TORCH_CHECK(BuildAutoSplitPagedBsndProductionBudget(args.shape, args.platform, budget) ==
                             MlaScheduleStatus::Success,
@@ -757,8 +765,7 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
                                      int64_t windowLeft = -1, int64_t windowRight = -1, int64_t splits = 1)
 {
     const bool tnd = cuQ.has_value();
-    TORCH_CHECK(splits >= 0 && splits <= 256 && (!tnd || splits != 0),
-                "MLA: paged num_splits must be in [0,256]; TND automatic split is not implemented yet");
+    TORCH_CHECK(splits >= 0 && splits <= 256, "MLA: paged num_splits must be in [0,256]");
     const bool isSplit = splits != 1;
     const bool isWindow = windowLeft != -1 || windowRight != -1;
     TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
@@ -794,7 +801,8 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
     MlaWindowKernelParams window{};
     if (isWindow || isSplit) {
         window = CheckWindow(config);
-        TORCH_CHECK(splits == 0 ? AutoSplitPagedBsndMetadataWords(plan.shape.batch, plan.metadataWords)
+        TORCH_CHECK(splits == 0 ? (tnd ? AutoSplitPagedTndMetadataWords(plan.shape.batch, plan.metadataWords)
+                                       : AutoSplitPagedBsndMetadataWords(plan.shape.batch, plan.metadataWords))
                     : isSplit   ? (tnd ? SplitPagedTndMetadataWords(plan.shape.batch, plan.metadataWords)
                                        : SplitPagedBsndMetadataWords(plan.shape.batch, plan.metadataWords))
                                 : WindowPagedMetadataWords(plan.shape.batch, plan.metadataWords),
@@ -805,12 +813,21 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
             const uint32_t blocks = plan.shape.batch && q.size(0) && plan.shape.logicalKvCapacity ? platform.aicNum : 1;
             plan.platform.blockDims.fill(blocks);
             plan.context.blockDim = blocks;
-            MlaSplitPagedTndBudget budget{};
-            TORCH_CHECK(BuildSplitPagedTndBudget(plan.shape, plan.platform, splits, budget) ==
-                            MlaScheduleStatus::Success,
-                        "MLA: TND paged split workspace or accumulator overflow");
-            plan.totalWorkspaceBytes = budget.totalBytes;
-            plan.context.workspaceBytes = budget.userBytes;
+            if (splits == 0) {
+                MlaAutoSplitPagedTndBudget budget{};
+                TORCH_CHECK(BuildAutoSplitPagedTndProductionBudget(plan.shape, plan.platform, budget) ==
+                                MlaScheduleStatus::Success,
+                            "MLA: TND paged auto split workspace or accumulator overflow");
+                plan.totalWorkspaceBytes = budget.totalBytes;
+                plan.context.workspaceBytes = budget.userBytes;
+            } else {
+                MlaSplitPagedTndBudget budget{};
+                TORCH_CHECK(BuildSplitPagedTndBudget(plan.shape, plan.platform, splits, budget) ==
+                                MlaScheduleStatus::Success,
+                            "MLA: TND paged split workspace or accumulator overflow");
+                plan.totalWorkspaceBytes = budget.totalBytes;
+                plan.context.workspaceBytes = budget.userBytes;
+            }
         } else if (splits == 0) {
             MlaAutoSplitPagedBsndBudget budget{};
             TORCH_CHECK(BuildAutoSplitPagedBsndProductionBudget(plan.shape, plan.platform, budget) ==
@@ -961,13 +978,15 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
         if (isSplit) {
             const MlaSplitPagedBsndLaunchArgs splitArgs{a, uint32_t(splits), static_cast<uint8_t*>(accum.data_ptr()),
                                                         static_cast<uint8_t*>(accumLse.data_ptr())};
-            const auto error = tnd ? (q.scalar_type() == at::kBFloat16 ? LaunchSplitPagedTndBf16(splitArgs)
-                                                                       : LaunchSplitPagedTndFp16(splitArgs))
-                               : splits == 0
-                                   ? (q.scalar_type() == at::kBFloat16 ? LaunchAutoSplitPagedBsndBf16(splitArgs)
-                                                                       : LaunchAutoSplitPagedBsndFp16(splitArgs))
-                                   : (q.scalar_type() == at::kBFloat16 ? LaunchSplitPagedBsndBf16(splitArgs)
-                                                                       : LaunchSplitPagedBsndFp16(splitArgs));
+            const auto error =
+                tnd ? (splits == 0 ? (q.scalar_type() == at::kBFloat16 ? LaunchAutoSplitPagedTndBf16(splitArgs)
+                                                                       : LaunchAutoSplitPagedTndFp16(splitArgs))
+                                   : (q.scalar_type() == at::kBFloat16 ? LaunchSplitPagedTndBf16(splitArgs)
+                                                                       : LaunchSplitPagedTndFp16(splitArgs)))
+                : splits == 0 ? (q.scalar_type() == at::kBFloat16 ? LaunchAutoSplitPagedBsndBf16(splitArgs)
+                                                                  : LaunchAutoSplitPagedBsndFp16(splitArgs))
+                              : (q.scalar_type() == at::kBFloat16 ? LaunchSplitPagedBsndBf16(splitArgs)
+                                                                  : LaunchSplitPagedBsndFp16(splitArgs));
             TORCH_CHECK(error == ACL_SUCCESS, "MLA: paged split BATCH_MODE launch failed (", error, ")");
             return 0;
         }
@@ -1032,7 +1051,7 @@ SplitPagedTndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tenso
                        const std::optional<at::Tensor>& lengths, const std::optional<at::Tensor>& used,
                        const std::optional<at::Tensor>& metadata)
 {
-    TORCH_CHECK(splits >= 2 && splits <= 256, "MLA: TND paged split requires num_splits in [2,256]");
+    TORCH_CHECK(splits == 0 || (splits >= 2 && splits <= 256), "MLA: TND paged split requires num_splits=0 or [2,256]");
     TORCH_CHECK(!scale || (std::isfinite(*scale) && std::abs(*scale) <= std::numeric_limits<float>::max()),
                 "MLA: softmax_scale must be finite in FP32");
     auto r = PagedTndForward(q, k, v, qv, pageTable, cuQ, maxQ, scale ? float(*scale) : 1.0f / std::sqrt(576.0f),

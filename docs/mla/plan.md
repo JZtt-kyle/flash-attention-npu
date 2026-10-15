@@ -1,18 +1,16 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。功能基线为 **M10c9b TND PA 显式 split 生产接入已完成**；M10 尚未阶段收尾。R1 入口收敛及 R2 整体整理已完成，按用户确认范围恢复功能迁移。当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
+本页只记录实施顺序、产物和完成条件。功能基线为 **M10c10 TND PA 原生自动 split 完整接入已完成**；M10 尚未阶段收尾。R1 入口收敛及 R2 整体整理已完成，按用户确认范围恢复功能迁移。当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
 
-## 唯一下一步 M10c10：TND PA 原生自动 split 完整接入
+## 唯一下一步 M10：阶段收尾
 
-本步交付一个完整可调用行为：512+64、Hkv=1、FP16/BF16 的 TND Q + ND PA KV 支持 `num_splits=0`，覆盖无 mask、右下 causal/window、公开 cache/metadata 与真实 accumulator。当前尚未实现，完成验收前继续明确拒绝自动值。
+五种 512+64 布局已接通自动/单/显式 split 及 none/causal/window。本步只完成 M10 的组合、证据和阶段性能收尾，不开始 192/128 prefill。
 
-- 复用 BSND PA/非 PA TND 的原生 Direct/FD 分区、TND PA allocation/used 和有效页校验、PA partial 与 TND merge 数值组件；保留跨波次所有权、原 allocation token、空行及未用槽语义。自动任务记录必须与 v25 显式记录严格区分，说明所需表示域差异；不改造全部历史协议。
-- 影响路径：在 FA3 的 910 `mla/` 下补 `mla_auto_split_paged_tnd_*` 计划、CPU/AICPU 共用记录构造/校验、launcher 与双 dtype 实例；接入 `mla_forward.cpp`、`flash_api.cpp`、Python real/fake/metadata 分派及 `setup.py`。host 静态预算覆盖动态任务和真实 TND accumulator，动态长度留在设备。实现前补齐实际文件和受影响的共享头/地址/构建项。
-- 同一轮先做协议单元，再接通生产并验收。所属 `unit/auto_split_paged_tnd_protocol/` 保留固定源计划差分、task/merge/row 独立枚举、三 mask、非均匀/空前缀、Q-used、有效页、跨片段/核/波次、地址/预算溢出、陈旧或破坏记录及失败原子性；普通与 ASan/UBSan 同集合。
-- 所属 `unit/auto_split_paged_tnd/` 检查双 dtype 固定源和双数学、Direct/FD、边界及适用组件性能；`e2e/auto_split_paged_tnd/` 检查实际公开分派、O/LSE/accumulator、长度/stride/空值、metadata 更新/复用、生命周期、多流、real/fake/compile 和 release Trap，并注册日常 E2E。先测代表及适用的最大内存/最长 reference 成本边界。
-- 拟新增并注册的必跑组：`--unit auto_split_paged_tnd_protocol`、协议 sanitizer/所属工具，`--unit auto_split_paged_tnd`、代表组，以及公开专项、Trap、`e2e ordinary`、公开 profile。注册后在本节固定完整命令与输入集合，先 dry-run/collect-only，再执行；不因合并提交重复跑未变化的组件组。
-- 公开性能在采样前固定双 dtype 配置和三入口 R=1/4，覆盖原生 Direct/FD；按 design 的平均公开 E2E 门槛和原计时边界验收。共享生产/构建变化时累计 E2E 与普通 FA3 回归实跑；仅依赖和原始证据有效的 E2E 正确性可继承，数学缓存可复用。native 包先按 status 的路径和配方核验。
-- 完成条件：协议、生产数值、公开行为、日常回归、适用性能、文档及质量检查全部通过，再提交一次并停止。只有发现既有组件未覆盖的新增算法/共享协议风险，才按 AGENTS 在此说明风险和独立产物后调整边界；不恢复原来的机械分层拆法。
+- 对照 design 第 7 节核对五布局已开放组合：allocation/used、非均匀/空长度、页与 stride、长 KV、真实 accumulator、metadata 更新/复用、real/fake/compile 和未开放边界。只补具名覆盖缺口，不机械展开全部组合或按固定数量填充。
+- 用累计日常 E2E 作为回归主线。复核本轮 `summary.json`、实际用例、依赖/构建 manifest 和原始证据；仅完整有效且依赖未变的 E2E 正确性可继承，不累计历史单元或继承性能。数学 reference 继续内容缓存。
+- 阶段公开性能使用既有输入/驱动，采样前固定不超过 100 个 dtype/输入配置及选择依据，涵盖五布局和已开放 split/mask。保留三入口、R=1/4、预热/重复、转换与同步边界；配置内/配置间等权平均，原生 FD 和适用模板按 design 分类，单例退化完整保留。
+- 开始实现或采样前在本节补齐具体影响路径、完整组/命令、选中清单、可继承证据及依赖。先核对工具、廉价夹具和 native 包；只有新增风险、失败或缺口才扩展检查，不重构已验收路径。
+- 完成条件：组合覆盖和拒绝边界明确，必要 E2E/相关回归与阶段性能通过，三份文档和质量检查一致，提交一次后停止。阶段收尾完成后再进入 M11a。
 
 ## 后续里程碑：M10–M17
 
@@ -20,7 +18,7 @@
 
 | 里程碑 | 剩余产物与边界 | 完成条件 |
 | --- | --- | --- |
-| M10：512+64 split-KV | M10c10 完整接入后做一次阶段收尾；不再拆协议/生产轮 | 五种布局的自动/1/显式 split、三 mask、空分片/全空、O/LSE/真实 accumulator/metadata、长 KV 及阶段性能；有效 E2E 按规则继承 |
+| M10：512+64 split-KV | 五布局均已接通，完成一次组合与阶段性能收尾 | 五种布局的自动/1/显式 split、三 mask、空分片/全空、O/LSE/真实 accumulator/metadata、长 KV 及阶段性能；有效 E2E 按规则继承 |
 | M11：192/128 共享数值与 BSND | M11a 闭环固定源通用非量化数值组件及 mask/partial/merge 所需适配；M11b 一次接通 BSND 的 metadata/生产/公开调用 | qv=None、独立 K/V、GQA、192 stride、双 dtype、O/LSE/accumulator；BSND 三 mask 和自动/1/显式 split，新增算法单元及公开 E2E/性能 |
 | M12：prefill 非 PA TND/混合 | M12a TND varlen，M12b TND Q + BSND cache；各复用 M11 数值和已有调度，一次接通长度、metadata、mask/split 与公开行为 | allocation/used、非均匀/空长度、stride/GQA、三 mask、自动/1/显式 split、生产精度、生命周期及公开 E2E/性能 |
 | M13：prefill PA | M13a BSND PA，M13b TND PA；各一次接通页访问、metadata、三 mask、自动/1/显式 split 和公开行为 | 合法 P 代表边界、独立 K/V 与内容/RoPE stride、长度/空值/复用/生命周期、数值及 PA 公开 E2E/性能 |
@@ -47,6 +45,7 @@
 | M10c5a–M10c6b | TND Q + BSND KV 显式/原生自动计划与 v21/v22、64 位 KV 起点、生产 cache/metadata |
 | M10c7a–M10c8b | BSND Q + ND PA KV 显式/原生自动计划与 v23/v24、页校验、生产 cache/metadata 与真实 accumulator |
 | M10c9a–M10c9b | TND Q + ND PA KV 显式紧凑计划、v25 安全协议、三阶段生产、公开 cache/metadata 和真实 TND accumulator |
+| M10c10 | TND Q + ND PA KV 原生自动分区、v26、三阶段生产、公开 real/fake/cache/metadata、真实 26 片 accumulator；三 mask、源/双数学、协议/sanitizer、Trap、日常回归和平均公开性能闭环 |
 | 验收工具整理 | 统一入口、构建/reference 缓存和 E2E 证据恢复；模块单元/日常 E2E/专项归属、代表组合与显式穷举、仓库外产物及原生对照构建 |
 | R1：前向入口收敛 | 三个公开 MLA 前向共用适配，real/fake split 共用分派；参数名错误提示、双语调用说明、日常接口回归和 100 配置公开性能验收 |
 | R2：代码、测试与无头交接整理 | 共用 helper 下沉到 support、消除反向依赖，按实际 Python 依赖管理构建/证据；补齐工具归属并修正历史断言；集成五轮文档修正及干净收尾检查；原 R3 的内核可读性核对合入本步，保留源分层和数值流水 |

@@ -19,8 +19,8 @@ from tests.mla.support.mla_split_kv_build import compile_drivers
 from tests.mla.support.mla_cpu_driver import CpuDriver
 from tests.mla.support.mla_source_compare import assert_mla_source_close
 from tests.mla.unit.auto_split_bsnd_metadata.test_metadata import visible
-from tests.mla.support.components import split_kv_merge_merge as merge
-from tests.mla.support.components import split_kv_attention_attention as partial
+from tests.mla.support.components import split_kv_merge as merge
+from tests.mla.support.components import split_kv_attention as partial
 
 merge_probes = merge.merge_probes
 
