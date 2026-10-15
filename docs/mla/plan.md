@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**M10 的五种 512+64 布局及阶段收尾、M11a 的 192/128 数值组件已完成**；R1 入口收敛及 R2 整体整理已完成。当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
+本页只记录实施顺序、产物和完成条件。**M10 的五种 512+64 布局及阶段收尾、M11a 的 192/128 数值组件已完成，公开 prefill 尚未接入。** 当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。本轮仅修正文档，不推进下述开发步骤。
 
 ## 唯一下一步 M11b
 
@@ -10,8 +10,9 @@ M11a 因通用非量化算法的独立 K/V、GQA、192 行 stride 和输出 128 
 
 - 产物：同一提交完成 BSND host、AICPU、Kernel、metadata、公开 real/fake/compile；支持 qv=None、独立 K/V、GQA、完整 storage/stride、有效长度和空输入，输出 O/LSE 及实际 FP32 accumulator。无 mask、causal、window 与自动/1/显式 split 随布局一次接入。
 - 接口和安全：沿用已确认的 FA3 形状、返回数量、动态长度校验、metadata 复用/失效及流生命周期契约；新格式必须说明既有格式不能表达的语义或安全边界，不能只因版本号新增而另拆组件步。尚未接通的 TND/混合/PA prefill 仍明确拒绝。
-- 验收：先把具体影响路径、模块工具/CPU 协议与 sanitizer、910B 数值/边界/Trap、公开 real/fake/compile/生命周期用例及统一命令补入当前步。新增日常 BSND prefill E2E 注册到 `regression_cases.py`，累计 E2E 和普通 FA3 覆盖共享路径；不累计历史单元，组件证据不替代新入口的分派和参数传递。
-- 性能：长测前复核工具、廉价夹具和原生通用路径配方/实际分派；固定公开输入集合，完成适用 metadata 公开 E2E 平均验收。M11a 的组件耗时及 merge 退化仅作定位依据，不可声明公开性能已通过；保持既定 R、预热、重复次数和计时边界。
+- 影响路径：Python real/fake 共用入口、910 `flash_api.cpp` 与 `mla/` 的校验/前向、调度/metadata/AICPU、生产 launcher 和构建清单；复用 `MlaPrefill` 与 `HeadDim=128` 归并，不能把组件的 KV-head 虚拟 batch 夹具直接当成公开 BSND 头布局。
+- 验收：实现前补齐具体文件、测试选择依据、拟继承 E2E 及依赖和统一命令。新增独立 K/V、GQA/192 stride、三 mask、自动/1/显式 split、空值/有效长度、真实 accumulator、metadata 失效/复用及 real/fake/compile/生命周期/Trap 用例；协议变化补所属 CPU/sanitizer。新日常 BSND prefill E2E 注册到 `regression_cases.py`，相关累计 E2E 和普通 FA3 覆盖共享路径；不累计历史单元，组件证据不替代新入口验收。
+- 性能：长测前复核工具、廉价夹具和原生通用路径配方/实际分派。现有 `mla_native_dispatch.py`、`mla_public_performance.py` 的公开适用过滤限定 template 5，须为通用 prefill 的实际分派补齐规则与成功/失败测试，不能沿用空适用集合。固定公开输入，保持 R、预热、重复次数与计时边界，完成 metadata 公开 E2E 平均门槛；M11a 的组件耗时及 merge 退化只作定位依据。
 - 完成条件：以上完整行为、必要验证和证据身份均闭环，更新本步涉及的 design/plan/status，经质量检查后提交一次并停止；必要验证受限则保留交接，不提交为已闭环。
 
 ## 后续里程碑：M11–M17
@@ -30,33 +31,22 @@ M11a 因通用非量化算法的独立 K/V、GQA、192 行 stride 和输出 128 
 
 ## 已完成步骤
 
-这里只保留交付边界，当前拒绝项以 status 和 design 第 2 节为准。每步的命令、数量、耗时、失败修正及原始证据从该提交的 status 查询；不把历史阶段的拒绝条件当作当前限制。M04c 实际在 M05 后执行，编号保留。
+这里只保留交付边界，当前拒绝项以 status 和 design 第 2 节为准。每步的命令、数量、耗时、失败修正及原始证据从该提交的 status 查询；不把历史阶段的拒绝条件当作当前限制。
 
 | 步骤 | 已交付产物 |
 | --- | --- |
 | M00–M03 | 固定迁移交集/FA3 契约、独立双 reference 与固定源执行器、入口识别/校验/未实现拦截 |
-| M04a–M04c4、M05a–M05c2 | dense 调度和 Kernel/Block/Tile、FP16/BF16 BSND 前向、v1 metadata 与公开只读 cache、S1G 多块/长 KV/空容量 |
-| M06a–M06e2c2 | v2 实际 KV、v3 TND、v4 混合、v5 allocation/used；三种非 PA 布局的完整 storage/stride、生产/公开及生命周期 |
-| M07a–M07e3c | ND PA 地址/Copy/调度、v6、BSND/TND PA 前向与公开 metadata/cache；M07 阶段完成 |
-| M08a–M08e | 右下 causal 范围/数值、五种布局 v7–v11 及公开接入；M08 阶段完成 |
-| M09a–M09e | window 归一化/数值、五种布局 v12–v16 及公开接入；M09 阶段完成 |
-| M10a–M10b2 | split-KV 分区/workspace、partial attention、FD 归并与 FA3 accumulator 适配 |
-| M10c1a–M10c2b2 | 非 PA BSND 显式/原生自动计划与 v17/v18、两/三阶段生产和公开调用 |
-| M10c3a–M10c4b2 | 非 PA TND 显式/原生自动紧凑计划与 v19/v20、生产 varlen 和真实 accumulator |
-| M10c5a–M10c6b | TND Q + BSND KV 显式/原生自动计划与 v21/v22、64 位 KV 起点、生产 cache/metadata |
-| M10c7a–M10c8b | BSND Q + ND PA KV 显式/原生自动计划与 v23/v24、页校验、生产 cache/metadata 与真实 accumulator |
-| M10c9a–M10c9b | TND Q + ND PA KV 显式紧凑计划、v25 安全协议、三阶段生产、公开 cache/metadata 和真实 TND accumulator |
-| M10c10 | TND Q + ND PA KV 原生自动分区、v26、三阶段生产、公开 real/fake/cache/metadata、真实 26 片 accumulator；三 mask、源/双数学、协议/sanitizer、Trap、日常回归和平均公开性能闭环 |
-| M10 阶段收尾 | 五布局单/显式/自动 split 与三 mask 的组合覆盖、累计 E2E/公开专项和固定 92 配置阶段公开性能；统一驱动选择、计时前适用集合检查与绑定原始证据的等权汇总 |
-| M11a：192/128 数值组件 | 固定通用非量化 Kernel/Block/Tile、独立 Q/K/V 与 GQA/stride、三 mask、direct/partial、128 维归并及 accumulator；910B 双 dtype 固定源/双数学、组件性能和受影响累计 E2E，公开 prefill 仍拒绝 |
-| 验收工具整理 | 统一入口、构建/reference 缓存和 E2E 证据恢复；模块单元/日常 E2E/专项归属、代表组合与显式穷举、仓库外产物及原生对照构建 |
-| R1：前向入口收敛 | 三个公开 MLA 前向共用适配，real/fake split 共用分派；参数名错误提示、双语调用说明、日常接口回归和 100 配置公开性能验收 |
-| R2：代码、测试与无头交接整理 | 共用 helper 下沉到 support、消除反向依赖，按实际 Python 依赖管理构建/证据；补齐工具归属并修正历史断言；集成五轮文档修正及干净收尾检查；原 R3 的内核可读性核对合入本步，保留源分层和数值流水 |
+| M04–M06 | 512+64 dense 数值与非 PA BSND/TND/混合生产前向，v1–v5、allocation/used、完整 storage/stride 与生命周期 |
+| M07 | ND PA 地址/Copy/调度、v6、BSND/TND PA 公开 metadata/cache 及阶段收尾 |
+| M08–M09 | 五布局右下 causal 与 window，v7–v16、公开接入及各阶段收尾 |
+| M10 | partial/FD 归并与真实 accumulator；五布局显式/原生自动 split，v17–v26、公开入口及组合/性能阶段收尾 |
+| M11a | 192/128 通用数值组件，独立 K/V、GQA/stride、三 mask、direct/partial/128 维 merge；公开 prefill 仍拒绝 |
+| 工具整理、R1、R2 | 统一验收与缓存/证据管理、模块归属与共享 helper、共用前向分派、文档轮和无头交接；原 R3 的内核可读性核对合入 R2 |
 
 ```bash
 git log --oneline -- docs/mla/status.md
-git log -G 'M10c8b' -- docs/mla/plan.md
-git show 737d5ae:docs/mla/status.md
+git show feb189b:docs/mla/status.md  # M10 阶段证据
+git show fd7e133:docs/mla/status.md  # M11a 数值组件证据
 ```
 
 ## 迭代与收尾规则

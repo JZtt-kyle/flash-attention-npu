@@ -1,58 +1,58 @@
 # MLA 当前状态
 
-**M11a：192/128 数值组件已完成。** 分支 `feat/mla-cann-migration`，接手基线 `feb189b`。固定 CANN 通用非量化算法已在 910B 上完成独立 K/V、GQA、三 mask、direct/partial/merge 和双 dtype 组件验收；公开 prefill 仍明确拒绝。唯一下一步是 [M11b：完整 BSND 接入](plan.md#唯一下一步-m11b)，本轮提交后停止。
+**本轮为专门文档修正，功能基线仍是 M11a。** 分支 `feat/mla-cann-migration`，接手提交 `fd7e133`，接手时工作区干净。本轮只修改 design/plan/status，合并重复协议与实施历史，修正组件/公开能力、性能适用范围及交接路径；不推进功能、不修改无头循环计数。唯一下一步仍是 [M11b：完整 BSND prefill 接入](plan.md#唯一下一步-m11b)，本轮提交后停止。
 
-## 本轮改动与边界
+## 能力与未开放边界
 
-910 目录新增 `MlaPrefill` Kernel、通用 Cube/Vector Block、源 Tile 操作及组件发射参数，保留来源和版权。与既有 512+64 aMLA 不同，该路径使用通用 online softmax、独立 Q/K 192 和 V/O 128，复用已有 stride Copy、window mask 和 FD 归并；共享归并仅新增默认仍为 512 的 `HeadDim=128` 特化。参数是单次组件发射数据，不是新 metadata 协议；资源、事件和源映射见 [design 6.5.1](design.md#651-192128-通用非量化数值组件)。CATLASS 与 CANN 源仓未改。
+| 范围 | 当前状态 |
+| --- | --- |
+| 512+64、Hkv=1、FP16/BF16 | BSND、TND、TND Q + BSND KV、BSND PA、TND PA 五布局的单/显式/自动 split 与无 mask/右下 causal/window 已接通；M10 阶段已收尾 |
+| 192/128、独立 K/V、GQA | M11a 通用数值组件已完成三 mask、direct/partial/128 维 merge；**公开前向及 metadata 仍明确拒绝**，没有 prefill 日常公开 E2E 或公开性能通过声明 |
+| softcap、非默认调度 | 尚未迁移；保持 `softcap=0`、`pack_gqa=None`、`sm_margin=0`，其他拒绝项见 [design 2.2](design.md#22-后端选项与返回值) |
+| 图与芯片 | 已有代表 fake/compile 和流生命周期检查；完整 graph replay 未验收。目标为 910B/C，实现验收使用 910B，未作 910C 实机验收 |
 
-新增模块独占单元、原生通用分派预检查、固定源 probe、双数学缓存及性能夹具，复用统一驱动和既有采样协议。构建缓存校验源码、头依赖、编译器、dtype/CANN 路径及实际加载库。组件当前支持 M≤512、BRC N≤8192、非 BRC N≤1024；归并测试以 KV head 映射虚拟 batch，BSND 公开头布局和完整生命周期由 M11b 接入。未更改公开 real/fake/metadata 行为，未注册尚未接通的 prefill E2E。
+M11a 的组件参数不是新 metadata 协议，组件资源界限和固定源映射见 [design 6.5.1](design.md#651-192128-通用非量化数值组件)。归并夹具以 KV head 映射虚拟 batch，公开 BSND 头布局、完整生命周期和性能仍须 M11b 验收。现有公开性能过滤器只接受 decode template 5；通用 prefill 分派的适用规则也属于 M11b 接入范围。
 
-## 本次闭环证据
+## 最近开发闭环与证据
 
-证据根 `/tmp/mla-m11a/`，最终组件为 `acceptance-final/summary.json`，回归为 `regression/summary.json`。全部先 dry-run/collect-only，固定实现后执行；未使用 `--resume`、`--max-cases` 或完整矩阵扩展，继承通过结果为 0。
+最近开发闭环为 `fd7e133`（M11a）。证据根 `/tmp/mla-m11a/`，最终组件组在 `acceptance-final/summary.json`，回归在 `regression/summary.json`。各组的实际目录由 summary 的 `attempt` / `groups[*].directory` 指定，不能省略 `attempt-*` 层级查找日志或 profile。以下均为**上次实测**，本轮没有重跑：
 
-| 检查 | 结果 | 用时 |
+| 检查 | 上次结果（均 0 failed/skipped） | 上次用时 |
 | --- | --- | --- |
 | prefill 工具/缓存/失败传播 | 22 passed | 7.8 s |
 | prefill 模块单元 | 56 passed：27 数值配置 × 双 dtype、2 发射失败原子性 | 253.7 s，含组件重建 |
-| 性能廉价夹具 | 2 passed，双 dtype 的 attention/merge 全部固定输入 | 26.3 s |
+| 性能廉价夹具 | 2 passed | 26.3 s |
 | 组件性能 | 2 passed，12 attention + 6 merge 配置及迁移适配成本 | 67.0 s |
 | 累计日常 MLA E2E | 314 passed | 68.0 s |
 | 普通 FA3 回归 | 516 passed | 27.5 s |
 
-各组均 0 failed/skipped。54 份数值报告共 1860 个双数学对照状态全部 passed，无源精度限制豁免；固定源逐元素检查、空行 inf 符号、raw sum/max 八路重复、accumulator、重复执行、输入只读和 guard 均通过。193..256 片超过原生归并缓冲域，具名 256 片用例按数学与空行契约验收，不冒充原生逐元素覆盖。最终组件 reference 54 次全部命中；E2E 281 次命中、119 次生成，普通 FA3 31 次命中，待测实现每次实际执行。
+M11a 最终运行未使用 `--resume`、`--max-cases` 或完整矩阵扩展，继承结果为 0。54 份数值报告的 1860 个双数学对照状态全部 passed，无源精度限制豁免；193..256 片超出原生 FD 归并缓冲域，具名 256 片用例按数学与空行契约验收，不计为原生逐元素覆盖。原始检查汇总为 `final-check.json`。
 
-代表及最大成本检查在 `check-platform/`：10 项通过后才运行完整模块。成本输入 `B=1,Sq=257,Hq=8,Sk=4097,Hkv=2,M=512,N=512,S=8` 首次 reference 检查约 14.5 s；最终缓存后的 FP16/BF16 用例分别 1.95/2.56 s，进程最大 RSS 约 2.31 GiB。未因耗时截断覆盖。
+组件 Kernel 的迁移/固定源配置均值：attention FP16/BF16 为 0.9998/0.9827，merge 为 1.8487/1.8526；相应退化数为 4/6、2/6、3/3、3/3。merge 退化保留，不解释为公开性能已通过或失败。完整 Kernel/wall 样本位于最终 `prefill-profile` 组的 `probes/<dtype>/profile/`；`adaptation-wall.json` 单列迁移行适配与 accumulator 成本。计时保持 5 次预热、5×20 wall、5×10 Kernel、预分配及同片段，源输出初始化保留。
 
-以下比值为迁移/固定源、配置等权平均；所有单例、退化和原始 profiler/wall 样本保存在 `acceptance-final/` 下 `prefill-profile/probes/<dtype>/profile/`。
+代表与最大成本预检查在 `check-platform/`，共 10 项通过。成本输入 `B=1,Sq=257,Hq=8,Sk=4097,Hkv=2,M=512,N=512,S=8` 在最终组件组缓存后 FP16/BF16 用例耗时为 1.95/2.56 s，报告的进程最大 RSS 约 2.31 GiB；这些是整个用例及进程的测量，不能当作独立 reference 耗时/峰值。开发期 `check-expanded/` 曾把容量 26 当作发射核数导致源同步超时，改为实际物理核数分波后最终组通过；早期失败日志不计为通过，详细修正从 `git show fd7e133:docs/mla/status.md` 查询。
 
-| 组件 | dtype | Kernel 均值 | probe wall 均值 | Kernel 退化数 |
-| --- | --- | --- | --- | --- |
-| direct/partial attention | FP16 | 0.9998 | 0.9973 | 4/6 |
-| direct/partial attention | BF16 | 0.9827 | 1.0019 | 2/6 |
-| 128 维 merge | FP16 | 1.8487 | 1.0013 | 3/3 |
-| 128 维 merge | BF16 | 1.8526 | 1.0048 | 3/3 |
+M10 阶段证据及性能结论从 `git show feb189b:docs/mla/status.md` 查询。本轮不把旧阶段源码/扩展身份当作当前全矩阵验收；M11a 改动共享归并后已实跑上述累计 E2E 和普通 FA3，未重跑历史公开专项、性能或阶段矩阵。尚未开放功能没有补记通过。
 
-组件使用 5 次预热、5×20 wall、5×10 Kernel，同片段、预分配、输入转换在计时外，保留源输出初始化。merge 成对采样使用相同规范统计；迁移行适配及 accumulator 写入另以 5×20 wall 记录在 `adaptation-wall.json`，各输入中位数为 156.9–166.5 μs。merge Kernel 退化完整保留；本轮没有公开 metadata E2E 性能声明，M11b 必须实测适用公开平均门槛。
+## 本轮文档核对
 
-`final-check.json` 复用统一驱动函数核对最终六组原始证据、源码、依赖、收集/实测清单和结果，以及组件/生产构建、实际加载库和 native 包，全部有效。接手 M10 的 13 组正确性及构建证据核对在 `handoff-check.json`；共享归并和构建输入改变后，本轮重新执行累计 E2E，不继承历史单元或性能。
+本轮证据在 `/tmp/mla-doc-review-20261015/`。`evidence-review.json` 复用统一驱动的 `reusable`、`suite_sources`、`validate_result`、`validate_causal_builds` 和 `matching_files`，只读核对最终六组原始哈希、收集/实测清单、源码依赖、组件/生产构建及保存的加载身份，8.2 s 全部通过；双 dtype 的原生分派日志/二进制仍匹配，六次请求均为通用 template 3。
 
-## 失败修正与未运行项
+这些是文件与历史证据核对，不是本次设备通过或 `--resume` 继承；本轮新增设备测试和继承执行结果均为 0。没有探测芯片、加载 torch/扩展、重建或运行设备矩阵。下次开发仍需核对运行环境与实际加载身份，只有符合 [继承规则](design.md#73-增量验收与证据继承) 的 E2E 正确性可复用，历史单元和性能不跳过执行。
 
-首次扩大代表集合在 `check-expanded/` 的 FP16 成本用例触发源 `InitOutput/SyncAll` 超时：夹具将协议容量 26 当成发射核数，卡 6 实际只有 20 AIC。改为既有平台查询并按物理核数分波后，`check-platform/` 及最终全部数值检查通过；没有改数值算法绕过失败。早期工具 mock 误取设备锁、`profile.py` 遮蔽标准库的收集失败，以及开发期编译错误均已修正；旧日志保留在本轮证据根，不计为通过。
+固定 CANN 通过只读 Git 对象核对 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，CATLASS gitlink/checkout 为 design 的固定版本；FA3 本地副本位于 `/tmp/mla-fa3-reference/d15f1531a460ba456f41b01a774f33ab2db8febf/`，窗口与 split 源文件按现有 oracle 的 SHA256 校验。GitHub 固定源码外链在线获取返回 cache miss，未记为在线通过；保留固定链接，接口核对使用本地版本副本。
 
-初次性能 `performance/` 把迁移行适配和 accumulator 写入混入 merge 成对采样；最终按既有组件边界分离，并重新执行廉价夹具与完整采样。`unit/`、`tools-full-retry/`、`tools-cache-final/` 等开发检查不替代最终身份的证据。
+一致性核对覆盖公开 real/fake 拒绝与分派、v1–v26 编码、split 发射/预算、数值组件、固定来源和验收选择。350 个本地链接/锚点、37 个表格及 13 条 `--list`/dry-run 命令通过，记录为 `document-links.json`、`command-review.json`；原生包构建命令仅检查模块路径，没有执行。源码核对记录为 `source-review.json`。
 
-本轮未运行历史数值/协议单元、历史公开专项/性能或阶段矩阵；共享路径回归走累计 E2E 与普通 FA3。尚未开放 192/128 公开前向、softcap、非默认调度；完整 graph replay 和 910C 实机仍未验收。M11b 须一次接通 BSND 的 host/AICPU/Kernel/metadata、real/fake/compile、三 mask 和自动/1/显式 split，新增公开 E2E 及适用平均性能。
+质量检查使用已有 pre-commit 4.6.2：`PYTHONPATH=/tmp/mla-m01-precommit PRE_COMMIT_HOME=/tmp/mla-precommit-cache ci/code_quality.sh --staged`，三份文档适用检查通过，其余代码类钩子按文件类型跳过；`git diff --check` 通过。收尾更新后以同一命令复核，最终日志为 `quality-final.log`。本轮没有新增设备通过结果，也没有未解决的本地检查失败；外链在线核验限制如上。
 
-## 环境与复现
+## 环境记录与复现
 
-Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1；CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。卡 6 为 Ascend910B3、20 AIC，性能进程持有统一驱动卡锁并保存设备快照。固定源始终为 Git blob `ca18aee610729ca5270a44e2d84c751bc687fbf0`，不依赖 CANN 源仓当前 HEAD。
+以下来自 M11a 保存的 runtime/build manifest，**本轮未重新探测**：Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1；CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`；卡 6 为 Ascend910B3、20 AIC。保存的实际加载扩展为 `/home/zhangqijia/repo/flash-attention-npu/flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `23f3468d4c302c579a7eb122520fa2ba76181f4f67b5dfefe7c372fb8761abfb`，本轮仅确认文件哈希仍相同。
 
-生产扩展已重建并实际加载 `/home/zhangqijia/repo/flash-attention-npu/flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `23f3468d4c302c579a7eb122520fa2ba76181f4f67b5dfefe7c372fb8761abfb`；准备 596.8 s、runtime 核验 21.6 s，回归复用构建 1.2 s、runtime 21.7 s。
+`MLA_WORK_DIR` 默认 `/tmp/flash-attention-npu-mla-46928a793876`：生产/reference 在 `mla-validation-artifacts/`，prefill 组件缓存在 `prefill-probes/`。native 包为 `/tmp/mla-m10c3b/native/opp/vendors/mla_ca18aee_transformer`；M11a 使用已有 103/104 配方，实际分派见证据根的 `native-fp16-dispatch.json` / `native-bf16-dispatch.json`。这些临时目录被清理后不可继续继承。
 
-仓库外 `MLA_WORK_DIR` 为默认 `/tmp/flash-attention-npu-mla-46928a793876`：生产/reference 在 `mla-validation-artifacts/`，组件构建在 `prefill-probes/`。native 包复用 `/tmp/mla-m10c3b/native/opp/vendors/mla_ca18aee_transformer`，既有 103/104 配方足够；`native-fp16-dispatch.json` / `native-bf16-dispatch.json` 证明六个 combined/split/causal 请求实际执行固定通用 template 3，绑定原始日志和二进制哈希。`build/` 仅保留无头日志/状态，未改循环计数；临时证据清理后不可继续继承。
+以下为开发复现命令，本轮只核对选择和 dry-run；运行前先以相同参数 `--dry-run`、再 `--collect-only`。需查询芯片的收集和实测在宿主执行，纯文档轮不运行：
 
 ```bash
 python3 -m tests.mla --suite prefill-tools --output /tmp/mla-m11a/repro-tools
@@ -64,4 +64,4 @@ MLA_NATIVE_ROOT=/tmp/mla-m10c3b/native python3 -m tests.mla \
   --suite e2e ordinary --device 6 --output /tmp/mla-m11a/repro-regression
 ```
 
-复现先同参数 dry-run/collect-only；实机及需查询芯片的收集在宿主运行。原生通用分派检查入口为 `python3 -m tests.mla.support.mla_prefill_native --help`。日常仍为 `python3 -m tests.mla --device 6`。本次三份文档的契约、表格及变更行 16 个链接/锚点已核对；`ci/code_quality.sh --staged` 和 `git diff --check` 均通过，质量日志为 `quality-final.log`。
+日常入口仍为 `python3 -m tests.mla --device 6`；原生通用分派预检查用法见 `python3 -m tests.mla.support.mla_prefill_native --help`。历史步骤命令、失败修正和原始证据由 `git log -- docs/mla/status.md` 查询；当前文档闭环提交由 `git log -1 -- docs/mla/status.md` 定位。
