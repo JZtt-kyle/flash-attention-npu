@@ -91,4 +91,9 @@ def daily_suites():
             "test_q_used_metadata_rejected",
         )
     ]
+    paged_split = "tests/mla/e2e/split_paged_bsnd/test_public.py"
+    suites["split_paged_bsnd"] = [
+        f"{paged_split}::{name}"
+        for name in ("test_daily", "test_empty", "test_fake", "test_compile")
+    ]
     return suites

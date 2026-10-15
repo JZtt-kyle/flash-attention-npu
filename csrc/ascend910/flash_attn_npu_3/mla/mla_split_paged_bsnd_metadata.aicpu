@@ -1,0 +1,26 @@
+// Copyright (c) 2025 Huawei Technologies Co., Ltd.
+// CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
+#include "aicpu_api.h"
+#include "mla_split_paged_bsnd_metadata.cpp"
+#include "mla_split_paged_bsnd_plan.cpp"
+#include "mla_split_kv_plan.cpp"
+#include "mla_split_kv.cpp"
+#include "mla_paged_metadata.cpp"
+#include "mla_window.cpp"
+#include "mla_causal.cpp"
+#include "mla_metadata.cpp"
+#include "mla_tnd_schedule.cpp"
+#include "mla_schedule.cpp"
+#include "detail/cann_split_core.cpp"
+
+__global__ __aicpu__ uint32_t ComputeMlaSplitPagedBsndMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (!args) return 1;
+    const auto& a = *static_cast<const MlaSplitPagedBsndMetadataArgs*>(args);
+    const auto& in = a.input;
+    const bool ok = BuildSplitPagedBsndMetadata(in.shape, in.platform, in.dtype,
+        reinterpret_cast<uint32_t*>(in.outputAddr), in.outputWords, PagedMetadataInputs(in), a.window, a.splits);
+    AscendC::DataStoreBarrier();
+    return ok ? 0 : 1;
+}

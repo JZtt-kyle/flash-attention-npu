@@ -3,6 +3,7 @@
 // BSND PA explicit-split protocol; source attribution in the plan header.
 #pragma once
 #include "mla_paged_metadata.h"
+#include "mla_paged_metadata_args.h"
 #include "mla_window.h"
 #include "mla_window_params.h"
 
@@ -22,6 +23,11 @@ inline bool SplitPagedBsndMetadataWords(int64_t batch, uint32_t& words)
     words = 414 + 7 * uint32_t(batch);
     return true;
 }
+struct MlaSplitPagedBsndMetadataArgs {
+    MlaPagedMetadataArgs input;
+    MlaWindowConfig window;
+    int64_t splits;
+};
 // False leaves output untouched (unsafe descriptor/overlap); true writes a
 // complete record, including a zero-payload failure record. No device reads.
 bool BuildSplitPagedBsndMetadata(const MlaPagedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
