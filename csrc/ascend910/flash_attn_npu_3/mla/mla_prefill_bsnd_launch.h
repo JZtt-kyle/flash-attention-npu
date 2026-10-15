@@ -8,6 +8,7 @@ struct MlaPrefillBsndLaunchArgs {
     uint64_t q, k, v, out, lse, accum, accumLse, workspace, metadata, usedQuery, usedKv;
     MlaPrefillBsndContext context;
     MlaPrefillParams params;
+    uint64_t cuQuery = 0, cuKv = 0;
 };
 aclError LaunchPrefillBsndFp16(const MlaPrefillBsndLaunchArgs&);
 aclError LaunchPrefillBsndBf16(const MlaPrefillBsndLaunchArgs&);

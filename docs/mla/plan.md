@@ -1,16 +1,16 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**M10 的五种 512+64 布局及阶段收尾、M11 的 192/128 BSND 已完成。** 当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
+本页只记录实施顺序、产物和完成条件。**M10 的五种 512+64 布局及阶段收尾、M11 的 192/128 BSND、M12a 的紧凑 TND 已完成。** 当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
 
-## 唯一下一步 M12a
+## 唯一下一步 M12b
 
-一次接通 192/128 的紧凑 TND Q/KV varlen 完整公开行为，复用 [M11 数值与 BSND 接入](design.md#651-192128-通用非量化数值组件) 和已有 TND allocation/used、mask/split 调度与校验。M11b 已完成，本轮提交后停止，不开始 M12a。
+一次接通 192/128 的混合 TND Q + BSND cache 完整公开行为，复用 [M11 数值组件](design.md#651-192128-通用非量化数值组件)、[M12a 紧凑 TND 适配](design.md#512-192128-tnd-prefill-记录) 和已有混合布局的 allocation/used、mask/split 调度。M12a 本轮已闭环；本轮提交后停止，不开始 M12b。
 
-- 产物：同一提交完成 TND host、AICPU、Kernel、metadata、公开 real/fake/compile；支持 qv=None、独立 K/V、GQA、完整 storage/stride、分配前缀与实际 used、非均匀/空长度、O/LSE 和真实 FP32 accumulator。无 mask、causal、window 与自动/1/显式 split 随布局接入。
-- 接口与影响：沿用固定 FA3 的 varlen 返回数量、max 长度和有效输出区域；复用源算法、既有 TND 寻址/调度与 M11 数值核，明确实际 TND token、KV head 和归并地址。新记录须说明 v27 无法表达的分配前缀/长度语义；不因新增布局或版本号拆组件轮。混合与 PA prefill 仍明确拒绝。
-- 验收准备：实现前补齐本步具体影响文件、必跑组/命令及依据、拟继承 E2E 与依赖。新增模块所属 CPU/源差分/sanitizer 和双 dtype 设备数值，补 real/fake/compile、前缀/used/空值/stride/复用/生命周期/Trap；登记自己的日常 E2E，按共享路径选择累计 E2E 和普通 FA3 回归。
-- 性能：复用 M11 的通用 template 3/4 分类与固定 native 包，在长测前补 TND 适配所需廉价夹具和实际分派检查；固定输入与原有计时协议，完成适用的公开平均性能。相同输入继续复用内容 reference 缓存，不继承历史单元或性能。
-- 完成条件：完整可调用行为、必要验证及证据身份闭环，更新涉及的三份文档、通过质量检查，提交一次后停止；必要验证受限时如实交接，不提交为已闭环。
+- 产物：同一提交完成混合布局 host、AICPU、Kernel、metadata、公开 real/fake/compile；支持 qv=None、独立 K/V、GQA、TND Q 分配前缀、BSND KV 容量/used、非均匀/空长度及完整 storage/stride，返回 O/LSE 和真实 FP32 accumulator。无 mask、causal、window 与自动/1/显式 split 随布局接入。
+- 接口与影响：沿用固定 FA3 的 cache 调用、metadata 参数和返回契约；复用已有调度与 M11 数值核，明确 Q allocation、BSND KV batch/head、输出与归并地址。优先复用现有记录和消费者；若扩展记录，说明既有格式无法表达的语义，不按层、mask、split 或版本号拆轮。PA prefill 仍拒绝。
+- 实施前准备：在本节补齐具体改动路径及共享头文件/地址/发射/构建影响，写明必跑组/命令、选择依据、拟继承 E2E 的依赖和完成条件。新增混合布局所属 CPU 固定源差分/边界/sanitizer、双 dtype 设备数值及 real/fake/compile、长度/stride/复用/生命周期/Trap；登记自己的日常 E2E，并同步既有未开放边界测试。
+- 验收：统一驱动先 dry-run/collect，核对适用 native 包与廉价夹具，再跑代表及成本边界。实现固定后运行新行为和受影响路径的 E2E、普通 FA3 与公开平均性能；保持固定输入、R、阈值及计时边界，相同数学 reference 使用内容缓存。只继承身份与原始证据完整有效的 E2E，不累计历史单元或性能。
+- 完成条件：完整可调用行为、必要验证和证据身份闭环，相关文档及仓库质量检查通过，提交一次后停止；必要验证受限或失败时如实交接，不提交为已闭环。
 
 ## 后续里程碑：M12–M17
 
@@ -18,7 +18,7 @@
 
 | 里程碑 | 剩余产物与边界 | 完成条件 |
 | --- | --- | --- |
-| M12：prefill 非 PA TND/混合 | M12a TND varlen，M12b TND Q + BSND cache；各复用 M11 数值和已有调度，一次接通长度、metadata、mask/split 与公开行为 | allocation/used、非均匀/空长度、stride/GQA、三 mask、自动/1/显式 split、生产精度、生命周期及公开 E2E/性能 |
+| M12：prefill 非 PA TND/混合 | 剩余 M12b TND Q + BSND cache；复用 M11/M12a 数值与适配，一次接通长度、metadata、mask/split 与公开行为 | allocation/used、非均匀/空长度、stride/GQA、三 mask、自动/1/显式 split、生产精度、生命周期及公开 E2E/性能 |
 | M13：prefill PA | M13a BSND PA，M13b TND PA；各一次接通页访问、metadata、三 mask、自动/1/显式 split 和公开行为 | 合法 P 代表边界、独立 K/V 与内容/RoPE stride、长度/空值/复用/生命周期、数值及 PA 公开 E2E/性能 |
 | M14：prefill 组合收尾 | 核对 M11–M13 的必迁组合、补明确缺口并完成阶段验收；不再按 mask × split × 布局重复开接入轮 | 前序入口已实测必要组合；新发现的算法缺口按风险单列，已有有效 E2E 按规则继承，阶段性能实际执行 |
 | M15：softcap/调度选项 | softcap 数学独立闭环；pack_gqa、sm_margin 按共享调度影响划分 | 有效数学/调度语义、资源校验及适用 E2E，不能忽略参数 |
@@ -38,6 +38,7 @@
 | M10 | partial/FD 归并与真实 accumulator；五布局显式/原生自动 split，v17–v26、公开入口及组合/性能阶段收尾 |
 | M11a | 192/128 通用数值组件，独立 K/V、GQA/stride、三 mask、direct/partial/128 维 merge |
 | M11b | 完整 BSND prefill host/AICPU/Kernel/v27/real/fake/compile，三 mask、自动/1/显式 split、真实 accumulator、公开 E2E 与性能闭环 |
+| M12a | 完整紧凑 TND prefill host/AICPU/Kernel/v28/real/fake/compile，allocation/used、GQA/stride、三 mask、自动/1/显式 split、真实 accumulator、公开 E2E 与性能闭环 |
 | 工具整理、R1、R2 | 统一验收与缓存/证据管理、模块归属与共享 helper、共用前向分派、文档轮和无头交接；原 R3 的内核可读性核对合入 R2 |
 
 ```bash

@@ -3,6 +3,7 @@
 // Native partition algorithm: ca18aee attention/common/op_host/split_core.cpp.
 #include "mla_prefill_bsnd_metadata.h"
 #include "detail/cann_split_core.h"
+#include "mla_used_schedule.h"
 #include <algorithm>
 #include <new>
 #include <vector>
@@ -16,15 +17,17 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
         return false;
     // Same subtraction-based range checks as BuildUsedMetadataWithSchedule.
     // Neither read-only length array may overlap the writable record.
-    for (const auto address : {a.usedQuery, a.usedKv}) {
-        if (address && c.batch && address < a.output + uint64_t(a.words) * 4 &&
-            (address >= a.output || c.batch > (a.output - address) / 4))
+    for (uint32_t axis = 0; axis < 4; ++axis) {
+        const uint64_t address = axis == 0 ? a.usedQuery : axis == 1 ? a.usedKv : axis == 2 ? a.cuQuery : a.cuKv;
+        const uint64_t count = uint64_t(c.batch) + (axis >= 2);
+        if (address && count && address < a.output + uint64_t(a.words) * 4 &&
+            (address >= a.output || count > (a.output - address) / 4))
             return false;
     }
     auto* out = reinterpret_cast<uint32_t*>(a.output);
     std::fill(out, out + a.words, 0);
     out[0] = kMlaMetadataMagic;
-    out[1] = out[2] = kMlaPrefillBsndVersion;
+    out[1] = out[2] = c.tnd ? kMlaPrefillTndVersion : kMlaPrefillBsndVersion;
     out[3] = a.words;
     out[4] = c.dtype;
     out[5] = 1;
@@ -33,11 +36,27 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
         (a.usedKv && c.batch > (UINT64_MAX - a.usedKv) / 4) ||
         (c.dtype != uint32_t(MlaMetadataDtype::Fp16) && c.dtype != uint32_t(MlaMetadataDtype::Bf16)))
         return true;
+    if (c.tnd &&
+        (!a.cuQuery || !a.cuKv || a.cuQuery % 4 || a.cuKv % 4 || uint64_t(c.batch) + 1 > (UINT64_MAX - a.cuQuery) / 4 ||
+         uint64_t(c.batch) + 1 > (UINT64_MAX - a.cuKv) / 4))
+        return true;
+    if (!c.tnd && (a.cuQuery || a.cuKv))
+        return true;
     try {
+        MlaUsedLengths allocation;
+        if (c.tnd &&
+            ParseUsedLengths(
+                {c.batch, c.heads, {MlaSequenceLayout::Tnd, c.totalQ, c.sq}, {MlaSequenceLayout::Tnd, c.totalK, c.sk}},
+                {{reinterpret_cast<const int32_t*>(a.cuQuery), uint64_t(c.batch) + 1},
+                 {reinterpret_cast<const int32_t*>(a.cuKv), uint64_t(c.batch) + 1},
+                 {reinterpret_cast<const int32_t*>(a.usedQuery), a.usedQuery ? c.batch : 0},
+                 {reinterpret_cast<const int32_t*>(a.usedKv), a.usedKv ? c.batch : 0}},
+                allocation) != MlaScheduleStatus::Success)
+            return true;
         std::vector<uint32_t> result(a.words, 0);
         const uint32_t header[] = {kMlaMetadataMagic,
-                                   27,
-                                   27,
+                                   out[1],
+                                   out[2],
                                    a.words,
                                    c.dtype,
                                    0,
@@ -56,6 +75,10 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
                                    uint32_t(c.window.right),
                                    0};
         std::copy(header, header + 20, result.begin());
+        if (c.tnd) {
+            result[20] = c.totalQ;
+            result[21] = c.totalK;
+        }
         detail::BaseInfo base{};
         base.bSize = c.batch;
         base.n2Size = c.kvHeads;
@@ -68,16 +91,28 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
         base.sparseMode = c.window.kind == 2 ? 4 : c.window.kind == 1 ? 3 : 0;
         base.preToken = c.window.kind == 1 ? INT32_MAX : c.window.left;
         base.nextToken = c.window.kind == 1 ? 0 : c.window.right;
-        uint32_t* tail = result.data() + 20 + 2 * c.batch;
+        uint32_t* tail = result.data() + PrefillTailWord(c);
         uint32_t* prefix = tail + 346;
         uint64_t groups = 0, tiles = 0;
         for (uint32_t b = 0; b < c.batch; ++b) {
-            const uint32_t q = a.usedQuery ? reinterpret_cast<const uint32_t*>(a.usedQuery)[b] : c.sq;
-            const uint32_t k = a.usedKv ? reinterpret_cast<const uint32_t*>(a.usedKv)[b] : c.sk;
+            const uint32_t q = c.tnd         ? allocation.sequences[b].queryLength
+                               : a.usedQuery ? reinterpret_cast<const uint32_t*>(a.usedQuery)[b]
+                                             : c.sq;
+            const uint32_t k = c.tnd      ? allocation.sequences[b].kvLength
+                               : a.usedKv ? reinterpret_cast<const uint32_t*>(a.usedKv)[b]
+                                          : c.sk;
             if (q > c.sq || k > c.sk)
                 return true;
-            result[20 + 2 * b] = q;
-            result[21 + 2 * b] = k;
+            const uint32_t word = PrefillSequenceWord(c, b);
+            if (c.tnd) {
+                const auto& seq = allocation.sequences[b];
+                result[word] = uint32_t(seq.queryStart);
+                result[word + 2] = uint32_t(seq.kvStart);
+                result[word + 4] = seq.queryCapacity;
+                result[word + 5] = seq.kvCapacity;
+            }
+            result[PrefillLengthWord(c, b)] = q;
+            result[PrefillLengthWord(c, b) + 1] = k;
             base.actualSeqS1Size.push_back(q);
             base.actualSeqS2Size.push_back(k);
             const uint64_t count = l.groups ? (uint64_t(q) * base.gSize + l.m - 1) / l.m : 0;

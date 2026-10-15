@@ -12,24 +12,34 @@ struct Reader {
     }
 };
 struct Arrays {
-    const std::vector<uint32_t>&q, &k;
+    const std::vector<uint32_t>&q, &k, &cq, &ck;
+    bool tnd;
     uint32_t operator()(uint32_t axis, uint32_t i) const
     {
-        return (axis ? k : q).at(i);
+        return (tnd ? (axis == 0 ? cq : axis == 1 ? ck : axis == 2 ? q : k) : (axis ? k : q)).at(i);
     }
 };
-int main()
+int main(int argc, char**)
 {
     MlaPrefillBsndContext c{};
     int fault;
     uint32_t value;
     while (std::cin >> c.batch >> c.sq >> c.sk >> c.heads >> c.kvHeads >> c.splits >> c.cores >> c.dtype >>
            c.usedFlags >> c.window.kind >> c.window.left >> c.window.right >> fault >> value) {
-        std::vector<uint32_t> q(c.batch), k(c.batch);
+        c.tnd = argc > 1;
+        if (c.tnd)
+            std::cin >> c.totalQ >> c.totalK;
+        std::vector<uint32_t> q(c.batch), k(c.batch), cq(c.batch + 1), ck(c.batch + 1);
         for (auto& x : q)
             std::cin >> x;
         for (auto& x : k)
             std::cin >> x;
+        if (c.tnd) {
+            for (auto& x : cq)
+                std::cin >> x;
+            for (auto& x : ck)
+                std::cin >> x;
+        }
         MlaPrefillBsndLayout l{};
         if (!PrefillBsndLayout(c, l)) {
             std::cout << "{\"layout\":false}\n" << std::flush;
@@ -39,6 +49,18 @@ int main()
         std::vector<uint32_t> record(l.words, 0xA5A5A5A5);
         MlaPrefillBsndMetadataArgs a{c, c.usedFlags & 1 ? uint64_t(q.data()) : 0,
                                      c.usedFlags & 2 ? uint64_t(k.data()) : 0, uint64_t(record.data()), l.words};
+        if (c.tnd) {
+            a.cuQuery = uint64_t(cq.data());
+            a.cuKv = uint64_t(ck.data());
+        }
+        if (fault == -9)
+            a.cuQuery = 0;
+        if (fault == -10)
+            ++a.cuQuery;
+        if (fault == -11)
+            a.cuKv = UINT64_MAX - 3;
+        if (fault == -12)
+            a.output = uint64_t(cq.data());
         if (fault == -2)
             a.output = 0;
         if (fault == -3)
@@ -63,7 +85,8 @@ int main()
         MlaAutoSplitBsndSchedule schedule{}, before{};
         std::memset(&schedule, 0xA5, sizeof(schedule));
         before = schedule;
-        const auto status = ReadPrefillBsndMetadata(Reader{record}, l.words, c, Arrays{q, k}, schedule);
+        const auto status =
+            ReadPrefillBsndMetadata(Reader{record}, l.words, c, Arrays{q, k, cq, ck, bool(c.tnd)}, schedule);
         if (status != MlaMetadataReadStatus::Success && std::memcmp(&before, &schedule, sizeof(schedule)))
             return 3;
         std::cout << "{\"layout\":true,\"built\":" << built << ",\"status\":" << int(status) << ",\"bytes\":" << l.bytes

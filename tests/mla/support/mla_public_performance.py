@@ -130,6 +130,9 @@ def summarize_varlen(reports, specs, *, include_native_fd=False):
         raise ValueError("Expected 1..50 fixed varlen inputs")
     if len(reports) != 2 or {r["dtype"] for r in reports} != {"fp16", "bf16"}:
         raise ValueError("Both dtypes are required")
+    representation = reports[0].get("representation", "compressed")
+    if any(r.get("representation", "compressed") != representation for r in reports):
+        raise ValueError("Dtype representations differ")
     if include_native_fd and (
         not all(r.get("automatic_split") for r in reports)
         or any(s.get("splits") != 0 for s in specs)
@@ -152,7 +155,16 @@ def summarize_varlen(reports, specs, *, include_native_fd=False):
             if row["case"] != index:
                 raise ValueError("Inconsistent case index")
             item = dict(dtype=report["dtype"], case=index, spec=row["spec"])
-            applicable = row["native_template"] == 5 and (include_native_fd or not row["native_fd"])
+            applicable = e2e_applicable(
+                row["native_template"],
+                row["native_fd"],
+                representation=representation,
+                include_native_fd=(
+                    row["spec"].get("splits") == 0
+                    if representation == "prefill"
+                    else include_native_fd
+                ),
+            )
             if applicable != row["e2e_applicable"]:
                 raise ValueError("Inconsistent native dispatch classification")
             if not applicable:
@@ -179,7 +191,8 @@ def summarize_varlen(reports, specs, *, include_native_fd=False):
         threshold=1.0,
         mean_ratio=mean,
         weighting="equal input/dtype weight; equal R=1/4 weight within each input",
-        includes_native_fd=include_native_fd,
+        includes_native_fd=include_native_fd
+        or (representation == "prefill" and any(s.get("splits") == 0 for s in specs)),
         measured_cases=2 * len(specs),
         applicable_cases=len(cases),
         excluded_cases=len(excluded),

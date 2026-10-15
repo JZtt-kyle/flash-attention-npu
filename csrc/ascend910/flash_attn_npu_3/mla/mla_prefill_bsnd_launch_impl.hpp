@@ -4,6 +4,7 @@
 #include "kernel_operator.h"
 #include "mla_prefill_bsnd_launch.h"
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
+#include "lib/matmul_intf.h"
 #include "kernel/mla_prefill.hpp"
 #include "kernel/mla_used_metadata.hpp"
 #include "mla_prefill_bsnd_consumer.h"
@@ -17,7 +18,10 @@ __aicore__ inline bool LoadPrefill(const MlaPrefillBsndLaunchArgs& a, Kernel::Me
     const auto& c = a.context;
     if (!PrefillBsndLayout(c, layout) || !ValidUsedMetadataAddress(a.metadata, layout.words) ||
         (a.usedQuery && !ValidUsedMetadataAddress(a.usedQuery, c.batch)) ||
-        (a.usedKv && !ValidUsedMetadataAddress(a.usedKv, c.batch)) || AscendC::GetBlockNum() != c.cores ||
+        (a.usedKv && !ValidUsedMetadataAddress(a.usedKv, c.batch)) ||
+        (c.tnd && (!ValidUsedMetadataAddress(a.cuQuery, uint64_t(c.batch) + 1) ||
+                   !ValidUsedMetadataAddress(a.cuKv, uint64_t(c.batch) + 1))) ||
+        AscendC::GetBlockNum() != c.cores ||
         c.dtype != (AscendC::IsSameType<MLA_PREFILL_TYPE, half>::value ? uint32_t(MlaMetadataDtype::Fp16)
                                                                        : uint32_t(MlaMetadataDtype::Bf16)) ||
         (c.batch && (bool(c.usedFlags & 1) != bool(a.usedQuery) || bool(c.usedFlags & 2) != bool(a.usedKv)))) {
@@ -26,10 +30,15 @@ __aicore__ inline bool LoadPrefill(const MlaPrefillBsndLaunchArgs& a, Kernel::Me
     }
     read.data.SetGlobalBuffer((__gm__ uint32_t*)a.metadata);
     Kernel::UsedMetadataReaders arrays;
+    const uint32_t usedIndex = c.tnd ? 2 : 0;
+    if (c.tnd) {
+        arrays.data[0].data.SetGlobalBuffer((__gm__ uint32_t*)a.cuQuery);
+        arrays.data[1].data.SetGlobalBuffer((__gm__ uint32_t*)a.cuKv);
+    }
     if (a.usedQuery)
-        arrays.data[0].data.SetGlobalBuffer((__gm__ uint32_t*)a.usedQuery);
+        arrays.data[usedIndex].data.SetGlobalBuffer((__gm__ uint32_t*)a.usedQuery);
     if (a.usedKv)
-        arrays.data[1].data.SetGlobalBuffer((__gm__ uint32_t*)a.usedKv);
+        arrays.data[usedIndex + 1].data.SetGlobalBuffer((__gm__ uint32_t*)a.usedKv);
     if (ReadPrefillBsndMetadata(read, layout.words, c, arrays, s) != MlaMetadataReadStatus::Success) {
         AscendC::Trap();
         return false;
@@ -47,7 +56,58 @@ __aicore__ inline void RunPrefill(const MlaPrefillBsndLaunchArgs& a, const MlaPr
                (GM_ADDR)a.workspace + l.sumOffset + row * 8 * 4, (GM_ADDR)a.workspace + l.maxOffset + row * 8 * 4,
                &pipe);
 }
+template <bool IsTnd>
+__aicore__ inline void PrefillMerge(const MlaPrefillBsndLaunchArgs& a, const MlaSplitKvMergeParams& p,
+                                    const MlaPrefillBsndLayout& l, uint64_t row, uint32_t begin, uint32_t end)
+{
+    AscendC::TPipe pipe;
+    Block::MlaSplitKvMerge<MLA_PREFILL_TYPE, true, IsTnd, 128> merge;
+    merge.Init(p, (GM_ADDR)a.workspace + l.outOffset + row * 128 * 4, (GM_ADDR)a.workspace + l.sumOffset + row * 8 * 4,
+               (GM_ADDR)a.workspace + l.maxOffset + row * 8 * 4, (GM_ADDR)a.out, (GM_ADDR)a.lse, (GM_ADDR)a.accum,
+               (GM_ADDR)a.accumLse, &pipe);
+    for (uint32_t start = begin; start < end; start += merge.TileRows())
+        merge.Run(start, merge.TileRows() < end - start ? merge.TileRows() : end - start);
+}
+// Same disjoint, 64-element aligned initialization as AutoInitialize in
+// mla_auto_split_launch_impl.hpp. Stream ordering separates it from attention.
+template <typename T>
+__aicore__ inline void PrefillInitialize(uint64_t address, uint64_t elements, T value)
+{
+    const uint64_t cores = AscendC::GetBlockNum() * AscendC::GetSubBlockNum();
+    const uint64_t chunk = (elements + cores * 64 - 1) / (cores * 64) * 64;
+    const uint64_t start = uint64_t(AscendC::GetBlockIdx()) * chunk;
+    if (start < elements) {
+        AscendC::GlobalTensor<T> tensor;
+        tensor.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(address));
+        matmul::InitOutput<T>(tensor[start], chunk < elements - start ? chunk : elements - start, value);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(0);
+    }
+}
+
 #endif
+__global__ __aicore__ __mix__(1, 2) void MLA_PREFILL_INIT(MlaPrefillBsndLaunchArgs a)
+{
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
+    Kernel::MetadataReader read;
+    MlaAutoSplitBsndSchedule s{};
+    MlaPrefillBsndLayout l{};
+    if (!LoadPrefill(a, read, s, l))
+        return;
+    if ASCEND_IS_AIV {
+        AscendC::TPipe pipe;
+        const auto& c = a.context;
+        const uint64_t rows = uint64_t(c.totalQ) * c.heads;
+        PrefillInitialize<MLA_PREFILL_TYPE>(a.out, rows * 128, MLA_PREFILL_TYPE(0));
+        PrefillInitialize<float>(a.lse, rows, c.totalK ? -float(1.0 / 0.0) : float(1.0 / 0.0));
+        if (c.splits != 1) {
+            const uint64_t capacity = c.splits ? c.splits : 26;
+            PrefillInitialize<float>(a.accum, rows * capacity * 128, 0.0f);
+            PrefillInitialize<float>(a.accumLse, rows * capacity, -float(1.0 / 0.0));
+        }
+    }
+#endif
+}
 __global__ __aicore__ __mix__(1, 2) void MLA_PREFILL_ATTENTION(MlaPrefillBsndLaunchArgs a)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
@@ -67,24 +127,36 @@ __global__ __aicore__ __mix__(1, 2) void MLA_PREFILL_ATTENTION(MlaPrefillBsndLau
         if (!PrefillBsndTask(read, c, s, index / l.capacity, index % l.capacity, t))
             continue;
         const uint32_t b = t.batch / c.kvHeads;
-        MlaPrefillTask task{b,
+        MlaPrefillTask task{a.context.tnd ? 0U : b,
                             t.batch % c.kvHeads,
                             t.rowBegin,
                             t.rowEnd - t.rowBegin,
-                            read(20 + 2 * b),
-                            read(21 + 2 * b),
+                            read(PrefillLengthWord(c, b)),
+                            read(PrefillLengthWord(c, b) + 1),
                             t.s2Begin,
                             t.s2End};
+        auto current = a;
+        if (c.tnd) {
+            const uint64_t qStart = read(PrefillSequenceWord(c, b));
+            const uint64_t kStart = read(PrefillSequenceWord(c, b) + 2);
+            current.q += qStart * a.params.q.rowStride * 2;
+            current.k += kStart * a.params.k.rowStride * 2;
+            current.v += kStart * a.params.v.rowStride * 2;
+            current.out += qStart * c.heads * 128 * 2;
+            current.lse += qStart * 4;
+            current.params.batch = 1;
+            current.params.sq = c.totalQ;
+        }
         if (c.splits == 1) {
             if (l.m <= 128)
-                RunPrefill<true, false>(a, task, core, index * l.m, l);
+                RunPrefill<true, false>(current, task, core, index * l.m, l);
             else
-                RunPrefill<false, false>(a, task, core, index * l.m, l);
+                RunPrefill<false, false>(current, task, core, index * l.m, l);
         } else {
             if (l.m <= 128)
-                RunPrefill<true, true>(a, task, core, index * l.m, l);
+                RunPrefill<true, true>(current, task, core, index * l.m, l);
             else
-                RunPrefill<false, true>(a, task, core, index * l.m, l);
+                RunPrefill<false, true>(current, task, core, index * l.m, l);
         }
     }
 #endif
@@ -99,12 +171,22 @@ __global__ __aicore__ __mix__(1, 2) void MLA_PREFILL_MERGE(MlaPrefillBsndLaunchA
         return;
     if ASCEND_IS_AIV {
         const auto& c = a.context;
-        for (uint64_t group = AscendC::GetBlockIdx(); group < s.groups; group += c.cores * 2) {
+        // TND uses M=512 even for short sequences. Distribute independent row
+        // tiles across vectors instead of serializing an entire M group on one
+        // vector. The existing merge's 192 split-row bound remains unchanged.
+        const uint32_t capacityRows = 192U / l.capacity;
+        const uint32_t tileRows = capacityRows > 8 ? 8 : capacityRows ? capacityRows : 1;
+        const uint32_t tiles = c.tnd ? (l.m + tileRows - 1) / tileRows : 1;
+        for (uint64_t index = AscendC::GetBlockIdx(); index < s.groups * tiles; index += c.cores * 2) {
+            const uint64_t group = index / tiles;
+            const uint32_t begin = c.tnd ? (index % tiles) * tileRows : 0;
             MlaAutoSplitBsndTask t{};
             if (!PrefillBsndTask(read, c, s, group, 0, t)) {
                 AscendC::Trap();
                 return;
             }
+            if (begin >= t.rowEnd - t.rowBegin)
+                continue;
             MlaSplitKvMergeParams p{};
             p.batch = c.batch;
             p.sq = c.sq;
@@ -116,8 +198,8 @@ __global__ __aicore__ __mix__(1, 2) void MLA_PREFILL_MERGE(MlaPrefillBsndLaunchA
             p.rows = t.rowEnd - t.rowBegin;
             p.mBase = l.m;
             p.splits = t.splitCount;
-            p.queryLength = read(20 + 2 * p.batchIndex);
-            p.kvLength = read(21 + 2 * p.batchIndex);
+            p.queryLength = read(PrefillLengthWord(c, p.batchIndex));
+            p.kvLength = read(PrefillLengthWord(c, p.batchIndex) + 1);
             p.adapt = 1;
             p.maskKind = c.window.kind;
             p.left = c.window.left;
@@ -131,20 +213,26 @@ __global__ __aicore__ __mix__(1, 2) void MLA_PREFILL_MERGE(MlaPrefillBsndLaunchA
                 p.end[split] = p.kvLength < t.s2End * l.n ? p.kvLength : t.s2End * l.n;
             }
             const uint64_t row = group * l.capacity * l.m;
-            AscendC::TPipe pipe;
-            Block::MlaSplitKvMerge<MLA_PREFILL_TYPE, true, false, 128> merge;
-            merge.Init(p, (GM_ADDR)a.workspace + l.outOffset + row * 128 * 4,
-                       (GM_ADDR)a.workspace + l.sumOffset + row * 8 * 4,
-                       (GM_ADDR)a.workspace + l.maxOffset + row * 8 * 4, (GM_ADDR)a.out, (GM_ADDR)a.lse,
-                       (GM_ADDR)a.accum, (GM_ADDR)a.accumLse, &pipe);
-            for (uint32_t start = 0; start < p.rows; start += merge.TileRows())
-                merge.Run(start, merge.TileRows() < p.rows - start ? merge.TileRows() : p.rows - start);
+            if (c.tnd) {
+                p.batch = 1;
+                p.sq = c.totalQ;
+                p.batchIndex = read(PrefillSequenceWord(c, t.batch / c.kvHeads));
+                PrefillMerge<true>(a, p, l, row, begin, begin + tileRows < p.rows ? begin + tileRows : p.rows);
+            } else
+                PrefillMerge<false>(a, p, l, row, 0, p.rows);
         }
     }
 #endif
 }
 aclError MLA_PREFILL_LAUNCH(const MlaPrefillBsndLaunchArgs& a)
 {
+    if (a.context.tnd) {
+        MlaBatchLaunchScope launch;
+        MLA_PREFILL_INIT<<<a.context.cores, nullptr, a.stream>>>(a);
+        const auto error = launch.Result();
+        if (error != ACL_SUCCESS)
+            return error;
+    }
     {
         MlaBatchLaunchScope launch;
         MLA_PREFILL_ATTENTION<<<a.context.cores, nullptr, a.stream>>>(a);

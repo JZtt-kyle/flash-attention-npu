@@ -83,6 +83,30 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "prefill-tnd-tools": [
+        "tests/mla/unit/tools/test_mla_prefill_tnd_tools.py",
+        "tests/mla/unit/tools/test_mla_prefill_bsnd_tools.py::test_prefill_profiler_boundaries",
+        "tests/mla/unit/tools/test_mla_validation_policy.py::test_varlen_average_retains_regressions_and_failure",
+        "tests/mla/unit/tools/test_mla_validation_policy.py::test_varlen_average_rejects_incomplete_evidence",
+        "tests/mla/unit/tools/test_mla_validation_policy.py::test_mixed_average_weights_entries_and_keeps_regressions",
+        "tests/mla/unit/tools/test_mla_validation_policy.py::test_mixed_average_rejects_incomplete_evidence",
+        "tests/mla/unit/tools/test_mla_auto_split_tnd_tools.py::test_native_fd_average",
+        "tests/mla/unit/tools/test_mla_auto_split_tnd_tools.py::test_invalid_performance_evidence",
+        "tests/mla/unit/tools/test_organization.py",
+    ],
+    "prefill-tnd-profile-check": ["tests/mla/e2e/prefill_tnd/test_profile.py"],
+    "prefill-tnd-profile": ["tests/mla/e2e/prefill_tnd/test_profile.py"],
+    "prefill-tnd-trap": ["tests/mla/e2e/prefill_tnd/test_trap.py"],
+    "prefill-tnd-sanitize": ["tests/mla/unit/prefill_tnd/test_metadata.py"],
+    "prefill-tnd-check": [
+        "tests/mla/e2e/prefill_tnd/test_public.py",
+        "-k",
+        "representative or cost_boundary",
+    ],
+    "prefill-tnd-public": [
+        "tests/mla/e2e/prefill_tnd/test_public.py",
+        "tests/mla/e2e/prefill_tnd/test_source.py",
+    ],
     "prefill-bsnd-tools": [
         "tests/mla/unit/tools/test_mla_prefill_bsnd_tools.py",
         "tests/mla/unit/tools/test_flash_attn_npu_v3_mla_build.py::test_aicpu_sources_by_backend",
@@ -865,6 +889,8 @@ SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()
 PERFORMANCE_SUITES = {
     "prefill-bsnd-profile",
     "prefill-bsnd-profile-check",
+    "prefill-tnd-profile",
+    "prefill-tnd-profile-check",
     "prefill-profile",
     "auto-split-paged-tnd-profile",
     "auto-split-paged-bsnd-profile",
@@ -931,6 +957,9 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "prefill-tnd-tools",
+    "unit-prefill_tnd",
+    "prefill-tnd-sanitize",
     "prefill-bsnd-tools",
     "unit-prefill_bsnd",
     "prefill-bsnd-sanitize",
@@ -1050,7 +1079,12 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
-    if suite in {"unit-prefill_bsnd", "prefill-bsnd-sanitize"}:
+    if suite in {
+        "unit-prefill_bsnd",
+        "prefill-bsnd-sanitize",
+        "unit-prefill_tnd",
+        "prefill-tnd-sanitize",
+    }:
         from tests.mla.support.mla_prefill_bsnd_build import toolchain_identity
 
         return toolchain_identity(suite.endswith("sanitize"))
@@ -1289,9 +1323,16 @@ def environment(args, directory, suite):
         MLA_PAGED_ATTENTION_REUSE="1",
         MLA_PAGED_METADATA_LIBRARY=str(args.artifacts / "producer/metadata.so"),
     )
-    if suite in {"unit-prefill_bsnd", "prefill-bsnd-sanitize"}:
+    if suite in {
+        "unit-prefill_bsnd",
+        "prefill-bsnd-sanitize",
+        "unit-prefill_tnd",
+        "prefill-tnd-sanitize",
+    }:
         env["MLA_SCHEDULE_ARTIFACT_DIR"] = str(directory / "schedule")
         env["MLA_SCHEDULE_SANITIZE"] = str(int(suite.endswith("sanitize")))
+    if suite in {"prefill-tnd-profile", "prefill-tnd-profile-check"}:
+        env["MLA_PREFILL_TND_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {"prefill-bsnd-profile", "prefill-bsnd-profile-check"}:
         env["MLA_PREFILL_BSND_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     for variable, child in {

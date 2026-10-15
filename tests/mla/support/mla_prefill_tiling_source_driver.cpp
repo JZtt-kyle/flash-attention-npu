@@ -34,9 +34,11 @@ struct FiaTilingNonQuant {
     void CalcMBaseSize();
 };
 #include "generic_tiling.inc"
-int main()
+int main(int argc, char**)
 {
     Info info;
+    if (argc > 1)
+        info.inputLayout = TilingKeyLayout::TND;
     FiaTilingNonQuant tiling{&info};
     uint32_t sk, mask;
     while (std::cin >> info.s1Size >> sk >> info.gSize >> mask) {

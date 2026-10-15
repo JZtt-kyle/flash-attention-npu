@@ -1,4 +1,5 @@
 #define MLA_PREFILL_TYPE half
+#define MLA_PREFILL_INIT MlaPrefillTndFp16Init
 #define MLA_PREFILL_ATTENTION MlaPrefillBsndFp16Attention
 #define MLA_PREFILL_MERGE MlaPrefillBsndFp16Merge
 #define MLA_PREFILL_LAUNCH LaunchPrefillBsndFp16

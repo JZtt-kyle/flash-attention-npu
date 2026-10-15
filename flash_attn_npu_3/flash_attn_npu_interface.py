@@ -200,12 +200,12 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         "MLA: supported representation without qv requires Dq=192 and Dv=128",
     )
     check(
-        not (varlen_q or varlen_k or paged_kv),
-        "MLA prefill forward is not implemented yet for TND, mixed or paged layouts",
+        varlen_q == varlen_k and not paged_kv,
+        "MLA prefill forward is not implemented yet for mixed or paged layouts",
     )
-    check(q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
+    check(varlen_q or q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
     check(
-        _fits_mla_dense_shape(q.shape[0], q.shape[1], heads_q, k.shape[1]),
+        varlen_q or _fits_mla_dense_shape(q.shape[0], q.shape[1], heads_q, k.shape[1]),
         "MLA: prefill BSND shape bounds exceeded",
     )
     for tensor in (q, k, v):
@@ -1408,20 +1408,30 @@ def _mla_tnd_bsnd_forward_fake(
     )
 
 
-def _mla_prefill_bsnd_budget(batch, sq, sk, heads, kv_heads, splits, left, right, causal):
+def _mla_prefill_bsnd_budget(
+    batch, sq, sk, heads, kv_heads, splits, left, right, causal, total_q=None, total_k=None
+):
     if (
-        not _fits_mla_dense_shape(batch, sq, heads, sk)
+        not _fits_mla_dense_shape(batch if total_q is None else 0, sq, heads, sk)
         or kv_heads <= 0
         or heads % kv_heads
         or not 0 <= splits <= 256
     ):
         raise RuntimeError("MLA: prefill BSND shape/split bounds exceeded")
-    words = 368 + batch * (2 + 2 * kv_heads)
+    words = (
+        (368 + batch * (2 + 2 * kv_heads))
+        if total_q is None
+        else (372 + batch * (8 + 2 * kv_heads))
+    )
     if words > 2**32 - 1 or batch * kv_heads > (2**32 - 1 - 758) // 10:
         raise RuntimeError("MLA: prefill metadata word count overflow")
     kind, _, _ = _normalize_mla_window(sq, sk, left, right, causal)
     group = heads // kv_heads
-    n = (8192 if group < 5 else 4096 if group < 10 else 2048) if sq <= 16 else 512
+    n = (
+        (8192 if group < 5 else 4096 if group < 10 else 2048)
+        if sq <= 16 and total_q is None
+        else 512
+    )
     n = min(n, 1024) if kind else n
     n = min(n, sk) or 32
     aligned = (n + 31) // 32 * 32
@@ -1437,11 +1447,14 @@ def _mla_prefill_bsnd_budget(batch, sq, sk, heads, kv_heads, splits, left, right
         else 32
     )
     capacity = splits or 26
-    if max(batch, 1) * max(sq, 1) * heads * capacity * 512 > 2**63 - 1:
+    rows = max(batch, 1) * max(sq, 1) if total_q is None else max(total_q, 1)
+    if rows * heads * capacity * 512 > 2**63 - 1:
         raise RuntimeError("MLA: prefill accumulator overflow")
-    if batch and sq and sk:
+    if batch and sq and sk and (total_q is None or (total_q and total_k)):
         scratch = 26 * (12 * m * aligned + 16 * m * 128)
         groups = batch * kv_heads * ((sq * group + m - 1) // m)
+        if total_q is not None:
+            groups = min(groups, (total_q * group // m + batch) * kv_heads)
         workspace = scratch + (0 if splits == 1 else groups * capacity * m * 144 * 4)
         if workspace > 2**63 - 1:
             raise RuntimeError("MLA: prefill workspace overflow")
@@ -1532,6 +1545,161 @@ def _mla_prefill_bsnd_forward_fake(
         torch.empty((0,), device=q.device)
         if num_splits == 1
         else q.new_empty((capacity, b, h, sq), dtype=torch.float32),
+    )
+
+
+def _mla_prefill_forward(
+    q,
+    k,
+    v,
+    splits,
+    left,
+    right,
+    causal,
+    scale,
+    used_k,
+    used_q,
+    metadata,
+    cu_q=None,
+    cu_k=None,
+    max_q=None,
+    max_k=None,
+):
+    if cu_q is not None and cu_k is not None:
+        _check_mla_tnd_inputs(q, k, cu_q, cu_k, max_q, max_k)
+        return torch.ops.flash_attn_npu_3._mla_prefill_tnd_forward(
+            q,
+            k,
+            v,
+            cu_q,
+            cu_k,
+            max_q,
+            max_k,
+            splits,
+            left,
+            right,
+            causal,
+            scale,
+            used_q,
+            used_k,
+            metadata,
+        )
+    return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_forward(
+        q, k, v, splits, left, right, causal, scale, used_k, used_q, metadata
+    )
+
+
+def _check_prefill_tnd(
+    q, k, v, cu_q, cu_k, max_q, max_k, splits, left, right, causal, used_q, used_k
+):
+    _check_mla_inputs(q, k, v, varlen_q=True, varlen_k=True)
+    if q.shape[-1] != 192 or v.shape[-1] != 128:
+        raise RuntimeError("MLA: prefill requires 192/128 tensors")
+    _check_mla_tnd_inputs(q, k, cu_q, cu_k, max_q, max_k)
+    _check_mla_used(q, cu_q.numel() - 1, used_q, used_k)
+    return _mla_prefill_bsnd_budget(
+        cu_q.numel() - 1,
+        max_q,
+        max_k,
+        q.shape[1],
+        k.shape[1],
+        splits,
+        left,
+        right,
+        causal,
+        total_q=q.shape[0],
+        total_k=k.shape[0],
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_prefill_tnd_metadata")
+def _mla_prefill_tnd_metadata_fake(
+    q,
+    k,
+    v,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_splits=1,
+    window_left=-1,
+    window_right=-1,
+    causal=False,
+    seqused_q=None,
+    seqused_k=None,
+):
+    words = _check_prefill_tnd(
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        num_splits,
+        window_left,
+        window_right,
+        causal,
+        seqused_q,
+        seqused_k,
+    )
+    return q.new_empty((words,), dtype=torch.int32)
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_prefill_tnd_forward")
+def _mla_prefill_tnd_forward_fake(
+    q,
+    k,
+    v,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_splits=1,
+    window_left=-1,
+    window_right=-1,
+    causal=False,
+    softmax_scale=None,
+    seqused_q=None,
+    seqused_k=None,
+    scheduler_metadata=None,
+):
+    words = _check_prefill_tnd(
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        num_splits,
+        window_left,
+        window_right,
+        causal,
+        seqused_q,
+        seqused_k,
+    )
+    _check_mla_dense_options(softmax_scale=softmax_scale, num_splits=num_splits, allow_split=True)
+    if scheduler_metadata is not None and (
+        scheduler_metadata.dtype != torch.int32
+        or scheduler_metadata.device != q.device
+        or scheduler_metadata.shape != (words,)
+        or not scheduler_metadata.is_contiguous()
+    ):
+        raise RuntimeError(
+            "MLA: prefill scheduler_metadata must be same-device contiguous int32 with matching word count"
+        )
+    tq, h, _ = q.shape
+    capacity = num_splits or 26
+    return (
+        q.new_empty((tq, h, 128)),
+        q.new_empty((h, tq), dtype=torch.float32),
+        torch.empty((0,), device=q.device)
+        if num_splits == 1
+        else q.new_empty((capacity, h, tq, 128), dtype=torch.float32),
+        torch.empty((0,), device=q.device)
+        if num_splits == 1
+        else q.new_empty((capacity, h, tq), dtype=torch.float32),
     )
 
 
@@ -1707,11 +1875,7 @@ def _mla_forward(
             device=k.device,
         )
     if qv is None:
-        if any(x is not None for x in (cu_seqlens_q, cu_seqlens_k, page_table)):
-            raise RuntimeError(
-                "MLA prefill forward is not implemented yet for TND, mixed or paged layouts"
-            )
-        result = torch.ops.flash_attn_npu_3._mla_prefill_bsnd_forward(
+        result = _mla_prefill_forward(
             q,
             k,
             v,
@@ -1722,6 +1886,10 @@ def _mla_forward(
             seqused_k,
             seqused_q,
             scheduler_metadata,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
         )
         return result if return_accumulators else result[:2]
     if num_splits != 1:
@@ -1908,7 +2076,7 @@ def _flash_attn_forward(
             ),
         )
         if qv is None:
-            return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_forward(
+            return _mla_prefill_forward(
                 q,
                 k,
                 v,
@@ -1920,6 +2088,10 @@ def _flash_attn_forward(
                 seqused_k,
                 seqused_q,
                 scheduler_metadata,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
             )
         if num_splits != 1:
             return _mla_split_forward(
@@ -2141,7 +2313,7 @@ def _flash_attn_forward_fake(
             ),
         )
         if qv is None:
-            return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_forward(
+            return _mla_prefill_forward(
                 q,
                 k,
                 v,
@@ -2153,6 +2325,10 @@ def _flash_attn_forward_fake(
                 seqused_k,
                 seqused_q,
                 scheduler_metadata,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
             )
         if num_splits != 1:
             return _mla_split_forward(
@@ -3168,13 +3344,15 @@ def flash_attn_varlen_func(
     last dimension v.shape[-1]; unused query slots have no value guarantee.
     return_attn_probs=True returns (out, lse), with FP32 lse shaped (nheads, total_q).
 
+    Prefill MLA uses q/k dimensions 192 and independent v dimension 128 with qv=None;
+    its internal v28 record supports the same allocation/used, mask and split options.
     Compressed MLA uses q/k dimensions 64 and qv/v dimensions 512. Metadata
     is generated internally on every call (v20 for automatic num_splits=0,
     v19 for explicit num_splits=2..256; v13 for nondefault windows, v8 for right-down causal; otherwise
     v3 without used lengths, v5 with either used array). There is no explicit metadata or page-table parameter;
     paged MLA uses flash_attn_with_kvcache. See docs/mla/status.md for limits.
     """
-    if qv is not None and q.device.type == "npu":
+    if q.device.type == "npu" and (qv is not None or q.shape[-1] != v.shape[-1]):
         out, lse = _mla_forward(
             q,
             k,

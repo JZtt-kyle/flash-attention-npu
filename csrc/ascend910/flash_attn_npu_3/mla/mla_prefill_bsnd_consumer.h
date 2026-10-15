@@ -19,8 +19,8 @@ struct PrefillHeaderView {
         return i == 6 ? 0 : i == 7 ? read(19) : read(i);
     }
 };
-// Translate only scheduling coordinates (b,kvHead) into bN2. Tensor addresses
-// remain true BSND throughout the numerical and merge kernels.
+// Translate only scheduling coordinates (b,kvHead) into bN2. The launcher
+// retains the real tensor layout and rebases TND allocation starts per task.
 template <typename Reader>
 struct PrefillPartitionView {
     const Reader& read;
@@ -30,9 +30,17 @@ struct PrefillPartitionView {
         const uint32_t virtualBatch = c.batch * c.kvHeads;
         const uint32_t base = kMlaUsedMetadataPrefixWords + 8 * virtualBatch;
         if (i >= base)
-            return read(20 + 2 * c.batch + i - base);
+            return read(PrefillTailWord(c) + i - base);
         const uint32_t slot = i - kMlaUsedMetadataPrefixWords;
-        return read(20 + 2 * ((slot / 8) / c.kvHeads) + (slot % 8 == 7));
+        return read(PrefillLengthWord(c, (slot / 8) / c.kvHeads) + (slot % 8 == 7));
+    }
+};
+template <typename Reader>
+struct PrefillAllocationView {
+    const Reader& read;
+    MLA_PREFILL_INLINE uint32_t operator()(uint32_t i) const
+    {
+        return read(24 + i - kMlaUsedMetadataPrefixWords);
     }
 };
 template <typename Reader, typename Arrays>
@@ -44,7 +52,8 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
     MlaPrefillBsndLayout l{};
     if (!PrefillBsndLayout(c, l) || words != l.words)
         return S::InvalidBuffer;
-    const auto status = ReadMetadataHeader(PrefillHeaderView<Reader>{read}, words, l.words, 27, 27, c.dtype);
+    const uint32_t version = c.tnd ? 28 : 27;
+    const auto status = ReadMetadataHeader(PrefillHeaderView<Reader>{read}, words, l.words, version, version, c.dtype);
     if (status != S::Success)
         return status;
     const uint32_t fields[] = {c.batch,
@@ -66,21 +75,37 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
             return S::ShapeMismatch;
     if (c.workspaceBytes < l.bytes)
         return S::InvalidWorkspace;
-    for (uint32_t b = 0; b < c.batch; ++b) {
-        const uint32_t q = c.usedFlags & 1 ? arrays(0, b) : c.sq;
-        const uint32_t k = c.usedFlags & 2 ? arrays(1, b) : c.sk;
-        if (q > c.sq || k > c.sk || read(20 + 2 * b) != q || read(21 + 2 * b) != k)
-            return S::InvalidUsedLengths;
-    }
-    const uint32_t tail = 20 + 2 * c.batch;
+    if (c.tnd) {
+        if (read(20) != c.totalQ || read(21) != c.totalK || read(22) || read(23))
+            return S::ShapeMismatch;
+        MlaUsedMetadataContext geometry{};
+        geometry.batch = c.batch;
+        geometry.usedFlags = c.usedFlags;
+        geometry.query = {1, {c.totalQ, 0}, c.sq};
+        geometry.kv = {1, {c.totalK, 0}, c.sk};
+        for (uint32_t axis = 0; axis < 2; ++axis) {
+            uint32_t maximum;
+            const auto checked =
+                ReadUsedMetadataAxis(PrefillAllocationView<Reader>{read}, arrays, axis, geometry, maximum);
+            if (checked != S::Success)
+                return checked;
+        }
+    } else
+        for (uint32_t b = 0; b < c.batch; ++b) {
+            const uint32_t q = c.usedFlags & 1 ? arrays(0, b) : c.sq;
+            const uint32_t k = c.usedFlags & 2 ? arrays(1, b) : c.sk;
+            if (q > c.sq || k > c.sk || read(20 + 2 * b) != q || read(21 + 2 * b) != k)
+                return S::InvalidUsedLengths;
+        }
+    const uint32_t tail = PrefillTailWord(c);
     if (read(tail) != c.window.kind || int32_t(read(tail + 1)) != c.window.left ||
         int32_t(read(tail + 2)) != c.window.right)
         return S::ShapeMismatch;
     MlaUsedKernelSchedule used{};
     auto& t = used.tiling;
     t.batch = c.batch * c.kvHeads;
-    t.sq = c.sq;
-    t.sk = c.sk;
+    t.sq = c.tnd && !c.totalQ ? 0 : c.sq;
+    t.sk = c.tnd && !c.totalK ? 0 : c.sk;
     t.heads = c.heads / c.kvHeads;
     t.mBaseSize = l.m;
     t.s2BaseSize = l.n;
@@ -107,8 +132,8 @@ MLA_PREFILL_INLINE bool PrefillBsndTask(const Reader& read, const MlaPrefillBsnd
         const uint32_t b = t.batch / c.kvHeads;
         t.split = split;
         t.splitCount = c.splits;
-        SplitBsndFragment(read(20 + 2 * b), read(21 + 2 * b), a.heads, t.m, a.mBaseSize, a.s2BaseSize, c.window,
-                          c.splits, split, t.s2Begin, t.s2End);
+        SplitBsndFragment(read(PrefillLengthWord(c, b)), read(PrefillLengthWord(c, b) + 1), a.heads, t.m, a.mBaseSize,
+                          a.s2BaseSize, c.window, c.splits, split, t.s2Begin, t.s2End);
     }
     return true;
 }

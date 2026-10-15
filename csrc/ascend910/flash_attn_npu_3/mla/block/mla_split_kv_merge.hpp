@@ -75,7 +75,8 @@ class MlaSplitKvMerge {
     {
         const uint64_t flat = uint64_t(params.rowStart) + row;
         if constexpr (IsTnd)
-            return (flat % params.heads) * params.sq + params.batchIndex + flat / params.heads;
+            return (uint64_t(HeadDim == 128 ? params.kvHead : 0) * params.heads + flat % params.heads) * params.sq +
+                   params.batchIndex + flat / params.heads;
         if constexpr (HeadDim == 128)
             return ((uint64_t(params.batchIndex) * params.kvHeads + params.kvHead) * params.heads +
                     flat % params.heads) *
@@ -229,11 +230,12 @@ class MlaSplitKvMerge {
         WaitFlag<HardEvent::V_MTE3>(0);
         const uint64_t outRow =
             uint64_t(params.batchIndex) * (IsTnd ? 1 : params.sq) * params.heads + params.rowStart + start;
-        if constexpr (HeadDim == 128 && !IsTnd) {
+        if constexpr (HeadDim == 128) {
             for (uint32_t row = 0; row < rows; ++row) {
                 const uint64_t flat = uint64_t(params.rowStart) + start + row;
                 const uint64_t address =
-                    ((uint64_t(params.batchIndex) * params.sq + flat / params.heads) * params.kvHeads + params.kvHead) *
+                    ((uint64_t(params.batchIndex) * (IsTnd ? 1 : params.sq) + flat / params.heads) * params.kvHeads +
+                     params.kvHead) *
                         params.heads +
                     flat % params.heads;
                 DataCopy(output[address * HeadDim], cast[row * HeadDim], HeadDim);

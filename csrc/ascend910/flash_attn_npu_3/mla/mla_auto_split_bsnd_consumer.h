@@ -86,7 +86,8 @@ MLA_AUTO_INLINE void Geometry(const Reader& read, const MlaAutoSplitBsndSchedule
 }
 // Adjacent exclusive endpoints form disjoint intervals. Intersect them with
 // this M's visible interval; do not uniformly divide by maxSplits.
-MLA_AUTO_INLINE uint32_t Parts(const MlaAutoSplitBsndSchedule& s, MlaAutoSplitBsndTask& t)
+MLA_AUTO_INLINE uint32_t Parts(const MlaAutoSplitBsndSchedule& s, MlaAutoSplitBsndTask& t, uint32_t owner = UINT32_MAX,
+                               uint32_t* ownerSplit = nullptr)
 {
     const uint32_t first = t.s2Begin, stop = t.s2End;
     uint32_t count = 0;
@@ -103,6 +104,8 @@ MLA_AUTO_INLINE uint32_t Parts(const MlaAutoSplitBsndSchedule& s, MlaAutoSplitBs
         if (t.batch == s.bEnd[core] && t.m == s.mEnd[core])
             hi = hi < s.nEnd[core] ? hi : s.nEnd[core];
         if (lo < hi) {
+            if (ownerSplit && core == owner)
+                *ownerSplit = count;
             if (count == t.split) {
                 t.owner = core;
                 t.s2Begin = lo;
@@ -266,14 +269,21 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitPartitions(const Reader& read
             t.batch = s.bEnd[i - 1];
             t.m = s.mEnd[i - 1];
             Geometry<IsPaged>(read, s, w, t);
-            const uint32_t first = t.s2Begin, stop = t.s2End, count = Parts(s, t);
-            for (uint32_t split = 0; split < count; ++split) {
-                t.split = split;
-                t.s2Begin = first;
-                t.s2End = stop;
-                Parts(s, t);
-                if (t.owner == i)
-                    startSplit = split;
+            if constexpr (Prefill) {
+                // The same fragment traversal supplies its inverse owner ->
+                // split mapping; do not enumerate every split and rescan all
+                // cores just to validate this one ordinal.
+                Parts(s, t, i, &startSplit);
+            } else {
+                const uint32_t first = t.s2Begin, stop = t.s2End, count = Parts(s, t);
+                for (uint32_t split = 0; split < count; ++split) {
+                    t.split = split;
+                    t.s2Begin = first;
+                    t.s2End = stop;
+                    Parts(s, t);
+                    if (t.owner == i)
+                        startSplit = split;
+                }
             }
         }
         if (read(base + 164 + i) != startSplit)

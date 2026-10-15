@@ -193,8 +193,11 @@ std::vector<at::Tensor> mha_fwd(
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(q_v_ ? 576.0f : 192.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (!q_v_) {
+            TORCH_CHECK(!cu_seqlens_q_ || (max_seqlen_q_ && max_seqlen_k_), "MLA: compact TND requires max_seqlen_q/k");
             return flash_attn::mla::PrefillBsndForward(q, k, v, scale, num_splits, window_size_left, window_size_right,
-                                                       is_causal, seqused_q_, seqused_k_, scheduler_metadata_);
+                                                       is_causal, seqused_q_, seqused_k_, scheduler_metadata_,
+                                                       cu_seqlens_q_, cu_seqlens_k_, max_seqlen_q_.value_or(0),
+                                                       max_seqlen_k_.value_or(0));
         }
         if (num_splits != 1) {
             if (page_table_) {

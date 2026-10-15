@@ -36,6 +36,8 @@ def compile_drivers(directory):
     begin = next(i for i, word in enumerate(command) if word.endswith("mla_split_kv.cpp"))
     command = command[:begin] + [
         str(MLA / "mla_prefill_bsnd_metadata.cpp"),
+        str(MLA / "mla_tnd_schedule.cpp"),
+        str(MLA / "mla_schedule.cpp"),
         str(MLA / "detail/cann_split_core.cpp"),
         str(ROOT / "tests/mla/support/mla_prefill_bsnd_driver.cpp"),
         "-o",

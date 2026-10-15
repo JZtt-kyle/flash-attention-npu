@@ -33,7 +33,7 @@ def test_mla_supported_subset_and_rejections(entry, representation, layout, dtyp
             assert args[name].stride(-1) == 1
             assert not args[name].is_contiguous()
             assert args[name].storage_offset() > 0
-    if representation == "compressed" or layout == "dense":
+    if representation == "compressed" or layout in ("dense", "tnd"):
         out, lse, *_ = _forward(entry, args)
         assert out.shape == (*args["q"].shape[:-1], args["v"].shape[-1]) and out.dtype == dtype
         assert (
@@ -144,40 +144,27 @@ def test_mla_empty_contract(entry, representation, sq, sk, dtype):
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
 @pytest.mark.parametrize("public_entry", ["dense", "varlen", "kvcache"])
 @pytest.mark.parametrize("fake", [False, True])
-def test_public_rejects_before_metadata_or_dispatch(
+def test_public_mla_avoids_ordinary_metadata(
     monkeypatch, representation, public_entry, fake, dtype
 ):
     def unexpected(*args, **kwargs):
         pytest.fail("MLA reached ordinary metadata/kernel dispatch")
 
     monkeypatch.setattr(api, "get_scheduler_metadata", unexpected)
-    supported = representation == "compressed" or public_entry != "varlen"
-    if not supported:
-        monkeypatch.setattr(api, "_flash_attn_forward", unexpected)
     with FakeTensorMode() if fake else nullcontext():
         args = _inputs(representation, "tnd" if public_entry == "varlen" else "dense", dtype=dtype)
-        if supported:
-            if public_entry == "dense":
-                out, lse = api.flash_attn_func(**args, return_attn_probs=True)
-            elif public_entry == "varlen":
-                out, lse = api.flash_attn_varlen_func(**args, return_attn_probs=True)
-            else:
-                args["k_cache"], args["v_cache"] = args.pop("k"), args.pop("v")
-                out, lse, *_ = api.flash_attn_with_kvcache(
-                    **args, num_splits=1, return_softmax_lse=True
-                )
-            width = 512 if representation == "compressed" else 128
-            assert out.shape == ((4, 4, width) if public_entry == "varlen" else (2, 3, 4, width))
-            assert lse.shape == ((4, 4) if public_entry == "varlen" else (2, 4, 3))
-            return
-        with pytest.raises(RuntimeError, match="forward is not implemented yet"):
-            if public_entry == "dense":
-                api.flash_attn_func(**args)
-            elif public_entry == "varlen":
-                api.flash_attn_varlen_func(**args)
-            else:
-                args["k_cache"], args["v_cache"] = args.pop("k"), args.pop("v")
-                api.flash_attn_with_kvcache(**args)
+        if public_entry == "dense":
+            out, lse = api.flash_attn_func(**args, return_attn_probs=True)
+        elif public_entry == "varlen":
+            out, lse = api.flash_attn_varlen_func(**args, return_attn_probs=True)
+        else:
+            args["k_cache"], args["v_cache"] = args.pop("k"), args.pop("v")
+            out, lse, *_ = api.flash_attn_with_kvcache(
+                **args, num_splits=1, return_softmax_lse=True
+            )
+        width = 512 if representation == "compressed" else 128
+        assert out.shape == ((4, 4, width) if public_entry == "varlen" else (2, 3, 4, width))
+        assert lse.shape == ((4, 4) if public_entry == "varlen" else (2, 4, 3))
 
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])

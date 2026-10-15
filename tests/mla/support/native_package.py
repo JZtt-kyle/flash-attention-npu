@@ -34,7 +34,14 @@ DENSE_KEYS = (
     105000000010100001,
     105000000110100001,
 )
-LAYOUT_KEYS = (105000000030000002, 105000000010200001, 105000000010200002)
+# Generic prefill TND uses query-layout digit 3 (compressed MLA uses digit 2).
+LAYOUT_KEYS = (
+    105000000030000002,
+    105000000010200001,
+    105000000010200002,
+    103000000030000003,
+    104000000030000003,
+)
 # FIA's empty-KV template uses the same key for both output dtypes; the MLA
 # dtype offset does not apply (arch22/fia_tiling_empty_tensor.cpp).
 EMPTY_KV_KEY = 100000000000000020
@@ -67,7 +74,14 @@ def native_vendor():
 def run(command, root, name, *, cwd=None, env=None):
     (root / f"{name}.command.json").write_text(json.dumps(command, indent=2) + "\n")
     with (root / f"{name}.log").open("w") as log:
-        subprocess.run(command, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+        subprocess.run(
+            command,
+            cwd=root if cwd is None else cwd,
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=True,
+        )
 
 
 def build(*, host_only=False):
