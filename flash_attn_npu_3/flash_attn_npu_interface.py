@@ -918,9 +918,11 @@ def _mla_split_mixed_forward_fake(
     _check_mla_dense_options(softmax_scale=softmax_scale)
     _check_mla_mixed_inputs(q, k, cu_seqlens_q, max_seqlen_q, cache_seqlens, None, seqused_q)
     _check_mla_used(q, k.shape[0], seqused_q, cache_seqlens)
-    if not 2 <= num_splits <= 256:
-        raise RuntimeError("MLA: mixed split requires num_splits in [2,256]")
-    words = _mla_split_bsnd_words(k.shape[0])
+    if seqused_q is not None and scheduler_metadata is not None:
+        raise RuntimeError("MLA: Q-used with explicit metadata is not supported")
+    if num_splits != 0 and not 2 <= num_splits <= 256:
+        raise RuntimeError("MLA: mixed split requires num_splits=0 or [2,256]")
+    words = _mla_split_bsnd_words(k.shape[0], num_splits)
     _normalize_mla_window(max_seqlen_q, k.shape[1], window_left, window_right, causal)
     if scheduler_metadata is not None and (
         scheduler_metadata.dtype != torch.int32
@@ -932,25 +934,25 @@ def _mla_split_mixed_forward_fake(
         raise RuntimeError(
             "MLA: mixed split metadata must be same-device contiguous int32 with the selected protocol size"
         )
+    capacity = 26 if num_splits == 0 else num_splits
     total, heads = q.shape[:2]
     limit = 2**63 - 1
-    if num_splits * heads * max(total, 1) * 512 * 4 > limit:
+    if capacity * heads * max(total, 1) * 512 * 4 > limit:
         raise RuntimeError("MLA: mixed split accumulator overflow")
     if total and k.shape[0] and k.shape[1]:
         active = min(k.shape[0], total)
         groups = min(
             active * ((max_seqlen_q * heads + 255) // 256), (total * heads + active * 255) // 256
         )
-        if (
-            groups * num_splits * 256 * 528 * 4 + 2 * 26 * (6 * 256 * 512 + 8 * 256 * 512 + 8 * 256)
-            > limit
-        ):
+        if (2 * 26 + 26 if num_splits == 0 else groups * num_splits) * 256 * 528 * 4 + 2 * 26 * (
+            6 * 256 * 512 + 8 * 256 * 512 + 8 * 256
+        ) > limit:
             raise RuntimeError("MLA: mixed split workspace overflow")
     return (
         q.new_empty((total, heads, 512)),
         q.new_empty((heads, total), dtype=torch.float32),
-        q.new_empty((num_splits, heads, total, 512), dtype=torch.float32),
-        q.new_empty((num_splits, heads, total), dtype=torch.float32),
+        q.new_empty((capacity, heads, total, 512), dtype=torch.float32),
+        q.new_empty((capacity, heads, total), dtype=torch.float32),
     )
 
 
@@ -972,9 +974,9 @@ def _mla_split_mixed_metadata_fake(
         batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens, cu_seqlens_q
     )
     _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
-    if not 2 <= num_splits <= 256:
-        raise RuntimeError("MLA: mixed split requires num_splits in [2,256]")
-    return cache_seqlens.new_empty((_mla_split_bsnd_words(batch_size),))
+    if num_splits != 0 and not 2 <= num_splits <= 256:
+        raise RuntimeError("MLA: mixed split requires num_splits=0 or [2,256]")
+    return cache_seqlens.new_empty((_mla_split_bsnd_words(batch_size, num_splits),))
 
 
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_split_tnd_forward")
@@ -1319,12 +1321,7 @@ def _flash_attn_forward(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
-            allow_split=page_table is None
-            and (
-                (cu_seqlens_q is None and cu_seqlens_k is None)
-                or (cu_seqlens_q is not None and cu_seqlens_k is not None)
-                or (cu_seqlens_q is not None and num_splits >= 2)
-            ),
+            allow_split=page_table is None and (cu_seqlens_k is None or cu_seqlens_q is not None),
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -1575,12 +1572,7 @@ def _flash_attn_forward_fake(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
-            allow_split=page_table is None
-            and (
-                (cu_seqlens_q is None and cu_seqlens_k is None)
-                or (cu_seqlens_q is not None and cu_seqlens_k is not None)
-                or (cu_seqlens_q is not None and num_splits >= 2)
-            ),
+            allow_split=page_table is None and (cu_seqlens_k is None or cu_seqlens_q is not None),
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -2842,9 +2834,9 @@ def flash_attn_with_kvcache(
 ):
     """
     NPU compressed MLA supports read-only BSND or ND paged caches with BSND/TND
-    queries, including right-down causal and window masks. Nonpaged BSND queries
+    queries, including right-down causal and window masks. Nonpaged BSND/TND queries
     support automatic num_splits=0, single split 1, and explicit splits 2..256.
-    Other MLA layouts require num_splits=1. Automatic requests return 26 FP32
+    Paged MLA caches require num_splits=1. Automatic requests return 26 FP32
     accumulator slots; the native partition determines the actual splits per M
     block and unused slots are 0/-inf. Current limits are in docs/mla/status.md.
     Generic FA3 append and rotary options below remain unsupported for MLA.
@@ -2981,7 +2973,7 @@ def flash_attn_with_kvcache(
             attention_chunk=attention_chunk,
             softcap=softcap,
             num_splits=num_splits,
-            allow_split=page_table is None and (cu_seqlens_q is None or num_splits >= 2),
+            allow_split=page_table is None,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
@@ -3739,7 +3731,7 @@ def _get_scheduler_metadata_fake(
             ),
             allow_causal=True,
             allow_window=True,
-            allow_split=page_size is None and (cu_seqlens_q is None or num_splits >= 2),
+            allow_split=page_size is None,
         )
         if num_splits != 1:
             if cu_seqlens_q is not None:
@@ -3865,7 +3857,7 @@ def get_scheduler_metadata(
     positive legacy softcap enables softcapping even when has_softcap is omitted.
     ``has_softcap=True`` requires a positive legacy softcap for this protocol.
     MLA requires headdim=64, headdim_v=512 and matching qkv_dtype.
-    Nonpaged BSND accepts num_splits=0..256; other layouts require 1.
+    Nonpaged BSND/TND queries accept num_splits=0..256; paged layouts require 1.
     cache_seqlens must be a same-device contiguous int32 tensor of shape
     (batch_size,); None/integer lengths are kvcache conveniences only.
     Without page_size or cu_seqlens_q, automatic num_splits=0 returns a v18
@@ -3875,7 +3867,8 @@ def get_scheduler_metadata(
     v2 for unmasked attention or v7 for right-down causal. Causal records contain
     410 + 8 * batch_size words and cannot be reused by an unmasked forward.
     With cu_seqlens_q and no page_size it generates a TND-query/BSND-cache record:
-    v4 for unmasked attention or v9 for causal;
+    v22 (758 + 10 * batch_size words) for automatic split, v21 (416 + 10 * batch_size
+    words) for explicit splits, or v4/v9 for unmasked/causal single split;
     max_seqlen_q is a per-query-segment bound, max_seqlen_k is cache capacity.
     Read-only flash_attn_with_kvcache accepts the matching v4/v9 record with TND queries
     and a BSND cache; the current query prefixes and KV lengths must match.
@@ -3913,7 +3906,7 @@ def get_scheduler_metadata(
             ),
             allow_causal=True,
             allow_window=True,
-            allow_split=page_size is None and (cu_seqlens_q is None or num_splits >= 2),
+            allow_split=page_size is None,
         )
         if num_splits != 1:
             if cu_seqlens_q is not None:

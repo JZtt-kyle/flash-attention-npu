@@ -103,7 +103,11 @@ int main()
             if (mode == 9)
                 shape.kv.layout = MlaSequenceLayout::Tnd;
             MlaWindowConfig window{q, k, left, right, bool(causal)};
-            const bool built = BuildAutoSplitMixedMetadata(shape, platform, dtype, data.data(), words, in, window);
+            auto producerShape = shape;
+            if (mode == 10)
+                producerShape.query.totalTokens = 0;
+            const bool built =
+                BuildAutoSplitMixedMetadata(producerShape, platform, dtype, data.data(), words, in, window, mode == 10);
             const uint32_t generated = data[5];
             MlaWindow w{};
             NormalizeWindow(window, w);

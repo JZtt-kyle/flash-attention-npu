@@ -178,7 +178,7 @@ def summarize_varlen(reports, specs, *, include_native_fd=False):
     )
 
 
-def summarize_mixed(reports, specs):
+def summarize_mixed(reports, specs, *, include_native_fd=False):
     """Reuse the fixed input/dtype gate with six equally weighted cache segments."""
     entries = ("implicit", "generate", "reuse")
     if any(
@@ -200,7 +200,7 @@ def summarize_mixed(reports, specs):
                     raise ValueError("Incomplete mixed R segments")
                 rows.append(dict(row, **segments))
             converted.append(dict(report, results=rows))
-        per_entry[entry] = summarize_varlen(converted, specs)
+        per_entry[entry] = summarize_varlen(converted, specs, include_native_fd=include_native_fd)
     result = dict(per_entry[entries[0]])
     cases = []
     for index, first in enumerate(result["cases"]):

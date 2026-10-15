@@ -1,7 +1,7 @@
 // Copyright (c) 2025 Huawei Technologies Co., Ltd.
 // CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
 // mixed native partition provenance: mla_auto_split_mixed_plan.h.
-// CPU producer and independent CPU/AICore protocol; not registered with AICPU.
+// Shared CPU/AICPU producer and independent CPU/AICore consumer protocol.
 #pragma once
 #include "mla_auto_split_bsnd_metadata.h"
 
@@ -22,7 +22,9 @@ struct MlaAutoSplitMixedContext {
 struct MlaAutoSplitMixedMetadataArgs {
     MlaUsedMetadataArgs input;
     MlaWindowConfig window;
+    bool queryTotalFromPrefix = false;
 };
 bool BuildAutoSplitMixedMetadata(const MlaUsedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
-                                 uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&);
+                                 uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&,
+                                 bool queryTotalFromPrefix = false);
 } // namespace flash_attn::mla

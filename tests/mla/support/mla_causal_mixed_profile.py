@@ -126,7 +126,10 @@ def profile(
     mask="causal",
     metadata_name="ComputeMlaCausalMixedMetadata",
     production_name="mla_tnd_used_",
+    automatic_split=False,
 ):
+    if automatic_split and any(s.get("splits") != 0 for s in specs):
+        raise ValueError("Automatic split profiling requires num_splits=0")
     prepare, metadata, call = prepare_case, generate_metadata, call_forward
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
@@ -246,6 +249,8 @@ def profile(
                 for key in ("native_fd", "native_template", "native_tiling_key", "e2e_applicable")
             },
         )
+        if automatic_split:
+            row["e2e_applicable"] = row["native_template"] == 5
         if hasattr(natives[index], "description"):
             row["native_call"] = natives[index].description()
         row["entries"] = {}
@@ -279,6 +284,7 @@ def profile(
         results.append(row)
     report = dict(
         dtype=dtype_name,
+        automatic_split=automatic_split,
         causal=mask == "causal",
         window=mask == "window",
         warmup=5,

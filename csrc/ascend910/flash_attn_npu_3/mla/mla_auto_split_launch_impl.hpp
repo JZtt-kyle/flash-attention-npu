@@ -5,6 +5,7 @@
 #pragma once
 #include "mla_auto_split_bsnd_launch.h"
 #include "mla_auto_split_tnd_launch.h"
+#include "mla_auto_split_mixed_launch.h"
 #include "kernel_operator.h"
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
 #include "kernel/mla_used_metadata.hpp"
@@ -14,7 +15,10 @@
 #endif
 namespace flash_attn::mla {
 namespace {
-#if MLA_AUTO_TND
+#if MLA_AUTO_MIXED
+using AutoContext = MlaAutoSplitMixedContext;
+using AutoLaunchArgs = MlaSplitMixedLaunchArgs;
+#elif MLA_AUTO_TND
 using AutoContext = MlaAutoSplitTndContext;
 using AutoLaunchArgs = MlaSplitTndLaunchArgs;
 #else
@@ -40,9 +44,12 @@ __aicore__ inline bool LoadAutoSplit(GM_ADDR metadata, const AutoContext& c, con
     for (uint32_t i = 0; i < 4; ++i)
         if (addresses[i])
             arrays.data[i].data.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(addresses[i]));
-    if (ReadAutoSplitMetadata<MLA_AUTO_TND, MLA_AUTO_TND ? kMlaAutoSplitTndVersion : kMlaAutoSplitBsndVersion>(
-            read, kMlaAutoSplitFixedWords + 10 * c.used.batch, c, inputs, arrays, s) !=
-        MlaMetadataReadStatus::Success) {
+    constexpr uint32_t version = MLA_AUTO_MIXED ? kMlaAutoSplitMixedVersion
+                                 : MLA_AUTO_TND ? kMlaAutoSplitTndVersion
+                                                : kMlaAutoSplitBsndVersion;
+    constexpr bool kvIsTnd = MLA_AUTO_TND && !MLA_AUTO_MIXED;
+    if (ReadAutoSplitMetadata<MLA_AUTO_TND, version, kvIsTnd>(read, kMlaAutoSplitFixedWords + 10 * c.used.batch, c,
+                                                              inputs, arrays, s) != MlaMetadataReadStatus::Success) {
         AscendC::Trap();
         return false;
     }
@@ -180,7 +187,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
             if constexpr (MLA_AUTO_TND) {
                 Kernel::MlaSplitKvUsedTnd<MLA_AUTO_TYPE> op;
                 op(tiling, p, scale, qc, qr, kv, kr, workspace, &pipe, metadata + kMlaUsedMetadataPrefixWords * 4,
-                   layouts, c.used.query.totalTokens.low);
+                   layouts, c.used.query.totalTokens.low, !MLA_AUTO_MIXED);
             } else {
                 Kernel::MlaSplitKvUsedBsnd<MLA_AUTO_TYPE, true> op;
                 op(tiling, p, scale, qc, qr, kv, kr, workspace, &pipe, metadata + kMlaUsedMetadataPrefixWords * 4,

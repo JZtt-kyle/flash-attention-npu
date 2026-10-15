@@ -1,7 +1,7 @@
 """v22 mixed native partition protocol: pinned source, independent geometry and corruption.
 
 No historical unit evidence is reused. Attention references are unnecessary for
-this CPU wire protocol; the production numerical path is not opened here.
+this CPU wire protocol; production numerics belong to auto_split_mixed.
 """
 
 import itertools
@@ -568,3 +568,23 @@ def test_capacity_cost_boundary_wide_serialized_kv(metadata_drivers, dtype):
     # Corrupt only the high word of a live KV origin.
     got = metadata_drivers[0].evaluate([[5, last + 3, 0]])[0]
     assert got["read"] and got["unchanged"]
+
+
+@pytest.mark.parametrize("dtype", [1, 2])
+@pytest.mark.parametrize("name,case", CASES, ids=[name for name, _ in CASES])
+def test_public_prefix_total(metadata_drivers, dtype, name, case):
+    # Public generation has no host totalQ. All serialized endpoints, spans,
+    # empty cases and masks must equal the independently known-total producer.
+    a, b = metadata_drivers[0].evaluate(
+        [request(dtype=dtype, mode=mode, **case) for mode in (0, 10)]
+    )
+    assert a == b
+
+
+@pytest.mark.parametrize("index,value", [(16, 1), (17, -1), (19, -1), (17, 106)])
+def test_public_prefix_failure(metadata_drivers, index, value):
+    row = request(mode=10)
+    row[index] = value
+    result = metadata_drivers[0].evaluate([row])[0]
+    assert result["built"] and result["generated"] != 0
+    assert not any(result["record"][8:])

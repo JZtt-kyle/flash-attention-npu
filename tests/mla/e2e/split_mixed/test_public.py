@@ -267,7 +267,6 @@ def test_compile():
     "fault",
     [
         "split-one",
-        "split-auto",
         "split-over",
         "split-negative",
         "scale",
@@ -287,7 +286,6 @@ def test_reject(fake, fault):
         if fault.startswith("split"):
             a["num_splits"] = {
                 "split-one": 1,
-                "split-auto": 0,
                 "split-over": 257,
                 "split-negative": -1,
             }[fault]
@@ -309,18 +307,6 @@ def test_reject(fake, fault):
             a["max_seqlen_q"] = -1
         with pytest.raises(RuntimeError, match="MLA"):
             call(a, "op", record)
-
-
-@pytest.mark.parametrize("fake", [False, True])
-def test_unopened_auto(fake):
-    with FakeTensorMode() if fake else nullcontext():
-        c = prepare(torch.float16, DAILY_CASES[0])
-        c["args"]["num_splits"] = 0
-        for entry in ("public", "eager"):
-            with pytest.raises(RuntimeError, match="MLA"):
-                call(c["args"], entry)
-        with pytest.raises(RuntimeError, match="MLA"):
-            metadata(c)
 
 
 def test_fake_accumulator_overflow():

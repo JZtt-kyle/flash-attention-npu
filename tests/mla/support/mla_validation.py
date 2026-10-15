@@ -57,6 +57,7 @@ USED_SHARED_CPU = [
 SPLIT_KV_ATTENTION = "tests/mla/unit/split_kv_attention/test_attention.py"
 SPLIT_KV_MERGE = "tests/mla/unit/split_kv_merge/test_merge.py"
 SPLIT_KV_MERGE_SUITES = {
+    "unit-auto_split_mixed",
     "unit-split_mixed",
     "unit-auto_split_tnd",
     "split-tnd",
@@ -78,6 +79,18 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "auto-split-mixed-tools": [
+        "tests/mla/unit/tools/test_mla_auto_split_mixed_production_tools.py",
+        "tests/mla/unit/tools/test_mla_auto_split_mixed_tools.py",
+    ],
+    "auto-split-mixed-check": [
+        "tests/mla/e2e/auto_split_mixed/test_public.py",
+        "-k",
+        "representative",
+    ],
+    "auto-split-mixed-public": ["tests/mla/e2e/auto_split_mixed/test_public.py"],
+    "auto-split-mixed-trap": ["tests/mla/e2e/auto_split_mixed/test_trap.py"],
+    "auto-split-mixed-profile": ["tests/mla/e2e/auto_split_mixed/test_auto_split_mixed_profile.py"],
     "auto-split-mixed-protocol-tools": ["tests/mla/unit/tools/test_mla_auto_split_mixed_tools.py"],
     "auto-split-mixed-protocol-sanitize": [
         "tests/mla/unit/auto_split_mixed_protocol/test_plan.py",
@@ -711,6 +724,7 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "auto-split-mixed-profile",
     "split-mixed-profile",
     "auto-split-tnd-profile",
     "auto-split-bsnd-profile",
@@ -767,6 +781,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "auto-split-mixed-tools",
     "auto-split-mixed-protocol-tools",
     "split-mixed-tools",
     "auto-split-tnd-tools",

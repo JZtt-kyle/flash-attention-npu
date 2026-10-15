@@ -18,6 +18,8 @@
 #include "mla_auto_split_bsnd_launch.h"
 #include "mla_auto_split_tnd_launch.h"
 #include "mla_auto_split_tnd_plan.h"
+#include "mla_auto_split_mixed_plan.h"
+#include "mla_auto_split_mixed_launch.h"
 #include "mla_window_paged_metadata.h"
 #include "mla_paged_metadata_args.h"
 #include "mla_paged_launch.h"
@@ -49,6 +51,7 @@ extern __global__ __aicpu__ uint32_t ComputeMlaSplitTndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaSplitMixedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaAutoSplitBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaAutoSplitTndMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaAutoSplitMixedMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaCausalBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaWindowTndMetadata(void* args);
@@ -176,7 +179,11 @@ struct MetadataSubmission {
     {
         if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs>) {
             if (splits == 0) {
-                if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
+                if (args.shape.query.layout == MlaSequenceLayout::Tnd &&
+                    args.shape.kv.layout == MlaSequenceLayout::Bsnd) {
+                    MlaAutoSplitMixedMetadataArgs autoArgs{args, *window, queryTotalFromPrefix};
+                    ComputeMlaAutoSplitMixedMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
+                } else if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
                     MlaAutoSplitTndMetadataArgs autoArgs{args, *window};
                     ComputeMlaAutoSplitTndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
                 } else {
@@ -610,11 +617,12 @@ at::Tensor SplitMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t
                                 const at::Tensor& cacheSeqlens, const at::Tensor& cuQ, int64_t windowLeft,
                                 int64_t windowRight, bool causal, int64_t splits)
 {
-    TORCH_CHECK(splits >= 2 && splits <= 256, "MLA: mixed split requires num_splits in [2,256]");
+    TORCH_CHECK(splits == 0 || (splits >= 2 && splits <= 256), "MLA: mixed split requires num_splits=0 or [2,256]");
     CheckTndBsndMetadataInputs(batch, maxQ, sk, heads, dtype, cacheSeqlens, cuQ);
     CheckUsedInputs(cacheSeqlens, batch, std::nullopt, cacheSeqlens);
     uint32_t words;
-    TORCH_CHECK(SplitMixedMetadataWords(batch, words), "MLA: window metadata word count overflow");
+    TORCH_CHECK(splits == 0 ? AutoSplitMixedMetadataWords(batch, words) : SplitMixedMetadataWords(batch, words),
+                "MLA: split metadata word count overflow");
     MlaWindowConfig config{maxQ, sk, windowLeft, windowRight, causal};
     CheckWindow(config);
     const c10::OptionalDeviceGuard deviceGuard(device_of(cacheSeqlens));
@@ -1091,14 +1099,17 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
         MlaAutoSplitKvLayout layout{};
         MlaAccumulatorLayout accumulator{};
         const auto status =
-            tnd ? BuildAutoSplitTndPlanLayout({{batch, shape.query.totalTokens, shape.kv.totalTokens, heads, sq, sk},
-                                               256,
-                                               512,
-                                               p.aicNum,
-                                               2,
-                                               libBytes},
-                                              layout)
-                : BuildAutoSplitKvLayout({batch, sq, sk, heads, 256, 512, p.aicNum, 2, libBytes}, layout);
+            tnd && shape.kv.layout == MlaSequenceLayout::Bsnd
+                ? BuildAutoSplitMixedPlanLayout(
+                      {{batch, shape.query.totalTokens, heads, sq, sk}, 256, 512, p.aicNum, 2, libBytes}, layout)
+            : tnd ? BuildAutoSplitTndPlanLayout({{batch, shape.query.totalTokens, shape.kv.totalTokens, heads, sq, sk},
+                                                 256,
+                                                 512,
+                                                 p.aicNum,
+                                                 2,
+                                                 libBytes},
+                                                layout)
+                  : BuildAutoSplitKvLayout({batch, sq, sk, heads, 256, 512, p.aicNum, 2, libBytes}, layout);
         TORCH_CHECK(
             status == MlaScheduleStatus::Success &&
                 BuildSplitAccumulatorLayout({tnd ? MlaAccumulatorQueryLayout::Tnd : MlaAccumulatorQueryLayout::Bsnd,
@@ -1224,8 +1235,10 @@ std::vector<at::Tensor> UsedForward(const at::Tensor& q, const at::Tensor& k, co
             if (tnd && a.context.kv.layout == uint32_t(MlaSequenceLayout::Bsnd)) {
                 MlaSplitMixedLaunchArgs mixedArgs{a, uint32_t(splits), static_cast<uint8_t*>(accum.data_ptr()),
                                                   static_cast<uint8_t*>(accumLse.data_ptr())};
-                error = q.scalar_type() == at::kBFloat16 ? LaunchSplitMixedBf16(mixedArgs)
-                                                         : LaunchSplitMixedFp16(mixedArgs);
+                error = splits == 0 ? (q.scalar_type() == at::kBFloat16 ? LaunchAutoSplitMixedBf16(mixedArgs)
+                                                                        : LaunchAutoSplitMixedFp16(mixedArgs))
+                                    : (q.scalar_type() == at::kBFloat16 ? LaunchSplitMixedBf16(mixedArgs)
+                                                                        : LaunchSplitMixedFp16(mixedArgs));
             } else if (tnd) {
                 MlaSplitTndLaunchArgs tndArgs{a, uint32_t(splits), static_cast<uint8_t*>(accum.data_ptr()),
                                               static_cast<uint8_t*>(accumLse.data_ptr())};
@@ -1456,20 +1469,23 @@ std::vector<at::Tensor> SplitMixedForward(const at::Tensor& q, const at::Tensor&
                                           const std::optional<at::Tensor>& usedQuery,
                                           const std::optional<at::Tensor>& schedulerMetadata)
 {
-    TORCH_CHECK(splits >= 2 && splits <= 256, "MLA: mixed split requires num_splits in [2,256]");
+    TORCH_CHECK(splits == 0 || (splits >= 2 && splits <= 256), "MLA: mixed split requires num_splits=0 or [2,256]");
     CheckForwardBoundary(q, k, v, qv, true, false, false);
     TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
     CheckTndBsndForwardInputs(q, k, cuQ, maxQ, cacheSeqlens, std::nullopt);
     const int64_t batch = k.size(0), sk = k.size(1), heads = q.size(1);
     CheckUsedInputs(q, batch, usedQuery, cacheSeqlens);
+    TORCH_CHECK(!usedQuery || !schedulerMetadata,
+                "MLA compressed forward is not implemented yet for Q-used with explicit metadata");
     uint32_t words;
-    TORCH_CHECK(SplitMixedMetadataWords(batch, words), "MLA: window metadata word count overflow");
+    TORCH_CHECK(splits == 0 ? AutoSplitMixedMetadataWords(batch, words) : SplitMixedMetadataWords(batch, words),
+                "MLA: split metadata word count overflow");
     MlaWindowConfig config{maxQ, sk, windowLeft, windowRight, causal};
     CheckWindow(config);
     if (schedulerMetadata) {
         TORCH_CHECK(schedulerMetadata->scalar_type() == at::kInt && schedulerMetadata->dim() == 1 &&
                         schedulerMetadata->numel() == words && schedulerMetadata->is_contiguous(),
-                    "MLA: split scheduler_metadata must be contiguous int32[416 + 10 * batch_size]");
+                    "MLA: split scheduler_metadata must be contiguous int32 with the selected protocol size");
         TORCH_CHECK(schedulerMetadata->device() == q.device(),
                     "MLA: scheduler_metadata must be on the same NPU device");
     }

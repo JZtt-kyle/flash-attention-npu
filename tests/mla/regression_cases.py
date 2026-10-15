@@ -80,4 +80,15 @@ def daily_suites():
         f"{mixed_split}::{name}"
         for name in ("test_daily", "test_empty", "test_fake", "test_compile")
     ]
+    mixed_auto = "tests/mla/e2e/auto_split_mixed/test_public.py"
+    suites["auto_split_mixed"] = [
+        f"{mixed_auto}::{name}"
+        for name in (
+            "test_daily",
+            "test_empty",
+            "test_fake",
+            "test_compile",
+            "test_q_used_metadata_rejected",
+        )
+    ]
     return suites
