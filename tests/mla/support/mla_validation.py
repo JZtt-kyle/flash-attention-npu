@@ -83,6 +83,10 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "prefill-tools": ["tests/mla/unit/tools/test_mla_prefill_tools.py"],
+    "prefill-check": ["tests/mla/unit/prefill_attention/test_attention.py", "-k", "representative"],
+    "prefill-profile": ["tests/mla/unit/prefill_attention/component_profile.py"],
+    "prefill-profile-check": ["tests/mla/unit/prefill_attention/component_profile.py"],
     "split-bsnd-public": ["tests/mla/e2e/split_kv_bsnd/test_public.py"],
     "auto-split-bsnd-public": ["tests/mla/e2e/auto_split_bsnd/test_public.py"],
     "split-tnd-public": ["tests/mla/e2e/split_tnd/test_public.py"],
@@ -838,6 +842,7 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "prefill-profile",
     "auto-split-paged-tnd-profile",
     "auto-split-paged-bsnd-profile",
     "split-paged-bsnd-profile",
@@ -877,6 +882,10 @@ WINDOW_DEVICE_SUITES = {
     "window-bsnd-public",
 }
 STANDALONE_CHECK_SUITES = {
+    "prefill-check",
+    "prefill-profile-check",
+    "unit-prefill_attention",
+    "prefill-profile",
     "split-kv-merge-check",
     "causal-smoke",
     "causal-check",
@@ -899,6 +908,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "prefill-tools",
     "split-stage-tools",
     "auto-split-paged-tnd-tools",
     "auto-split-paged-bsnd-tools",
@@ -1270,6 +1280,14 @@ def environment(args, directory, suite):
     env["MLA_VALIDATION_MAX_CASES"] = str(getattr(args, "max_cases", DEFAULT_MAX_CASES))
     env["MLA_FULL_MATRIX"] = "1" if getattr(args, "full_matrix", False) else "0"
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
+    if suite in {
+        "prefill-check",
+        "unit-prefill_attention",
+        "prefill-profile",
+        "prefill-profile-check",
+    }:
+        env["MLA_PREFILL_DIR"] = str(directory / "probes")
+        env["MLA_PREFILL_PROFILE_CHECK"] = str(int(suite == "prefill-profile-check"))
     if suite in CAUSAL_DEVICE_SUITES:
         env["MLA_CAUSAL_ATTENTION_DIR"] = str(directory / "probes")
     if suite in WINDOW_DEVICE_SUITES:
@@ -1730,11 +1748,24 @@ def run(args):
                 | WINDOW_DEVICE_SUITES
                 | SPLIT_KV_DEVICE_SUITES
                 | SPLIT_KV_MERGE_SUITES
+                | {
+                    "prefill-check",
+                    "unit-prefill_attention",
+                    "prefill-profile",
+                    "prefill-profile-check",
+                }
                 and not args.collect_only
                 and result["returncode"] == 0
             ):
                 try:
-                    if suite in SPLIT_KV_MERGE_SUITES:
+                    if suite in {
+                        "prefill-check",
+                        "unit-prefill_attention",
+                        "prefill-profile",
+                        "prefill-profile-check",
+                    }:
+                        validate_causal_builds(directory, kind="prefill_merge")
+                    elif suite in SPLIT_KV_MERGE_SUITES:
                         validate_causal_builds(directory, kind="split_kv_merge")
                     elif suite in SPLIT_KV_DEVICE_SUITES:
                         validate_causal_builds(directory, kind="split_kv")

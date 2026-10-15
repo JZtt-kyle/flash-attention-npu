@@ -37,10 +37,26 @@ def build_probes(
     split_kv=False,
     paged_causal=False,
     paged_window=False,
+    prefill=False,
 ):
     assert dtype in ("fp16", "bf16")
     assert (
-        sum((metadata, bsnd, tnd, mixed, used, stride, tnd_stride, paged, causal, window, split_kv))
+        sum(
+            (
+                metadata,
+                bsnd,
+                tnd,
+                mixed,
+                used,
+                stride,
+                tnd_stride,
+                paged,
+                causal,
+                window,
+                split_kv,
+                prefill,
+            )
+        )
         <= 1
     )
     assert not paged_causal or paged
@@ -163,7 +179,9 @@ def build_probes(
         ROOT
         / "tests/mla/support"
         / (
-            "mla_split_kv_attention_probe.cpp"
+            "mla_prefill_probe.cpp"
+            if prefill
+            else "mla_split_kv_attention_probe.cpp"
             if split_kv
             else "mla_window_attention_probe.cpp"
             if window
@@ -243,6 +261,21 @@ def build_probes(
                 "mla_mmad.hpp",
             ]
         )
+        if prefill:
+            expected = (
+                [
+                    "fia_kernel_nonquant.h",
+                    "fia_block_cube_nonquant_gqa.h",
+                    "fia_block_vec_nonquant.h",
+                ]
+                if name == "oracle"
+                else [
+                    "mla_prefill.hpp",
+                    "mla_prefill_cube.hpp",
+                    "mla_prefill_vector.hpp",
+                    "mla_copy.hpp",
+                ]
+            )
         assert all(header in dependencies for header in expected)
         if name in ("metadata", "metadata_checked"):
             assert "mla_metadata_consumer.h" in dependencies and "mla_metadata.hpp" in dependencies
@@ -397,6 +430,7 @@ def build_probes(
             ],
         ]
     manifest = {
+        "prefill": prefill,
         "split_kv": split_kv,
         "causal": causal,
         "window": window,
@@ -422,7 +456,7 @@ def build_probes(
             ["git", "-C", str(ROOT / "csrc/catlass"), "rev-parse", "HEAD"], text=True
         ).strip(),
     }
-    if paged or causal or window or split_kv:
+    if paged or causal or window or split_kv or prefill:
         dependencies = set()
         for depfile in artifacts.glob("*-device.d"):
             dependencies.update(

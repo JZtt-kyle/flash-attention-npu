@@ -1071,6 +1071,8 @@ Q 使用 BSND 分配容量或 TND 分配前缀，可选 Q-used 不移动 64 位�
 
 ### 6.5 数值路径与资源布局
 
+以下描述 512+64 路径；192/128 通用非量化组件见 [6.5.1](#651-192128-通用非量化数值组件)。
+
 QK 的 L1 循环顺序为 N→K→M，M/N 子块均为 128。576 维并非先算完整内容再算完整 RoPE：两组 288 依次为 `[content 0:256, rope 0:32]`、`[rope 32:64, content 256:512]`，每组按 K=96 的 L0 片累加到 FP32 L0C。Q 的 64 维 RoPE 一次复制跨越相邻 Q/P 槽，尾 M 用 padding 偏移保持相邻关系；复制前必须同时取得两个槽的释放事件。最终 QK 以 FP32 ND 写入 GM，再乘 scale。
 
 Vector 保留 `SoftmaxFlashV2<float,...WITHOUT_BRC>` 和其动态 tiling；随后执行 `AmlaVecCompute`：计算 `round(-max/ln2)`、指数缩放因子、FP16/BF16 因子往返转换及 `cof/eps` 修正。P 在缩放后以 `CAST_ROUND` 转成输入 dtype。跨 S2 块的 `nUpdate` 含 `-30` 截断、`1.5` 修正、`1e-6` 和 `2^23`，以 int32 原子加更新 FP32 PV 缓冲的位表示；不能替换为常规 `O *= exp(old_max-new_max)`。
@@ -1085,6 +1087,18 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 | GM workspace | Kernel 顺序为双槽 QK FP32、P 输入 dtype、PV FP32、vec2 FP32。QK/P 用 `loop%2`，PV 用 `bn2IdxInCurCore%2`（每个新 S1G 任务递增），不是统一使用 tile 序号；调用间不得共用可变 scratch |
 | workspace 预算 | 源 host 普通部分为 `2*aicNum*(6*R1+8*R2+8*mBaseSize)` 字节，包含 nUpdate/sum 的额外预留；设备按 `GetBlockNum()` 排四个段，nUpdate 实际在 UB 生成并操作 PV 的 int32 别名。保留预算与段界，不把预留当成新的 GM 数据流；框架 `libapiSize` 与用户 workspace 单列 |
 | 任务 / 行分工 | 三项 `RunInfo` 环、两槽 GM；外层 M 基块最多 256。C1V2 将 M 按 16 行边界分给两条 Vector，M<=16 时第二条零行仍参与事件；C1V1 全部行由一条 Vector 处理，V1 内层每次至多 128 行 |
+
+#### 6.5.1 192/128 通用非量化数值组件
+
+[`MlaPrefill`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_prefill.hpp) 接收调用方已校验的单 M 块、KV 片端点、有效长度与 Q/K/V 独立布局；[`参数`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_prefill_params.h) 是组件发射数据，不是 metadata 协议。既有 dense 参数固定单 KV 头和共享内容 KV，无法表达这里的 KV 头索引及独立 K/V，因此用既有布局/window 描述组成新的当次参数。每个 AIC 处理一个 `(batch, KV head, S1G block, KV fragment)`，组内 `G=Hq/Hkv`；末维分别为 Q/K 192、V/O 128。公开 prefill 仍由既有 real/fake 入口明确拒绝，布局、host/AICPU 和 metadata 接入留在 M11b。
+
+[`Cube`](../../csrc/ascend910/flash_attn_npu_3/mla/block/mla_prefill_cube.hpp) 特化固定源 `arch22/fia_block_cube_nonquant_gqa.h`：保留 Q2V2KP3 的 512 KiB L1 分区、Q/V 复用、Load3D、L0 双缓冲及 MMAD 次序；Q/K 的 192 行通过既有 stride Copy 读取，V 独立寻址。源 RoPE 合并/分离两种输入在测试侧归一为同一完整 192 行，迁移侧不将其误作紧凑 128/64。
+
+[`Vector`](../../csrc/ascend910/flash_attn_npu_3/mla/block/mla_prefill_vector.hpp) 特化固定源 `fia_block_vec_nonquant.h`，M≤128 使用 BRC，较大 M 使用非 BRC 的 `SoftmaxFlashV2`；保留 scale、P 的输入 dtype 转换、前一块 FP32 O 重缩放、Add、最终 RowDivs 及输出舍入。它采用通用 online softmax 更新，不使用 512+64 的 aMLA 位操作。三槽任务环沿用源 `fia_kernel_nonquant.h::ExecuteTask` 的两轮排空，跨核事件为 QK→V1 的 7、V1→PV 的 8、PV→V2 的 9。C1V2 的零行 Vector 仍参与事件；组件 probe 按平台实际 AIC 数分波，不把参数容量 26 当作物理核数。
+
+组件当前接受 M≤512，N≤8192；非 BRC 限 N≤1024，保证 softmax 的 UB 行对齐。mask 复用逐行 `WindowMask`；宽行单独发射 repeat，避免 uint8 repeat stride 溢出。direct 的 O/LSE 写 BSND / `[B,Hq,Sq]`，全遮罩行显式为 0/-inf。partial 保留源 FP32 O 和八路 sum/max；无 tile 的片由设备写 0/0/-inf，有 tile 的全遮罩行保留源原始统计。归并复用 [`MlaSplitKvMerge`](../../csrc/ascend910/flash_attn_npu_3/mla/block/mla_split_kv_merge.hpp) 的 `HeadDim=128` 特化，默认 512 不变；无贡献行、accumulator 和 193..256 片的源缓冲域外数学验收沿用 [6.2.10](#6210-独立-bsnd-fd-归并与-accumulator-适配)。组件测试将 KV head 映射为虚拟 batch 验证归并，公开头布局适配不在本步声明完成。
+
+[`模块用例`](../../tests/mla/unit/prefill_attention/test_attention.py) 与 [`双数学 reference`](../../tests/mla/support/mla_prefill_reference.py) 从原始独立 Q/K/V 和窗口枚举可见键，验证分组、stride、尾块/空行、direct/partial/merge、重复执行及 guard；FP64/输入 dtype 结果使用既有内容缓存。oracle 由固定 Git blob 的通用 Kernel/Cube/Vector 编译，原始数值头不改，片段夹具只提供端点和缓冲地址；原生预检查另证明实际使用通用 template 3/4。实际加载、构建依赖和原始证据由统一驱动校验；组件通过不能替代 M11b 的公开 real/fake/compile/E2E。
 
 ### 6.6 同步依赖与组件复用结论
 
@@ -1249,6 +1263,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 | 范围 | 固定矩阵定义 | 采样驱动与计量边界 |
 | --- | --- | --- |
+| 192/128 独立数值组件 | [`prefill 清单`](../../tests/mla/support/mla_prefill_cases.py) 的 `PERFORMANCE_IDS`，双 dtype、三 mask、BRC/非 BRC、direct/partial；其 split 配置另测 128 维 merge | `python3 -m tests.mla --suite prefill-profile-check` 先验廉价夹具，再 `--suite prefill-profile`；复用既有 5×20 wall / 5×10 Kernel 成对采样，预分配且输入转换在计时外，源初始化保留，merge 单列迁移行适配和 accumulator 成本，无公开 E2E 声明 |
 | 整容量 BSND、S1G 多块、长 KV | [`mla_profile_cases.py`](../../tests/mla/support/mla_profile_cases.py)：`CASES/S1G_CASES/KV_CASES/LONG_KV_CASES` | [`mla_dense_profile.py`](../../tests/mla/support/mla_dense_profile.py) 同调度组件；[`mla_forward_profile.py`](../../tests/mla/support/mla_forward_profile.py) 公开 E2E |
 | 独立 BSND causal | [causal attention](../../tests/mla/support/components/causal_attention.py) 的 `PERFORMANCE_CASES`：保留上述四组的 causal 变体，增加有效 KV、部分/全遮罩代表例 | `python3 -m tests.mla --suite causal-profile` 同调度固定源 non-FD 组件；mask 准备、host 调度、分配和 H2D 在计时外，kernel 与预分配 probe wall 分列，无公开 E2E 声明 |
 | 生产/公开 BSND causal | [causal public](../../tests/mla/support/public_cases/causal_public.py) 的 `PERFORMANCE_CASES` 保留整容量四组、实际 KV 和 stride 的 causal 变体及部分遮罩；`USED_CASES` 固定内部 Q-used 代表 | `python3 -m tests.mla --suite causal-bsnd-profile`：公开驱动测复用、生成加前向、内部生成的 R=1/4；`mla_causal_bsnd_used_profile.py` 对同调度固定源组件测内部 Q-used Kernel。原生执行必须使用真实三角 mask，逐例记录 template/FD；原生必要 stride 转换计入公开 E2E |

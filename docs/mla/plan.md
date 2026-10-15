@@ -1,16 +1,18 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**M10 的五种 512+64 布局及阶段收尾已完成**；R1 入口收敛及 R2 整体整理已完成。当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
+本页只记录实施顺序、产物和完成条件。**M10 的五种 512+64 布局及阶段收尾、M11a 的 192/128 数值组件已完成**；R1 入口收敛及 R2 整体整理已完成。当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
 
-## 唯一下一步 M11a
+## 唯一下一步 M11b
 
-实现 192/128 共享数值组件，范围按 [design 3.2](design.md#32-展开-mla-prefill192--128) 和固定 CANN 通用非量化路径。
+一次接通 192/128 BSND 的完整公开行为，范围按 [design 3.2](design.md#32-展开-mla-prefill192--128)，复用 [M11a 数值组件](design.md#651-192128-通用非量化数值组件) 和既有 mask/split 调度、校验及归并。
 
-M11a 独立组件步的依据是新数值算法风险：192/128 使用固定 CANN 的通用 `fia_kernel_nonquant.h` 路径，独立 K/V、GQA、192 行 stride 和输出 128 的矩阵乘/softmax/partial 行为未被现有 512+64 组件覆盖。该步不是按 Kernel、Block、Tile 或 mask/split 开关拆轮。
+M11a 因通用非量化算法的独立 K/V、GQA、192 行 stride 和输出 128 风险单独闭环；这些数值风险现已有组件证据。M11b 不再按 host/AICPU/Kernel、metadata、mask 或 split 开关拆轮。
 
-- 独立产物：910 目录中的通用非量化数值适配及可调用组件 probe，复用既有 mask/split 调度、归并和双数学 reference；保留固定源映射及版权。公开 prefill 入口在 M11b 完整接入前继续明确拒绝。
-- 完成条件：FP16/BF16 在 910B 上通过固定源和双数学对照，覆盖独立 V、GQA、192 stride、尾块/空行、三 mask、直接/partial/merge 与适用组件性能；新增模块独占单元组，512+64 跨模块回归只走受影响累计 E2E。
-- 实现前先确定通用源所需的最小 native 配方、组件用例与统一驱动命令，写入当前步；原生包必须能证明实际执行了通用路径。M11b 再一次交付 BSND host/AICPU/Kernel/metadata、real/fake、三 mask 和自动/单/显式 split 的公开行为及 E2E/性能。
+- 产物：同一提交完成 BSND host、AICPU、Kernel、metadata、公开 real/fake/compile；支持 qv=None、独立 K/V、GQA、完整 storage/stride、有效长度和空输入，输出 O/LSE 及实际 FP32 accumulator。无 mask、causal、window 与自动/1/显式 split 随布局一次接入。
+- 接口和安全：沿用已确认的 FA3 形状、返回数量、动态长度校验、metadata 复用/失效及流生命周期契约；新格式必须说明既有格式不能表达的语义或安全边界，不能只因版本号新增而另拆组件步。尚未接通的 TND/混合/PA prefill 仍明确拒绝。
+- 验收：先把具体影响路径、模块工具/CPU 协议与 sanitizer、910B 数值/边界/Trap、公开 real/fake/compile/生命周期用例及统一命令补入当前步。新增日常 BSND prefill E2E 注册到 `regression_cases.py`，累计 E2E 和普通 FA3 覆盖共享路径；不累计历史单元，组件证据不替代新入口的分派和参数传递。
+- 性能：长测前复核工具、廉价夹具和原生通用路径配方/实际分派；固定公开输入集合，完成适用 metadata 公开 E2E 平均验收。M11a 的组件耗时及 merge 退化仅作定位依据，不可声明公开性能已通过；保持既定 R、预热、重复次数和计时边界。
+- 完成条件：以上完整行为、必要验证和证据身份均闭环，更新本步涉及的 design/plan/status，经质量检查后提交一次并停止；必要验证受限则保留交接，不提交为已闭环。
 
 ## 后续里程碑：M11–M17
 
@@ -18,7 +20,7 @@ M11a 独立组件步的依据是新数值算法风险：192/128 使用固定 CAN
 
 | 里程碑 | 剩余产物与边界 | 完成条件 |
 | --- | --- | --- |
-| M11：192/128 共享数值与 BSND | M11a 闭环固定源通用非量化数值组件及 mask/partial/merge 所需适配；M11b 一次接通 BSND 的 metadata/生产/公开调用 | qv=None、独立 K/V、GQA、192 stride、双 dtype、O/LSE/accumulator；BSND 三 mask 和自动/1/显式 split，新增算法单元及公开 E2E/性能 |
+| M11：192/128 BSND | M11a 数值组件已完成；M11b 一次接通 BSND 的 metadata/生产/公开调用 | qv=None、独立 K/V、GQA、192 stride、双 dtype、O/LSE/accumulator；BSND 三 mask 和自动/1/显式 split，新增公开 E2E 及适用平均性能 |
 | M12：prefill 非 PA TND/混合 | M12a TND varlen，M12b TND Q + BSND cache；各复用 M11 数值和已有调度，一次接通长度、metadata、mask/split 与公开行为 | allocation/used、非均匀/空长度、stride/GQA、三 mask、自动/1/显式 split、生产精度、生命周期及公开 E2E/性能 |
 | M13：prefill PA | M13a BSND PA，M13b TND PA；各一次接通页访问、metadata、三 mask、自动/1/显式 split 和公开行为 | 合法 P 代表边界、独立 K/V 与内容/RoPE stride、长度/空值/复用/生命周期、数值及 PA 公开 E2E/性能 |
 | M14：prefill 组合收尾 | 核对 M11–M13 的必迁组合、补明确缺口并完成阶段验收；不再按 mask × split × 布局重复开接入轮 | 前序入口已实测必要组合；新发现的算法缺口按风险单列，已有有效 E2E 按规则继承，阶段性能实际执行 |
@@ -46,6 +48,7 @@ M11a 独立组件步的依据是新数值算法风险：192/128 使用固定 CAN
 | M10c9a–M10c9b | TND Q + ND PA KV 显式紧凑计划、v25 安全协议、三阶段生产、公开 cache/metadata 和真实 TND accumulator |
 | M10c10 | TND Q + ND PA KV 原生自动分区、v26、三阶段生产、公开 real/fake/cache/metadata、真实 26 片 accumulator；三 mask、源/双数学、协议/sanitizer、Trap、日常回归和平均公开性能闭环 |
 | M10 阶段收尾 | 五布局单/显式/自动 split 与三 mask 的组合覆盖、累计 E2E/公开专项和固定 92 配置阶段公开性能；统一驱动选择、计时前适用集合检查与绑定原始证据的等权汇总 |
+| M11a：192/128 数值组件 | 固定通用非量化 Kernel/Block/Tile、独立 Q/K/V 与 GQA/stride、三 mask、direct/partial、128 维归并及 accumulator；910B 双 dtype 固定源/双数学、组件性能和受影响累计 E2E，公开 prefill 仍拒绝 |
 | 验收工具整理 | 统一入口、构建/reference 缓存和 E2E 证据恢复；模块单元/日常 E2E/专项归属、代表组合与显式穷举、仓库外产物及原生对照构建 |
 | R1：前向入口收敛 | 三个公开 MLA 前向共用适配，real/fake split 共用分派；参数名错误提示、双语调用说明、日常接口回归和 100 配置公开性能验收 |
 | R2：代码、测试与无头交接整理 | 共用 helper 下沉到 support、消除反向依赖，按实际 Python 依赖管理构建/证据；补齐工具归属并修正历史断言；集成五轮文档修正及干净收尾检查；原 R3 的内核可读性核对合入本步，保留源分层和数值流水 |

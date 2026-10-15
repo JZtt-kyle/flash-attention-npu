@@ -10,7 +10,7 @@
 
 // Source: CANN ca18aee610729ca5270a44e2d84c751bc687fbf0,
 // arch22/fia_block_vec_flashdecode_arch22.h: ComputeScaleValue,
-// ReduceFinalRes, CopyFinalResOut. Only shared 512+64 FP16/BF16 BSND.
+// ReduceFinalRes, CopyFinalResOut. FP16/BF16; 512+64 and 192/128 numerical specializations.
 #pragma once
 #include "catlass/catlass.hpp"
 #include "../tile/mla_fd_ops.hpp"
@@ -19,8 +19,10 @@
 namespace flash_attn::mla::Block {
 using namespace AscendC;
 
-template <typename OutputT, bool WriteSingleAccumulator = false, bool IsTnd = false>
+template <typename OutputT, bool WriteSingleAccumulator = false, bool IsTnd = false, uint32_t HeadDim = 512>
 class MlaSplitKvMerge {
+    static_assert(HeadDim == 512 || HeadDim == 128);
+
   public:
     __aicore__ inline void Init(const MlaSplitKvMergeParams& p, GM_ADDR out, GM_ADDR sum, GM_ADDR maximum,
                                 GM_ADDR result, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse, TPipe* pipe)
@@ -167,7 +169,7 @@ class MlaSplitKvMerge {
             auto current = partialBuf[slot].Get<float>();
             for (uint32_t row = 0; row < rows; ++row) {
                 if (!Valid(split, start + row)) {
-                    Duplicate(current[row * 512], 0.0f, 512);
+                    Duplicate(current[row * HeadDim], 0.0f, HeadDim);
                 }
             }
             PipeBarrier<PIPE_V>();
@@ -183,15 +185,15 @@ class MlaSplitKvMerge {
                 SetFlag<HardEvent::V_MTE3>(0);
                 WaitFlag<HardEvent::V_MTE3>(0);
                 for (uint32_t row = 0; row < rows;) {
-                    const uint64_t gap = (uint64_t(params.sq) - 1) * 512 * 4;
+                    const uint64_t gap = (uint64_t(params.sq) - 1) * HeadDim * 4;
                     const uint32_t count =
                         gap > UINT32_MAX
                             ? 1
                             : Min(rows - row, params.heads - (params.rowStart + start + row) % params.heads);
                     const uint64_t offset =
                         uint64_t(split) * params.batch * params.heads * params.sq + RowAddress(start + row);
-                    DataCopyPad(accumulator[offset * 512], current[row * 512],
-                                DataCopyExtParams{uint16_t(count), 512 * 4, 0, count == 1 ? 0 : uint32_t(gap), 0});
+                    DataCopyPad(accumulator[offset * HeadDim], current[row * HeadDim],
+                                DataCopyExtParams{uint16_t(count), HeadDim * 4, 0, count == 1 ? 0 : uint32_t(gap), 0});
                     DataCopyPad(accumulatorLse[offset], lse[row * 8],
                                 DataCopyExtParams{uint16_t(count), 4, 0,
                                                   count == 1 ? 0 : uint32_t((uint64_t(params.sq) - 1) * 4), 0});
@@ -201,10 +203,10 @@ class MlaSplitKvMerge {
                 WaitFlag<HardEvent::MTE3_V>(0);
             }
             auto target = split == 0 ? reduced : current;
-            Tile::RowMuls(target, current, weights[split * width], rows, 512, 512);
+            Tile::RowMuls(target, current, weights[split * width], rows, HeadDim, HeadDim);
             if (split != 0) {
                 PipeBarrier<PIPE_V>();
-                Add(reduced, reduced, current, rows * 512);
+                Add(reduced, reduced, current, rows * HeadDim);
             }
             PipeBarrier<PIPE_V>();
             SetFlag<HardEvent::V_MTE2>(2 + slot);
@@ -213,15 +215,15 @@ class MlaSplitKvMerge {
         WaitFlag<HardEvent::V_MTE2>(3);
         auto cast = castBuf.Get<OutputT>();
         if constexpr (std::is_same<OutputT, bfloat16_t>::value) {
-            Cast(cast, reduced, RoundMode::CAST_RINT, rows * 512);
+            Cast(cast, reduced, RoundMode::CAST_RINT, rows * HeadDim);
         } else {
-            Cast(cast, reduced, RoundMode::CAST_ROUND, rows * 512);
+            Cast(cast, reduced, RoundMode::CAST_ROUND, rows * HeadDim);
         }
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         const uint64_t outRow =
             uint64_t(params.batchIndex) * (IsTnd ? 1 : params.sq) * params.heads + params.rowStart + start;
-        DataCopy(output[outRow * 512], cast, rows * 512);
+        DataCopy(output[outRow * HeadDim], cast, rows * HeadDim);
         SetFlag<HardEvent::MTE3_V>(0);
         WaitFlag<HardEvent::MTE3_V>(0);
     }
@@ -231,7 +233,8 @@ class MlaSplitKvMerge {
     {
         const uint32_t slot = split % 2;
         WaitFlag<HardEvent::V_MTE2>(2 + slot);
-        DataCopy(partialBuf[slot].Get<float>(), partial[(uint64_t(split) * params.mBase + start) * 512], rows * 512);
+        DataCopy(partialBuf[slot].Get<float>(), partial[(uint64_t(split) * params.mBase + start) * HeadDim],
+                 rows * HeadDim);
         SetFlag<HardEvent::MTE2_V>(2 + slot);
     }
 

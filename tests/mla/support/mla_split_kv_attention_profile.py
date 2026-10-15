@@ -70,84 +70,7 @@ def profile(probes, output):
             assert case["partial"].total == case["schedule"].cores
             for a, b in zip(*(suite.raw_results(case, name) for name in names)):
                 torch.testing.assert_close(a, b, rtol=0, atol=0, equal_nan=True)
-        walls = []
-        for index in range(len(cases)):
-            for round_id in range(5):
-                for iteration in range(20):
-                    for name in names if round_id % 2 == 0 else names[::-1]:
-                        start = time.perf_counter_ns()
-                        call(index, name)
-                        walls.append(
-                            dict(
-                                case=index,
-                                name=name,
-                                round=round_id,
-                                iteration=iteration,
-                                wall_us=(time.perf_counter_ns() - start) / 1000,
-                            )
-                        )
-        (output / "wall.json").write_text(json.dumps(walls, indent=2) + "\n")
-        labels = []
-        profiler = torch_npu.profiler
-        trace = output / "profiler"
-        with profiler.profile(
-            activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU],
-            schedule=profiler.schedule(wait=0, warmup=1, active=len(cases) * 5 * 10 * 2, repeat=1),
-            on_trace_ready=profiler.tensorboard_trace_handler(str(trace)),
-            experimental_config=profiler._ExperimentalConfig(
-                profiler_level=profiler.ProfilerLevel.Level0,
-                export_type=profiler.ExportType.Text,
-                data_simplification=False,
-            ),
-        ) as prof:
-            call(0, "oracle")
-            prof.step()
-            for index in range(len(cases)):
-                for round_id in range(5):
-                    for iteration in range(10):
-                        for name in names if round_id % 2 == 0 else names[::-1]:
-                            call(index, name)
-                            labels.append(
-                                dict(case=index, name=name, round=round_id, iteration=iteration)
-                            )
-                            prof.step()
-        (output / "labels.json").write_text(json.dumps(labels, indent=2) + "\n")
-        csvs, raws = list(trace.rglob("kernel_details.csv")), list(trace.rglob("op_summary_*.csv"))
-        assert len(csvs) == len(raws) == 1
-        with csvs[0].open() as stream:
-            rows = sorted(
-                csv.DictReader(stream), key=lambda r: Decimal(r["Start Time(us)"].strip())
-            )
-        with raws[0].open() as stream:
-            raw = sorted(
-                csv.DictReader(stream), key=lambda r: Decimal(r["Task Start Time(us)"].strip())
-            )
-        assert len(rows) == len(raw) == len(labels)
-        for row, source, label in zip(rows, raw, labels):
-            assert row["Name"] == source["Op Name"] and row["Device_id"] == source["Device_id"]
-            assert Decimal(row["Start Time(us)"].strip()) == Decimal(
-                source["Task Start Time(us)"].strip()
-            )
-            assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
-            prefix = "cann" if label["name"] == "oracle" else "mla"
-            assert prefix + "_split_kv_attention" in row["Name"]
-            label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
-        (output / "kernel-samples.json").write_text(json.dumps(labels, indent=2) + "\n")
-        results = []
-        for index, spec in enumerate(PERFORMANCE_CASES):
-            result = dict(config=spec)
-            for name in names:
-                result[name] = dict(
-                    kernel_us=statistics.median(
-                        s["kernel_us"] for s in labels if s["case"] == index and s["name"] == name
-                    ),
-                    wall_us=statistics.median(
-                        s["wall_us"] for s in walls if s["case"] == index and s["name"] == name
-                    ),
-                )
-            result["kernel_ratio"] = result["migrated"]["kernel_us"] / result["oracle"]["kernel_us"]
-            result["wall_ratio"] = result["migrated"]["wall_us"] / result["oracle"]["wall_us"]
-            results.append(result)
+        results, paths = sample_components(call, PERFORMANCE_CASES, output, "split_kv_attention")
         report = dict(
             scope="Independent FD partial Kernel versus pinned CANN task creation/execution and FD Block writeback, with identical fragments and inputs; no reduction. Mask preparation, CPU partition, allocation and H2D are outside timing. Wall includes ctypes, launch and synchronization using preallocated outputs/workspace; not public or metadata E2E. Source output initialization is retained. Raw normalized O and sum/max stay FP32.",
             dtype=str(probes[0]["dtype"]),
@@ -159,8 +82,7 @@ def profile(probes, output):
             cpu_affinity=sorted(os.sched_getaffinity(0)),
             visible_devices=os.environ.get("ASCEND_RT_VISIBLE_DEVICES"),
             device=torch.npu.get_device_name(0),
-            kernel_csv=str(csvs[0]),
-            raw_csv=str(raws[0]),
+            **paths,
             results=results,
         )
         (output / "summary.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -170,3 +92,85 @@ def profile(probes, output):
         return report
     finally:
         os.sched_setaffinity(0, affinity)
+
+
+def sample_components(call, configs, output, kernel_suffix):
+    """Sample prepared, synchronized one-kernel calls with the existing protocol."""
+    names = ("oracle", "migrated")
+    walls = []
+    for index in range(len(configs)):
+        for round_id in range(5):
+            for iteration in range(20):
+                for name in names if round_id % 2 == 0 else names[::-1]:
+                    start = time.perf_counter_ns()
+                    call(index, name)
+                    walls.append(
+                        dict(
+                            case=index,
+                            name=name,
+                            round=round_id,
+                            iteration=iteration,
+                            wall_us=(time.perf_counter_ns() - start) / 1000,
+                        )
+                    )
+    (output / "wall.json").write_text(json.dumps(walls, indent=2) + "\n")
+    labels = []
+    profiler = torch_npu.profiler
+    trace = output / "profiler"
+    with profiler.profile(
+        activities=[profiler.ProfilerActivity.CPU, profiler.ProfilerActivity.NPU],
+        schedule=profiler.schedule(wait=0, warmup=1, active=len(configs) * 5 * 10 * 2, repeat=1),
+        on_trace_ready=profiler.tensorboard_trace_handler(str(trace)),
+        experimental_config=profiler._ExperimentalConfig(
+            profiler_level=profiler.ProfilerLevel.Level0,
+            export_type=profiler.ExportType.Text,
+            data_simplification=False,
+        ),
+    ) as prof:
+        call(0, "oracle")
+        prof.step()
+        for index in range(len(configs)):
+            for round_id in range(5):
+                for iteration in range(10):
+                    for name in names if round_id % 2 == 0 else names[::-1]:
+                        call(index, name)
+                        labels.append(
+                            dict(case=index, name=name, round=round_id, iteration=iteration)
+                        )
+                        prof.step()
+    (output / "labels.json").write_text(json.dumps(labels, indent=2) + "\n")
+    csvs, raws = list(trace.rglob("kernel_details.csv")), list(trace.rglob("op_summary_*.csv"))
+    assert len(csvs) == len(raws) == 1
+    with csvs[0].open() as stream:
+        rows = sorted(csv.DictReader(stream), key=lambda r: Decimal(r["Start Time(us)"].strip()))
+    with raws[0].open() as stream:
+        raw = sorted(
+            csv.DictReader(stream), key=lambda r: Decimal(r["Task Start Time(us)"].strip())
+        )
+    assert len(rows) == len(raw) == len(labels)
+    for row, source, label in zip(rows, raw, labels):
+        assert row["Name"] == source["Op Name"] and row["Device_id"] == source["Device_id"]
+        assert Decimal(row["Start Time(us)"].strip()) == Decimal(
+            source["Task Start Time(us)"].strip()
+        )
+        assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
+        prefix = "cann" if label["name"] == "oracle" else "mla"
+        assert prefix + "_" + kernel_suffix in row["Name"]
+        label.update(kernel_us=float(row["Duration(us)"]), kernel_name=row["Name"])
+    (output / "kernel-samples.json").write_text(json.dumps(labels, indent=2) + "\n")
+    results = []
+    for index, spec in enumerate(configs):
+        result = dict(config=spec)
+        for name in names:
+            result[name] = dict(
+                kernel_us=statistics.median(
+                    s["kernel_us"] for s in labels if s["case"] == index and s["name"] == name
+                ),
+                wall_us=statistics.median(
+                    s["wall_us"] for s in walls if s["case"] == index and s["name"] == name
+                ),
+            )
+        result["kernel_ratio"] = result["migrated"]["kernel_us"] / result["oracle"]["kernel_us"]
+        result["wall_ratio"] = result["migrated"]["wall_us"] / result["oracle"]["wall_us"]
+        results.append(result)
+    return results, dict(kernel_csv=str(csvs[0]), raw_csv=str(raws[0]))

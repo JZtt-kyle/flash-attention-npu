@@ -7,6 +7,11 @@
 #include "mla/mla_split_kv_merge_params.h"
 using namespace AscendC;
 using flash_attn::mla::MlaSplitKvMergeParams;
+#ifdef MLA_PREFILL
+constexpr uint32_t OutputWidth = 128, MaxMBase = 512;
+#else
+constexpr uint32_t OutputWidth = 512, MaxMBase = 256;
+#endif
 static_assert(sizeof(MlaSplitKvMergeParams) + 7 * sizeof(void*) <= 1536);
 #ifdef MLA_DENSE_BF16
 using OutputT = bfloat16_t;
@@ -50,7 +55,7 @@ __global__ __aicore__ __mix__(1, 2) void MERGE_ENTRY(GM_ADDR partial, GM_ADDR su
         info.kvSeqSize = p.kvLength;
         info.gSize = info.qHeadNum = p.heads;
         info.kvHeadNum = 1;
-        info.headDim = info.headDimAlign = 512;
+        info.headDim = info.headDimAlign = OutputWidth;
         info.mBaseSize = p.mBase;
         info.batchContinuous = true;
         info.softmaxLseFlag = true;
@@ -78,7 +83,7 @@ __global__ __aicore__ __mix__(1, 2) void MERGE_ENTRY(GM_ADDR partial, GM_ADDR su
         op.FlashDecode(fd);
         op.FreeEventID();
 #else
-        flash_attn::mla::Kernel::MlaSplitKvMerge<OutputT> op;
+        flash_attn::mla::Kernel::MlaSplitKvMerge<OutputT, OutputWidth> op;
         op(p, partial, sum, maximum, output, lse, accum, accumLse, &pipe);
 #endif
     }
@@ -92,11 +97,11 @@ extern "C" int launch_merge(void* stream, void* partial, void* sum, void* maximu
     // Guard allocation sizes remain the owner's responsibility for this probe.
     if (!p || !partial || !sum || !maximum || !output || !lse || p->batch == 0 || p->batch > 65536 || p->sq == 0 ||
         p->sq > 1048576 || p->heads == 0 || p->heads > 65536 || p->batchIndex >= p->batch || p->mBase < 1 ||
-        p->mBase > 256 || p->rows == 0 || p->rows > p->mBase || p->rowStart % p->mBase != 0 || p->splits == 0 ||
+        p->mBase > MaxMBase || p->rows == 0 || p->rows > p->mBase || p->rowStart % p->mBase != 0 || p->splits == 0 ||
         p->splits > 256 || p->kvLength > 16384 || p->maskKind > 2 || p->adapt > 1 ||
         // M10a's dense row bound keeps source S1G and ceil-div fields uint32.
         uint64_t(p->sq) * p->heads > UINT32_MAX - 255 || uint64_t(p->rowStart) + p->rows > uint64_t(p->sq) * p->heads ||
-        uint64_t(p->batch) * p->sq * p->heads > INT64_MAX / (512ULL * 4 * p->splits) ||
+        uint64_t(p->batch) * p->sq * p->heads > INT64_MAX / (uint64_t(OutputWidth) * 4 * p->splits) ||
         (p->maskKind == 2 && (p->left < 0 || p->right < 0 || p->left > INT32_MAX || p->right > INT32_MAX)) ||
         (p->adapt && p->splits > 1 && (!accum || !accumLse))) {
         return -1;

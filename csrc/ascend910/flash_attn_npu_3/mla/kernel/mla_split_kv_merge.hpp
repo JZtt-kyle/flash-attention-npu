@@ -13,7 +13,7 @@
 #include "../block/mla_split_kv_merge.hpp"
 
 namespace flash_attn::mla::Kernel {
-template <typename OutputT>
+template <typename OutputT, uint32_t HeadDim = 512>
 class MlaSplitKvMerge {
   public:
     __aicore__ inline void operator()(const MlaSplitKvMergeParams& params, GM_ADDR out, GM_ADDR sum, GM_ADDR maximum,
@@ -23,7 +23,7 @@ class MlaSplitKvMerge {
             if (GetBlockIdx() != 0) {
                 return;
             }
-            Block::MlaSplitKvMerge<OutputT> block;
+            Block::MlaSplitKvMerge<OutputT, false, false, HeadDim> block;
             block.Init(params, out, sum, maximum, result, lse, accum, accumLse, pipe);
             const uint32_t tile = block.TileRows();
             for (uint32_t start = 0; start < params.rows; start += tile) {
