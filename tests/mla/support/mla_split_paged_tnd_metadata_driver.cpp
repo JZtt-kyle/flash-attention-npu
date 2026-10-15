@@ -33,9 +33,16 @@ int main()
         auto* destination = mode == 18   ? nullptr
                             : mode == 19 ? reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(record.data()) + 1)
                                          : record.data();
-        const bool built =
-            BuildSplitPagedTndMetadata(shape, r.platform, dtype, destination, mode == 17 ? words - 1 : words, inputs,
-                                       window, mode == 25 ? 2 : r.splits);
+        auto producerShape = shape;
+        auto producerPlatform = r.platform;
+        if (mode == 39) {
+            producerShape.query.totalTokens = 0;
+            producerPlatform.blockDims.fill(
+                shape.batch && shape.query.maxLength && shape.logicalKvCapacity ? r.platform.aicNum : 1);
+        }
+        const bool built = BuildSplitPagedTndMetadata(producerShape, producerPlatform, dtype, destination,
+                                                      mode == 17 ? words - 1 : words, inputs, window,
+                                                      mode == 25 ? 2 : r.splits, mode == 39);
         const bool intact = record == initial;
         const uint32_t generated = record[5];
         const bool cleared = std::all_of(record.begin() + 8, record.end(), [](uint32_t v) { return v == 0; });

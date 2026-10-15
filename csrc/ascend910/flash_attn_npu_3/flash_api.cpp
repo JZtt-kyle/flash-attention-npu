@@ -186,14 +186,21 @@ std::vector<at::Tensor> mha_fwd(
                         is_rotary_interleaved,
                     "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
         TORCH_CHECK(attention_chunk == 0 && softcap == 0.0f &&
-                        (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 && (!page_table_ || !cu_seqlens_q_) &&
-                                             (!cu_seqlens_k_ || cu_seqlens_q_))) &&
+                        (num_splits == 1 ||
+                         (num_splits >= 0 && num_splits <= 256 && (!page_table_ || !cu_seqlens_q_ || num_splits > 1) &&
+                          (!cu_seqlens_k_ || cu_seqlens_q_))) &&
                         !pack_gqa_.has_value() && sm_margin == 0,
                     "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(576.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (num_splits != 1) {
             if (page_table_) {
+                if (cu_seqlens_q_) {
+                    TORCH_CHECK(max_seqlen_q_, "MLA: TND paged split requires max_seqlen_q");
+                    return flash_attn::mla::PagedTndForward(
+                        q, k, v, *q_v_, *page_table_, *cu_seqlens_q_, *max_seqlen_q_, scale, seqused_k_, seqused_q_,
+                        scheduler_metadata_, is_causal, window_size_left, window_size_right, num_splits);
+                }
                 return flash_attn::mla::PagedBsndForward(q, k, v, *q_v_, *page_table_, scale, seqused_k_, seqused_q_,
                                                          scheduler_metadata_, is_causal, window_size_left,
                                                          window_size_right, num_splits);
@@ -835,7 +842,8 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
         TORCH_CHECK(num_heads_kv == 1, "MLA scheduler metadata is not implemented yet outside the dense shape bounds");
         TORCH_CHECK(!cu_seqlens_k && !cu_seqlens_k_new && !seqused_q && !cache_leftpad && max_seqlen_k_new == 0 &&
                         attention_chunk == 0 && !has_softcap &&
-                        (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 && (!page_size || !cu_seqlens_q))) &&
+                        (num_splits == 1 ||
+                         (num_splits >= 0 && num_splits <= 256 && (!page_size || !cu_seqlens_q || num_splits > 1))) &&
                         !pack_gqa.has_value() && sm_margin == 0 && !softcap_ && !softmax_scale,
                     "MLA scheduler metadata is not implemented yet for these length, mask, split, scheduling or "
                     "legacy numerical options");

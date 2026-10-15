@@ -330,3 +330,21 @@ def test_consistent_c1v1_payload_cannot_change_merge_ownership(drivers, dtype):
     got = drivers[1].evaluate([request(dtype=dtype, mode=38)])[0]
     assert got["generated"] == 0 and got["read"] and got["unchanged"]
     assert got["page_reads"] == 0
+
+
+@pytest.mark.parametrize("dtype", [1, 2])
+@pytest.mark.parametrize("queries", [(3, 0, 7), (0, 0, 0), ()])
+def test_total_from_prefix(drivers, dtype, queries):
+    c = config(b=len(queries), q=7, total=sum(queries))
+    cu = [0]
+    for q in queries:
+        cu.append(cu[-1] + q)
+    kv = [17] * len(queries)
+    normal, derived = drivers[1].evaluate(
+        [request(c, cu=cu, kv=kv, dtype=dtype, mode=mode) for mode in (0, 39)]
+    )
+    assert derived["built"] and derived["generated"] == derived["read"] == 0
+    assert derived["record"] == normal["record"]
+    if queries:
+        invalid = drivers[1].evaluate([request(c, cu=[1] + cu[1:], kv=kv, dtype=dtype, mode=39)])[0]
+        assert invalid["built"] and invalid["generated"] and invalid["cleared"]

@@ -27,9 +27,11 @@ struct MlaSplitPagedTndMetadataArgs {
     MlaPagedMetadataArgs input;
     MlaWindowConfig window;
     int64_t splits;
+    bool queryTotalFromPrefix = false;
 };
 // False leaves output untouched (unsafe descriptor/overlap); true writes a
 // complete record, including a zero-payload failure record. No device reads.
 bool BuildSplitPagedTndMetadata(const MlaPagedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
-                                uint32_t words, const MlaPagedInputs&, const MlaWindowConfig&, int64_t splits);
+                                uint32_t words, const MlaPagedInputs&, const MlaWindowConfig&, int64_t splits,
+                                bool queryTotalFromPrefix = false);
 } // namespace flash_attn::mla

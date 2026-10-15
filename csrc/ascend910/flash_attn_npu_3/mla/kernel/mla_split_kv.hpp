@@ -60,17 +60,19 @@ class MlaSplitKvUsedTnd : private MlaTaskRing<InputT, true, true, false, true, t
 };
 // PA keeps logical fragment endpoints and resolves physical pages in Copy.
 // Absolute offsets own a persistent slot across every task wave.
-template <typename InputT>
-class MlaSplitKvPagedBsnd
-    : private MlaTaskRing<InputT, true, false, false, false, true, true, false, true, true, true> {
+template <typename InputT, bool IsTnd = false>
+class MlaSplitKvPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, true, false, true, true, true> {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
                                       GM_ADDR qc, GM_ADDR qr, const MlaPagedCacheInputs& cache, GM_ADDR workspace,
-                                      TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts& layouts)
+                                      TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts& layouts,
+                                      uint32_t totalQ = 0)
     {
         this->Run(s, scale, qc, qr, reinterpret_cast<GM_ADDR>(cache.v.address),
-                  reinterpret_cast<GM_ADDR>(cache.k.address), workspace, workspace, workspace, pipe, spans, 0, &layouts,
-                  false, reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout, p.window, &p);
+                  reinterpret_cast<GM_ADDR>(cache.k.address), workspace, workspace, workspace, pipe, spans, totalQ,
+                  &layouts, false, reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout, p.window, &p);
     }
 };
+template <typename InputT>
+using MlaSplitKvPagedBsnd = MlaSplitKvPaged<InputT>;
 } // namespace flash_attn::mla::Kernel

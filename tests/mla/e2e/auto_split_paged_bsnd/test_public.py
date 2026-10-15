@@ -488,7 +488,7 @@ def test_layout_extremes(dtype, layout):
 def test_unopened_paged_split(fake):
     with FakeTensorMode() if fake else nullcontext():
         c = prepare(torch.float16, DAILY_CASES[0])
-        a = dict(c["args"])
+        a = dict(c["args"], num_splits=0)
         a["q"] = a["q"].flatten(0, 1)
         a["qv"] = a["qv"].flatten(0, 1)
         a["cu_seqlens_q"] = torch.tensor([0, 3, 6], dtype=torch.int32, device="npu")

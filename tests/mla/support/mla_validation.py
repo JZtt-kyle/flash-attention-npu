@@ -128,6 +128,15 @@ SUITES = {
         "-k",
         "representative or capacity_cost_boundary",
     ],
+    "split-paged-tnd-tools": ["tests/mla/unit/tools/test_mla_split_paged_tnd_production_tools.py"],
+    "split-paged-tnd-check": [
+        "tests/mla/e2e/split_paged_tnd/test_public.py",
+        "-k",
+        "representative",
+    ],
+    "split-paged-tnd-public": ["tests/mla/e2e/split_paged_tnd/test_public.py"],
+    "split-paged-tnd-trap": ["tests/mla/e2e/split_paged_tnd/test_trap.py"],
+    "split-paged-tnd-profile": ["tests/mla/e2e/split_paged_tnd/test_profile.py"],
     "split-paged-bsnd-tools": [
         "tests/mla/unit/tools/test_mla_split_paged_bsnd_production_tools.py"
     ],
@@ -785,6 +794,7 @@ SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()
 PERFORMANCE_SUITES = {
     "auto-split-paged-bsnd-profile",
     "split-paged-bsnd-profile",
+    "split-paged-tnd-profile",
     "auto-split-mixed-profile",
     "split-mixed-profile",
     "auto-split-tnd-profile",
@@ -845,6 +855,7 @@ CPU_SUITES = {
     "auto-split-paged-bsnd-tools",
     "auto-split-paged-bsnd-protocol-tools",
     "split-paged-bsnd-tools",
+    "split-paged-tnd-tools",
     "split-paged-tnd-protocol-tools",
     "split-paged-bsnd-protocol-tools",
     "auto-split-mixed-tools",

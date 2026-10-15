@@ -7,7 +7,7 @@
 namespace flash_attn::mla {
 bool BuildSplitPagedTndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                                 uint32_t* output, uint32_t words, const MlaPagedInputs& inputs,
-                                const MlaWindowConfig& window, int64_t splits)
+                                const MlaWindowConfig& window, int64_t splits, bool queryTotalFromPrefix)
 {
     uint32_t expected;
     if (!SplitPagedTndMetadataWords(shape.batch, expected) || words != expected)
@@ -15,19 +15,23 @@ bool BuildSplitPagedTndMetadata(const MlaPagedShape& shape, const MlaPlatformInf
     struct Context {
         const MlaWindowConfig& window;
         int64_t splits;
+        bool fromPrefix;
         MlaSplitPagedTndPlan plan;
-    } context{window, splits, {}};
+    } context{window, splits, queryTotalFromPrefix, {}};
     const auto builder = [](const MlaPagedShape& s, const MlaPlatformInfo& p, const MlaPagedInputs& in,
                             MlaPagedSchedule& schedule, const void* opaque) {
         auto& c = *const_cast<Context*>(static_cast<const Context*>(opaque));
-        const auto status = BuildSplitPagedTndPlan(s, p, in, c.window, c.splits, c.plan);
+        auto platform = p;
+        if (c.fromPrefix)
+            platform.blockDims.fill(s.batch && s.query.totalTokens && s.logicalKvCapacity ? p.aicNum : 1);
+        const auto status = BuildSplitPagedTndPlan(s, platform, in, c.window, c.splits, c.plan);
         if (status == MlaScheduleStatus::Success)
             schedule = std::move(c.plan.paged);
         return status;
     };
     const uint32_t base = kMlaPagedMetadataPrefixWords + kMlaPagedMetadataSequenceWords * uint32_t(shape.batch);
-    if (!BuildPagedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, false, builder, &context,
-                                        words - base))
+    if (!BuildPagedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, queryTotalFromPrefix, builder,
+                                        &context, words - base))
         return false;
     output[1] = output[2] = kMlaSplitPagedTndVersion;
     if (output[5] == 0) {

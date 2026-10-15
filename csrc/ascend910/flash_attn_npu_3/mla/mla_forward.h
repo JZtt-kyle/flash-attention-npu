@@ -87,7 +87,7 @@ std::vector<at::Tensor> PagedTndForward(const at::Tensor& q, const at::Tensor& k
                                         int64_t maxQ, float scale, const std::optional<at::Tensor>& cacheSeqlens,
                                         const std::optional<at::Tensor>& usedQuery,
                                         const std::optional<at::Tensor>& schedulerMetadata, bool causal = false,
-                                        int64_t windowLeft = -1, int64_t windowRight = -1);
+                                        int64_t windowLeft = -1, int64_t windowRight = -1, int64_t splits = 1);
 std::vector<at::Tensor> WindowTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                          const at::Tensor& qv, const at::Tensor& cuQ, const at::Tensor& cuK,
                                          int64_t maxQ, int64_t maxK, float scale, int64_t windowLeft,

@@ -101,4 +101,9 @@ def daily_suites():
         f"{paged_auto}::{name}"
         for name in ("test_daily", "test_empty", "test_fake", "test_compile")
     ]
+    paged_tnd_split = "tests/mla/e2e/split_paged_tnd/test_public.py"
+    suites["split_paged_tnd"] = [
+        f"{paged_tnd_split}::{name}"
+        for name in ("test_daily", "test_empty", "test_fake", "test_compile")
+    ]
     return suites
