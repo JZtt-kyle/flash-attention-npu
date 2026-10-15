@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-本页记录实施顺序、每步产物与完成条件。**M10c6b 混合布局原生自动 split 生产接入已完成；唯一下一步为 M10c7a BSND PA 显式 split 计划与安全协议。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。
+本页记录实施顺序、每步产物与完成条件。**M10c7a BSND PA 显式 split 计划与 v23 安全协议已完成；唯一下一步为 M10c7b BSND PA 显式 split 生产接入。** 当前能力和证据见 [status](status.md)，范围及验收契约见 [design](design.md)。
 
 ## 已完成：按覆盖目的精简测试
 
@@ -258,7 +258,7 @@ M10a 已交付独立调度/布局组件，设备 partial attention 与合并数�
 
 本步 prefix 协议/ASan/UBSan、固定源/双数学、真实 accumulator、公开/Trap/生命周期、累计小输入 E2E、普通 FA3 与含原生 FD 的平均公开性能均已通过。原生对照包只复用当前配方及完整内容有效的构建，性能实际重测，完整结果和开发失败记录见 status。提交后立即停止，PA split 保持拒绝。
 
-### 唯一下一步 M10c7a：BSND PA 显式 split 计划与安全协议
+### 已完成 M10c7a：BSND PA 显式 split 计划与安全协议
 
 先独立闭环 BSND Q + ND PA KV、512+64、显式 `S=2..256` 的 CPU 任务/持久布局及 v23 安全协议。PA 的逻辑容量、按有效长度整页取整的调度上界和页大小相关基本块属于新的协议边界；本步不接通 AICPU、设备 partial/merge 或公开 PA split。已有非 PA split 与 PA 单 split 行为保持原契约。
 
@@ -267,13 +267,31 @@ M10a 已交付独立调度/布局组件，设备 partial attention 与合并数�
 - 必跑：统一入口新增本模块工具、代表/最大实际 CPU 成本、普通及 sanitizer 组，先 `--dry-run`/`--collect-only`，冻结后实跑 `--unit split_paged_bsnd_protocol` 和对应 sanitizer；累计 `--suite e2e --device 6` 覆盖共享代码影响。只有新增设备可调用行为时才注册其日常 E2E，此 CPU 步不注册伪 PA split E2E，也不累计其他模块历史单元。
 - 基线与完成：先核对本 status 的源码、构建、加载身份和完整 E2E 原始证据；只有未变化且完整有效的 E2E 可继承，变更则实际执行。构建/reference 缓存继续放仓库外，必要共享构建影响也须核验实际加载。固定源、独立边界、普通/sanitizer、工具及受影响 E2E 全通过，更新协议契约、plan/status 和质量检查后仅提交一次；设备数值、Trap 和公开性能由后续生产接入步骤独立验收。
 
+本步实施前固定如下边界：
+
+- 基线 `4f531a3`；新增 `mla/mla_split_paged_bsnd_{plan.h,plan.cpp,metadata.h,metadata.cpp,consumer.h}`。复用 `BuildPagedSchedule` 的 PA 源几何/长度快照、`MlaSplitKvPlan` 的显式分片与 BSND 原 allocation 地址、v6 页描述符/有效页检查；不修改共享数值实现、setup、生产分派或公开签名。静态资源上界独立于有效长度，v23 记录携带 window/S 与宽 M 前缀，明确全零 KV、空容量与逐次页表校验。
+- 测试新增 `unit/split_paged_bsnd_protocol/`，构建及两个 CPU 驱动置于 `support/`；固定 CANN PA tiling、mask 范围/workspace 与 FA3 分片/accumulator 片段重新编译执行。独立逐行/逐页枚举任务与地址，覆盖 P=16/112/512/528/1024、尾页/跨页三 mask、used/空值/多波、S=2/8/256、输入/输出别名、坏描述符、页号、跨版本、前缀/预算/宽整数及失败原子性。
+- 统一命令先 dry-run、collect-only：`--suite split-paged-bsnd-protocol-tools`；代表和最大实际 CPU 成本 `--suite split-paged-bsnd-protocol-check`；冻结后 `--unit split_paged_bsnd_protocol` 与 `--suite split-paged-bsnd-protocol-sanitize` 使用同一集合；`--suite e2e --device 6` 实跑累计清单。没有新增设备可调用行为，本步不增加伪 PA split E2E，公开性能和 Trap 不属于 CPU 协议验收。
+- 接手核验前步 E2E 原始证据、源码、构建输入/依赖/产物和加载库；新增头文件/测试驱动会改变保守证据及构建身份，因此累计 E2E 本步实跑，不继承历史单元/性能。证据放 `/tmp/mla-m10c7a/`；构建与数学缓存沿用 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`，同输入数学缓存复用。完成上述固定源/独立边界、工具、普通/sanitizer 和重建加载后的 E2E，再更新 design/status、质量检查并提交一次。
+
+本步固定源 PA 几何/mask/workspace/FA3 分片与 accumulator、独立行/页/任务地址、普通与 ASan/UBSan、工具及重建加载后的累计 E2E 均已通过。校验绑定逻辑容量与当前长度，不绑定页号/物理地址；消费者每次完整检查物理描述和所有有效页。开发失败、实际结果与耗时见 status。CPU 协议闭环不代表公开 PA split 已开放；提交后立即停止。
+
+### 唯一下一步 M10c7b：BSND PA 显式 split 生产接入
+
+在已闭环 v23 与 PA Copy、显式 partial/merge 数值组件上，接通 BSND Q + ND PA KV、512+64、双 dtype、显式 S=2..256 的完整可调用行为。范围包含无 mask、右下 causal/window、Q allocation/used、实际 KV 长度及合法 Q/qv/cache/page-table stride；自动 split 和 TND PA split 继续拒绝。
+
+- 改动与影响：在 FA3 910 MLA 目录接入 v23 AICPU、host 静态预算与调用描述、PA partial 和独立 merge/init 发射、双 dtype 实例及生产/Python/C++ real/fake/compile。优先复用已有页 Copy、任务环与显式归并；每次和每阶段在写入/同步前校验逻辑记录、当前长度、页表和物理 cache，不把原始页号、地址或 stride 固定到 metadata。保留原 Q allocation 行地址、跨波持久槽与真实 FP32 accumulator；共享 Kernel/Block/Tile、构建/调度/地址改动全部纳入影响范围。
+- 新增本模块单元与 `e2e/split_paged_bsnd/` 专项，并在 `regression_cases.py` 注册公开能力的日常小输入 E2E。固定源 PA partial/归并和独立双数学覆盖双 dtype、三 mask、页大小代表边界、非 512 因子/大于 512、尾页/跨页、空片/全空、S=2..256、跨波及真实 accumulator；源不支持的表示域单列，不能以旧无 mask 或非 PA 用例替代新增能力。
+- 实施前固定具体路径、测试组和命令；统一入口先 dry-run/collect-only，先工具、代表及最大内存/最长 reference 成本检查，固定实现后运行所属单元、必要协议/sanitizer、新公开专项、真实 release Trap、生命周期/失败恢复、累计 E2E、相关 ordinary 回归与限量平均公开性能。公开性能含页表/cache 转换和分配，保持既有 R/计时/数学阈值，适用配置平均比值 ≤1。
+- 基线与完成：核对本 status 的完整源码、构建、加载与 E2E 原始证据；只继承依赖未变且完整有效的 E2E 正确性。共享路径变化则实际运行相关 E2E，数学 reference 按内容复用。v23 生成/消费、设备真实 O/LSE/accumulator、公开契约/拒绝边界及必要性能全部通过后更新 design/plan/status、质量检查并提交一次，不扩展到 PA 自动或 TND 布局。
+
 ## 后续里程碑：M10–M17
 
 **下表每行是能力里程碑，不是一个无头轮次或一个提交。**临近该阶段时根据已闭环组件和实际影响细化当前步，同时保留下一步；不现在为所有远期任务固定文件、测试数量或提交数。细化采用与 M08 相同的规则：新算法先独立验收，稳定布局接入一次闭环。实现和必要的测试/对照驱动一起交付，基础精度、普通回归与生命周期不推迟到阶段末。
 
 | 里程碑 | 依赖与建议提交边界 | 阶段完成条件 |
 | --- | --- | --- |
-| M10：512+64 split-KV | M10a CPU 分区/布局、M10b1 partial attention、M10b2 FD 归并、M10c1a 跨波任务/持久地址和 M10c1b BSND 显式生产、M10c2a 原生自动任务/归约计划、M10c2b1 v18 安全协议和 M10c2b2 BSND 自动生产、M10c3a TND 显式任务/持久布局、M10c3b TND 显式生产、M10c4a TND 原生自动任务/持久布局、M10c4b1 v20 安全协议、M10c4b2 TND 自动生产、M10c5a 混合显式计划/v21 协议、M10c5b 混合显式生产、M10c6a 混合原生自动计划/v22 协议及 M10c6b 混合自动生产已完成；接着 M10c7a BSND PA 显式计划/协议，再按可调用行为完成 PA 显式/自动及 TND 布局，不把完整 split 迁移作为一轮 | 自动/1/显式 split、空分片/全空、O/LSE/accumulator/metadata 及已支持 mask 组合；长 KV E2E |
+| M10：512+64 split-KV | M10a CPU 分区/布局、M10b1 partial attention、M10b2 FD 归并、M10c1a 跨波任务/持久地址和 M10c1b BSND 显式生产、M10c2a 原生自动任务/归约计划、M10c2b1 v18 安全协议和 M10c2b2 BSND 自动生产、M10c3a TND 显式任务/持久布局、M10c3b TND 显式生产、M10c4a TND 原生自动任务/持久布局、M10c4b1 v20 安全协议、M10c4b2 TND 自动生产、M10c5a 混合显式计划/v21 协议、M10c5b 混合显式生产、M10c6a 混合原生自动计划/v22 协议、M10c6b 混合自动生产及 M10c7a BSND PA 显式计划/v23 协议已完成；接着 M10c7b BSND PA 显式生产，再按可调用行为完成 PA 自动及 TND 布局，不把完整 split 迁移作为一轮 | 自动/1/显式 split、空分片/全空、O/LSE/accumulator/metadata 及已支持 mask 组合；长 KV E2E |
 | M11：192/128 BSND prefill | 这是新数值表示；先验证独立 K/V、分组头及 192 stride 数值组件，再完成 BSND metadata/生产/公开接入 | qv=None、源通用非量化路径、GQA、真实 stride、O/LSE 和适用 E2E |
 | M12：prefill TND/长度 | 复用 M11 数值；TND varlen 和混合 cache 按可调用行为接入，各自同时覆盖 allocation/used 与 stride | 非均匀长度、seqused、空值/边界/GQA、生产精度和适用 E2E |
 | M13：prefill PA | 复用已有页寻址；BSND PA、TND PA 各自接通 metadata/生产/入口，避免按 Copy/host/API 重复拆层 | 合法 P 的代表边界、内容/RoPE 的真实 stride、长度/复用/生命周期、精度及 PA E2E |
@@ -340,6 +358,7 @@ M10a 已交付独立调度/布局组件，设备 partial attention 与合并数�
 | M10c5b | 非 PA TND Q + BSND KV 显式 2..256、v21 公开 prefix/AICPU、共享 partial/merge 的 BSND KV stride、紧凑预算与真实 FP32 accumulator、公开 real/fake/compile；本模块 CPU/sanitizer、固定源/双数学、公开/Trap/生命周期、累计 E2E、普通 FA3 与适用平均公开性能 |
 | M10c6a | 非 PA TND Q + BSND KV 原生 AIC/FD/Vector 计划与 v22 构造/独立消费；复用紧凑 Q 与 64 位 KV 起点、三种 mask、Direct/Partial/Empty、宽任务号与 accumulator 溢出；本模块固定源/边界、普通/ASan/UBSan、工具、重建后的累计 E2E；尚未接通混合自动生产 |
 | M10c6b | 非 PA TND Q + BSND KV 原生自动 split、v22 安全 prefix/AICPU、共享 init/partial/merge 的独立 KV 布局、紧凑预算与真实 FP32 accumulator、公开 real/fake/compile；本模块协议/sanitizer、固定源/双数学、公开/Trap/生命周期、累计 E2E、普通 FA3 与含原生 FD 的平均公开性能 |
+| M10c7a | BSND Q + ND PA KV 显式 split CPU 计划、独立静态预算与 v23 构造/消费/查询；三 mask、页几何/有效页校验、原 allocation 地址、宽任务号及 accumulator/持久槽溢出；固定源/独立边界、普通/ASan/UBSan、工具与重建后的累计 E2E；尚未接入 AICPU/设备或公开 PA split |
 | 测试整理与精简 | 模块所属单元测试、明确的小输入日常 E2E 与共享支持目录；代表组合取代默认数量截断，穷举显式开启、仅继承 E2E；外部产物和可重建原生对照，build 仅保留无头日志与状态 |
 
 M07 的页大小精度覆盖全部 16..1024 的 16 倍数；性能矩阵及原生非 FD/FD 的边界见 [design 7.1](design.md#71-固定性能矩阵与阶段边界)。公开接入包含 None/整数/tensor KV 长度、v6 复用及相关 MLA/普通 FA3 回归，结果只在 status 维护。

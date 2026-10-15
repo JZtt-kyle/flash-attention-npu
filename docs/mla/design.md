@@ -820,6 +820,19 @@ M10c5a 独立闭环 CPU 构造/计划及共享校验协议，M10c5b 的生产适
 
 [`固定性能集合`](../../tests/mla/support/mla_auto_split_mixed_cases.py) 覆盖长 KV、跨 M、空 used、独立 stride 和 Direct 临时槽复用，双 dtype、隐式/生成/复用各 R=1/4。保留 5 次预热、5×20 wall、完成同步及原生 packing/restoration 计时边界；原生 FD 和非 FD 同纳入配置内/配置间等权平均，原生空模板按既有约定单列。profile 独立验证 AICPU→init→partial→merge 的顺序、dtype、设备、完整阶段与实际加载身份。
 
+#### 6.2.25 BSND PA 显式 split 计划与 v23 安全协议
+
+[M10c7a 计划](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_paged_bsnd_plan.h) 独立组合 BSND Q + ND PA KV、512+64、显式 `S=2..256` 的 CPU 任务和持久布局。复用固定 CANN PA 源几何、有效长度解析与无 split 调度证书，显式片段复用固定 FA3 分片和现有三种 mask 范围；原生自动 FD 不改写成均匀显式分片。本步仅交付 CPU 计划及可由 CPU/AICore 共用的校验/查询头文件；尚未接入 AICPU、设备 partial/merge 或公开 PA split，公开仍明确要求 `num_splits=1`。
+
+- 页大小 P 为 16..1024 的 16 倍数，逻辑容量 C 为 0..16384 且为 P 的整数倍。记录分别保存 C 和源 `ceil(max(KV-used)/P)*P` 调度上界；基本 N 先按 P 调整（例如 P=112 得到 448，P=528 保留 512），再截短到源上界。分片以有效长度和原 Q 几何求三 mask 的逻辑 token 范围，不能将物理页池容量或压紧后的 Q 长度代替它们。
+- 任务 prefix 按有效 Q 的 M 块累计，全部用 uint64；任务 `g*S+s` 和 merge `g` 分别以 AIC 数与两倍 AIC 数循环分核。持久槽为 `[compact M, S, M row, 512/8]`，跨波不复用；必须等所有 partial 写完再归并。零 Q-used 无任务，单个零 KV 或全遮罩 M 仍有空分片初始化所有者；全零有效 KV 的源空证书使用 M=256、容量对应 N 作为显式初始化几何。B、Q 容量或 C 为零时无任务/workspace，但 FP32 accumulator shape/stride 仍须验证。
+- 静态预算独立于当次长度：M 块数上界 `B*ceil(Qcap*H/128)`，持久行数上界 `B*ceil(Qcap*H/256)*S*256`，两者分别限制任务数与字节数。源允许 M=256 的尾块，其他 M 必须为容量行数的 128..256 因子，故后一个上界覆盖每种有效 M。scratch 按 M=256、容量对应 PA N 保守预留；当次计划仍给出实际 M/N 的偏移。FP32 accumulator 为 `[S,B,H,Qcap,512]` / `[S,B,H,Qcap]`，独立检查 int64 stride/字节溢出；Q-used 不移动原 allocation 的 O/LSE/accumulator 行地址。
+- [v23 构造](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_paged_bsnd_metadata.h) 使用 `414+7*B` 个 int32：v6 的 408 字 prefix 与 B 个五字 span，追加 `window(kind,left,right)`、S 与 B+1 个低/高 uint64 M prefix。生产和独立消费者分别重建前缀与预算。输出描述符错误或输入/输出重叠返回 false 并保留输出；可安全写入的失败返回完整失败 header 并清空其余 payload；计划/查询/消费者失败均不修改目标对象。
+- [独立消费者](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_paged_bsnd_consumer.h) 先检查真实 v23 header，再通过 v6 schema view 校验逻辑几何、完整分配/used/长度、平台、源端点及 workspace；另外校验窗口/S、静态资源和宽 M prefix，任务查询独立二分定位 batch。版本、P/C、长度或 mask 变化均需重新生成 metadata。v6 的无 mask 调度证书不决定显式任务所有权，v23 prefix 覆盖所有有效 M。
+- 记录不绑定页号、物理 cache 地址/页池、stride 或 scale。消费者必须每次接收完整物理描述并校验所有有效页，即使 Q-used 为零或 mask 全遮罩；页表 padding 不读。合法的重排页表可复用逻辑记录；非法页号和不足的 backing span 必须拒绝。后续设备路径须在写入/同步前完成这些检查，保证记录、长度、页表和输入在调用期间稳定，并逐页 Copy，不能只检查 fragment 首尾页。
+
+[本模块单元](../../tests/mla/unit/split_paged_bsnd_protocol/test_plan.py) 重新编译固定源 PA tiling、mask/workspace 与 FA3 分片/accumulator 片段，独立枚举行、页、分片和原 allocation 地址；[协议单元](../../tests/mla/unit/split_paged_bsnd_protocol/test_metadata.py) 覆盖双 dtype、三 mask、尾页/跨页、空容量/全空/used、损坏记录/页描述符、静态预算与宽任务号。普通和 ASan/UBSan 使用同一集合。该 CPU 证据不代表 PA split 数值、Trap 或公开性能已验收。
+
 ### 6.3 长度与布局调度
 
 [`BuildDenseSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.cpp) 处理整容量 BSND；以下入口复用同一 `detail/cann_split_core.*`，由 host/CPU 驱动与相应 AICPU 生成器编译同一源码。长度先完整校验，再数值转换为固定源格式；分配起点与 used 分别处理。记录格式见 [第 5 节](#5-metadata-设计)。
