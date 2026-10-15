@@ -385,6 +385,42 @@ def flash_attn_varlen_func(
 
 ### FlashAttention v3
 
+#### Compressed MLA on Ascend 910B/C
+
+The three v3 entry points accept compressed MLA with `q/k` head dimension 64,
+`qv/v` head dimension 512 and one KV head. `q` and `k` contain the RoPE components;
+`qv` is query content and `v` is shared content K/V. Scores are
+`(q @ k.T + qv @ v.T) * softmax_scale`; the default scale is `1 / sqrt(576)`.
+The output has dimension 512. MLA is forward-only and rejects tensors requiring gradients.
+
+Use `flash_attn_func` for BSND, `flash_attn_varlen_func` for packed TND, and
+`flash_attn_with_kvcache` for read-only dense or paged caches with BSND/TND queries.
+The cache entry rejects KV appends, rotary inputs and cache remapping. FP16/BF16,
+causal and window masks are supported. `num_splits` defaults to 1 for func/varlen
+and 0 (automatic) for cache. Paged TND currently requires an explicit value in
+1..256. `softcap=0`, `attention_chunk=0`, `pack_gqa=None`, `sm_margin=0` and
+`rotary_interleaved=True` are required; 192/128 prefill remains unsupported.
+See the [MLA contract](docs/mla/design.md#2-fa3-入口与后端边界) for layout, page-size,
+length and empty-output rules, and [status](docs/mla/status.md) for validation limits.
+The general attention constraints below apply to ordinary attention; MLA uses this contract.
+
+```python
+import torch
+from flash_attn_npu_3 import flash_attn_func
+
+q = torch.randn(1, 2, 4, 64, device="npu", dtype=torch.float16)
+k = torch.randn(1, 16, 1, 64, device="npu", dtype=torch.float16)
+qv = torch.randn(1, 2, 4, 512, device="npu", dtype=torch.float16)
+v = torch.randn(1, 16, 1, 512, device="npu", dtype=torch.float16)
+out, lse = flash_attn_func(q, k, v, qv=qv, return_attn_probs=True)
+assert out.shape == (1, 2, 4, 512) and lse.shape == (1, 4, 2)
+```
+
+`return_attn_probs=True` returns `(out, lse)` for func/varlen. The cache entry's
+`return_softmax_lse=True` returns `(out, lse, out_accum, lse_accum)`; the last two
+are empty for a single split and contain FP32 partial results for split execution.
+Without these flags, each entry returns only `out`.
+
 #### flash_attn_with_kvcache
 
 ```python
@@ -424,7 +460,7 @@ def flash_attn_with_kvcache(
     v3 version of the KV cache interface, with more features compared to v2.
 
     If k and v are not None, k_cache and v_cache will be updated *in-place* with the new values
-    from k and v. This is useful for incremental decoding.
+    from k and v. This is useful for incremental decoding in ordinary attention; MLA caches are read-only.
 
     Multi-query and grouped-query attention (MQA/GQA) are supported.
 
@@ -438,7 +474,7 @@ def flash_attn_with_kvcache(
         q: (batch_size, seqlen, nheads, headdim)
         k_cache: If no page_table, shape (batch_size_cache, seqlen_cache, nheads_k, headdim);
             if page_table (i.e., paged KV cache), shape (num_blocks, page_block_size, nheads_k, headdim)
-            page_block_size can be any value (e.g., 1, 2, 3, 64, etc).
+            For ordinary attention, page_block_size can be any value; MLA uses the linked page-size rules.
         v_cache: If no page_table, shape (batch_size_cache, seqlen_cache, nheads_k, headdim_v);
             if page_table, shape (num_blocks, page_block_size, nheads_k, headdim_v).
         k [optional]: (batch_size, seqlen_new, nheads_k, headdim). If not None, concatenate k to k_cache
@@ -456,7 +492,8 @@ def flash_attn_with_kvcache(
         max_seqlen_q [optional]: Maximum query sequence length in ragged mode.
         rotary_seqlens [optional]: Sequence lengths for rotary positional embedding.
         q_descale, k_descale, v_descale: Optional dequantization scales for FP8 quantization.
-        softmax_scale: float. The scaling of QK^T before applying softmax. Default to 1 / sqrt(headdim).
+        softmax_scale: float. Scales q @ k.T + qv @ v.T with qv, otherwise q @ k.T.
+            Defaults to 1 / sqrt(headdim + headdim_v) with qv, otherwise 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask.
         window_size: (left, right). If not (-1, -1), implements sliding window local attention.
         attention_chunk: int. Attention chunk size.
@@ -481,8 +518,9 @@ def flash_attn_with_kvcache(
         - No backward pass.
 
     Returns:
-        out: (batch_size, seqlen, nheads, headdim).
-        softmax_lse [optional]: (batch_size, nheads, seqlen). The logsumexp of each row of QK^T * scaling.
+        out: (batch_size, seqlen, nheads, headdim_v).
+        With return_softmax_lse=True, returns (out, softmax_lse, out_accum, softmax_lse_accum).
+        softmax_lse [optional]: (batch_size, nheads, seqlen). FP32 row logsumexp, including the qv contribution when supplied.
     """
 ```
 
@@ -534,8 +572,9 @@ def flash_attn_func(
     Arguments:
         q: (batch_size, seqlen, nheads, headdim)
         k: (batch_size, seqlen, nheads_k, headdim)
-        v: (batch_size, seqlen, nheads_k, headdim)
-        softmax_scale: float. The scaling of QK^T before applying softmax. Default to 1 / sqrt(headdim).
+        v: (batch_size, seqlen, nheads_k, headdim_v)
+        softmax_scale: float. Scales q @ k.T + qv @ v.T with qv, otherwise q @ k.T.
+            Defaults to 1 / sqrt(headdim + headdim_v) with qv, otherwise 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask (e.g., for autoregressive modeling).
         qv [optional]: (batch_size, seqlen, nheads, headdim_v).
         q_descale, k_descale, v_descale: Optional dequantization scales for FP8 quantization.
@@ -547,7 +586,7 @@ def flash_attn_func(
         pack_gqa: bool. Whether to pack GQA for better performance.
         deterministic: bool. Whether to use the deterministic implementation of the backward pass.
         sm_margin: int. SM margin for tuning.
-        return_attn_probs: bool. Whether to return the attention probabilities. This option is for testing only.
+        return_attn_probs: bool. Returns (out, softmax_lse) when True.
 
     Constraints:
         - 1 <= headdim <= 256.
@@ -560,9 +599,9 @@ def flash_attn_func(
         - Backward: headdim in (0, 256]; Q and K must share the same headdim; seqused_* not supported in bwd.
 
     Returns:
-        out: (batch_size, seqlen, nheads, headdim).
+        out: (batch_size, seqlen, nheads, headdim_v).
         softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen).
-            The logsumexp of each row of QK^T * scaling.
+            FP32 row logsumexp, including the qv contribution when supplied.
     """
 ```
 
@@ -608,14 +647,15 @@ def flash_attn_varlen_func(
     Arguments:
         q: (total_q, nheads, headdim), where total_q is the total number of query tokens in the batch.
         k: (total_k, nheads_k, headdim), where total_k is the total number of key tokens in the batch.
-        v: (total_k, nheads_k, headdim), where total_k is the total number of value tokens in the batch.
+        v: (total_k, nheads_k, headdim_v), where total_k is the total number of value tokens in the batch.
         cu_seqlens_q: (batch_size + 1,), dtype torch.int32. Cumulative sequence lengths used to index q.
         cu_seqlens_k: (batch_size + 1,), dtype torch.int32. Cumulative sequence lengths used to index k, v.
         max_seqlen_q: int. Maximum query sequence length in the batch.
         max_seqlen_k: int. Maximum key sequence length in the batch.
         seqused_q [optional]: Actual query sequence lengths used.
         seqused_k [optional]: Actual key sequence lengths used.
-        softmax_scale: float. The scaling of QK^T before applying softmax. Default to 1 / sqrt(headdim).
+        softmax_scale: float. Scales q @ k.T + qv @ v.T with qv, otherwise q @ k.T.
+            Defaults to 1 / sqrt(headdim + headdim_v) with qv, otherwise 1 / sqrt(headdim).
         causal: bool. Whether to apply causal attention mask.
         qv [optional]: Additional query value tensor.
         q_descale, k_descale, v_descale: Optional dequantization scales for FP8 quantization.
@@ -626,7 +666,7 @@ def flash_attn_varlen_func(
         pack_gqa: bool. Whether to pack GQA for better performance.
         deterministic: bool. Whether to use the deterministic implementation of the backward pass.
         sm_margin: int. SM margin for tuning.
-        return_attn_probs: bool. Whether to return the attention probabilities. This option is for testing only.
+        return_attn_probs: bool. Returns (out, softmax_lse) when True.
 
     Constraints:
         - 1 <= headdim <= 256.
@@ -641,9 +681,9 @@ def flash_attn_varlen_func(
         - Backward: headdim in (0, 256]; Q and K must share the same headdim; seqused_* not supported in bwd.
 
     Returns:
-        out: (total_q, nheads, headdim).
+        out: (total_q, nheads, headdim_v).
         softmax_lse [optional, if return_attn_probs=True]: (nheads, total_q).
-            The logsumexp of each row of QK^T * scaling.
+            FP32 row logsumexp, including the qv contribution when supplied.
     """
 ```
 

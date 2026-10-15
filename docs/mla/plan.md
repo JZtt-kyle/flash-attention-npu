@@ -2,7 +2,18 @@
 
 本页只记录实施顺序、产物和完成条件。功能基线为 **M10c9b TND PA 显式 split 生产接入已完成**；M10 尚未阶段收尾。当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
 
-## 唯一下一步 M10c10：TND PA 原生自动 split 完整接入
+## 唯一下一步 R2：测试公共依赖整理
+
+R1 已完成前向入口收敛。按用户确认的顺序，先消除测试公共层对具体测试模块的反向依赖，再处理 R3 内核配置可读性，之后恢复 M10c10。源码组织继续参照固定 FA3/CANN；共用 reference、输入映射和执行器按职责集中，测试文件负责用例与断言。
+
+- 影响路径：`tests/mla/support/` 及消费这些 helper 的 `unit/`、`e2e/`。接手时列出实际移出的 helper、归属和调用者，保留原来源声明；固定源、种子、参数、数学阈值、计时边界和用例选择保持原语义。
+- 实现前在此补齐实际文件和必要的独立 helper 用例。先验证抽取前后函数行为、命令/收集集合、错误传播和证据依赖；共享 reference、构建/发射或计时路径有实际行为变化时，明确受影响专项并实测。
+- 必跑基线：`python3 -m tests.mla --suite tools e2e ordinary --device 6 --output /tmp/mla-test-dependencies/repro`，先 dry-run/collect-only。工具检查覆盖归属、依赖闭包和失效；E2E 覆盖调用和 reference 组合。根据实际依赖判断 R1 证据可否继承，不累计重跑历史组件单元；性能只在影响调用/发射/计时时补适用集合。
+- 完成条件：`support` 不再从具体 `test_*.py` 取公共实现，现有用例及证据规则完整保留，相关验证、文档和质量检查通过；原有无头循环修复继续隔离，一次提交后停止。
+
+R3 须先对照固定 CANN Kernel/Block 与 CATLASS 模板的真实组织方式，再决定共享内核配置的命名和类型边界；保留源数值与流水，不把普通整理扩展为算法重写。
+
+## 待恢复 M10c10：TND PA 原生自动 split 完整接入
 
 原 M10c10a/b 合为一次可调用行为提交：512+64、Hkv=1、FP16/BF16 的 TND Q + ND PA KV 支持 `num_splits=0`，覆盖无 mask、右下 causal/window、公开 cache/metadata 与真实 accumulator。当前尚未实现，完成验收前继续明确拒绝自动值。
 
@@ -48,6 +59,7 @@
 | M10c7a–M10c8b | BSND Q + ND PA KV 显式/原生自动计划与 v23/v24、页校验、生产 cache/metadata 与真实 accumulator |
 | M10c9a–M10c9b | TND Q + ND PA KV 显式紧凑计划、v25 安全协议、三阶段生产、公开 cache/metadata 和真实 TND accumulator |
 | 验收工具整理 | 统一入口、构建/reference 缓存和 E2E 证据恢复；模块单元/日常 E2E/专项归属、代表组合与显式穷举、仓库外产物及原生对照构建 |
+| R1：前向入口收敛 | 三个公开 MLA 前向共用适配，real/fake split 共用分派；参数名错误提示、双语调用说明、日常接口回归和 100 配置公开性能验收 |
 
 ```bash
 git log --oneline -- docs/mla/status.md

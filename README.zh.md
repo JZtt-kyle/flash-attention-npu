@@ -376,6 +376,38 @@ def flash_attn_varlen_func(
 
 ### FlashAttention v3
 
+#### Ascend 910B/C 的压缩 MLA
+
+三个 v3 入口均可传入压缩 MLA：`q/k` 的头维度为 64，`qv/v` 为 512，KV 头数为 1。
+`q/k` 表示已经形成的 RoPE 分量，`qv` 是 query 内容，`v` 是共享的内容 K/V。
+分数为 `(q @ k.T + qv @ v.T) * softmax_scale`，默认 scale 为 `1 / sqrt(576)`，
+输出末维为 512。MLA 仅支持前向，会拒绝需要梯度的输入。
+
+BSND 使用 `flash_attn_func`，紧凑 TND 使用 `flash_attn_varlen_func`；
+`flash_attn_with_kvcache` 接收 BSND/TND query 及只读的普通或分页 cache，
+拒绝追加 KV、rotary 输入及 cache 重映射。支持 FP16/BF16、causal 和 window。
+func/varlen 的 `num_splits` 默认 1，cache 默认 0（自动）；分页 TND 当前须显式传 1..256。
+要求 `softcap=0`、`attention_chunk=0`、`pack_gqa=None`、`sm_margin=0`、
+`rotary_interleaved=True`；192/128 prefill 尚未接通。
+布局、页大小、长度和空值规则见 [MLA 契约](docs/mla/design.md#2-fa3-入口与后端边界)，
+实测边界见 [status](docs/mla/status.md)。下文通用约束用于普通 attention，MLA 以此契约为准。
+
+```python
+import torch
+from flash_attn_npu_3 import flash_attn_func
+
+q = torch.randn(1, 2, 4, 64, device="npu", dtype=torch.float16)
+k = torch.randn(1, 16, 1, 64, device="npu", dtype=torch.float16)
+qv = torch.randn(1, 2, 4, 512, device="npu", dtype=torch.float16)
+v = torch.randn(1, 16, 1, 512, device="npu", dtype=torch.float16)
+out, lse = flash_attn_func(q, k, v, qv=qv, return_attn_probs=True)
+assert out.shape == (1, 2, 4, 512) and lse.shape == (1, 4, 2)
+```
+
+func/varlen 的 `return_attn_probs=True` 返回 `(out, lse)`；cache 的
+`return_softmax_lse=True` 返回 `(out, lse, out_accum, lse_accum)`，后两项在单 split
+时为空，在 split 执行时是真实的 FP32 分片结果。不开启返回开关时均只返回 `out`。
+
 #### flash_attn_with_kvcache
 
 ```python
@@ -415,7 +447,7 @@ def flash_attn_with_kvcache(
     v3 版本的 KV 缓存接口，相比 v2 增加了更多功能。
 
     如果 k 和 v 不为 None，k_cache 和 v_cache 将被 *原地更新* 为 k 和 v 的新值。
-    这对于增量解码非常有用。
+    这适用于普通 attention 的增量解码；MLA cache 只读。
 
     支持多查询注意力和分组查询注意力（MQA/GQA）。
 
@@ -429,7 +461,7 @@ def flash_attn_with_kvcache(
         q: (batch_size, seqlen, nheads, headdim)
         k_cache: 如果没有 page_table，形状为 (batch_size_cache, seqlen_cache, nheads_k, headdim)；
             如果有 page_table（即分页 KV 缓存），形状为 (num_blocks, page_block_size, nheads_k, headdim)
-            page_block_size 可以是任意值（如 1, 2, 3, 64 等）。
+            普通 attention 的 page_block_size 可为任意值；MLA 须满足上方链接的页大小规则。
         v_cache: 如果没有 page_table，形状为 (batch_size_cache, seqlen_cache, nheads_k, headdim_v)；
             如果有 page_table，形状为 (num_blocks, page_block_size, nheads_k, headdim_v)。
         k [可选]: (batch_size, seqlen_new, nheads_k, headdim)。如果不为 None，从 cache_seqlens 指定的位置开始拼接到 k_cache。
@@ -446,7 +478,8 @@ def flash_attn_with_kvcache(
         max_seqlen_q [可选]: 变长模式下的最大 query 序列长度。
         rotary_seqlens [可选]: 旋转位置编码的序列长度。
         q_descale, k_descale, v_descale: 可选，用于 FP8 量化的反缩放因子。
-        softmax_scale: float。softmax 前对 QK^T 的缩放。默认为 1 / sqrt(headdim)。
+        softmax_scale: float。有 qv 时缩放 q @ k.T + qv @ v.T，否则缩放 q @ k.T。
+            有 qv 时默认为 1 / sqrt(headdim + headdim_v)，否则为 1 / sqrt(headdim)。
         causal: bool。是否应用因果注意力掩码。
         window_size: (left, right)。如果 != (-1, -1)，实现滑动窗口局部注意力。
         attention_chunk: int。注意力分块大小。
@@ -471,8 +504,9 @@ def flash_attn_with_kvcache(
         - 不支持反向传播。
 
     返回：
-        out: (batch_size, seqlen, nheads, headdim)。
-        softmax_lse [可选]: (batch_size, nheads, seqlen)。QK^T * scaling 的每行 logsumexp。
+        out: (batch_size, seqlen, nheads, headdim_v)。
+        return_softmax_lse=True 时返回 (out, softmax_lse, out_accum, softmax_lse_accum)。
+        softmax_lse [可选]: (batch_size, nheads, seqlen)。FP32 每行 logsumexp，有 qv 时包含其贡献。
     """
 ```
 
@@ -522,8 +556,9 @@ def flash_attn_func(
     参数：
         q: (batch_size, seqlen, nheads, headdim)
         k: (batch_size, seqlen, nheads_k, headdim)
-        v: (batch_size, seqlen, nheads_k, headdim)
-        softmax_scale: float。softmax 前对 QK^T 的缩放。默认为 1 / sqrt(headdim)。
+        v: (batch_size, seqlen, nheads_k, headdim_v)
+        softmax_scale: float。有 qv 时缩放 q @ k.T + qv @ v.T，否则缩放 q @ k.T。
+            有 qv 时默认为 1 / sqrt(headdim + headdim_v)，否则为 1 / sqrt(headdim)。
         causal: bool。是否应用因果注意力掩码（例如用于自回归建模）。
         qv [可选]: (batch_size, seqlen, nheads, headdim_v)。
         q_descale, k_descale, v_descale: 可选，用于 FP8 量化的反缩放因子。
@@ -535,7 +570,7 @@ def flash_attn_func(
         pack_gqa: bool。是否打包 GQA 以提高性能。
         deterministic: bool。是否使用反向传播的确定性实现。
         sm_margin: int。SM 边际，用于调优。
-        return_attn_probs: bool。是否返回注意力概率。此选项仅用于测试。
+        return_attn_probs: bool。为 True 时返回 (out, softmax_lse)。
 
     约束：
         - 1 <= headdim <= 256。
@@ -548,7 +583,7 @@ def flash_attn_func(
         - 反向：headdim 须在 (0, 256]；Q 与 K 的 headdim 须相同；反向暂不支持 seqused_*。
 
     返回：
-        out: (batch_size, seqlen, nheads, headdim)。
+        out: (batch_size, seqlen, nheads, headdim_v)。
         softmax_lse [可选，return_attn_probs=True 时]: (batch_size, nheads, seqlen)。
             QK^T * scaling 每行的 logsumexp。
     """
@@ -595,14 +630,15 @@ def flash_attn_varlen_func(
     参数：
         q: (total_q, nheads, headdim)，total_q 为批次中 query token 总数。
         k: (total_k, nheads_k, headdim)，total_k 为批次中 key token 总数。
-        v: (total_k, nheads_k, headdim)，total_k 为批次中 value token 总数。
+        v: (total_k, nheads_k, headdim_v)，total_k 为批次中 value token 总数。
         cu_seqlens_q: (batch_size + 1,)，dtype 为 torch.int32。用于索引 q 的累积序列长度。
         cu_seqlens_k: (batch_size + 1,)，dtype 为 torch.int32。用于索引 k、v 的累积序列长度。
         max_seqlen_q: int。批次中最大 query 序列长度。
         max_seqlen_k: int。批次中最大 key 序列长度。
         seqused_q [可选]: 实际使用的 query 序列长度。
         seqused_k [可选]: 实际使用的 key 序列长度。
-        softmax_scale: float。softmax 前对 QK^T 的缩放。默认为 1 / sqrt(headdim)。
+        softmax_scale: float。有 qv 时缩放 q @ k.T + qv @ v.T，否则缩放 q @ k.T。
+            有 qv 时默认为 1 / sqrt(headdim + headdim_v)，否则为 1 / sqrt(headdim)。
         causal: bool。是否应用因果注意力掩码。
         qv [可选]: 额外的 query value 张量。
         q_descale, k_descale, v_descale: 可选，用于 FP8 量化的反缩放因子。
@@ -613,7 +649,7 @@ def flash_attn_varlen_func(
         pack_gqa: bool。是否打包 GQA 以提高性能。
         deterministic: bool。是否使用反向传播的确定性实现。
         sm_margin: int。SM 边际，用于调优。
-        return_attn_probs: bool。是否返回注意力概率。此选项仅用于测试。
+        return_attn_probs: bool。为 True 时返回 (out, softmax_lse)。
 
     约束：
         - 1 <= headdim <= 256。
@@ -628,7 +664,7 @@ def flash_attn_varlen_func(
         - 反向：headdim 须在 (0, 256]；Q 与 K 的 headdim 须相同；反向暂不支持 seqused_*。
 
     返回：
-        out: (total_q, nheads, headdim)。
+        out: (total_q, nheads, headdim_v)。
         softmax_lse [可选，return_attn_probs=True 时]: (nheads, total_q)。
             QK^T * scaling 每行的 logsumexp。
     """

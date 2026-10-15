@@ -251,22 +251,22 @@ def _check_mla_dense_options(
     optional_tensors=(),
     allow_split=False,
 ):
-    if any(t is not None for t in optional_tensors) or not rotary_interleaved:
+    if any(t is not None for t in optional_tensors):
         raise RuntimeError(
             "MLA compressed forward is not implemented yet for optional tensors or length/rotary options"
         )
-    if (
-        (causal and not allow_causal)
-        or (window_size != (-1, -1) and not allow_window)
-        or attention_chunk != 0
-        or softcap != 0.0
-        or (num_splits != 1 and not (allow_split and 0 <= num_splits <= 256))
-        or pack_gqa is not None
-        or sm_margin != 0
+    for name, unsupported in (
+        ("causal", causal and not allow_causal),
+        ("window_size", window_size != (-1, -1) and not allow_window),
+        ("attention_chunk", attention_chunk != 0),
+        ("softcap", softcap != 0.0),
+        ("num_splits", num_splits != 1 and not (allow_split and 0 <= num_splits <= 256)),
+        ("pack_gqa", pack_gqa is not None),
+        ("sm_margin", sm_margin != 0),
+        ("rotary_interleaved", not rotary_interleaved),
     ):
-        raise RuntimeError(
-            "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options"
-        )
+        if unsupported:
+            raise RuntimeError(f"MLA compressed forward is not implemented yet for {name}")
     # The fake/real op validates scale inside the dispatcher. A symbolic Python
     # float cannot be passed to math.isfinite while tracing the public wrapper.
     if (
@@ -1396,6 +1396,286 @@ def _mla_tnd_bsnd_forward_fake(
     )
 
 
+def _mla_split_forward(
+    q,
+    k,
+    v,
+    qv,
+    *,
+    num_splits,
+    window_size=(-1, -1),
+    causal=False,
+    softmax_scale=None,
+    cu_seqlens_q=None,
+    cu_seqlens_k=None,
+    max_seqlen_q=None,
+    max_seqlen_k=None,
+    seqused_q=None,
+    seqused_k=None,
+    page_table=None,
+    scheduler_metadata=None,
+):
+    """Select the existing split operator; its registered fake uses the same route."""
+    ops = torch.ops.flash_attn_npu_3
+    options = dict(
+        num_splits=num_splits,
+        window_left=window_size[0],
+        window_right=window_size[1],
+        causal=causal,
+        softmax_scale=softmax_scale,
+        seqused_q=seqused_q,
+        scheduler_metadata=scheduler_metadata,
+    )
+    if page_table is not None:
+        if cu_seqlens_q is not None:
+            if max_seqlen_q is None:
+                raise RuntimeError("MLA: TND paged split requires max_seqlen_q")
+            return ops._mla_split_paged_tnd_forward(
+                q,
+                k,
+                v,
+                qv,
+                page_table,
+                cu_seqlens_q,
+                max_seqlen_q,
+                cache_seqlens=seqused_k,
+                **options,
+            )
+        return ops._mla_split_paged_bsnd_forward(
+            q,
+            k,
+            v,
+            qv,
+            page_table,
+            cache_seqlens=seqused_k,
+            **options,
+        )
+    if cu_seqlens_q is not None:
+        if cu_seqlens_k is not None:
+            return ops._mla_split_tnd_forward(
+                q,
+                k,
+                v,
+                qv,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                seqused_k=seqused_k,
+                **options,
+            )
+        return ops._mla_split_mixed_forward(
+            q,
+            k,
+            v,
+            qv,
+            cu_seqlens_q,
+            max_seqlen_q,
+            cache_seqlens=seqused_k,
+            **options,
+        )
+    return ops._mla_split_bsnd_forward(q, k, v, qv, cache_seqlens=seqused_k, **options)
+
+
+def _mla_forward(
+    q,
+    k,
+    v,
+    qv,
+    *,
+    softmax_scale=None,
+    causal=False,
+    window_size=(-1, -1),
+    num_splits=1,
+    cu_seqlens_q=None,
+    cu_seqlens_k=None,
+    max_seqlen_q=None,
+    max_seqlen_k=None,
+    seqused_q=None,
+    seqused_k=None,
+    page_table=None,
+    scheduler_metadata=None,
+    return_accumulators=False,
+    attention_chunk=0,
+    softcap=0.0,
+    pack_gqa=None,
+    sm_margin=0,
+    rotary_interleaved=True,
+    unsupported_options=(),
+):
+    """Shared forward-only adaptation of the three FA3 public entry points.
+
+    Follow pinned FA3 d15f153's public-wrapper/forward/backend boundary. NPU
+    operators own tensor validation and real/fake execution. Keep the existing
+    four-result cache operators to avoid extra Python device allocations.
+    """
+    for name, value in unsupported_options:
+        if value is not None:
+            raise RuntimeError(f"MLA compressed forward is not implemented yet for {name}")
+    if num_splits == 0 and page_table is not None and cu_seqlens_q is not None:
+        raise RuntimeError(
+            "MLA compressed forward is not implemented yet for num_splits=0 with TND paged KV"
+        )
+    _check_mla_dense_options(
+        softmax_scale=softmax_scale,
+        causal=causal,
+        allow_causal=True,
+        window_size=window_size,
+        allow_window=True,
+        num_splits=num_splits,
+        allow_split=True,
+        attention_chunk=attention_chunk,
+        softcap=softcap,
+        pack_gqa=pack_gqa,
+        sm_margin=sm_margin,
+        rotary_interleaved=rotary_interleaved,
+    )
+    if cu_seqlens_q is None and max_seqlen_q is not None:
+        raise RuntimeError(
+            "MLA compressed forward is not implemented yet for max_seqlen_q without cu_seqlens_q"
+        )
+    if page_table is not None and cu_seqlens_q is not None and max_seqlen_q is None:
+        raise RuntimeError("MLA: TND paged forward requires max_seqlen_q")
+    if cu_seqlens_k is None and isinstance(seqused_k, int):
+        # Integer convenience input needs valid geometry before creating
+        # its device tensor. Tensor/None lengths go straight to the op.
+        _check_mla_inputs(
+            q,
+            k,
+            v,
+            qv,
+            varlen_q=cu_seqlens_q is not None,
+            paged_kv=page_table is not None,
+        )
+        batch = k.shape[0]
+        if page_table is not None:
+            batch = _check_mla_paged_inputs(
+                q,
+                k,
+                page_table,
+                None,
+                scheduler_metadata,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                window_left=window_size[0],
+                window_right=window_size[1],
+                causal=causal,
+                num_splits=num_splits,
+            )
+        capacity = k.shape[1] * (page_table.shape[1] if page_table is not None else 1)
+        if not 0 <= seqused_k <= capacity:
+            raise RuntimeError("MLA: cache_seqlens must be between zero and KV capacity")
+        seqused_k = torch.full(
+            (batch,),
+            seqused_k,
+            dtype=torch.int32,
+            device=k.device,
+        )
+    if num_splits != 1:
+        result = _mla_split_forward(
+            q,
+            k,
+            v,
+            qv,
+            num_splits=num_splits,
+            window_size=window_size,
+            causal=causal,
+            softmax_scale=softmax_scale,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            seqused_q=seqused_q,
+            seqused_k=seqused_k,
+            page_table=page_table,
+            scheduler_metadata=scheduler_metadata,
+        )
+        return result if return_accumulators else result[:2]
+    ops = torch.ops.flash_attn_npu_3
+    cache_options = dict(
+        softmax_scale=softmax_scale,
+        cache_seqlens=seqused_k,
+        scheduler_metadata=scheduler_metadata,
+    )
+    if page_table is not None:
+        cache_options.update(causal=causal, window_left=window_size[0], window_right=window_size[1])
+        if cu_seqlens_q is not None:
+            out, lse = ops._mla_paged_tnd_forward(
+                q,
+                k,
+                v,
+                qv,
+                page_table,
+                cu_seqlens_q,
+                max_seqlen_q,
+                **cache_options,
+            )
+        else:
+            out, lse = ops._mla_paged_bsnd_forward(q, k, v, qv, page_table, **cache_options)
+    elif cu_seqlens_k is not None:
+        tnd_options = dict(softmax_scale=softmax_scale, seqused_q=seqused_q, seqused_k=seqused_k)
+        if window_size != (-1, -1):
+            out, lse = ops._mla_window_tnd_forward(
+                q,
+                k,
+                v,
+                qv,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                *window_size,
+                causal,
+                **tnd_options,
+            )
+        else:
+            op = ops._mla_causal_tnd_forward if causal else ops._mla_tnd_forward
+            out, lse = op(
+                q,
+                k,
+                v,
+                qv,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                **tnd_options,
+            )
+    elif cu_seqlens_q is not None:
+        if max_seqlen_q is None:
+            raise RuntimeError("MLA: mixed TND/BSND requires max_seqlen_q")
+        if window_size != (-1, -1):
+            op = (
+                ops._mla_window_mixed_cache
+                if return_accumulators
+                else ops._mla_window_mixed_forward
+            )
+            return op(
+                q, k, v, qv, cu_seqlens_q, max_seqlen_q, *window_size, causal, **cache_options
+            )
+        if causal:
+            op = (
+                ops._mla_causal_mixed_cache
+                if return_accumulators
+                else ops._mla_causal_mixed_forward
+            )
+            return op(q, k, v, qv, cu_seqlens_q, max_seqlen_q, **cache_options)
+        out, lse = ops._mla_tnd_bsnd_forward(
+            q, k, v, qv, cu_seqlens_q, max_seqlen_q, **cache_options
+        )
+    elif window_size != (-1, -1):
+        op = ops._mla_window_bsnd_cache if return_accumulators else ops._mla_window_bsnd_forward
+        return op(q, k, v, qv, *window_size, causal, **cache_options)
+    elif causal:
+        op = ops._mla_causal_bsnd_cache if return_accumulators else ops._mla_causal_bsnd_forward
+        return op(q, k, v, qv, **cache_options)
+    else:
+        out, lse = ops._mla_dense_forward(q, k, v, qv, **cache_options)
+    if return_accumulators:
+        return out, lse, torch.empty(0, device=out.device), torch.empty(0, device=out.device)
+    return out, lse
+
+
 @_torch_custom_op_wrapper(
     "flash_attn_npu_3::_flash_attn_forward", mutates_args=(), device_types="npu"
 )
@@ -1476,91 +1756,23 @@ def _flash_attn_forward(
             ),
         )
         if num_splits != 1:
-            if page_table is not None:
-                if cu_seqlens_q is not None:
-                    if max_seqlen_q is None:
-                        raise RuntimeError("MLA: TND paged split requires max_seqlen_q")
-                    return torch.ops.flash_attn_npu_3._mla_split_paged_tnd_forward(
-                        q,
-                        k,
-                        v,
-                        qv,
-                        page_table,
-                        cu_seqlens_q,
-                        max_seqlen_q,
-                        num_splits,
-                        window_size_left,
-                        window_size_right,
-                        causal,
-                        softmax_scale,
-                        seqused_k,
-                        seqused_q,
-                        scheduler_metadata,
-                    )
-                return torch.ops.flash_attn_npu_3._mla_split_paged_bsnd_forward(
-                    q,
-                    k,
-                    v,
-                    qv,
-                    page_table,
-                    num_splits,
-                    window_size_left,
-                    window_size_right,
-                    causal,
-                    softmax_scale,
-                    seqused_k,
-                    seqused_q,
-                    scheduler_metadata,
-                )
-            if cu_seqlens_q is not None and cu_seqlens_k is None:
-                return torch.ops.flash_attn_npu_3._mla_split_mixed_forward(
-                    q,
-                    k,
-                    v,
-                    qv,
-                    cu_seqlens_q,
-                    max_seqlen_q,
-                    num_splits,
-                    window_size_left,
-                    window_size_right,
-                    causal,
-                    softmax_scale,
-                    seqused_k,
-                    seqused_q,
-                    scheduler_metadata,
-                )
-            if cu_seqlens_q is not None:
-                return torch.ops.flash_attn_npu_3._mla_split_tnd_forward(
-                    q,
-                    k,
-                    v,
-                    qv,
-                    cu_seqlens_q,
-                    cu_seqlens_k,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    num_splits,
-                    window_size_left,
-                    window_size_right,
-                    causal,
-                    softmax_scale,
-                    seqused_q,
-                    seqused_k,
-                    scheduler_metadata,
-                )
-            return torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
+            return _mla_split_forward(
                 q,
                 k,
                 v,
                 qv,
-                num_splits,
-                window_size_left,
-                window_size_right,
-                causal,
-                softmax_scale,
-                seqused_k,
-                seqused_q,
-                scheduler_metadata,
+                num_splits=num_splits,
+                window_size=(window_size_left, window_size_right),
+                causal=causal,
+                softmax_scale=softmax_scale,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                seqused_q=seqused_q,
+                seqused_k=seqused_k,
+                page_table=page_table,
+                scheduler_metadata=scheduler_metadata,
             )
         if page_table is not None:
             _check_mla_paged_inputs(
@@ -1764,91 +1976,23 @@ def _flash_attn_forward_fake(
             ),
         )
         if num_splits != 1:
-            if page_table is not None:
-                if cu_seqlens_q is not None:
-                    if max_seqlen_q is None:
-                        raise RuntimeError("MLA: TND paged split requires max_seqlen_q")
-                    return _mla_split_paged_tnd_forward_fake(
-                        q,
-                        k,
-                        v,
-                        qv,
-                        page_table,
-                        cu_seqlens_q,
-                        max_seqlen_q,
-                        num_splits,
-                        window_size_left,
-                        window_size_right,
-                        causal,
-                        softmax_scale,
-                        seqused_k,
-                        seqused_q,
-                        scheduler_metadata,
-                    )
-                return _mla_split_paged_bsnd_forward_fake(
-                    q,
-                    k,
-                    v,
-                    qv,
-                    page_table,
-                    num_splits,
-                    window_size_left,
-                    window_size_right,
-                    causal,
-                    softmax_scale,
-                    seqused_k,
-                    seqused_q,
-                    scheduler_metadata,
-                )
-            if cu_seqlens_q is not None and cu_seqlens_k is None:
-                return _mla_split_mixed_forward_fake(
-                    q,
-                    k,
-                    v,
-                    qv,
-                    cu_seqlens_q,
-                    max_seqlen_q,
-                    num_splits,
-                    window_size_left,
-                    window_size_right,
-                    causal,
-                    softmax_scale,
-                    seqused_k,
-                    seqused_q,
-                    scheduler_metadata,
-                )
-            if cu_seqlens_q is not None:
-                return _mla_split_tnd_forward_fake(
-                    q,
-                    k,
-                    v,
-                    qv,
-                    cu_seqlens_q,
-                    cu_seqlens_k,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    num_splits,
-                    window_size_left,
-                    window_size_right,
-                    causal,
-                    softmax_scale,
-                    seqused_q,
-                    seqused_k,
-                    scheduler_metadata,
-                )
-            return _mla_split_bsnd_forward_fake(
+            return _mla_split_forward(
                 q,
                 k,
                 v,
                 qv,
-                num_splits,
-                window_size_left,
-                window_size_right,
-                causal,
-                softmax_scale,
-                seqused_k,
-                seqused_q,
-                scheduler_metadata,
+                num_splits=num_splits,
+                window_size=(window_size_left, window_size_right),
+                causal=causal,
+                softmax_scale=softmax_scale,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_k=max_seqlen_k,
+                seqused_q=seqused_q,
+                seqused_k=seqused_k,
+                page_table=page_table,
+                scheduler_metadata=scheduler_metadata,
             )
         if page_table is not None:
             _check_mla_paged_inputs(
@@ -2324,48 +2468,31 @@ class FlashAttnFunc(torch.autograd.Function):
         sm_margin=0,
         return_softmax=False,
     ):
-        is_mla = _check_mla_inputs(q, k, v, qv)
-        if is_mla:
-            _check_mla_dense_options(
-                softmax_scale=softmax_scale,
-                causal=causal,
-                allow_causal=True,
-                window_size=window_size,
-                attention_chunk=attention_chunk,
-                softcap=softcap,
-                num_splits=num_splits,
-                pack_gqa=pack_gqa,
-                sm_margin=sm_margin,
-                optional_tensors=(q_descale, k_descale, v_descale),
-            )
+        _check_mla_inputs(q, k, v, qv)
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
-        # MLA generates and consumes its private AICPU record inside DenseForward.
-        # Explicit reuse is available through the read-only kvcache entry.
-        scheduler_metadata = None
-        if not is_mla:
-            # Training interfaces do not expose scheduler_metadata (aligned with
-            # official flash-attn); the scheduler metadata is computed internally on
-            # the AICPU so no D2H/H2D sync breaks the pipeline.
-            batch_size, seqlen_q, num_heads, head_size = q.shape
-            seqlen_k, num_heads_k = k.shape[1], k.shape[2]
-            cache_seqlens = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
-            scheduler_metadata = get_scheduler_metadata(
-                batch_size,
-                seqlen_q,
-                seqlen_k,
-                num_heads,
-                num_heads_k,
-                head_size,
-                cache_seqlens,
-                qkv_dtype=q.dtype,
-                headdim_v=v.shape[-1],
-                causal=causal,
-                window_size=window_size,
-                has_softcap=softcap > 0.0,
-                num_splits=num_splits,
-                sm_margin=sm_margin,
-            )
+        # Training interfaces do not expose scheduler_metadata (aligned with
+        # official flash-attn); the scheduler metadata is computed internally on
+        # the AICPU so no D2H/H2D sync breaks the pipeline.
+        batch_size, seqlen_q, num_heads, head_size = q.shape
+        seqlen_k, num_heads_k = k.shape[1], k.shape[2]
+        cache_seqlens = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
+        scheduler_metadata = get_scheduler_metadata(
+            batch_size,
+            seqlen_q,
+            seqlen_k,
+            num_heads,
+            num_heads_k,
+            head_size,
+            cache_seqlens,
+            qkv_dtype=q.dtype,
+            headdim_v=v.shape[-1],
+            causal=causal,
+            window_size=window_size,
+            has_softcap=softcap > 0.0,
+            num_splits=num_splits,
+            sm_margin=sm_margin,
+        )
         # out, q, k, v, out_padded, softmax_lse = _flash_attn_forward(
         out, softmax_lse, *rest = _flash_attn_forward(
             q,
@@ -2496,36 +2623,8 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         sm_margin=0,
         return_softmax=False,
     ):
-        if _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True):
-            _check_mla_dense_options(
-                softmax_scale=softmax_scale,
-                causal=causal,
-                window_size=window_size,
-                attention_chunk=attention_chunk,
-                softcap=softcap,
-                num_splits=num_splits,
-                pack_gqa=pack_gqa,
-                sm_margin=sm_margin,
-                optional_tensors=(q_descale, k_descale, v_descale),
-            )
-            _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
-            if seqused_q is not None or seqused_k is not None:
-                _check_mla_used(q, cu_seqlens_q.numel() - 1, seqused_q, seqused_k)
-            out, lse = torch.ops.flash_attn_npu_3._mla_tnd_forward(
-                q,
-                k,
-                v,
-                qv,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                max_seqlen_q,
-                max_seqlen_k,
-                softmax_scale,
-                seqused_q,
-                seqused_k,
-            )
-            return (out, lse) if return_softmax else out
         _validate_varlen_query(q, cu_seqlens_q)
+        _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True)
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
         # Training interfaces do not expose scheduler_metadata (aligned with
@@ -2811,39 +2910,27 @@ def flash_attn_func(
             FP32 natural log of each row's softmax normalization factor, including
             the qv contribution for MLA.
     """
-    # Causal MLA is forward-only. Its real/fake dispatcher validates every
-    # tensor, including rejecting gradients, without an autograd context.
-    if (
-        (causal or window_size != (-1, -1) or num_splits != 1)
-        and qv is not None
-        and q.device.type == "npu"
-    ):
-        _check_mla_dense_options(
+    if qv is not None and q.device.type == "npu":
+        out, lse = _mla_forward(
+            q,
+            k,
+            v,
+            qv,
+            softmax_scale=softmax_scale,
             causal=causal,
-            allow_causal=True,
-            allow_window=True,
             window_size=window_size,
+            num_splits=num_splits,
             attention_chunk=attention_chunk,
             softcap=softcap,
-            num_splits=num_splits,
-            allow_split=True,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
-            optional_tensors=(q_descale, k_descale, v_descale),
+            unsupported_options=(
+                ("q_descale", q_descale),
+                ("k_descale", k_descale),
+                ("v_descale", v_descale),
+            ),
         )
-        if num_splits != 1:
-            out, softmax_lse, _, _ = torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
-                q, k, v, qv, num_splits, window_size[0], window_size[1], causal, softmax_scale
-            )
-        elif window_size != (-1, -1):
-            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_window_bsnd_forward(
-                q, k, v, qv, window_size[0], window_size[1], causal, softmax_scale
-            )
-        else:
-            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_causal_bsnd_forward(
-                q, k, v, qv, softmax_scale
-            )
-        return (out, softmax_lse) if return_attn_probs else out
+        return (out, lse) if return_attn_probs else out
     return FlashAttnFunc.apply(
         q,
         k,
@@ -2905,74 +2992,31 @@ def flash_attn_varlen_func(
     v3 without used lengths, v5 with either used array). There is no explicit metadata or page-table parameter;
     paged MLA uses flash_attn_with_kvcache. See docs/mla/status.md for limits.
     """
-    if (
-        (causal or window_size != (-1, -1) or num_splits != 1)
-        and qv is not None
-        and q.device.type == "npu"
-    ):
-        _check_mla_dense_options(
-            causal=causal,
-            allow_window=True,
-            allow_causal=True,
-            softmax_scale=softmax_scale,
-            window_size=window_size,
-            attention_chunk=attention_chunk,
-            softcap=softcap,
-            num_splits=num_splits,
-            allow_split=True,
-            pack_gqa=pack_gqa,
-            sm_margin=sm_margin,
-            optional_tensors=(q_descale, k_descale, v_descale),
-        )
-        if num_splits != 1:
-            out, lse, _, _ = torch.ops.flash_attn_npu_3._mla_split_tnd_forward(
-                q,
-                k,
-                v,
-                qv,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_splits,
-                window_size[0],
-                window_size[1],
-                causal,
-                softmax_scale,
-                seqused_q,
-                seqused_k,
-            )
-            return (out, lse) if return_attn_probs else out
-        if window_size != (-1, -1):
-            out, lse = torch.ops.flash_attn_npu_3._mla_window_tnd_forward(
-                q,
-                k,
-                v,
-                qv,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                max_seqlen_q,
-                max_seqlen_k,
-                window_size[0],
-                window_size[1],
-                causal,
-                softmax_scale,
-                seqused_q,
-                seqused_k,
-            )
-            return (out, lse) if return_attn_probs else out
-        out, lse = torch.ops.flash_attn_npu_3._mla_causal_tnd_forward(
+    if qv is not None and q.device.type == "npu":
+        out, lse = _mla_forward(
             q,
             k,
             v,
             qv,
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            softmax_scale,
-            seqused_q,
-            seqused_k,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            num_splits=num_splits,
+            attention_chunk=attention_chunk,
+            softcap=softcap,
+            pack_gqa=pack_gqa,
+            sm_margin=sm_margin,
+            unsupported_options=(
+                ("q_descale", q_descale),
+                ("k_descale", k_descale),
+                ("v_descale", v_descale),
+            ),
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            seqused_q=seqused_q,
+            seqused_k=seqused_k,
         )
         return (out, lse) if return_attn_probs else out
     return FlashAttnVarlenFunc.apply(
@@ -3169,291 +3213,41 @@ def flash_attn_with_kvcache(
             paged_kv=page_table is not None,
         )
     if is_mla:
-        # The real/fake dispatcher checks scale. Keep its scalar validation
-        # inside the op so torch.compile can capture this public wrapper.
-        _check_mla_dense_options(
+        result = _mla_forward(
+            q,
+            k_cache,
+            v_cache,
+            qv,
+            softmax_scale=softmax_scale,
             causal=causal,
-            allow_causal=True,
-            allow_window=True,
             window_size=window_size,
+            num_splits=num_splits,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=cache_seqlens,
+            page_table=page_table,
+            scheduler_metadata=scheduler_metadata,
+            return_accumulators=return_softmax_lse,
             attention_chunk=attention_chunk,
             softcap=softcap,
-            num_splits=num_splits,
-            allow_split=page_table is None or cu_seqlens_q is None or num_splits > 1,
             pack_gqa=pack_gqa,
             sm_margin=sm_margin,
             rotary_interleaved=rotary_interleaved,
-            optional_tensors=(
-                k,
-                v,
-                cu_seqlens_k_new,
-                max_seqlen_q if cu_seqlens_q is None else None,
-                cache_batch_idx,
-                cache_leftpad,
-                rotary_cos,
-                rotary_sin,
-                rotary_seqlens,
-                q_descale,
-                k_descale,
-                v_descale,
+            unsupported_options=(
+                ("k", k),
+                ("v", v),
+                ("cu_seqlens_k_new", cu_seqlens_k_new),
+                ("cache_batch_idx", cache_batch_idx),
+                ("cache_leftpad", cache_leftpad),
+                ("rotary_cos", rotary_cos),
+                ("rotary_sin", rotary_sin),
+                ("rotary_seqlens", rotary_seqlens),
+                ("q_descale", q_descale),
+                ("k_descale", k_descale),
+                ("v_descale", v_descale),
             ),
         )
-        if page_table is not None and cu_seqlens_q is not None and max_seqlen_q is None:
-            raise RuntimeError("MLA: TND paged forward requires max_seqlen_q")
-        if isinstance(cache_seqlens, int):
-            # Integer convenience input needs valid geometry before creating
-            # its device tensor. Tensor/None lengths go straight to the op.
-            _check_mla_inputs(
-                q,
-                k_cache,
-                v_cache,
-                qv,
-                varlen_q=cu_seqlens_q is not None,
-                paged_kv=page_table is not None,
-            )
-            batch = k_cache.shape[0]
-            if page_table is not None:
-                batch = _check_mla_paged_inputs(
-                    q,
-                    k_cache,
-                    page_table,
-                    None,
-                    scheduler_metadata,
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    window_left=window_size[0],
-                    window_right=window_size[1],
-                    causal=causal,
-                    num_splits=num_splits,
-                )
-            capacity = k_cache.shape[1] * (page_table.shape[1] if page_table is not None else 1)
-            if not 0 <= cache_seqlens <= capacity:
-                raise RuntimeError("MLA: cache_seqlens must be between zero and KV capacity")
-            cache_seqlens = torch.full(
-                (batch,),
-                cache_seqlens,
-                dtype=torch.int32,
-                device=k_cache.device,
-            )
-        if num_splits != 1:
-            if page_table is not None:
-                if cu_seqlens_q is not None:
-                    result = torch.ops.flash_attn_npu_3._mla_split_paged_tnd_forward(
-                        q,
-                        k_cache,
-                        v_cache,
-                        qv,
-                        page_table,
-                        cu_seqlens_q,
-                        max_seqlen_q,
-                        num_splits,
-                        *window_size,
-                        causal,
-                        softmax_scale,
-                        cache_seqlens,
-                        None,
-                        scheduler_metadata,
-                    )
-                    return result if return_softmax_lse else result[0]
-                result = torch.ops.flash_attn_npu_3._mla_split_paged_bsnd_forward(
-                    q,
-                    k_cache,
-                    v_cache,
-                    qv,
-                    page_table,
-                    num_splits,
-                    *window_size,
-                    causal,
-                    softmax_scale,
-                    cache_seqlens,
-                    None,
-                    scheduler_metadata,
-                )
-                return result if return_softmax_lse else result[0]
-            if cu_seqlens_q is not None:
-                result = torch.ops.flash_attn_npu_3._mla_split_mixed_forward(
-                    q,
-                    k_cache,
-                    v_cache,
-                    qv,
-                    cu_seqlens_q,
-                    max_seqlen_q,
-                    num_splits,
-                    window_size[0],
-                    window_size[1],
-                    causal,
-                    softmax_scale,
-                    cache_seqlens,
-                    None,
-                    scheduler_metadata,
-                )
-                return result if return_softmax_lse else result[0]
-            result = torch.ops.flash_attn_npu_3._mla_split_bsnd_forward(
-                q,
-                k_cache,
-                v_cache,
-                qv,
-                num_splits,
-                window_size[0],
-                window_size[1],
-                causal,
-                softmax_scale,
-                cache_seqlens,
-                None,
-                scheduler_metadata,
-            )
-            return result if return_softmax_lse else result[0]
-        if page_table is not None and cu_seqlens_q is not None:
-            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_paged_tnd_forward(
-                q,
-                k_cache,
-                v_cache,
-                qv,
-                page_table,
-                cu_seqlens_q,
-                max_seqlen_q,
-                softmax_scale,
-                cache_seqlens,
-                scheduler_metadata=scheduler_metadata,
-                causal=causal,
-                window_left=window_size[0],
-                window_right=window_size[1],
-            )
-        elif page_table is not None:
-            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_paged_bsnd_forward(
-                q,
-                k_cache,
-                v_cache,
-                qv,
-                page_table,
-                softmax_scale,
-                cache_seqlens,
-                scheduler_metadata=scheduler_metadata,
-                causal=causal,
-                window_left=window_size[0],
-                window_right=window_size[1],
-            )
-        elif cu_seqlens_q is not None:
-            if max_seqlen_q is None:
-                raise RuntimeError("MLA: mixed TND/BSND requires max_seqlen_q")
-            if window_size != (-1, -1):
-                if return_softmax_lse:
-                    return torch.ops.flash_attn_npu_3._mla_window_mixed_cache(
-                        q,
-                        k_cache,
-                        v_cache,
-                        qv,
-                        cu_seqlens_q,
-                        max_seqlen_q,
-                        window_size[0],
-                        window_size[1],
-                        causal,
-                        softmax_scale,
-                        cache_seqlens,
-                        scheduler_metadata,
-                    )
-                out, softmax_lse = torch.ops.flash_attn_npu_3._mla_window_mixed_forward(
-                    q,
-                    k_cache,
-                    v_cache,
-                    qv,
-                    cu_seqlens_q,
-                    max_seqlen_q,
-                    window_size[0],
-                    window_size[1],
-                    causal,
-                    softmax_scale,
-                    cache_seqlens,
-                    scheduler_metadata=scheduler_metadata,
-                )
-            elif causal:
-                if return_softmax_lse:
-                    return torch.ops.flash_attn_npu_3._mla_causal_mixed_cache(
-                        q,
-                        k_cache,
-                        v_cache,
-                        qv,
-                        cu_seqlens_q,
-                        max_seqlen_q,
-                        softmax_scale,
-                        cache_seqlens,
-                        scheduler_metadata,
-                    )
-                out, softmax_lse = torch.ops.flash_attn_npu_3._mla_causal_mixed_forward(
-                    q,
-                    k_cache,
-                    v_cache,
-                    qv,
-                    cu_seqlens_q,
-                    max_seqlen_q,
-                    softmax_scale,
-                    cache_seqlens,
-                    scheduler_metadata=scheduler_metadata,
-                )
-            else:
-                out, softmax_lse = torch.ops.flash_attn_npu_3._mla_tnd_bsnd_forward(
-                    q,
-                    k_cache,
-                    v_cache,
-                    qv,
-                    cu_seqlens_q,
-                    max_seqlen_q,
-                    softmax_scale,
-                    cache_seqlens,
-                    scheduler_metadata,
-                )
-        elif window_size != (-1, -1):
-            if return_softmax_lse:
-                return torch.ops.flash_attn_npu_3._mla_window_bsnd_cache(
-                    q,
-                    k_cache,
-                    v_cache,
-                    qv,
-                    window_size[0],
-                    window_size[1],
-                    causal,
-                    softmax_scale,
-                    cache_seqlens,
-                    scheduler_metadata,
-                )
-            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_window_bsnd_forward(
-                q,
-                k_cache,
-                v_cache,
-                qv,
-                window_size[0],
-                window_size[1],
-                causal,
-                softmax_scale,
-                cache_seqlens,
-                scheduler_metadata=scheduler_metadata,
-            )
-        elif causal and return_softmax_lse:
-            return torch.ops.flash_attn_npu_3._mla_causal_bsnd_cache(
-                q, k_cache, v_cache, qv, softmax_scale, cache_seqlens, scheduler_metadata
-            )
-        elif causal:
-            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_causal_bsnd_forward(
-                q,
-                k_cache,
-                v_cache,
-                qv,
-                softmax_scale,
-                cache_seqlens,
-                scheduler_metadata=scheduler_metadata,
-            )
-        else:
-            out, softmax_lse = torch.ops.flash_attn_npu_3._mla_dense_forward(
-                q, k_cache, v_cache, qv, softmax_scale, cache_seqlens, scheduler_metadata
-            )
-        if return_softmax_lse:
-            return (
-                out,
-                softmax_lse,
-                torch.empty(0, device=out.device),
-                torch.empty(0, device=out.device),
-            )
-        return out
+        return result if return_softmax_lse else result[0]
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
     if softmax_scale is None:
