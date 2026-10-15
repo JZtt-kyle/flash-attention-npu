@@ -80,6 +80,19 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "auto-split-paged-bsnd-protocol-tools": [
+        "tests/mla/unit/tools/test_mla_auto_split_paged_bsnd_tools.py"
+    ],
+    "auto-split-paged-bsnd-protocol-sanitize": [
+        "tests/mla/unit/auto_split_paged_bsnd_protocol/test_plan.py",
+        "tests/mla/unit/auto_split_paged_bsnd_protocol/test_metadata.py",
+    ],
+    "auto-split-paged-bsnd-protocol-check": [
+        "tests/mla/unit/auto_split_paged_bsnd_protocol/test_plan.py",
+        "tests/mla/unit/auto_split_paged_bsnd_protocol/test_metadata.py",
+        "-k",
+        "representative or capacity_cost_boundary",
+    ],
     "auto-split-mixed-tools": [
         "tests/mla/unit/tools/test_mla_auto_split_mixed_production_tools.py",
         "tests/mla/unit/tools/test_mla_auto_split_mixed_tools.py",
@@ -805,6 +818,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "auto-split-paged-bsnd-protocol-tools",
     "split-paged-bsnd-tools",
     "split-paged-bsnd-protocol-tools",
     "auto-split-mixed-tools",
@@ -819,6 +833,9 @@ CPU_SUITES = {
     "unit-auto_split_mixed_protocol",
     "auto-split-mixed-protocol-sanitize",
     "auto-split-mixed-protocol-check",
+    "unit-auto_split_paged_bsnd_protocol",
+    "auto-split-paged-bsnd-protocol-sanitize",
+    "auto-split-paged-bsnd-protocol-check",
     "unit-split_paged_bsnd_protocol",
     "split-paged-bsnd-protocol-sanitize",
     "split-paged-bsnd-protocol-check",
@@ -904,6 +921,9 @@ CPU_SUITES = {
 
 def suite_dependencies(suite):
     if suite in {
+        "unit-auto_split_paged_bsnd_protocol",
+        "auto-split-paged-bsnd-protocol-sanitize",
+        "auto-split-paged-bsnd-protocol-check",
         "unit-split_paged_bsnd_protocol",
         "split-paged-bsnd-protocol-sanitize",
         "split-paged-bsnd-protocol-check",
@@ -1161,6 +1181,9 @@ def environment(args, directory, suite):
         "unit-auto_split_mixed_protocol",
         "auto-split-mixed-protocol-sanitize",
         "auto-split-mixed-protocol-check",
+        "unit-auto_split_paged_bsnd_protocol",
+        "auto-split-paged-bsnd-protocol-sanitize",
+        "auto-split-paged-bsnd-protocol-check",
         "unit-split_paged_bsnd_protocol",
         "split-paged-bsnd-protocol-sanitize",
         "split-paged-bsnd-protocol-check",

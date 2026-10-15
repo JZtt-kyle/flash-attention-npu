@@ -233,6 +233,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v21](#6221-混合显式-split-计划与-v21-安全协议) | 21 / 21 | 416+10B | TND Q + BSND KV 显式 split；64 位 KV 起点与紧凑 Q 计划；生产接入见 [6.2.22](#6222-混合显式-split-生产适配) |
 | [v22](#6223-混合原生自动-split-计划与-v22-安全协议) | 22 / 22 | 758+10B | TND Q + BSND KV 自动 split；紧凑 Q、64 位 KV 起点和原生 AIC/FD/Vector 端点；生产接入见 [6.2.24](#6224-混合原生自动-split-生产适配) |
 | [v23](#6225-bsnd-pa-显式-split-计划与-v23-安全协议) | 23 / 23 | 414+7B | BSND Q + ND PA KV 显式 S=2..256；逻辑页几何、allocation/used 与宽 M 前缀；生产接入见 [6.2.26](#6226-bsnd-pa-显式-split-生产适配) |
+| [v24](#6227-bsnd-pa-原生自动计划与-v24-安全协议) | 24 / 24 | 756+7B | BSND Q + ND PA KV 原生自动 CPU 计划/安全协议；尚未编入 AICPU 或公开前向 |
 
 协议能表达某布局，不代表该布局已接通生产入口。生成记录、设备校验、独立 attention、入口调用分别验收；当前接入层次见 [status](status.md)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 使用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
 
@@ -843,6 +844,17 @@ BSND Q + ND PA KV 的 512+64、FP16/BF16、显式 S=2..256 复用 v23 和原 all
 - merge 复用独立 FD Block，按原 `[B,Sq,H]` 行写 O/LSE 和真实 FP32 `[S,B,H,Sq,512]` / `[S,B,H,Sq]` accumulator。全零实际 KV 的空片写 0/-inf；静态 C=0 的 merge 阶段在完整校验后初始化输出及 accumulator，PA LSE 为 -inf。缩短 Q-used 不移动其他 batch 的行，未使用行无新增承诺。
 - 公开 cache、Python/C++ raw、私有 `_mla_split_paged_bsnd_forward` 与 fake 使用相同已开放范围；公开签名不变。公开生成器通过 `_mla_paged_metadata` 的末尾可选 split 参数选择 v23，既有单 split 调用保持原协议。scale、页号、物理地址和 stride 不进入 metadata 身份，合法更换必须在当次前向重新校验。
 - [`本模块源对照`](../../tests/mla/unit/split_paged_bsnd/test_source.py) 实际运行固定 CANN PA+FD partial 和原始归并，独立页表映射及双数学核对 O/LSE/accumulator。源 FD 归并的 192 片 UB 上界单列，193..256 的迁移行为仍须真实 accumulator 与双数学验收。公开专项、Trap、生命周期与日常回归位于 [`split_paged_bsnd`](../../tests/mla/e2e/split_paged_bsnd/test_public.py)。
+
+#### 6.2.27 BSND PA 原生自动计划与 v24 安全协议
+
+[`原生 PA 计划`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_plan.h) 组合 BSND Q + ND PA KV 的固定源 PA 几何与已有原生自动计划。P/C、有效 KV 上界及 M/N 选择沿用 6.2.25；每 M 的 AIC 分片、FD 持久槽和 8 行 Vector 归约保留固定 CANN 顺序。它是独立 CPU 计划和 CPU/AICore 共用协议；v24 尚未编入 AICPU 或生产前向，公开 PA 自动与 TND PA split 仍拒绝。
+
+- 三种 mask 使用实际 Q/KV 长度求逻辑 token 区间。原生 AIC 的 `(batch,M,N)` 端点为独占上界，Vector 的 `(FD head,8-row part)` 端点为包含上界；查询分别返回 Direct、Partial 和 Empty。Direct 不占持久 FD 槽；零成本 M 有唯一 Empty 初始化所有者，包括源计算端点之外的零尾部。全零 KV-used 使用 M=256 与容量对应 PA N；静态 B/Q/C 任一为零时无任务/workspace，仍校验全部输入。
+- 静态 M 上界为 `B*ceil(Qcap*H/128)`；AIC>1 时最多 `2*AIC` 个持久槽，每槽最多 256 行，AIC=1 无 FD 槽。scratch 按最大 M=256 与容量对应 N 保守预留，计划使用实际 M/N 的偏移。FP32 accumulator 容量为 AIC，形状 `[AIC,B,H,Qcap,512]` / `[AIC,B,H,Qcap]`，AIC=1 沿用空 accumulator；独立核验 int64 stride/字节及 workspace+libapi 边界，Q-used 不压紧原 allocation 地址。预算仅含计划 scratch 和 FD 持久槽，后续生产所需 Direct 临时槽须另行预算及验收。
+- [`v24 构造器`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_metadata.h) 写 `756+7*B` 个 int32：v6 的 408 字 prefix、B 个五字 PA span、346 字窗口/AIC/FD/Vector tail，以及 B+1 个 uint64 M prefix。版本/kind 均为 24，区别于 v23 显式 split。输出字数/地址不安全或输入输出重叠时保留输出；安全描述符下的失败写完整失败 header 并清空 payload。计划、消费者及查询失败均保留目标对象。
+- [`独立消费者`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_auto_split_paged_bsnd_consumer.h) 先核验 v24 header/窗口，再通过 v6 view 校验逻辑几何、原分配/当前 used、平台、完整 cache 描述符及全部有效页；即使 Q-used=0 或全遮罩也不跳过页校验。随后复用独立分区安全检查，核对 AIC 覆盖、FD/Vector 所有权、持久槽及 accumulator 静态预算。它不调用生产计划或源调度器，不证明划分最优性。记录不绑定页号、物理地址或 stride，合法更换按当次调用重新校验；所有输入在查询/使用期间保持稳定，设备接入须在写入或同步前完成验证。
+
+[`本模块单元`](../../tests/mla/unit/auto_split_paged_bsnd_protocol/test_plan.py) 从固定 Git blob 重编译 PA 几何、原生 AIC/FD/Vector、workspace 和 FA3 accumulator oracle，独立枚举行/token/page 与原 allocation 地址；[`协议单元`](../../tests/mla/unit/auto_split_paged_bsnd_protocol/test_metadata.py) 覆盖双 dtype、三 mask、页边界、Direct/Partial/Empty、Q-used/空容量、宽 group、精确 accumulator/总预算溢出、记录损坏/陈旧长度/坏页及合法页表/stride 更换。普通和 ASan/UBSan 使用同一集合；共享 v18/v20/v22 消费者变化由重建后的累计小输入 E2E 回归。生产数值、真实 Trap、生命周期及平均公开性能属于后续接入验收。
 
 ### 6.3 长度与布局调度
 

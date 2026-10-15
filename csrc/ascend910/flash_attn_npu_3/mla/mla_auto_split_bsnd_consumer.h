@@ -1,6 +1,6 @@
 // Copyright (c) 2025 Huawei Technologies Co., Ltd.
 // CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
-// Independent v18/v20/v22 safety validation. No producer, CPU plan or SplitCore call.
+// Independent v18/v20/v22 safety validation and shared v24 partition checks. No producer, CPU plan or SplitCore call.
 // Validates coverage/addressing, not the optimality/authenticity of a partition.
 #pragma once
 #include "mla_auto_split_bsnd_metadata.h"
@@ -30,9 +30,20 @@ struct MlaAutoSplitBsndRow {
     uint64_t out, lse, accumulatorOut, accumulatorLse, partialOut, partialSum, partialMax;
 };
 namespace auto_split_detail {
+template <bool IsPaged = false>
 MLA_AUTO_INLINE uint32_t Base(uint32_t batch)
 {
-    return kMlaUsedMetadataPrefixWords + 8 * batch;
+    return IsPaged ? 408 + 5 * batch : kMlaUsedMetadataPrefixWords + 8 * batch;
+}
+template <bool IsPaged, typename Reader>
+MLA_AUTO_INLINE uint32_t QueryLength(const Reader& read, uint32_t batch)
+{
+    return read(IsPaged ? 408 + 5 * batch + 3 : kMlaUsedMetadataPrefixWords + 8 * batch + 6);
+}
+template <bool IsPaged, typename Reader>
+MLA_AUTO_INLINE uint32_t KvLength(const Reader& read, uint32_t batch)
+{
+    return read(IsPaged ? 408 + 5 * batch + 4 : kMlaUsedMetadataPrefixWords + 8 * batch + 7);
 }
 MLA_AUTO_INLINE bool Less(uint32_t b, uint32_t m, uint32_t n, uint32_t z, uint32_t j, uint32_t k)
 {
@@ -48,13 +59,12 @@ struct UsedView {
     }
 };
 // The caller has already checked the span and M index. All products are wide.
-template <typename Reader>
+template <bool IsPaged, typename Reader>
 MLA_AUTO_INLINE void Geometry(const Reader& read, const MlaAutoSplitBsndSchedule& s, const MlaWindowKernelParams& w,
                               MlaAutoSplitBsndTask& t)
 {
     const auto& a = s.used.tiling;
-    const uint32_t word = kMlaUsedMetadataPrefixWords + 8 * t.batch;
-    const uint32_t q = read(word + 6), k = read(word + 7);
+    const uint32_t q = QueryLength<IsPaged>(read, t.batch), k = KvLength<IsPaged>(read, t.batch);
     const uint64_t row = uint64_t(t.m) * a.mBaseSize, rows = uint64_t(q) * a.heads;
     t.rowBegin = row;
     t.rowEnd = row + a.mBaseSize < rows ? row + a.mBaseSize : rows;
@@ -111,35 +121,20 @@ MLA_AUTO_INLINE void Offsets(const MlaAutoSplitBsndSchedule& s, uint64_t row, ui
 }
 } // namespace auto_split_detail
 
-template <bool IsTnd, uint32_t Version, bool IsKvTnd = IsTnd, typename Reader, typename Arrays, typename Context>
-MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, uint32_t words, const Context& context,
-                                                            const MlaUsedMetadataInputs& inputs, const Arrays& arrays,
-                                                            MlaAutoSplitBsndSchedule& output)
+// Geometry and invocation descriptors must already be independently validated.
+// This common checker consumes a logical used-span view plus the native tail;
+// it never calls a producer or recomputes the source's optimal partition.
+template <bool IsTnd, bool IsPaged = false, typename Reader>
+MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitPartitions(const Reader& read, const MlaUsedMetadataContext& c,
+                                                              const MlaWindowKernelParams& w,
+                                                              const MlaUsedKernelSchedule& used,
+                                                              MlaAutoSplitBsndSchedule& output)
 {
     using Status = MlaMetadataReadStatus;
     using namespace auto_split_detail;
-    const auto& c = context.used;
-    if (c.batch > (UINT32_MAX - kMlaAutoSplitFixedWords) / 10)
-        return Status::InvalidBuffer;
-    auto status = ReadMetadataHeader(read, words, kMlaAutoSplitFixedWords + 10 * c.batch, Version, Version, c.dtype);
-    if (status != Status::Success)
-        return status;
-    if (c.query.layout != uint32_t(IsTnd) || c.kv.layout != uint32_t(IsKvTnd))
-        return Status::ShapeMismatch;
-    const uint32_t base = Base(c.batch), prefixWord = base + kMlaAutoSplitTailPrefix;
-    const auto& w = context.window;
-    if (w.kind > 2 || w.left < -1 || w.right < -1 || w.left > int64_t(c.kv.maxLength) - 1 ||
-        w.right > (c.query.maxLength == 0 ? 0 : int64_t(c.query.maxLength) - 1) || read(base) != w.kind ||
-        int32_t(read(base + 1)) != w.left || int32_t(read(base + 2)) != w.right)
-        return Status::ShapeMismatch;
-    if ((w.kind == 0 && (w.left != int64_t(c.kv.maxLength) - 1 || w.right != int64_t(c.query.maxLength) - 1)) ||
-        (w.kind == 1 && (w.left != int64_t(c.kv.maxLength) - 1 || w.right != 0)) ||
-        (w.kind == 2 && c.query.maxLength && c.kv.maxLength && (w.left < 0 || w.right < 0)))
-        return Status::ShapeMismatch;
+    const uint32_t base = Base<IsPaged>(c.batch), prefixWord = base + kMlaAutoSplitTailPrefix;
     MlaAutoSplitBsndSchedule s{};
-    status = ReadUsedMetadata(UsedView<Reader>{read, base}, base, c, inputs, arrays, s.used);
-    if (status != Status::Success)
-        return status;
+    s.used = used;
     auto& a = s.used.tiling;
     const uint64_t totalQ = UsedMetadataTotal(c.query);
     const bool empty = IsTnd ? !totalQ || !UsedMetadataTotal(c.kv) : !c.batch || !a.sq || !a.sk;
@@ -170,9 +165,8 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
             return Status::InvalidPrefixes;
         if (b == c.batch || empty)
             continue;
-        const uint32_t word = kMlaUsedMetadataPrefixWords + 8 * b;
-        const uint64_t rows = uint64_t(read(word + 6)) * a.heads;
-        const uint32_t count = (rows + a.mBaseSize - 1) / a.mBaseSize, k = read(word + 7);
+        const uint64_t rows = uint64_t(QueryLength<IsPaged>(read, b)) * a.heads;
+        const uint32_t count = (rows + a.mBaseSize - 1) / a.mBaseSize, k = KvLength<IsPaged>(read, b);
         prefix += count;
         // Right-bottom causal/local bands always include the last row's last
         // key when both lengths are nonzero. This bounds all earlier tiles
@@ -207,8 +201,7 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
         if (b > c.batch || (b == c.batch && (m || n)))
             return Status::InvalidEndpoints;
         if (b < c.batch) {
-            const uint32_t word = kMlaUsedMetadataPrefixWords + 8 * b;
-            const uint64_t rows = uint64_t(read(word + 6)) * a.heads;
+            const uint64_t rows = uint64_t(QueryLength<IsPaged>(read, b)) * a.heads;
             const uint32_t count = empty ? 0 : (rows + a.mBaseSize - 1) / a.mBaseSize;
             if (m >= (count ? count : 1) || (!count && n))
                 return Status::InvalidEndpoints;
@@ -216,7 +209,7 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
                 MlaAutoSplitBsndTask t{};
                 t.batch = b;
                 t.m = m;
-                Geometry(read, s, w, t);
+                Geometry<IsPaged>(read, s, w, t);
                 // Native cost partitioning can stop at/before the first
                 // visible tile of a local window. That empty prefix belongs
                 // to neither an FD fragment nor persistent storage.
@@ -245,7 +238,7 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
         MlaAutoSplitBsndTask t{};
         t.batch = s.bEnd[core];
         t.m = s.mEnd[core];
-        Geometry(read, s, w, t);
+        Geometry<IsPaged>(read, s, w, t);
         if (s.nEnd[core] <= t.s2Begin || s.nEnd[core] == t.s2End)
             continue;
         const uint32_t count = Parts(s, t), rows = t.rowEnd - t.rowBegin;
@@ -272,7 +265,7 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
             MlaAutoSplitBsndTask t{};
             t.batch = s.bEnd[i - 1];
             t.m = s.mEnd[i - 1];
-            Geometry(read, s, w, t);
+            Geometry<IsPaged>(read, s, w, t);
             const uint32_t first = t.s2Begin, stop = t.s2End, count = Parts(s, t);
             for (uint32_t split = 0; split < count; ++split) {
                 t.split = split;
@@ -315,6 +308,38 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
     return Status::Success;
 }
 
+template <bool IsTnd, uint32_t Version, bool IsKvTnd = IsTnd, typename Reader, typename Arrays, typename Context>
+MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, uint32_t words, const Context& context,
+                                                            const MlaUsedMetadataInputs& inputs, const Arrays& arrays,
+                                                            MlaAutoSplitBsndSchedule& output)
+{
+    using Status = MlaMetadataReadStatus;
+    using namespace auto_split_detail;
+    const auto& c = context.used;
+    if (c.batch > (UINT32_MAX - kMlaAutoSplitFixedWords) / 10)
+        return Status::InvalidBuffer;
+    auto status = ReadMetadataHeader(read, words, kMlaAutoSplitFixedWords + 10 * c.batch, Version, Version, c.dtype);
+    if (status != Status::Success)
+        return status;
+    if (c.query.layout != uint32_t(IsTnd) || c.kv.layout != uint32_t(IsKvTnd))
+        return Status::ShapeMismatch;
+    const uint32_t base = Base(c.batch);
+    const auto& w = context.window;
+    if (w.kind > 2 || w.left < -1 || w.right < -1 || w.left > int64_t(c.kv.maxLength) - 1 ||
+        w.right > (c.query.maxLength == 0 ? 0 : int64_t(c.query.maxLength) - 1) || read(base) != w.kind ||
+        int32_t(read(base + 1)) != w.left || int32_t(read(base + 2)) != w.right)
+        return Status::ShapeMismatch;
+    if ((w.kind == 0 && (w.left != int64_t(c.kv.maxLength) - 1 || w.right != int64_t(c.query.maxLength) - 1)) ||
+        (w.kind == 1 && (w.left != int64_t(c.kv.maxLength) - 1 || w.right != 0)) ||
+        (w.kind == 2 && c.query.maxLength && c.kv.maxLength && (w.left < 0 || w.right < 0)))
+        return Status::ShapeMismatch;
+    MlaAutoSplitBsndSchedule s{};
+    status = ReadUsedMetadata(UsedView<Reader>{read, base}, base, c, inputs, arrays, s.used);
+    if (status != Status::Success)
+        return status;
+    return ReadAutoSplitPartitions<IsTnd>(read, c, w, s.used, output);
+}
+
 // Keep the established v18 entry point and BSND wire identity unchanged.
 template <typename Reader, typename Arrays>
 MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitBsndMetadata(const Reader& read, uint32_t words,
@@ -327,7 +352,7 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitBsndMetadata(const Reader& re
 
 // Queries require an unchanged, successfully validated record and context.
 // Like the CPU plan, every failure leaves the caller's output untouched.
-template <typename Reader>
+template <bool IsPaged = false, typename Reader>
 MLA_AUTO_INLINE bool AutoSplitBsndTask(const Reader& read, const MlaAutoSplitBsndSchedule& s,
                                        const MlaWindowKernelParams& window, uint64_t group, uint32_t split,
                                        MlaAutoSplitBsndTask& output)
@@ -336,7 +361,7 @@ MLA_AUTO_INLINE bool AutoSplitBsndTask(const Reader& read, const MlaAutoSplitBsn
     if (group >= s.groups)
         return false;
     const auto& a = s.used.tiling;
-    const uint32_t base = Base(a.batch), prefix = base + kMlaAutoSplitTailPrefix;
+    const uint32_t base = Base<IsPaged>(a.batch), prefix = base + kMlaAutoSplitTailPrefix;
     uint32_t lo = 0, hi = a.batch;
     while (lo < hi) {
         const uint32_t mid = lo + (hi - lo) / 2;
@@ -352,7 +377,7 @@ MLA_AUTO_INLINE bool AutoSplitBsndTask(const Reader& read, const MlaAutoSplitBsn
     t.batch = lo;
     t.m = group - ReadMetadataWide(read, prefix + 2 * lo);
     t.split = split;
-    Geometry(read, s, window, t);
+    Geometry<IsPaged>(read, s, window, t);
     const bool empty = t.s2Begin == t.s2End;
     const uint32_t count = empty ? 1 : Parts(s, t);
     if (split >= count)
@@ -378,13 +403,13 @@ MLA_AUTO_INLINE bool AutoSplitBsndTask(const Reader& read, const MlaAutoSplitBsn
     output = t;
     return true;
 }
-template <typename Reader>
+template <bool IsPaged = false, typename Reader>
 MLA_AUTO_INLINE bool AutoSplitBsndMerge(const Reader& read, const MlaAutoSplitBsndSchedule& s, uint32_t head,
                                         uint32_t part, MlaAutoSplitBsndMerge& output)
 {
     using namespace auto_split_detail;
     const auto& a = s.used.tiling;
-    const uint32_t base = Base(a.batch);
+    const uint32_t base = Base<IsPaged>(a.batch);
     if (head >= s.fdHeads || part >= read(base + 190 + head))
         return false;
     MlaAutoSplitBsndMerge r{};
@@ -403,7 +428,7 @@ MLA_AUTO_INLINE bool AutoSplitBsndMerge(const Reader& read, const MlaAutoSplitBs
         }
     }
     r.rowBegin = uint64_t(r.m) * a.mBaseSize + part * 8;
-    const uint64_t end = uint64_t(read(kMlaUsedMetadataPrefixWords + 8 * r.batch + 6)) * a.heads;
+    const uint64_t end = uint64_t(QueryLength<IsPaged>(read, r.batch)) * a.heads;
     const uint64_t blockEnd = uint64_t(r.m + 1) * a.mBaseSize;
     const uint64_t limit = end < blockEnd ? end : blockEnd;
     r.rowEnd = uint64_t(r.rowBegin) + 8 < limit ? uint64_t(r.rowBegin) + 8 : limit;
