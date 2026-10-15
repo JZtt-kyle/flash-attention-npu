@@ -253,6 +253,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v22](#6223-混合原生自动-split-计划与-v22-安全协议) | 22 / 22 | 758+10B | TND Q + BSND KV 自动 split；紧凑 Q、64 位 KV 起点和原生 AIC/FD/Vector 端点；生产接入见 [6.2.24](#6224-混合原生自动-split-生产适配) |
 | [v23](#6225-bsnd-pa-显式-split-计划与-v23-安全协议) | 23 / 23 | 414+7B | BSND Q + ND PA KV 显式 S=2..256；逻辑页几何、allocation/used 与宽 M 前缀；生产接入见 [6.2.26](#6226-bsnd-pa-显式-split-生产适配) |
 | [v24](#6227-bsnd-pa-原生自动计划与-v24-安全协议) | 24 / 24 | 756+7B | BSND Q + ND PA KV 原生自动 split；PA span、原生 AIC/FD/Vector 端点与 M 前缀 |
+| [v25](#6229-tnd-pa-显式-split-计划与-v25-安全协议) | 25 / 25 | 414+7B | TND Q + ND PA KV 显式 S=2..256；独立 CPU 计划/共享协议，尚未接入生产 |
 
 协议能表达某布局，不代表该布局已接通生产入口。生成记录、设备校验、独立 attention、入口调用分别验收；当前接入层次见 [status](status.md)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 使用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
 
@@ -275,9 +276,9 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 [`mla_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h) 定义共同前缀：`magic=0x4d4c4131`；前八字依次为 magic、version、kind、wordCount、dtype、生成状态、源调度状态、保留位。其后 393 字为 `MlaMetadataSchedule`，保存几何、端点、FD 记账、workspace 与局部资源需求。保留位为零；64 位字段拆为低/高 32 位，只要求 4 字节对齐，允许奇数 storage offset。
 
-v2–v24 生成器先按静态 B 计算精确字数，要求 wordCount 不超过 `UINT32_MAX`，再检查输出地址、对齐、地址加法及与输入的区间重叠。不安全输出返回失败且不写记录；区间判断不做可能溢出的终点加法。只读输入可以相互别名，不能与输出重叠。输出安全但 dtype、描述符、形状、长度值或调度失败时，写非成功头部并清零八字头后的**全部载荷**，包括快照。v3–v24 成功记录从调度器拥有的快照序列化，不二次读取原始前缀或 used。
+v2–v25 生成器先按静态 B 计算精确字数，要求 wordCount 不超过 `UINT32_MAX`，再检查输出地址、对齐、地址加法及与输入的区间重叠。不安全输出返回失败且不写记录；区间判断不做可能溢出的终点加法。只读输入可以相互别名，不能与输出重叠。输出安全但 dtype、描述符、形状、长度值或调度失败时，写非成功头部并清零八字头后的**全部载荷**，包括快照。v3–v25 成功记录从调度器拥有的快照序列化，不二次读取原始前缀或 used。
 
-| 生成错误 | v1 / v2 | v3 | v4–v24 |
+| 生成错误 | v1 / v2 | v3 | v4–v25 |
 | --- | --- | --- | --- |
 | dtype 不支持 | `UnsupportedDtype=1` | 同左 | 同左 |
 | 形状、平台或调度失败 | `ScheduleFailure=2`，另存调度状态 | 同左 | 同左 |
@@ -882,6 +883,20 @@ BSND Q + ND PA KV 的 `num_splits=0` 接通 v24、512+64、FP16/BF16 和无 mask
 - 分配、metadata 提交与三阶段发射遵循现有 current stream 顺序，持有输入、页表、长度、记录、workspace、O/LSE 和 accumulator 的 storage；不读回动态长度、不物化完整 KV、不调用 CANN attention。
 
 [`所属源数值单元`](../../tests/mla/unit/auto_split_paged_bsnd/test_source.py) 在真实页上执行固定源 PA partial/FD，比较原生端点、O/LSE、真实 accumulator 及内容缓存的双数学；[`公开专项`](../../tests/mla/e2e/auto_split_paged_bsnd/test_public.py) 验收新入口的 mask、页边界、空值、stride、长度/metadata 复用、失败恢复和生命周期，并新增本模块累计日常 E2E。release Trap 逐 fault 启动全新解释器/设备 context，保存完整日志、超时、退出和事件证据；不 fork 已初始化 NPU 的进程。公开性能固定输入包含原生 FD，遵守 R=1/4 和既有预热/重复、分配及页表/cache 转换边界；按全部适用配置平均比 ≤1 验收，源表示域限制单列。
+
+#### 6.2.29 TND PA 显式 split 计划与 v25 安全协议
+
+[`独立计划`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_paged_tnd_plan.h) 组合 TND Q + ND PA KV、512+64、显式 S=2..256 与三种 mask。固定 CANN PA 几何/长度解析和固定 FA3 显式分片分别复用既有组件；内部借用 mixed 计划的逻辑区间及紧凑 Q 布局，但 Task 只返回 Q allocation 起点/容量、Q/KV-used 和逻辑 KV 片段，不暴露虚拟密集 KV 起点。真实 KV 地址仍由当次有效页表及独立 K/V stride 决定。
+
+Q allocation 为 int32 `[B+1]` 前缀、总 token T≤INT32_MAX，可含空段；调用级 maxQ 只是上界。可选 Q-used 不移动后续样本起点，KV-used 为必需的逐样本长度。P/C 限制沿用 6.2.25。平台固定 C1V2，非空 allocation 发射维度为 AIC，静态空容量为 1。计划拥有输入快照，构造/查询失败不改写目标。
+
+静态预算令 A=min(B,T)，M 组上界为 `min(A*ceil(maxQ*H/128), floor((T*H+127*A)/128))`，持久行上界为 `S*(T*H+255*A)`；scratch 以 M=256、容量对应 PA N 预算。每个非空 Q 段对任意源 M=128..256 最多贡献 255 行 padding，因此不能按 `B*maxQ` 或单一 M=256 的矩形槽数替代此包络。实际布局仍按已选 M 的紧凑 mixed 上界分配，消费者独立重算。FP32 accumulator 为 `[S,H,T,512]` / `[S,H,T]`，与持久槽分开检查字节/stride 溢出；零 KV 容量或全零 used 不能绕过检查。T=0/B=0/C=0 时任务及 workspace 为零；仅 KV-used 全零仍保留 Q 初始化任务。
+
+[`v25 构造器`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_paged_tnd_metadata.cpp) 写 contiguous int32 `[414+7B]`、version=kind=25：408 字 v6 头、B 个五字 TND PA span、window kind/left/right、S 和 B+1 个 uint64 M 前缀。同字数的 v23 不能混用，不保存页号、地址、stride 或 scale。输出字数/地址/重叠不安全时不写；合法输出上的生成失败写失败头并清空全部载荷。
+
+[`CPU/AICore 共用消费者`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_paged_tnd_consumer.h) 先检查 v25、TND、C1V2、窗口和 S，再经 v6 view 完整校验当次前缀/used、cache 描述及所有有效页，包括 Q-used=0/全遮罩样本；随后独立验证 M 前缀、持久槽和 accumulator 上界。Task 所有者为 `task%AIC`，Merge 为 `group%(2*AIC)`；Row 按 `allocationQStart+localQuery` 计算 O、head-major LSE 和 accumulator 字节地址，保留 used 间隙。查询仅适用于成功校验且保持不变的记录/context；校验不代替数值执行或设备阶段同步。
+
+[`本模块单元`](../../tests/mla/unit/split_paged_tnd_protocol/test_plan.py) 新编译固定源 PA、三种 mask 范围、workspace 与 FA3 分片/accumulator oracle，独立枚举行/token/page、非均匀/空分配、每个可能 M 的 padding 包络、uint64 M 前缀及 int64 字节边界；[`协议单元`](../../tests/mla/unit/split_paged_tnd_protocol/test_metadata.py) 核对双 dtype、陈旧长度、坏页、字段破坏、失败原子性和 Task/Merge/Row 地址。普通与 ASan/UBSan 运行相同集合。M10c9a 不接入 AICPU、launcher 或公开 TND PA split；其专属设备数值/Trap/生命周期、日常 E2E 和公开性能由下一步生产接入验收。
 
 ### 6.3 长度与布局调度
 
