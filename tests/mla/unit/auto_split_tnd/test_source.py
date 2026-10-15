@@ -6,14 +6,20 @@ import os
 from pathlib import Path
 import pytest
 import torch
-from tests.mla.e2e.auto_split_tnd.test_public import prepare, metadata, call, reference, effective
+from tests.mla.support.public_cases.auto_split_tnd_public import (
+    prepare,
+    metadata,
+    call,
+    reference,
+    effective,
+)
 from tests.mla.support.mla_auto_split_tnd_cases import spec, REPRESENTATIVES
 from tests.mla.support.mla_cpu_driver import CpuDriver
 from tests.mla.support.mla_split_kv_build import compile_drivers
 from tests.mla.support.mla_source_compare import assert_mla_source_close
 from tests.mla.unit.auto_split_bsnd.test_source import native_tasks
-from tests.mla.unit.split_kv_merge import test_merge as merge
-from tests.mla.unit.split_kv_attention import test_attention as partial
+from tests.mla.support.components import split_kv_merge_merge as merge
+from tests.mla.support.components import split_kv_attention_attention as partial
 
 merge_probes = merge.merge_probes
 

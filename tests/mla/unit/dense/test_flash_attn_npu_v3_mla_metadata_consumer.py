@@ -11,45 +11,15 @@ import pytest
 
 from tests.mla.support.mla_metadata_build import MLA, ROOT, sha256
 
-
-WORDS = 401
-SENTINEL = 0x12345678
-
-
-class Memory(ct.Structure):
-    _fields_ = [(n, ct.c_uint64) for n in ("l1", "ub", "l0a", "l0b", "l0c")]
-
-
-class Context(ct.Structure):
-    _fields_ = [
-        (n, ct.c_uint32) for n in ("dtype", "batch", "sq", "heads", "sk", "aic", "aiv", "block_dim")
-    ] + [("workspace", ct.c_uint64), ("libapi", ct.c_uint64), ("memory", Memory)]
-
-
-class Shape(ct.Structure):
-    _fields_ = [(n, ct.c_int64) for n in ("batch", "sq", "heads", "sk")]
-
-
-class Platform(ct.Structure):
-    _fields_ = [
-        ("aic", ct.c_uint32),
-        ("aiv", ct.c_uint32),
-        ("memory", Memory),
-        ("libapi", ct.c_uint64),
-        ("block_dims", ct.c_uint32 * 26),
-    ]
-
-
-class Args(ct.Structure):
-    _fields_ = [
-        ("output", ct.c_uint64),
-        ("words", ct.c_uint32),
-        ("dtype", ct.c_uint32),
-        ("shape", Shape),
-        ("platform", Platform),
-        ("cache_seqlens", ct.c_uint64),
-        ("cache_seqlens_count", ct.c_uint64),
-    ]
+from tests.mla.support.components.metadata_consumer import (
+    Args as Args,
+    Context as Context,
+    Memory as Memory,
+    Platform as Platform,
+    SENTINEL as SENTINEL,
+    Shape as Shape,
+    WORDS as WORDS,
+)
 
 
 # Wire v1 offsets, independently fixed by its documented serialized layout.

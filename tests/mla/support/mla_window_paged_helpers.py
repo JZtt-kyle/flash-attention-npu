@@ -5,11 +5,9 @@ import ctypes as ct
 import torch
 
 from tests.mla.support.mla_window_paged_reference import references as references, window_for
-from tests.mla.unit.paged_bsnd import test_flash_attn_npu_v3_mla_paged_attention as base
-from tests.mla.e2e.paged_bsnd import test_flash_attn_npu_v3_mla_paged_bsnd_production as production
-from tests.mla.unit.paged_bsnd import (
-    test_flash_attn_npu_v3_mla_paged_metadata_aicpu as metadata_base,
-)
+from tests.mla.support.components import paged_attention as base
+from tests.mla.support.public_cases import paged_bsnd_production as production
+from tests.mla.support.components import paged_metadata_aicpu as metadata_base
 
 config = base.config
 valid_outputs = base.valid_outputs

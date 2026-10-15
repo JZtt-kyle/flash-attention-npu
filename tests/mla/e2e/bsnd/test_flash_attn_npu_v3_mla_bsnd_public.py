@@ -10,13 +10,15 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_attention import (
+from tests.mla.support.components.bsnd_attention import (
     CASES,
-    bsnd_attention as bsnd_attention,
     launch_bsnd,
     make_bsnd_case,
     references,
     values_for,
+)
+from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_attention import (
+    bsnd_attention as bsnd_attention,
 )
 from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_metadata import check_source
 from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_metadata_aicpu import (
@@ -27,8 +29,9 @@ from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_schedule import (
     length_artifacts as length_artifacts,
     length_oracle as length_oracle,
 )
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward, _inputs
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvcache import cached, generate, metadata_args
+from tests.mla.support.public_cases.contract import _forward, _inputs
+from tests.mla.support.public_cases.kvcache import cached, generate
+from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvcache import metadata_args
 from tests.test_flash_attn_npu_v3_metadata_signature import metadata as call_metadata
 from tests.mla.support.mla_profile_cases import (
     BSND_CASES,

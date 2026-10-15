@@ -35,10 +35,7 @@ class WindowCannCall(CannCall):
 
 def check_window_accuracy(actual, source, cpu, shape, scale, lengths, spec):
     from tests.mla.support.mla_source_compare import assert_mla_source_close
-    from tests.mla.unit.window_bsnd.test_flash_attn_npu_v3_mla_window_attention import (
-        references,
-        normalized_window,
-    )
+    from tests.mla.support.components.window_attention import references, normalized_window
 
     batch, sq, heads, sk = shape
     window = normalized_window(spec)

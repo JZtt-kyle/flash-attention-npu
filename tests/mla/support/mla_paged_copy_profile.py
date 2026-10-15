@@ -13,11 +13,7 @@ import torch
 import torch_npu
 
 from tests.mla.support.mla_paged_copy_build import load_probes, sha256
-from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_copy import (
-    check_case,
-    launch,
-    make_case,
-)
+from tests.mla.support.components.paged_copy import check_case, launch, make_case
 
 
 # Fixed before sampling. Query layout describes the workload, not an input to

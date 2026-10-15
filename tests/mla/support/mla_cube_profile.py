@@ -14,7 +14,7 @@ import torch
 import torch_npu
 
 from tests.mla.support.mla_cube_build import build_probes
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_cube import launch, make_case
+from tests.mla.support.components.cube import launch, make_case
 
 
 SHAPES = [(2, 1, 8, 257), (1, 7, 16, 65), (1, 1, 128, 512), (2, 2, 128, 511)]

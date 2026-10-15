@@ -9,10 +9,10 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_ref import mla_reference_pair
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import check_case, make_case
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import probes as probes
+from tests.mla.support.components.dense import check_case, make_case
+from tests.mla.support.components.dense import probes as probes
 from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_forward import public
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvcache import cached, generate
+from tests.mla.support.public_cases.kvcache import cached, generate
 
 
 SHAPES = [

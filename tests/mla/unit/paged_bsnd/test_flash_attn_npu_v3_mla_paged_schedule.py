@@ -8,74 +8,30 @@ against the migrated SplitCore, and retained alongside FA3 whole-M results.
 
 import itertools
 import json
-import os
-from pathlib import Path
 import random
 
 import pytest
 
-from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_schedule import (
-    build_oracle,
+from tests.mla.support.components.tnd_schedule import (
     check_tasks,
     compile_driver,
-    evaluate,
     expected_spans,
     tnd_case,
 )
-from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_schedule import (
-    encode as encode_used,
-    used_case,
+
+from tests.mla.support.components.paged_schedule import (
+    encode as encode,
+    execute as execute,
+    paged_artifacts as paged_artifacts,
+    paged_case as paged_case,
+    paged_oracles as paged_oracles,
+    spans as spans,
 )
-
-
-@pytest.fixture(scope="session")
-def paged_artifacts(tmp_path_factory):
-    target = os.environ.get("MLA_PAGED_SCHEDULE_DIR")
-    directory = Path(target) if target else tmp_path_factory.mktemp("mla-paged-schedule")
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory
 
 
 @pytest.fixture(scope="session")
 def paged_scheduler(paged_artifacts):
     return compile_driver(paged_artifacts, False, used=True, paged=True)
-
-
-@pytest.fixture(scope="session")
-def paged_oracles(paged_artifacts):
-    source = build_oracle(paged_artifacts, used=True, paged=True)
-    migrated = compile_driver(paged_artifacts, True, used=True, paged=True, migrated_split=True)
-    return source, migrated
-
-
-def paged_case(layout=0, q=(7, 7), lengths=(17, 0), uq=None, page=112, capacity=None, **kwargs):
-    if capacity is None:
-        capacity = ((max(lengths, default=0) + page - 1) // page + 1) * page
-    return used_case(
-        layout, q, [capacity] * len(q), uq, list(lengths), page=page, sk=capacity, **kwargs
-    )
-
-
-def encode(item):
-    return [*encode_used(item), item["page"]]
-
-
-def execute(binary, items, **kwargs):
-    return evaluate(binary, [encode(item) for item in items], **kwargs)
-
-
-def spans(item):
-    q = item["q"]
-    uq = q if item["uq"] is None else item["uq"]
-    starts = list(itertools.accumulate(q, initial=0))
-    return [
-        max(uq, default=0),
-        max(item["uk"], default=0),
-        max(q, default=0),
-        *itertools.chain.from_iterable(
-            (starts[b], q[b], uq[b], item["uk"][b]) for b in range(len(q))
-        ),
-    ]
 
 
 def compare(scheduler, oracles, items, directory, name):

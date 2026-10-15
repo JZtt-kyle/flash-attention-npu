@@ -53,6 +53,6 @@ def test_fixed_source_and_snippet_identity(tmp_path, monkeypatch):
     (tmp_path / "flash_api.cpp").write_bytes(original["flash_api.cpp"] + b"// altered\n")
     with pytest.raises(RuntimeError, match="flash_api.cpp SHA256"):
         builder.split_toolchain_identity(False)
-    # New protocol implementation is not linked into production or metadata.
+    # The completed protocol is registered in the FA3 production build.
     setup = Path(runner.ROOT / "setup.py").read_text()
-    assert '"mla_split_kv.cpp"' not in setup
+    assert '"mla_split_kv.cpp"' in setup

@@ -20,7 +20,9 @@ namespace flash_attn::mla::Kernel {
 // M10a fragments and native workspace budget. One fragment per physical AIC;
 // no reduction, public accumulator, metadata or production dispatch here.
 template <typename InputT>
-class MlaSplitKvBsnd : private MlaTaskRing<InputT, true, false, false, false, false, false, false, true, true> {
+class MlaSplitKvBsnd : private MlaTaskRing<InputT, /*HasKvLengths=*/true, /*IsTnd=*/false, /*MixedKv=*/false,
+                                           /*HasUsed=*/false, /*HasStrides=*/false, /*IsPaged=*/false,
+                                           /*IsCausal=*/false, /*IsWindow=*/true, /*IsPartial=*/true> {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, const MlaSplitKvKernelParams& partial,
                                       float scale, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace,
@@ -34,7 +36,9 @@ class MlaSplitKvBsnd : private MlaTaskRing<InputT, true, false, false, false, fa
 // layouts. The launch wrapper supplies one persistent fragment per iteration.
 template <typename InputT, bool AbsolutePartialOffsets = false>
 class MlaSplitKvUsedBsnd
-    : private MlaTaskRing<InputT, true, false, false, true, true, false, false, true, true, AbsolutePartialOffsets> {
+    : private MlaTaskRing<InputT, /*HasKvLengths=*/true, /*IsTnd=*/false, /*MixedKv=*/false, /*HasUsed=*/true,
+                          /*HasStrides=*/true, /*IsPaged=*/false, /*IsCausal=*/false, /*IsWindow=*/true,
+                          /*IsPartial=*/true, AbsolutePartialOffsets> {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
                                       GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace, TPipe* pipe,
@@ -47,7 +51,10 @@ class MlaSplitKvUsedBsnd
 // TND allocation starts and independent strides are already carried by v5
 // spans. Total Q is only the output head stride; mask uses per-sample used.
 template <typename InputT>
-class MlaSplitKvUsedTnd : private MlaTaskRing<InputT, true, true, false, true, true, false, false, true, true, true> {
+class MlaSplitKvUsedTnd
+    : private MlaTaskRing<InputT, /*HasKvLengths=*/true, /*IsTnd=*/true, /*MixedKv=*/false, /*HasUsed=*/true,
+                          /*HasStrides=*/true, /*IsPaged=*/false, /*IsCausal=*/false, /*IsWindow=*/true,
+                          /*IsPartial=*/true, /*AbsolutePartialOffsets=*/true> {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
                                       GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace, TPipe* pipe,
@@ -61,7 +68,9 @@ class MlaSplitKvUsedTnd : private MlaTaskRing<InputT, true, true, false, true, t
 // PA keeps logical fragment endpoints and resolves physical pages in Copy.
 // Absolute offsets own a persistent slot across every task wave.
 template <typename InputT, bool IsTnd = false>
-class MlaSplitKvPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, true, false, true, true, true> {
+class MlaSplitKvPaged : private MlaTaskRing<InputT, /*HasKvLengths=*/true, IsTnd, /*MixedKv=*/false, /*HasUsed=*/false,
+                                            /*HasStrides=*/true, /*IsPaged=*/true, /*IsCausal=*/false,
+                                            /*IsWindow=*/true, /*IsPartial=*/true, /*AbsolutePartialOffsets=*/true> {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
                                       GM_ADDR qc, GM_ADDR qr, const MlaPagedCacheInputs& cache, GM_ADDR workspace,

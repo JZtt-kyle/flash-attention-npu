@@ -1,30 +1,18 @@
 """Conservative native dependencies plus the selected tests' Python imports.
 
-All native sources and test drivers remain in the closure. Unrelated test
-modules and the headless launcher no longer invalidate a numerical suite.
+Native sources remain conservative. Python helpers follow actual imports so
+moving a helper out of a test does not make every suite depend on it.
 """
 
 import ast
 from pathlib import Path
 
 
-def suite_sources(root, selection, baseline, *, headless=False):
+def python_dependencies(root, paths, baseline):
+    """Follow local imports; unknown dynamic loading retains the full baseline."""
     root = Path(root)
-    selected = {
-        path
-        for path in baseline
-        if not (
-            path.startswith("tests/")
-            and Path(path).name.startswith("test_")
-            and path.endswith(".py")
-        )
-        and path != "scripts/mla_codex_loop.py"
-    }
-    if headless and "scripts/mla_codex_loop.py" in baseline:
-        selected.add("scripts/mla_codex_loop.py")
-    pending = [arg.split("::", 1)[0] for arg in selection if arg.split("::", 1)[0].endswith(".py")]
-    pending += ["tests/mla/support/mla_validation.py"]
-    pending += [path for path in selected if Path(path).name in {"__init__.py", "conftest.py"}]
+    selected = set()
+    pending = list(paths)
     visited = set()
 
     def module_paths(name):
@@ -87,3 +75,20 @@ def suite_sources(root, selection, baseline, *, headless=False):
             for name in names:
                 pending.extend(module_paths(name))
     return {path: baseline[path] for path in sorted(selected)}
+
+
+def suite_sources(root, selection, baseline, *, headless=False):
+    selected = {
+        path: digest
+        for path, digest in baseline.items()
+        if not (path.startswith("tests/") and path.endswith(".py"))
+        and path != "scripts/mla_codex_loop.py"
+    }
+    if headless and "scripts/mla_codex_loop.py" in baseline:
+        selected["scripts/mla_codex_loop.py"] = baseline["scripts/mla_codex_loop.py"]
+    pending = [arg.split("::", 1)[0] for arg in selection if arg.split("::", 1)[0].endswith(".py")]
+    pending += ["tests/mla/support/mla_validation.py", "tests/mla/support/mla_validation_plugin.py"]
+    # Pytest can load fixtures/plugins through ancestors and package imports.
+    pending += [path for path in baseline if Path(path).name in {"__init__.py", "conftest.py"}]
+    selected.update(python_dependencies(root, pending, baseline))
+    return dict(sorted(selected.items()))

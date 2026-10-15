@@ -15,74 +15,38 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
 
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_stride import NAMES, strides_for
-from tests.mla.e2e.bsnd.test_flash_attn_npu_v3_mla_bsnd_stride_production import (
-    storage_fault as storage_fault,
-)
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward
-from tests.mla.e2e.mixed.test_flash_attn_npu_v3_mla_mixed_public import (
-    invoke as mixed_invoke,
-    metadata,
-)
-from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_stride import (
+from tests.mla.support.components.bsnd_stride import NAMES, strides_for
+from tests.mla.support.public_cases.bsnd_stride_production import storage_fault as storage_fault
+from tests.mla.support.public_cases.contract import _forward
+from tests.mla.e2e.mixed.test_flash_attn_npu_v3_mla_mixed_public import invoke as mixed_invoke
+from tests.mla.support.public_cases.mixed_public import metadata
+from tests.mla.support.components.tnd_stride import (
     BOUNDARY_CASES,
     EMPTY_CASES,
     LAYOUT_CASES,
-    PERFORMANCE_CASES as COMPONENT_CASES,
     WIDE_CASES,
     launch,
-    make_case,
     spec,
     stride_attention as stride_attention,
     stride_producer as stride_producer,
 )
-from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_attention import effective
-from tests.mla.e2e.tnd.test_flash_attn_npu_v3_mla_varlen_used import check_result as check_result
+from tests.mla.support.components.used_attention import effective
+from tests.mla.support.public_cases.varlen_used import check_result as check_result
+
+from tests.mla.support.public_cases.mixed_stride_production import (
+    PERFORMANCE_CASES as PERFORMANCE_CASES,
+    PUBLIC_CASES as PUBLIC_CASES,
+    forward_args as forward_args,
+    production_case as production_case,
+    public_args as public_args,
+)
 
 
-# Fix matrices before sampling. Public kvcache uses all allocated Q tokens;
-# Q-used remains internal. Native FIA limits Hq to 128, unlike the component.
-PERFORMANCE_CASES = [dict(c, aic=None) for c in COMPONENT_CASES if c["item"]["layout"] == 2]
-PUBLIC_CASES = [
-    dict(c, version=4, item=dict(c["item"], uq=None, heads=min(c["item"]["heads"], 128)))
-    for c in PERFORMANCE_CASES
-] + [
-    spec(4, 2, "contiguous", uk=(17, 0, 33)),
-    spec(4, 2, "matrix_65536", uk=(17, 0, 33), heads=8),
-    spec(4, 2, "head_65536", uk=(17, 0, 33), heads=8),
-    spec(4, 2, "overlap", uk=(17, 0, 33), heads=8),
-    spec(4, 2, uk=(0, 0, 0), heads=128),
-]
 ACCURACY_CASES = (
     [c for c in LAYOUT_CASES + BOUNDARY_CASES + EMPTY_CASES if c["item"]["layout"] == 2]
     + PERFORMANCE_CASES
     + PUBLIC_CASES
 )
-
-
-def production_case(probes, producer, config, **kwargs):
-    assert config["item"]["layout"] == 2
-    if config["version"] == 5 and config["item"]["uq"] is None:
-        config = dict(config, item=dict(config["item"], uq=config["item"]["q"]))
-    return make_case(probes, producer, config, full_launch=True, **kwargs)
-
-
-def forward_args(case):
-    return dict(
-        **case["devices"]["migrated"],
-        cu_seqlens_q=case["inputs"][0],
-        seqused_q=case["inputs"][2],
-        seqused_k=case["inputs"][3],
-        max_seqlen_q=case["context"].query.maximum,
-        softmax_scale=case["scale"],
-    )
-
-
-def public_args(args):
-    args = dict(args)
-    assert args.pop("seqused_q", None) is None
-    args["cache_seqlens"] = args.pop("seqused_k", None)
-    return args
 
 
 def invoke(args, entry="public"):

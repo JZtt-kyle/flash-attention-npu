@@ -9,12 +9,14 @@ import pytest
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_dense_build import ROOT, sha256
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import probe as probe
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata_dense import (
+from tests.mla.support.components.metadata import probe as probe
+from tests.mla.support.components.metadata_dense import (
     check_metadata_case,
     configure,
-    consumers as _independent_consumers,
     make_metadata_case,
+)
+from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata_dense import (
+    consumers as _independent_consumers,
     test_checked_runtime_error as check_runtime_error,
 )
 

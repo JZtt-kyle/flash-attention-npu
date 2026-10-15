@@ -14,16 +14,14 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward, _inputs
+from tests.mla.support.public_cases.contract import _forward, _inputs
 from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_attention import (
     CASES,
     EMPTY_CASES,
-    launch,
-    make_case,
-    references,
     tnd_attention as tnd_attention,
     tnd_probe as tnd_probe,
 )
+from tests.mla.support.components.tnd_attention import launch, make_case, references
 
 
 def public(args, lse=True):

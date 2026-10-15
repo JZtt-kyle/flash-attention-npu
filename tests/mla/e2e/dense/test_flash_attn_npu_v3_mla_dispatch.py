@@ -8,8 +8,8 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward, _inputs
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvcache import generate
+from tests.mla.support.public_cases.contract import _forward, _inputs
+from tests.mla.support.public_cases.kvcache import generate
 
 
 @pytest.fixture(params=[torch.float16, torch.bfloat16], ids=["fp16", "bf16"])

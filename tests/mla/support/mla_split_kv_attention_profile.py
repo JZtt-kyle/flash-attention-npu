@@ -12,7 +12,7 @@ import time
 import torch
 import torch_npu
 
-from tests.mla.unit.split_kv_attention import test_attention as suite
+from tests.mla.support.components import split_kv_attention_attention as suite
 from tests.mla.support.mla_split_kv_attention_cases import PERFORMANCE_CASES
 
 

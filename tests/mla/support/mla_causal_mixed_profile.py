@@ -19,7 +19,7 @@ from tests.mla.support.mla_cann_baseline import check_vendor_configuration, envi
 from tests.mla.support.mla_source_compare import assert_mla_source_close
 from tests.mla.support.mla_mixed_profile import CannMixedCall
 from tests.mla.support.mla_causal_tnd_profile import sample_kernels
-from tests.mla.e2e.causal_mixed.test_flash_attn_npu_v3_mla_causal_mixed_public import (
+from tests.mla.support.public_cases.causal_mixed_public import (
     PERFORMANCE_CASES,
     prepare,
     metadata,

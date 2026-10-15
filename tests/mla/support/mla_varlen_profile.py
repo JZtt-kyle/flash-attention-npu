@@ -19,12 +19,8 @@ import torch_npu
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_cann_baseline import check_vendor_configuration, environment, file_info
-from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_attention import references
-from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_schedule import (
-    build_oracle,
-    evaluate,
-    tnd_case,
-)
+from tests.mla.support.components.tnd_attention import references
+from tests.mla.support.components.tnd_schedule import build_oracle, evaluate, tnd_case
 
 
 # Fixed before sampling. Native host Hq<=128; larger-head component cases

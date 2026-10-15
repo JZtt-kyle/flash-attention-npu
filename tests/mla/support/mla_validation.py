@@ -726,6 +726,8 @@ SUITES = {
         "tests/mla/unit/tools/test_flash_attn_npu_v3_mla_build.py::test_device_dependency_staleness",
     ],
     "tools": [
+        "tests/mla/unit/tools/test_matrix.py",
+        "tests/mla/unit/tools/test_organization.py",
         "tests/mla/unit/tools/test_mla_validation.py",
         "tests/mla/unit/tools/test_mla_source_compare.py",
         "tests/mla/unit/tools/test_mla_codex_loop.py",
@@ -777,7 +779,7 @@ SUITES = {
     "causal-cpu": [CAUSAL_CPU],
     "causal-sanitize": [CAUSAL_CPU],
 }
-INCREMENTAL_SUITES.update(
+SUITES.update(
     {
         "split-kv-sanitize": ["tests/mla/unit/split_kv/test_split_kv.py"],
         "split-kv-tools": ["tests/mla/unit/tools/test_mla_split_kv_tools.py"],
@@ -951,6 +953,7 @@ CPU_SUITES = {
     "used-shared-sanitize",
     "cpu",
     "tools",
+    "unit-tools",
     "reference",
     "causal-cpu",
     "causal-sanitize",

@@ -37,7 +37,7 @@ from tests.mla.support.mla_profile_cases import (
 
 def check_causal_accuracy(actual, source, cpu, shape, scale, lengths):
     from tests.mla.support.mla_source_compare import assert_mla_source_close
-    from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_attention import references
+    from tests.mla.support.components.causal_attention import references
 
     batch, sq, heads, sk = shape
     full_refs = references(
@@ -172,11 +172,7 @@ def profile(
         )
         device = {name: tensor.npu() for name, tensor in cpu.items()}
         if stride_profiles is not None:
-            from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_stride import (
-                NAMES,
-                make_view,
-                strides_for,
-            )
+            from tests.mla.support.components.bsnd_stride import NAMES, make_view, strides_for
 
             profile_name = stride_profiles[index]
             for name, offset in zip(NAMES, (5, 11, 19, 29)):
@@ -247,7 +243,7 @@ def profile(
             if kv_lengths[index] is None:
                 refs = mla_reference_pair(**cpu, softmax_scale=scale)
             else:
-                from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_attention import references
+                from tests.mla.support.components.bsnd_attention import references
 
                 refs = references(
                     dict(shape=shape, logical_lengths=kv_lengths[index], inputs=cpu, scale=scale)
@@ -683,7 +679,7 @@ if __name__ == "__main__":
         strides = [profile_name for _, _, _, profile_name in STRIDE_CASES]
     causal = os.environ.get("MLA_FORWARD_CAUSAL") == "1"
     if causal:
-        from tests.mla.e2e.causal_bsnd.test_flash_attn_npu_v3_mla_causal_public import (
+        from tests.mla.support.public_cases.causal_public import (
             NATIVE_PREFLIGHT_CASES,
             PERFORMANCE_CASES,
         )

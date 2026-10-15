@@ -9,10 +9,7 @@ import math
 
 import pytest
 
-from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_schedule import (
-    encode as paged_encode,
-    paged_case,
-)
+from tests.mla.support.components.paged_schedule import encode as paged_encode, paged_case
 
 
 def config(

@@ -51,7 +51,7 @@ def compile_drivers(directory):
     identities = json.loads(manifest.read_text())
     identities.update({str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in binaries})
     manifest.write_text(json.dumps(identities, indent=2) + "\n")
-    from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_schedule import build_oracle
+    from tests.mla.support.components.tnd_schedule import build_oracle
 
     paged = build_oracle(directory, used=True, paged=True)
     identities[str(paged)] = hashlib.sha256(paged.read_bytes()).hexdigest()

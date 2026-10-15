@@ -11,12 +11,7 @@ import time
 import torch
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.e2e.causal_mixed.test_flash_attn_npu_v3_mla_causal_mixed_public import (
-    prepare,
-    spec,
-    call,
-    metadata,
-)
+from tests.mla.support.public_cases.causal_mixed_public import prepare, spec, call, metadata
 
 
 def run(dtype, fault, directory):

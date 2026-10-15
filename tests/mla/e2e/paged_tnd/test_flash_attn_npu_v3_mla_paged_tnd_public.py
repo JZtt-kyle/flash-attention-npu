@@ -2,7 +2,6 @@
 
 from contextlib import nullcontext
 import gc
-import hashlib
 import itertools
 import json
 import os
@@ -17,10 +16,8 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward
-from tests.mla.e2e.paged_tnd import test_flash_attn_npu_v3_mla_paged_tnd_production as production
-from tests.mla.e2e.paged_tnd.test_flash_attn_npu_v3_mla_paged_tnd_production import (
-    component,
+from tests.mla.support.public_cases import paged_tnd_production as production
+from tests.mla.support.public_cases.paged_tnd_production import (
     generate,
     make_case,
     tnd,
@@ -31,49 +28,16 @@ from tests.mla.e2e.paged_tnd.test_flash_attn_npu_v3_mla_paged_tnd_production imp
     storage_fault as storage_fault,
 )
 
-
-# Same page/length matrix as production, using full TND Q allocations.
-# Keep native FD cases and fix the matrix before collecting any timings.
-PERFORMANCE_CASES = [dict(c, uq=None) for c in production.PERFORMANCE_CASES]
-
-
-def public(args, lse=True):
-    args = dict(args)
-    args["k_cache"], args["v_cache"] = args.pop("k"), args.pop("v")
-    args.setdefault("num_splits", 1)
-    return api.flash_attn_with_kvcache(**args, return_softmax_lse=lse)
-
-
-def invoke(entry, args):
-    entry = entry.removesuffix("_fake")
-    if entry == "public":
-        return public(args)
-    if entry == "op":
-        return torch.ops.flash_attn_npu_3._mla_paged_tnd_forward(**args)
-    args = dict(args)
-    args["seqused_k"] = args.pop("cache_seqlens", None)
-    return _forward(entry, args)
-
-
-@pytest.fixture(params=("public", "op", "eager", "cpp", "public_fake", "op_fake", "eager_fake"))
-def entry(request):
-    with FakeTensorMode() if request.param.endswith("fake") else nullcontext():
-        yield request.param
-
-
-@pytest.fixture(params=(torch.float16, torch.bfloat16), ids=("fp16", "bf16"))
-def dtype(request):
-    return request.param
-
-
-def small_inputs(dtype=torch.float16, **kwargs):
-    args = production.small_inputs(dtype, **kwargs)
-    args["v"].fill_(3)
-    return args
-
-
-def check_constant(result, lengths, value=3, allocations=(5, 0, 2)):
-    production.check_constant(result[:2], result[0].dtype, allocations, allocations, lengths, value)
+from tests.mla.support.public_cases.paged_tnd_public import (
+    PERFORMANCE_CASES as PERFORMANCE_CASES,
+    check_case as check_case,
+    check_constant as check_constant,
+    dtype as dtype,
+    entry as entry,
+    invoke as invoke,
+    public as public,
+    small_inputs as small_inputs,
+)
 
 
 @pytest.mark.parametrize("page", range(16, 1025, 16))
@@ -148,45 +112,6 @@ def test_empty_batch(entry, dtype):
     args["cu_seqlens_q"] = args["cu_seqlens_q"][:1]
     result = invoke(entry, dict(args, scheduler_metadata=generate(args)))
     assert result[0].shape == (0, 8, 512) and result[1].shape == (8, 0)
-
-
-def check_case(probes, case, entry="public", metadata=None):
-    args = production.forward_args(case)
-    assert args.pop("seqused_q") is None
-    with (
-        forbid_host_readback(),
-        patch.object(torch.Tensor, "contiguous", side_effect=AssertionError("input copy")),
-    ):
-        if production.source_available(case):
-            assert component.launch(probes, case, "oracle") == 0
-        record = generate(args) if metadata is None else metadata
-        implicit = invoke(entry, args)
-        actual = invoke(entry, dict(args, scheduler_metadata=record))
-    report = production.check_result(case, actual[:2])
-    for a, b in zip(implicit[:2], actual[:2]):
-        torch.testing.assert_close(a.cpu(), b.cpu(), rtol=0, atol=0)
-    assert [x & 0xFFFFFFFF for x in record.cpu().tolist()] == case["expected"]
-    for before, after in case["input_checks"]:
-        torch.testing.assert_close(after.cpu(), before, rtol=0, atol=0, equal_nan=True)
-    report.update(
-        config=case["config"], entry=entry, scale=case["scale"], expected_metadata=case["expected"]
-    )
-    target = probes[1] / "tnd-public-accuracy"
-    target.mkdir(exist_ok=True)
-    digest = hashlib.sha256(json.dumps(report, sort_keys=True).encode()).hexdigest()[:20]
-    torch.save(
-        dict(
-            host=case["host"],
-            pages=case["table_host"],
-            actual=[t.cpu() for t in actual[:2]],
-            source=[t.cpu() for t in case["outputs"]["oracle"]],
-            report=report,
-        ),
-        target / (digest + ".pt"),
-    )
-    with (target / "results.jsonl").open("a") as f:
-        f.write(json.dumps(report) + "\n")
-    return report
 
 
 @pytest.mark.parametrize("page", range(16, 1025, 16))

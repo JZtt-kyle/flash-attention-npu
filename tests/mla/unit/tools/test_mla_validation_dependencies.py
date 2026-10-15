@@ -3,7 +3,7 @@
 import pytest
 
 from tests.mla.support import mla_validation as runner
-from tests.mla.support.mla_validation_dependencies import suite_sources
+from tests.mla.support.mla_validation_dependencies import python_dependencies, suite_sources
 from tests.mla.support.mla_validation_selection import COVERAGE, INCREMENTAL_SUITES, PARENTS
 
 
@@ -19,6 +19,7 @@ def source_tree(tmp_path):
         "tests/common/equation.py": "",
         "tests/test_unrelated.py": "",
         "tests/mla_driver.py": "",
+        "tests/common/unrelated.py": "",
         "csrc/ascend910/shared.hpp": "",
         "scripts/mla_codex_loop.py": "",
     }
@@ -33,10 +34,16 @@ def test_unrelated_test_and_headless_changes_preserve_numerical_identity(tmp_pat
     baseline = source_tree(tmp_path)
     selection = ["tests/test_selected.py::test_example[fp16]"]
     before = suite_sources(tmp_path, selection, baseline)
-    for path in ("tests/test_unrelated.py", "scripts/mla_codex_loop.py"):
+    unrelated = {
+        "tests/test_unrelated.py",
+        "scripts/mla_codex_loop.py",
+        "tests/mla_driver.py",
+        "tests/common/unrelated.py",
+    }
+    for path in unrelated:
         changed = dict(baseline, **{path: "changed"})
         assert suite_sources(tmp_path, selection, changed) == before
-    for path in set(baseline) - {"tests/test_unrelated.py", "scripts/mla_codex_loop.py"}:
+    for path in set(baseline) - unrelated:
         changed = dict(baseline, **{path: "changed"})
         assert suite_sources(tmp_path, selection, changed) != before, path
     assert "scripts/mla_codex_loop.py" in suite_sources(
@@ -52,6 +59,35 @@ def test_dynamic_unknown_import_falls_back_and_new_static_import_is_tracked(tmp_
     assert suite_sources(tmp_path, selection, baseline) == baseline
     path.write_text('command = ["python", "-m", "tests.test_unrelated"]\n')
     assert "tests/test_unrelated.py" in suite_sources(tmp_path, selection, baseline)
+
+
+def test_shared_helper_changes_invalidate_only_its_consumers(tmp_path):
+    baseline = source_tree(tmp_path)
+    helper = "tests/common/equation.py"
+    before = suite_sources(tmp_path, ["tests/test_selected.py"], baseline)
+    changed = dict(baseline, **{helper: "changed without changing mtime"})
+    assert suite_sources(tmp_path, ["tests/test_selected.py"], changed) != before
+    unrelated = suite_sources(tmp_path, ["tests/test_unrelated.py"], baseline)
+    assert suite_sources(tmp_path, ["tests/test_unrelated.py"], changed) == unrelated
+
+
+def test_production_build_tracks_its_helpers_without_cpu_or_profile_builders():
+    from tests.mla.paths import ROOT
+
+    baseline = {str(path.relative_to(ROOT)): None for path in (ROOT / "tests").rglob("*.py")}
+    baseline["setup.py"] = None
+    dependencies = python_dependencies(
+        ROOT, ["tests/mla/support/mla_validation_build.py"], baseline
+    )
+    assert {
+        "tests/mla/support/mla_validation_build.py",
+        "tests/mla/support/mla_dense_build.py",
+        "tests/mla/support/mla_metadata_build.py",
+        "tests/mla/support/mla_validation_dependencies.py",
+        "tests/mla/paths.py",
+    } <= set(dependencies)
+    assert not any("/test_" in path or "/public_cases/" in path for path in dependencies)
+    assert "tests/mla/support/mla_window_build.py" not in dependencies
 
 
 @pytest.mark.parametrize("owner", ("tests/__init__.py", "tests/common/conftest.py"))
@@ -93,4 +129,4 @@ def test_real_numerical_closures_track_builders_without_headless_or_unrelated_te
         assert selected["setup.py"] == baseline["setup.py"]
         assert "tests/mla/support/mla_metadata_build.py" in selected
         assert "tests/mla/support/mla_ref.py" in selected
-        assert "tests/mla/unit/dense/test_flash_attn_npu_v3_mla_dense.py" in selected
+        assert "tests/mla/support/components/dense.py" in selected

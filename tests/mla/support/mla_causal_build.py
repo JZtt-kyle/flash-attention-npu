@@ -8,7 +8,7 @@ import shutil
 import subprocess
 
 from tests.mla.support.mla_cpu_driver import CpuDriver as CpuDriver
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_schedule import CANN_COMMIT, MLA, ROOT, run
+from tests.mla.support.components.schedule import CANN_COMMIT, MLA, ROOT, run
 
 SOURCE_FILES = ("attention/common/op_host/split_core.h", "attention/common/op_host/split_core.cpp")
 

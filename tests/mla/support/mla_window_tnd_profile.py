@@ -4,7 +4,7 @@ import torch
 from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_source_compare import assert_mla_source_close
 from tests.mla.support.mla_varlen_used_profile import CannTndUsedCall
-from tests.mla.unit.window_bsnd.test_flash_attn_npu_v3_mla_window_attention import normalized_window
+from tests.mla.support.components.window_attention import normalized_window
 
 
 def window_for(case):
@@ -45,10 +45,7 @@ class WindowTndCall(CannTndUsedCall):
 
 
 def accuracy(case, actual, source):
-    from tests.mla.e2e.window_tnd.test_flash_attn_npu_v3_mla_window_tnd_public import (
-        effective,
-        reference_pairs,
-    )
+    from tests.mla.support.public_cases.window_tnd_public import effective, reference_pairs
 
     window = window_for(case)
     uq, uk = effective(case["spec"])
@@ -96,7 +93,7 @@ if __name__ == "__main__":
     import sys
     from tests.mla.support.mla_causal_tnd_profile import profile
     from tests.mla.support.mla_window_tnd_cases import PERFORMANCE_CASES
-    from tests.mla.e2e.window_tnd.test_flash_attn_npu_v3_mla_window_tnd_public import prepare, call
+    from tests.mla.support.public_cases.window_tnd_public import prepare, call
 
     profile(
         *sys.argv[1:],

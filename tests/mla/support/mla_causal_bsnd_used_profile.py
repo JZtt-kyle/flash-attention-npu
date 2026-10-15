@@ -15,13 +15,9 @@ import torch
 import torch_npu
 
 from tests.mla.support.mla_dense_build import ROOT, sha256
-from tests.mla.e2e.causal_bsnd.test_flash_attn_npu_v3_mla_causal_public import (
-    USED_CASES,
-    prepare,
-    source_tiles,
-)
-from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_attention import make_case
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import Schedule
+from tests.mla.support.public_cases.causal_public import USED_CASES, prepare, source_tiles
+from tests.mla.support.components.causal_attention import make_case
+from tests.mla.support.components.dense import Schedule
 
 
 def build_source(probes):

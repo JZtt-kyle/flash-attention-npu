@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import pytest
 import torch
-from tests.mla.e2e.auto_split_paged_bsnd.test_public import (
+from tests.mla.support.public_cases.auto_split_paged_bsnd_public import (
     prepare,
     metadata,
     call,
@@ -18,8 +18,8 @@ from tests.mla.support.mla_split_kv_build import compile_drivers
 from tests.mla.support.mla_source_compare import assert_mla_source_close
 from tests.mla.unit.auto_split_bsnd_metadata.test_metadata import visible
 from tests.mla.support.mla_auto_split_paged_bsnd_reference import native_schedule
-from tests.mla.unit.split_kv_merge import test_merge as merge
-from tests.mla.unit.split_kv_attention import test_attention as partial
+from tests.mla.support.components import split_kv_merge_merge as merge
+from tests.mla.support.components import split_kv_attention_attention as partial
 
 from tests.mla.unit.split_paged_bsnd.test_source import paged_source as paged_source
 
@@ -30,7 +30,7 @@ merge_probes = merge.merge_probes
 def native_partition():
     directory = Path(os.environ["MLA_VALIDATION_RESULT"]) / "native-partition"
     _, native, _ = compile_drivers(directory)
-    from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_schedule import build_oracle
+    from tests.mla.support.components.tnd_schedule import build_oracle
 
     paged = build_oracle(directory, used=True, paged=True)
     with CpuDriver(native) as driver, CpuDriver(paged) as geometry_source:
@@ -54,10 +54,7 @@ def test_fixed_source(paged_source, native_partition, s):
     words = record.cpu().tolist()
     m, n = words[15] or 256, words[16] or 512
     cores = words[17]  # Physical AIC count; public accumulator capacity stays 26.
-    from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_schedule import (
-        encode,
-        paged_case,
-    )
+    from tests.mla.support.components.paged_schedule import encode, paged_case
 
     original = native_partition[1].evaluate(
         [

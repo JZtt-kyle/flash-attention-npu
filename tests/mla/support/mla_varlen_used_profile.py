@@ -17,8 +17,8 @@ import torch_npu
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_cann_baseline import check_vendor_configuration, environment, file_info
 from tests.mla.support.mla_varlen_profile import CannTndCall
-from tests.mla.e2e.tnd import test_flash_attn_npu_v3_mla_varlen_used as used_cases
-from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_attention import (
+from tests.mla.support.public_cases import varlen_used as used_cases
+from tests.mla.support.components.used_attention import (
     configure_producer,
     effective,
     load_attention,
@@ -26,12 +26,8 @@ from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_attention import (
     references,
     check_math,
 )
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import load_probe
-from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_schedule import (
-    build_oracle,
-    evaluate,
-    tnd_case,
-)
+from tests.mla.support.components.metadata import load_probe
+from tests.mla.support.components.tnd_schedule import build_oracle, evaluate, tnd_case
 
 
 class CannTndUsedCall:
@@ -393,11 +389,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     cases_api = used_cases
     if args.stride:
-        from tests.mla.e2e.tnd import test_flash_attn_npu_v3_mla_tnd_stride_production as cases_api
-        from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_stride import (
-            configure_producer,
-            load_attention,
-        )
+        from tests.mla.support.public_cases import tnd_stride_production as cases_api
+        from tests.mla.support.components.tnd_stride import configure_producer, load_attention
     probes = load_attention(args.probe_dir)
     manifest = json.loads(Path(args.producer_manifest).read_text())
     from tests.mla.support.mla_dense_build import ROOT, sha256

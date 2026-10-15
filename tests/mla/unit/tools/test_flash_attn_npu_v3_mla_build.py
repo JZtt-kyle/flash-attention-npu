@@ -96,9 +96,24 @@ def test_aicpu_sources_by_backend():
             expected.append(f"csrc/{directory}/mla/mla_tnd_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_tnd_bsnd_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_used_metadata.aicpu")
+            expected.extend(
+                f"csrc/{directory}/mla/mla_{capability}_metadata.aicpu"
+                for capability in (
+                    "split_bsnd",
+                    "split_tnd",
+                    "split_mixed",
+                    "auto_split_bsnd",
+                    "auto_split_tnd",
+                    "auto_split_mixed",
+                )
+            )
             expected.append(f"csrc/{directory}/mla/mla_causal_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_window_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_paged_metadata.aicpu")
+            expected.extend(
+                f"csrc/{directory}/mla/mla_{capability}_metadata.aicpu"
+                for capability in ("split_paged_bsnd", "split_paged_tnd", "auto_split_paged_bsnd")
+            )
         assert builder._build_aicpu_metadata("unused.so", name) == expected
     assert builder._build_aicpu_metadata("unused.so", "unknown") == []
 

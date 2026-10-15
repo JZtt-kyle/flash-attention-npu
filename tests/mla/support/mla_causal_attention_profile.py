@@ -12,7 +12,7 @@ import time
 import torch
 import torch_npu
 
-from tests.mla.unit.causal_bsnd import test_flash_attn_npu_v3_mla_causal_attention as suite
+from tests.mla.support.components import causal_attention as suite
 
 
 def profile(probes, output):

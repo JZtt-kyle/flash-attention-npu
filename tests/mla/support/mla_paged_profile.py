@@ -17,10 +17,10 @@ import torch_npu
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_cann_baseline import check_vendor_configuration, environment, file_info
 from tests.mla.support.mla_dense_build import ROOT, sha256
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import load_probe
-from tests.mla.e2e.paged_bsnd import test_flash_attn_npu_v3_mla_paged_public as bsnd
-from tests.mla.e2e.paged_tnd import test_flash_attn_npu_v3_mla_paged_tnd_public as tnd
-from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_attention import (
+from tests.mla.support.components.metadata import load_probe
+from tests.mla.support.public_cases import paged_public as bsnd
+from tests.mla.support.public_cases import paged_tnd_public as tnd
+from tests.mla.support.components.paged_attention import (
     configure_producer,
     launch,
     load_attention,
@@ -28,10 +28,7 @@ from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_attention import
     references,
     check_math,
 )
-from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_schedule import (
-    build_oracle,
-    execute,
-)
+from tests.mla.support.components.paged_schedule import build_oracle, execute
 
 
 class CannPagedCall:

@@ -17,7 +17,7 @@ from tests.mla.support.mla_native_dispatch import parse_dispatch, sha256
 from tests.mla.support.mla_validation_policy import check_public_performance
 from tests.mla.support.mla_public_performance import summarize_mixed
 from tests.mla.support.mla_causal_tnd_profile import sample_kernels
-from tests.mla.e2e.causal_paged.test_flash_attn_npu_v3_mla_causal_paged_public import (
+from tests.mla.support.public_cases.causal_paged_public import (
     PERFORMANCE_CASES,
     REPRESENTATIVES,
     make_case,

@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 
 from tests.mla.support.mla_causal_build import source_blobs, toolchain_identity
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_schedule import MLA, ROOT
+from tests.mla.support.components.schedule import MLA, ROOT
 
 FA3_COMMIT = "d15f1531a460ba456f41b01a774f33ab2db8febf"
 FA3_SHA256 = "012547af36b3a780b2849b2ac26bda75d4aa26b0c83921449b81109128782fab"

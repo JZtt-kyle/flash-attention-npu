@@ -54,5 +54,5 @@ def test_existing_commands_and_e2e_are_unchanged():
     assert runner.SUITES["split-tnd-cpu"] == runner.SUITES["split-tnd-sanitize"]
     assert all("split_mixed_protocol" not in path for path in runner.SUITES["e2e"])
     setup = (runner.ROOT / "setup.py").read_text()
-    assert '"mla_split_mixed_plan.cpp"' not in setup
+    assert '"mla_split_mixed_plan.cpp"' in setup
     assert '"mla_split_mixed_metadata.cpp"' not in setup

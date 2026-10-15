@@ -26,8 +26,8 @@ from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_layout import (
     oracle as bsnd_oracle,
     tensor_case,
 )
-from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_schedule import compile_driver
-from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_schedule import execute, used_case
+from tests.mla.support.components.tnd_schedule import compile_driver
+from tests.mla.support.components.used_schedule import execute, used_case
 
 from tests.mla.paths import ROOT
 

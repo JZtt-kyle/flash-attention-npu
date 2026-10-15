@@ -18,19 +18,19 @@ def run(kind, fault, directory, entry="internal"):
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[kind]
     if entry.startswith("tnd-"):
-        from tests.mla.e2e.paged_tnd.test_flash_attn_npu_v3_mla_paged_tnd_production import (
+        from tests.mla.support.public_cases.paged_tnd_production import (
             small_inputs,
             forward,
             generate,
         )
     else:
-        from tests.mla.e2e.paged_bsnd.test_flash_attn_npu_v3_mla_paged_bsnd_production import (
+        from tests.mla.support.public_cases.paged_bsnd_production import (
             small_inputs,
             forward,
             generate,
         )
     if entry in ("public", "tnd-public"):
-        from tests.mla.e2e.paged_bsnd.test_flash_attn_npu_v3_mla_paged_public import public
+        from tests.mla.support.public_cases.paged_public import public
 
         def call(args, metadata=None):
             return public(dict(args, scheduler_metadata=metadata))

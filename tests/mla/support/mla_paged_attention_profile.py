@@ -7,16 +7,14 @@ import sys
 
 import torch
 
-from tests.mla.unit.paged_bsnd import test_flash_attn_npu_v3_mla_paged_attention as suite
+from tests.mla.support.components import paged_attention as suite
 from tests.mla.support.mla_bsnd_stride_profile import profile
 from tests.mla.support.mla_dense_build import ROOT, sha256
 
 
 def run(probes, producer, output, layout="bsnd"):
     if layout == "tnd":
-        from tests.mla.unit.paged_tnd import (
-            test_flash_attn_npu_v3_mla_tnd_paged_attention as active_suite,
-        )
+        from tests.mla.support.components import tnd_paged_attention as active_suite
     else:
         assert layout == "bsnd"
         active_suite = suite

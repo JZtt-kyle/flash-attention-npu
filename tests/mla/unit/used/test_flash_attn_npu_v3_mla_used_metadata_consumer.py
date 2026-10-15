@@ -10,57 +10,33 @@ import subprocess
 import pytest
 
 from tests.mla.support.mla_metadata_build import MLA, ROOT, sha256
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata_consumer import CORRUPTIONS, Memory
-from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_metadata_consumer import (
-    expected_schedule as bsnd_schedule,
-)
+from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata_consumer import CORRUPTIONS
 from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_metadata import (
     used_builder as used_builder,
+    build,
+    metadata_cases,
+    EMPTY_CASES,
+    wide_case,
+)
+from tests.mla.support.components.used_metadata import (
     used_artifacts as used_artifacts,
     used_oracle as used_oracle,
     PREFIX,
     SENTINEL,
-    build,
     check_records,
-    metadata_cases,
     input_arrays,
-    allocation_words,
-    EMPTY_CASES,
     used_case,
-    wide_case,
-    encode,
 )
 
-
-class Allocation(ct.Structure):
-    _fields_ = [(name, ct.c_uint32) for name in ("layout", "low", "high", "maximum")]
-
-
-class Context(ct.Structure):
-    _fields_ = (
-        [(name, ct.c_uint32) for name in ("dtype", "batch", "heads", "flags")]
-        + [
-            ("query", Allocation),
-            ("kv", Allocation),
-        ]
-        + [(name, ct.c_uint32) for name in ("aic", "aiv", "block_dim")]
-        + [
-            ("workspace", ct.c_uint64),
-            ("libapi", ct.c_uint64),
-            ("memory", Memory),
-        ]
-    )
-
-
-class Array(ct.Structure):
-    _fields_ = [("address", ct.c_uint64), ("count", ct.c_uint64)]
-
-
-ARRAY_NAMES = ("cu_q", "cu_k", "used_q", "used_k")
-
-
-class Inputs(ct.Structure):
-    _fields_ = [(name, Array) for name in ARRAY_NAMES]
+from tests.mla.support.components.used_metadata_consumer import (
+    ARRAY_NAMES as ARRAY_NAMES,
+    Allocation as Allocation,
+    Array as Array,
+    Context as Context,
+    Inputs as Inputs,
+    context_for as context_for,
+    expected_schedule as expected_schedule,
+)
 
 
 USED_CORRUPTIONS = CORRUPTIONS + [
@@ -137,29 +113,6 @@ def used_consumer(tmp_path_factory):
     ]
     lib.consume_used_metadata.restype = ct.c_uint32
     return lib, directory
-
-
-def context_for(row, item, dtype):
-    values = encode(item)
-    alloc = allocation_words(item)
-    return Context(
-        dtype,
-        len(item["q"]),
-        values[2],
-        alloc[8],
-        Allocation(*alloc[:4]),
-        Allocation(*alloc[4:8]),
-        values[4],
-        values[5],
-        row[21],
-        row[385] | row[386] << 32,
-        values[11] if row[15] else 0,
-        Memory(*values[6:11]),
-    )
-
-
-def expected_schedule(row):
-    return bsnd_schedule(row) + row[401:410]
 
 
 def decode(consumer, row, context, item, *, words=None, address=None, descriptors=None):

@@ -13,13 +13,8 @@ import torch
 import torch_npu  # noqa: F401
 
 from tests.mla.support.mla_dense_build import ROOT, sha256
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import (
-    Args,
-    Shape,
-    enqueue,
-    load_probe,
-)
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata_dense import (
+from tests.mla.support.components.metadata import Args, Shape, enqueue, load_probe
+from tests.mla.support.components.metadata_dense import (
     WORDS,
     assert_status,
     check_metadata_case,

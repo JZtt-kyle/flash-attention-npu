@@ -14,7 +14,7 @@ import torch
 import torch_npu
 
 from tests.mla.support.mla_dense_build import ROOT, sha256
-from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_attention import (
+from tests.mla.support.components.bsnd_attention import (
     PERFORMANCE_CASES,
     check_bsnd_case,
     configure_producer,
@@ -22,7 +22,7 @@ from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_attention import (
     load_attention,
     make_bsnd_case,
 )
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import load_probe
+from tests.mla.support.components.metadata import load_probe
 
 
 def profile(probe_dir, producer_manifest, output):

@@ -18,8 +18,8 @@ import torch
 import torch_npu
 
 from tests.mla.support.mla_dense_build import ROOT, sha256
-from tests.mla.unit.bsnd import test_flash_attn_npu_v3_mla_bsnd_stride as bsnd_stride
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import load_probe
+from tests.mla.support.components import bsnd_stride as bsnd_stride
+from tests.mla.support.components.metadata import load_probe
 
 
 def profile(

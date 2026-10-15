@@ -2,8 +2,8 @@
 #include <torch/extension.h>
 
 namespace flash_attn::mla {
-// v7 BSND causal, including internal Q-used. Explicit reuse is read-only cache
-// only; Q-used with an explicit record remains unsupported.
+// TND explicit/native automatic split (v19/v20). Shared host adapters validate
+// allocation/used lengths and optional records before launching the kernels.
 std::vector<at::Tensor> SplitTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                         const at::Tensor& qv, const at::Tensor& cuQ, const at::Tensor& cuK,
                                         int64_t maxQ, int64_t maxK, float scale, int64_t left, int64_t right,

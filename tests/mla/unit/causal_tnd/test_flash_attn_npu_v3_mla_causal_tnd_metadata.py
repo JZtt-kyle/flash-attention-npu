@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from tests.mla.support.mla_causal_build import CpuDriver
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_schedule import MLA, ROOT
+from tests.mla.support.components.schedule import MLA, ROOT
 from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_schedule import (
     causal_artifacts as causal_artifacts,
     drivers as drivers,
@@ -16,11 +16,15 @@ from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_schedule impor
     schedule_case,
     check_schedule,
 )
-from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_schedule import (
+from tests.mla.support.components.used_schedule import (
     used_artifacts as used_artifacts,
     used_oracle as used_oracle,
     used_case,
     execute,
+)
+
+from tests.mla.support.components.causal_tnd_metadata import (
+    request_for as request_for,
 )
 
 
@@ -78,25 +82,6 @@ CASES = [
         ([3, 2, 7], [33, 0, 65], [0, 0, 0], [0, 0, 65], 129, {}),
     )
 ]
-
-
-def request_for(item, dtype=1, cores=20):
-    q, k = item["q"], item["kv"]
-    uq, uk = item["uq"], item["uk"]
-    return [
-        len(q),
-        item.get("sq", max(q, default=0)),
-        item["heads"],
-        item.get("sk", max(k, default=0)),
-        sum(q),
-        sum(k),
-        dtype,
-        int(uq is not None) + 2 * int(uk is not None),
-        cores,
-        *itertools.accumulate(q, initial=0),
-        *itertools.accumulate(k, initial=0),
-        *itertools.chain.from_iterable(zip(q if uq is None else uq, k if uk is None else uk)),
-    ]
 
 
 @pytest.mark.parametrize("dtype,cores", itertools.product((1, 2), (1, 20, 26)))

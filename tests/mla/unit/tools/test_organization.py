@@ -1,5 +1,6 @@
 """Regression selection, stable identities and artifact placement after the move."""
 
+import ast
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,36 @@ def test_every_moved_source_is_present_and_uniquely_owned():
     assert len(owned) == len(set(owned))
     assert is_e2e(combined(E2E, E2E))
     assert not is_e2e(combined(UNITS, UNITS))
+
+
+def test_support_has_no_dependency_on_collected_test_modules():
+    violations = []
+    for path in (ROOT / "tests/mla/support").rglob("*.py"):
+        tree = ast.parse(path.read_text())
+        package = path.relative_to(ROOT).parts[:-1]
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                prefix = package[: len(package) - node.level + 1] if node.level else ()
+                module = ".".join((*prefix, *([node.module] if node.module else [])))
+                names = [module, *(module + "." + alias.name for alias in node.names)]
+            if any(name.startswith(("tests.mla.unit.", "tests.mla.e2e.")) for name in names):
+                violations.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+    assert not violations, violations
+
+
+def test_common_tools_include_catalog_and_dependency_guards():
+    from tests.mla.support.mla_validation import CPU_SUITES, SUITES
+
+    assert {
+        "tests/mla/unit/tools/test_matrix.py",
+        "tests/mla/unit/tools/test_organization.py",
+        "tests/mla/unit/tools/test_mla_validation_dependencies.py",
+    } <= set(SUITES["tools"])
+    assert "unit-tools" in CPU_SUITES
+    assert set(SUITES["unit-tools"]) == set(UNITS["tools"])
 
 
 def test_move_preserves_old_seed_and_selection_identity():

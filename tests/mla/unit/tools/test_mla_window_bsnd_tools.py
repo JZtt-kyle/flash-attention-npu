@@ -100,7 +100,7 @@ def test_window_average_rejects_incomplete(fault):
 
 
 def test_fake_normalization_matches_fixed_rules():
-    from tests.mla.unit.window_bsnd.test_flash_attn_npu_v3_mla_window_schedule import normalized
+    from tests.mla.support.components.window_schedule import normalized
 
     tree = ast.parse(Path("flash_attn_npu_3/flash_attn_npu_interface.py").read_text())
     node = next(

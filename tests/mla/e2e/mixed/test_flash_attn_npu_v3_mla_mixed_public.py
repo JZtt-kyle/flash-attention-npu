@@ -1,7 +1,6 @@
 """Public mixed kvcache: v4 reuse, source accuracy and stream lifetime."""
 
 from contextlib import nullcontext
-import itertools
 import json
 import os
 from pathlib import Path
@@ -15,62 +14,20 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward
+from tests.mla.support.public_cases.contract import _forward
+from tests.mla.support.components.tnd_bsnd_attention import CASES, launch, make_case, references
 from tests.mla.unit.mixed.test_flash_attn_npu_v3_mla_tnd_bsnd_attention import (
-    CASES,
     EMPTY_CASES,
-    launch,
-    make_case,
-    references,
     mixed_attention as mixed_attention,
     mixed_probe as mixed_probe,
 )
 
-
-def inputs(dtype=torch.float16, qs=(3, 0, 1), ks=(17, 0, 33), capacity=64, heads=4):
-    def offset(values):
-        return torch.tensor([123, *values, 456], dtype=torch.int32, device="npu")[1:-1]
-
-    return dict(
-        q=torch.zeros((sum(qs), heads, 64), dtype=dtype, device="npu"),
-        qv=torch.zeros((sum(qs), heads, 512), dtype=dtype, device="npu"),
-        k=torch.zeros((len(qs), capacity, 1, 64), dtype=dtype, device="npu"),
-        v=torch.zeros((len(qs), capacity, 1, 512), dtype=dtype, device="npu"),
-        cu_seqlens_q=offset(list(itertools.accumulate(qs, initial=0))),
-        cache_seqlens=offset(ks),
-        max_seqlen_q=max(qs, default=0) + 3,
-    )
-
-
-def metadata(args):
-    lengths = args.get("cache_seqlens")
-    if lengths is None or isinstance(lengths, int):
-        lengths = torch.full(
-            (args["k"].shape[0],),
-            args["k"].shape[1] if lengths is None else lengths,
-            dtype=torch.int32,
-            device=args["q"].device,
-        )
-    return api.get_scheduler_metadata(
-        batch_size=args["k"].shape[0],
-        max_seqlen_q=args["max_seqlen_q"],
-        max_seqlen_k=args["k"].shape[1],
-        num_heads_q=args["q"].shape[1],
-        num_heads_kv=1,
-        headdim=64,
-        headdim_v=512,
-        qkv_dtype=args["q"].dtype,
-        cu_seqlens_q=args["cu_seqlens_q"],
-        cache_seqlens=lengths,
-        num_splits=1,
-    )
-
-
-def public(args, lse=True):
-    args = dict(args)
-    args["k_cache"], args["v_cache"] = args.pop("k"), args.pop("v")
-    args.setdefault("num_splits", 1)
-    return api.flash_attn_with_kvcache(**args, return_softmax_lse=lse)
+from tests.mla.support.public_cases.mixed_public import (
+    dtype as dtype,
+    inputs as inputs,
+    metadata as metadata,
+    public as public,
+)
 
 
 def invoke(entry, args):
@@ -88,11 +45,6 @@ def invoke(entry, args):
 def entry(request):
     with FakeTensorMode() if request.param.endswith("fake") else nullcontext():
         yield request.param
-
-
-@pytest.fixture(params=[torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
-def dtype(request):
-    return request.param
 
 
 @pytest.mark.parametrize("spec", [(q, k, c, h, None) for q, k, c, h, _ in CASES + EMPTY_CASES])

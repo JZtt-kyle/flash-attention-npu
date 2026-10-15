@@ -5,12 +5,13 @@ import json
 from pathlib import Path
 import pytest
 import torch
-from tests.mla.unit.split_kv_merge import test_merge as source
-from tests.mla.unit.split_kv_attention import test_attention as partial
+from tests.mla.support.components import split_kv_merge_merge as source
+from tests.mla.support.components import split_kv_attention_attention as partial
 from tests.mla.support.mla_split_kv_attention_reference import fragments
 from tests.mla.support.mla_split_paged_bsnd_source_build import build_paged_partial, sha256
 from tests.mla.support.mla_source_compare import assert_mla_source_close
-from tests.mla.e2e.split_paged_tnd.test_public import prepare, metadata, call, reference, compare
+from tests.mla.support.public_cases.split_paged_tnd_public import prepare, metadata, call, reference
+from tests.mla.e2e.split_paged_tnd.test_public import compare
 from tests.mla.support.mla_split_paged_tnd_cases import spec
 
 merge_probes = source.merge_probes

@@ -2,13 +2,13 @@
 
 import torch
 from tests.common.compare import assert_fa_close
-from tests.mla.e2e.auto_split_mixed.test_public import (
+from tests.mla.support.public_cases.auto_split_mixed_public import (
     prepare,
     call,
     reference,
     metadata,
 )
-from tests.mla.e2e.causal_mixed.test_flash_attn_npu_v3_mla_causal_mixed_public import effective
+from tests.mla.support.public_cases.causal_mixed_public import effective
 from tests.mla.support.mla_window_mixed_profile import WindowMixedCall
 from tests.mla.support.mla_auto_split_mixed_cases import PERFORMANCE_CASES
 

@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import make_case
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import probes as probes
+from tests.mla.support.components.dense import make_case
+from tests.mla.support.components.dense import probes as probes
 from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvblocks import check_public
 from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_multiblock import check_stream_reuse
 from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_multiblock import (

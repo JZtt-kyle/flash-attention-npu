@@ -17,7 +17,7 @@ from tests.mla.support.mla_window_tnd_cases import (
 from tests.mla.support.mla_public_performance import summarize_varlen
 from tests.mla.unit.tools.test_mla_validation_policy import varlen_reports
 from tests.mla.unit.tools.test_mla_validation import args
-from tests.mla.unit.window_bsnd.test_flash_attn_npu_v3_mla_window_schedule import normalized
+from tests.mla.support.components.window_schedule import normalized
 
 
 def test_selection_and_environment(tmp_path):
@@ -143,9 +143,7 @@ def test_forward_driver_preserves_window_arguments(entry):
         calls.append(kw)
         return ("out", "lse", "empty", "empty")
 
-    tree = ast.parse(
-        Path("tests/mla/e2e/window_tnd/test_flash_attn_npu_v3_mla_window_tnd_public.py").read_text()
-    )
+    tree = ast.parse(Path("tests/mla/support/public_cases/window_tnd_public.py").read_text())
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "call")
     namespace = dict(
         api=SimpleNamespace(flash_attn_varlen_func=record),
@@ -175,9 +173,7 @@ def test_parallel_reference_uses_allocation_starts_and_used_lengths():
     import itertools
     from concurrent.futures import ThreadPoolExecutor
 
-    tree = ast.parse(
-        Path("tests/mla/e2e/window_tnd/test_flash_attn_npu_v3_mla_window_tnd_public.py").read_text()
-    )
+    tree = ast.parse(Path("tests/mla/support/public_cases/window_tnd_public.py").read_text())
     nodes = [
         n
         for n in tree.body

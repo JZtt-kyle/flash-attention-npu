@@ -110,8 +110,6 @@ def references(case):
         compute_fn=compute,
         expected_keys=names,
         source_files=sources,
-        test_source_files=[
-            str(ROOT / "tests/mla/unit/paged_bsnd/test_flash_attn_npu_v3_mla_paged_attention.py")
-        ],
+        test_source_files=[str(ROOT / "tests/mla/support/components/paged_attention.py")],
     )
     return [values[name] for name in names]

@@ -13,12 +13,9 @@ import torch_npu  # noqa: F401
 
 from tests.mla.support.mla_metadata_build import ROOT, sha256
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import load_probe
-from tests.mla.unit.mixed.test_flash_attn_npu_v3_mla_tnd_bsnd_metadata_aicpu import (
-    MixedArgs,
-    enqueue,
-)
-from tests.mla.unit.mixed.test_flash_attn_npu_v3_mla_tnd_bsnd_metadata_device import (
+from tests.mla.support.components.metadata import load_probe
+from tests.mla.support.components.tnd_bsnd_metadata_aicpu import MixedArgs, enqueue
+from tests.mla.support.components.tnd_bsnd_metadata_device import (
     load_consumer,
     make_case,
     launch,

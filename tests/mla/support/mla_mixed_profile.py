@@ -19,14 +19,10 @@ from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_cann_baseline import check_vendor_configuration, environment, file_info
 from tests.mla.support.mla_dense_build import ROOT, sha256
 from tests.mla.support.mla_varlen_profile import CannTndCall
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import load_probe
-from tests.mla.e2e.mixed.test_flash_attn_npu_v3_mla_mixed_public import metadata, public
-from tests.mla.unit.mixed.test_flash_attn_npu_v3_mla_tnd_bsnd_attention import references
-from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_schedule import (
-    build_oracle,
-    evaluate,
-    tnd_case,
-)
+from tests.mla.support.components.metadata import load_probe
+from tests.mla.support.public_cases.mixed_public import metadata, public
+from tests.mla.support.components.tnd_bsnd_attention import references
+from tests.mla.support.components.tnd_schedule import build_oracle, evaluate, tnd_case
 
 
 # Fixed before sampling. Retain the twelve mixed component geometries, with
@@ -168,12 +164,9 @@ def prepare(dtype, platform, output):
 
 
 def prepare_stride(platform, output, probe_dir, producer_manifest):
-    from tests.mla.e2e.mixed import test_flash_attn_npu_v3_mla_mixed_stride_production as cases_api
-    from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_stride import (
-        configure_producer,
-        load_attention,
-    )
-    from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_attention import (
+    from tests.mla.support.public_cases import mixed_stride_production as cases_api
+    from tests.mla.support.components.tnd_stride import configure_producer, load_attention
+    from tests.mla.support.components.used_attention import (
         check_math,
         effective,
         references,

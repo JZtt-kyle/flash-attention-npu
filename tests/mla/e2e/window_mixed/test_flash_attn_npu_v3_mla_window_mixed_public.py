@@ -14,17 +14,12 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.e2e.bsnd.test_flash_attn_npu_v3_mla_bsnd_stride_production import (
-    storage_fault as storage_fault,
-)
+from tests.mla.support.public_cases.bsnd_stride_production import storage_fault as storage_fault
 from tests.mla.unit.window_bsnd.test_flash_attn_npu_v3_mla_window_attention import (
     window_attention as window_attention,
 )
 from tests.mla.e2e.window_tnd.test_flash_attn_npu_v3_mla_window_tnd_public import (
     compare as compare_window,
-)
-from tests.mla.e2e.causal_mixed.test_flash_attn_npu_v3_mla_causal_mixed_public import (
-    prepare as prepare_mixed,
 )
 from tests.mla.support.mla_window_mixed_cases import (
     spec,
@@ -32,20 +27,19 @@ from tests.mla.support.mla_window_mixed_cases import (
     COST_CASES,
     ACCURACY_CASES,
 )
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward
-from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_schedule import (
+from tests.mla.support.components.used_schedule import (
     used_artifacts as used_artifacts,
     used_oracle as used_oracle,
     used_case,
     execute,
 )
-from tests.mla.unit.window_bsnd.test_flash_attn_npu_v3_mla_window_attention import make_case
+from tests.mla.support.components.window_attention import make_case
 
-
-def prepare(dtype, s, *, poison=True):
-    case = prepare_mixed(dtype, s, poison=poison)
-    case["args"].update(window_size=s["window"], causal=s.get("causal", False))
-    return case
+from tests.mla.support.public_cases.window_mixed_public import (
+    call as call,
+    metadata as metadata,
+    prepare as prepare,
+)
 
 
 def compare(probes, case, results, tile):
@@ -53,49 +47,6 @@ def compare(probes, case, results, tile):
     # are multiples of BSND capacity; used lengths never change those starts.
     mapped = dict(case, args=dict(case["args"], max_seqlen_k=case["spec"]["capacity"]))
     return compare_window(probes, mapped, results, tile)
-
-
-def metadata(args):
-    lengths = args.get("cache_seqlens")
-    if lengths is None or isinstance(lengths, int):
-        lengths = torch.full(
-            (args["k"].shape[0],),
-            args["k"].shape[1] if lengths is None else lengths,
-            dtype=torch.int32,
-            device=args["q"].device,
-        )
-    return api.get_scheduler_metadata(
-        args["k"].shape[0],
-        args["max_seqlen_q"],
-        args["k"].shape[1],
-        args["q"].shape[1],
-        1,
-        64,
-        lengths,
-        qkv_dtype=args["q"].dtype,
-        headdim_v=512,
-        cu_seqlens_q=args["cu_seqlens_q"],
-        causal=args["causal"],
-        window_size=args["window_size"],
-        num_splits=1,
-    )
-
-
-def call(args, entry="public", *, lse=True):
-    args = dict(args)
-    if entry == "public":
-        assert args.pop("seqused_q", None) is None
-        args["k_cache"], args["v_cache"] = args.pop("k"), args.pop("v")
-        return api.flash_attn_with_kvcache(**args, num_splits=1, return_softmax_lse=lse)
-    left, right = args.pop("window_size")
-    if entry == "op":
-        return torch.ops.flash_attn_npu_3._mla_window_mixed_forward(
-            **args, window_left=left, window_right=right
-        )
-    args["seqused_k"] = args.pop("cache_seqlens", None)
-    return _forward(
-        entry, dict(args, window_size_left=left, window_size_right=right, num_splits=1)
-    )[:2]
 
 
 def source_tile(probes, case, oracle):

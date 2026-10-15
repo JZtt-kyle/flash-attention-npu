@@ -17,11 +17,11 @@ from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_metadata_signature import metadata
 from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvcache import malformed
-from tests.mla.unit.mixed.test_flash_attn_npu_v3_mla_tnd_bsnd_metadata_aicpu import (
+from tests.mla.support.components.tnd_bsnd_metadata_aicpu import (
     mixed_probe as mixed_probe,
     host_record,
 )
-from tests.mla.unit.mixed.test_flash_attn_npu_v3_mla_tnd_bsnd_metadata import (
+from tests.mla.support.components.tnd_bsnd_metadata import (
     mixed_artifacts as mixed_artifacts,
     mixed_oracle as mixed_oracle,
     check_records,

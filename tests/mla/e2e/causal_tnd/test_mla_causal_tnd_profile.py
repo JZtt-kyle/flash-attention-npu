@@ -12,7 +12,7 @@ import sys
 from tests.mla.support.mla_native_dispatch import parse_dispatch, sha256
 from tests.mla.support.mla_validation_policy import check_public_performance
 from tests.mla.support.mla_public_performance import summarize_varlen
-from tests.mla.e2e.causal_tnd.test_flash_attn_npu_v3_mla_causal_tnd_public import PERFORMANCE_CASES
+from tests.mla.support.public_cases.causal_tnd_public import PERFORMANCE_CASES
 from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_attention import (
     causal_attention as causal_attention,
 )
@@ -22,7 +22,7 @@ from tests.mla.unit.causal_tnd.test_flash_attn_npu_v3_mla_causal_tnd_metadata im
 from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_schedule import (
     causal_artifacts as causal_artifacts,
 )
-from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_schedule import (
+from tests.mla.support.components.used_schedule import (
     used_artifacts as used_artifacts,
     used_oracle as used_oracle,
 )

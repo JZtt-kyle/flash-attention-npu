@@ -7,14 +7,20 @@ import os
 from pathlib import Path
 import pytest
 import torch
-from tests.mla.e2e.auto_split_bsnd.test_public import make_case, metadata, invoke, geometry, SPECS
+from tests.mla.support.public_cases.auto_split_bsnd_public import (
+    make_case,
+    metadata,
+    invoke,
+    geometry,
+)
+from tests.mla.e2e.auto_split_bsnd.test_public import SPECS
 from tests.mla.support.mla_auto_split_bsnd_reference import references
 from tests.mla.support.mla_split_kv_build import compile_drivers
 from tests.mla.support.mla_cpu_driver import CpuDriver
 from tests.mla.support.mla_source_compare import assert_mla_source_close
 from tests.mla.unit.auto_split_bsnd_metadata.test_metadata import visible
-from tests.mla.unit.split_kv_merge import test_merge as merge
-from tests.mla.unit.split_kv_attention import test_attention as partial
+from tests.mla.support.components import split_kv_merge_merge as merge
+from tests.mla.support.components import split_kv_attention_attention as partial
 
 merge_probes = merge.merge_probes
 

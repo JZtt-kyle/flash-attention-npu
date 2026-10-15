@@ -14,8 +14,8 @@ import torch
 from tests.mla.support.mla_dense_profile import profile as dense_profile
 from tests.mla.support.mla_profile_cases import CASES, S1G_CASES, KV_CASES, LONG_KV_CASES
 from tests.mla.support.mla_bsnd_stride_profile import profile as paged_profile
-from tests.mla.unit.paged_bsnd import test_flash_attn_npu_v3_mla_paged_attention as bsnd
-from tests.mla.unit.paged_tnd import test_flash_attn_npu_v3_mla_tnd_paged_attention as tnd
+from tests.mla.support.components import paged_attention as bsnd
+from tests.mla.support.components import tnd_paged_attention as tnd
 
 
 @pytest.fixture(autouse=True)

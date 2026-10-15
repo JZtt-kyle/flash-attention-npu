@@ -1,65 +1,48 @@
 # MLA 当前状态
 
-**R1 前向入口收敛已完成，回归与公开性能验收通过。** 功能基线仍为 M10c9b（`d42a7ff`），流程基线为 `dd9ed54`；分支 `feat/mla-cann-migration`。本次闭环提交由 `git log -1 -- docs/mla/status.md` 定位。唯一下一步为 [R2 测试公共依赖整理](plan.md#唯一下一步-r2测试公共依赖整理)，随后按固定 CANN/CATLASS 的方式整理内核配置，再恢复 M10c10；本轮提交后停止。
+**代码、文档、测试和无头开发流程整理完成，必要检查通过。** 分支 `feat/mla-cann-migration`；功能基线仍为 M10c9b，入口基线为 R1（`006bbc9`）。当前闭环提交用 `git log -1 -- docs/mla/status.md` 定位。唯一下一步为 [M10c10：TND PA 原生自动 split 完整接入](plan.md#唯一下一步-m10c10tnd-pa-原生自动-split-完整接入)，不再单开风格整理轮；本次提交后停止。
 
-## 本步改动与来源
+## 整理结果
 
-- 参照固定 FA3 `d15f1531a460ba456f41b01a774f33ab2db8febf` 的 `hopper/flash_attn_interface.py`：三个公开 MLA 入口共用 `_mla_forward`，公开与内部 real/fake 的 split 共用 `_mla_split_forward`，保留已注册算子的校验和 cache 四返回值优化。默认无 mask MLA 也直接调用算子；普通 attention 保留 Autograd 路径。
-- 四个公开函数及内部 forward/fake 的签名与接手基线相同，参数顺序与固定源一致。未改 CANN/CATLASS、C++、metadata 协议、设备数值或构建参数；原生产扩展经身份检查后复用。
-- 不支持的选项明确指出参数名；中英文 README 补齐 qv 含义、默认 `1/sqrt(576)`、V 输出维度、只读 cache、返回开关及可运行示例。接口文件由 4286 行收敛为 4080 行，主要收益是公开 API 不再各自维护布局/mask/split 分支。
-- 新增 `e2e/interface/test_forward.py` 并注册日常 E2E：8 个具名布局/mask/split/scale 组合×双 dtype×real/fake，三入口默认 compile、错误参数名两两覆盖及四布局整数 cache 长度。数值与既有原始 C++ 前向对照，继续由各能力 E2E 覆盖数学、stride/空值/复用。
+- 共享组件、固定源调度、输入、reference 和调用 helper 分别归入 `support/components/` 与 `support/public_cases/`；公共层对测试模块的反向导入从 **156 处降为 0**，公共层静态导入图无环。保留原来源与测试身份，PA reference 缓存依赖指向实际共享输入适配文件。
+- 对照固定 CANN Kernel 和 CATLASS 分层，保留现有 Kernel/Block/Tile、模板实例与流水；位置布尔参数补名称，修正过期协议注释。五个 C++ 文件去除注释后的 token 完全相同；未改 CANN/CATLASS、公开接口或数值算法。
+- Python 证据按实际导入闭包失效，未知动态加载继续保守处理；生产构建的 Python 输入从 **28 个降为 11 个**，保留实际构建器、原生源码、编译器、头文件和产物内容核验。独立 CPU/profile 构建器不再无故触发生产重建。
+- `tools` 补入清单和归属检查，`--unit tools` 明确为 CPU 工具模式；修正历史生产注册、merge 消费者归属和搬迁后的 AST 检查路径。269 个既有组的选择参数保持一致，`tools` 增加两个通用测试文件；未缩减数值用例、精度阈值或性能采样。
+- 接手已有六处循环修复已纳入本步：每五次成功开发后专门修正文档，保持失败停止、同会话恢复及只计数一次；新增“从干净工作区开始，必须干净结束”检查，防止漏提交文件流入下一轮。旧状态和接手已有工作保持可恢复。
 
 ## 当次证据
 
-证据根 `/tmp/mla-interface-consolidation-20261015/`。统一驱动先 dry-run/collect-only；所有必要组均不使用 `--resume`，本步继承通过结果 **0**。以下为当前源码实际执行，最终必要组无失败或跳过。
+证据根 `/tmp/mla-maintenance-20261015/`。实现通过质量检查后固定，再进行最终 dry-run/collect-only 与完整验收；本步未使用 `--resume`，继承通过结果 **0**。
 
-| 检查 | 结果 | 用时 | 证据 |
-| --- | --- | --- | --- |
-| 新入口代表集合 | 57 passed，0 failed/skipped | 22.2 s | `preflight-2/summary.json` |
-| 累计日常 E2E | 300 passed，0 failed/skipped（原 243 + 新 57） | 55.8 s | `acceptance/summary.json` |
-| 普通 FA3 回归 | 516 passed，0 failed/skipped | 27.1 s | `acceptance/summary.json` |
-| 测试归属/证据依赖工具 | 17 passed | 5.8 s | `tools.xml`、`tools.log` |
-| 公开性能 | 6 组通过，预先固定 100 配置 | 2571.3 s | `performance/summary.json`、`performance-summary.json` |
-| 源接口及示例语法核对 | 通过 | — | `source-contract-audit.json` |
-| 适用质量 hooks | 五项通过；最终暂存集合由收尾记录核对 | — | `quality-final.log` |
+| 检查 | 结果 | 用时 |
+| --- | --- | --- |
+| 通用工具 | 307 passed，0 failed/skipped | 126.0 s |
+| 完整工具单元 | 861 passed，0 failed/skipped | 611.1 s |
+| 累计 MLA E2E | 300 passed，0 failed/skipped | 56.1 s |
+| 普通 FA3 回归 | 516 passed，0 failed/skipped | 27.0 s |
 
-首轮新增测试误把 Q-used 之外的 O/LSE 槽当作有确定值，得到 3 passed / 1 failed；根据既有“不保证未用 query 输出”的契约修正比较范围后重跑，新集合及累计回归均通过。原失败保留在 `preflight/`，未修改实现或精度阈值来规避失败。
+工具组有重叠，不叠加为独立用例总数。完整工具单元含真实 AICPU 重编译和 CPU sanitizer 检查，约十分钟；仅在工具整体整理或相应改动时运行，不作为每轮功能开发门槛。日常 MLA E2E 本次约一分钟。
 
-构建校验复用各 1.2 s；runtime 当次核对约 21 s。累计 E2E 的数学 reference 缓存 387 hit、ordinary 31 hit，待测实现全部实际执行。无设备数值/共享协议改动，本步未重跑历史组件单元、sanitizer 和 Trap；该基线证据仍按 `git show d42a7ff:docs/mla/status.md` 定位，不将其记为本步通过。
+- `acceptance/summary.json`：最终四组结果、实际加载与原始证据；`final-evidence-audit.json`：源码依赖、原始证据及实现冻结核对全部有效。
+- `collection-comparison.json`：受影响 122 个测试文件的 **13,163 个收集节点及顺序完全一致**；这是收集检查，不是执行这些历史专项。`final-equivalence.json` 核对 531 个搬出定义/常量、1028 个原数值测试函数及 C++ token；`constants-before.json`/`constants-after.json` 的 161 份配置一致。
+- 预检中修复了过期断言、搬迁后的检查路径及 fixture 导入问题；完整工具诊断曾有 31 项失败，定点修复复核 31 passed 后重新完整验收。原失败保留在 `tools-preflight*`、`all-tools/`、`all-tools-diagnostic/` 和 `tool-repairs/`，未删除失败用例。独立审计的环境/pytest 根目录设置失误也保留原日志，成功复核以 `*-2` 和最终比较文件为准。
+- 首次当前源码构建实际完成，但期间修正测试使准备组按规则失效（`device-acceptance/summary.json`，548.3 s）；最终准备重新核验并复用完整产物 **1.2 s**，runtime **21.0 s**。源码固定后全部相关实现实际执行，未把该次失效准备记为验收通过。
+- 六项适用质量 hooks 通过，文档本地链接及锚点核对通过。公开调用、数值语句、性能输入和计时边界不变，本步未重跑 100 配置性能或历史设备组件矩阵；R1 的性能历史用 `git show 006bbc9:docs/mla/status.md` 查询，不记为本步实测或继承。
 
-最终 8 个实机组的源码依赖与原始证据哈希均有效（`final-evidence-audit.json`）；496 个文档本地链接及锚点通过（`doc-links-final.json`）。
+## 环境与使用
 
-## 当次公开性能
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1；CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。宿主卡 6 为 Ascend910B3。当前实际加载本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `aad267e6b538b240530a768c8ed58eae71179296cf28fc4dd25cd1d1c049b6e9`。
 
-各组沿用既有完整配置，没有按耗时筛选或截断。表内平均只计该组原口径的适用配置；单/显式 split 的原生自动 FD 及源非 MLA 模板对照保留单列，自动 split 组包含原生 Direct/FD。
+产物与数学缓存为 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`；后续性能使用的 native 路径仍为 `/tmp/mla-m10c3b/native`，使用前核验配方和内容。`build/` 只含 `mla-codex-loop/`。临时证据被清理后不可继承；长期保留需配置持久 `MLA_WORK_DIR`。
 
-| 组 | 实测/适用配置 | 平均耗时比 | 退化配置/分段 | 用时 |
-| --- | --- | --- | --- | --- |
-| `window-bsnd-profile` | 24/18 | 0.632044 | 0/0 | 658.0 s |
-| `window-tnd-profile` | 24/18 | 0.447359 | 0/0 | 842.6 s |
-| `auto-split-tnd-profile` | 14/12 | 0.799264 | 2/6 | 256.0 s |
-| `auto-split-mixed-profile` | 14/12 | 0.637423 | 0/4 | 282.3 s |
-| `auto-split-paged-bsnd-profile` | 12/12 | 0.864154 | 4/25 | 263.1 s |
-| `split-paged-tnd-profile` | 12/4 | 0.531557 | 0/0 | 269.3 s |
-
-合计 76 个适用配置等权平均比 **0.646915 ≤1**，6 个配置、35 个分段退化；另 24 个不适用源分派配置（原生 FD 或非 MLA 模板）依原规则单列。每组保留双 dtype 的全部单例、R 分段、wall/kernel 原始采样和固定源诊断，详情在对应组的 `public-profile/`。性能与固定 CANN 源比较，不作为相对整理前代码的加速声明。
-
-## 环境与复现
-
-Python `/usr/local/python3.11.15/bin/python3` 3.11.15，torch 2.7.1+cpu、torch_npu 2.7.1；CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。宿主卡 6 为 Ascend910B3，实机检查在宿主执行。
-
-实际加载本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA-256 `2bbbdaeac0b18209728a1a50da139a138482a6ed470f726d36e2a87adc76e1a6`；构建产物与数学缓存为 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`。native 必须显式用 `/tmp/mla-m10c3b/native`，固定源为 `ca18aee610729ca5270a44e2d84c751bc687fbf0`；驱动核验包内容与配方后使用。临时证据后续继承前须确认仍存在且依赖有效。
+原兼容启动脚本仍指向版本管理脚本，`--check` 与五轮预览已实际检查（CLI 0.162.1、已登录）；development=80 / reviewed=78 / pending=null 未改，本次未启动模型循环。可先检查，再运行一轮：
 
 ```bash
-python3 -m tests.mla --e2e interface --device 6 --output /tmp/mla-interface-consolidation-20261015/repro-interface
-python3 -m tests.mla --suite e2e ordinary --device 6 --output /tmp/mla-interface-consolidation-20261015/repro
-MLA_NATIVE_ROOT=/tmp/mla-m10c3b/native python3 -m tests.mla --suite window-bsnd-profile window-tnd-profile auto-split-tnd-profile auto-split-mixed-profile auto-split-paged-bsnd-profile split-paged-tnd-profile --device 6 --output /tmp/mla-interface-consolidation-20261015/repro-profile
+python3 /home/zhangqijia/repo/mla_codex_loop.py --check
+python3 /home/zhangqijia/repo/mla_codex_loop.py --max-dev-runs 1
+python3 -m tests.mla --suite e2e ordinary --device 6 --output /tmp/mla-maintenance-20261015/repro
 ```
 
-先 dry-run/collect-only。公开性能保持各组原始输入、精度、5 次预热、5×20 wall、10 次 profiler、R=1/4 和隔离条件；单配置的入口/R 先等权平均，所有单例和原生 FD 分类均保留。
+验收复现先 dry-run/collect-only；整体工具复现用 `--suite tools unit-tools`，日常仅按改动范围选工具。无头连续开发省略 `--max-dev-runs`。循环成功计数与手动提交分开，本次未篡改旧会话状态；接手备份见 `preexisting/`、`preexisting.patch`。
 
-## 当前功能与交接边界
-
-512+64、Hkv=1、FP16/BF16 的五种布局支持 none/causal/window；非 PA 的 BSND、TND、混合及 BSND PA 支持自动/单/显式 split，TND PA 支持显式 1..256。TND PA 自动 0、192/128 prefill、softcap 与非默认调度仍明确拒绝，完整 graph replay 和 910C 实机未验收；详细规则见 [design 2.1–2.2](design.md#21-入口与记录选择)。本步未扩大开放能力。
-
-接手已有六处独立循环修复完整保留，备份为 `preexisting/`、`preexisting.patch`；原始备注随既有工作区改动保留，均排除本步提交，保留核对为 `preservation-working.json`、`preservation-final.json`。本轮不启动无头循环；原状态 development=80/reviewed=78、pending=null 未变。
+512+64、Hkv=1、FP16/BF16 的五布局支持 none/causal/window；非 PA 三布局与 BSND PA 支持自动/单/显式 split，TND PA 支持显式 1..256。TND PA 自动 0、192/128 prefill、softcap、非默认调度仍拒绝，完整 graph replay 和 910C 实机未验收；本步不扩大功能范围，详见 [design](design.md#21-入口与记录选择)。

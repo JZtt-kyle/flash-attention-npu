@@ -7,7 +7,7 @@ Source packing/materialization precedes timing; this is not public metadata E2E.
 import argparse
 
 from tests.mla.support.mla_bsnd_stride_profile import profile
-from tests.mla.unit.tnd import test_flash_attn_npu_v3_mla_tnd_stride as tnd_stride
+from tests.mla.support.components import tnd_stride as tnd_stride
 
 
 if __name__ == "__main__":

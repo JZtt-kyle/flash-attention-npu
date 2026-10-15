@@ -12,8 +12,8 @@ import torch_npu  # noqa: F401
 
 from tests.mla.support.mla_metadata_build import ROOT, sha256
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import load_probe
-from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_attention import (
+from tests.mla.support.components.metadata import load_probe
+from tests.mla.support.components.used_attention import (
     configure_producer,
     launch,
     load_attention,

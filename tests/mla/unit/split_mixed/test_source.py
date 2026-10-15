@@ -3,8 +3,8 @@
 import json
 import pytest
 import torch
-from tests.mla.unit.split_kv_merge import test_merge as source
-from tests.mla.e2e.split_mixed.test_public import prepare, metadata, call, reference
+from tests.mla.support.components import split_kv_merge_merge as source
+from tests.mla.support.public_cases.split_mixed_public import prepare, metadata, call, reference
 from tests.mla.support.mla_split_mixed_cases import spec
 from tests.mla.support.mla_source_compare import assert_mla_source_close
 

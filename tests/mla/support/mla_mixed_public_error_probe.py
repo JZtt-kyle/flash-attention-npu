@@ -12,7 +12,7 @@ import torch
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.e2e.mixed.test_flash_attn_npu_v3_mla_mixed_public import inputs, metadata, public
+from tests.mla.support.public_cases.mixed_public import inputs, metadata, public
 
 
 def run(dtype, fault, directory, layout="contiguous"):
@@ -31,7 +31,7 @@ def run(dtype, fault, directory, layout="contiguous"):
         elif fault == "empty_k":
             args = inputs(kind, [3, 0, 1], [0, 0, 0], 0)
         if layout == "strided":
-            from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_stride import strides_for
+            from tests.mla.support.components.bsnd_stride import strides_for
 
             for name in ("q", "qv", "k", "v"):
                 t = args[name]

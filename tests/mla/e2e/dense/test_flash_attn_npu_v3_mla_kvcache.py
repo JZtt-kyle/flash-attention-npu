@@ -19,21 +19,18 @@ from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_ref import mla_reference_pair
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_metadata_signature import metadata as call_metadata
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward, _inputs
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import (
-    launch,
-    make_case,
-    make_rounding_case,
-)
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import probes as probes
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata_consumer import (
-    Args,
-    Shape,
-    Platform,
-    WORDS,
-)
+from tests.mla.support.public_cases.contract import _forward, _inputs
+from tests.mla.support.components.dense import launch, make_case
+from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import make_rounding_case
+from tests.mla.support.components.dense import probes as probes
+from tests.mla.support.components.metadata_consumer import Args, Shape, Platform, WORDS
 from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_metadata_aicpu import (
     bsnd_probe as bsnd_probe,
+)
+
+from tests.mla.support.public_cases.kvcache import (
+    cached as cached,
+    generate as generate,
 )
 
 
@@ -72,38 +69,6 @@ def metadata_args(dtype, shape=(2, 3, 4, 17)):
         qkv_dtype=dtype,
         cache_seqlens=torch.full((b + 2,), sk, dtype=torch.int32, device="npu")[1:-1],
         num_splits=1,
-    )
-
-
-def generate(device, lengths=None):
-    q, k = device["q"], device["k"]
-    if lengths is None:
-        lengths = torch.full((q.shape[0],), k.shape[1], dtype=torch.int32, device=q.device)
-    return api.get_scheduler_metadata(
-        q.shape[0],
-        q.shape[1],
-        k.shape[1],
-        q.shape[2],
-        1,
-        64,
-        lengths,
-        qkv_dtype=q.dtype,
-        headdim_v=512,
-        num_splits=1,
-    )
-
-
-def cached(device, metadata=None, lengths=None, scale=None, return_lse=True):
-    return api.flash_attn_with_kvcache(
-        device["q"],
-        device["k"],
-        device["v"],
-        qv=device["qv"],
-        cache_seqlens=lengths,
-        scheduler_metadata=metadata,
-        softmax_scale=scale,
-        num_splits=1,
-        return_softmax_lse=return_lse,
     )
 
 

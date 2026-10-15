@@ -9,7 +9,7 @@ import sys
 import time
 import torch
 from flash_attn_npu_3 import flash_attn_npu_interface as api
-from tests.mla.e2e.split_mixed.test_public import prepare, metadata, call
+from tests.mla.support.public_cases.split_mixed_public import prepare, metadata, call
 from tests.mla.support.mla_split_mixed_cases import spec
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
 

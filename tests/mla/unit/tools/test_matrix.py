@@ -64,11 +64,14 @@ def test_shape_boundaries_keep_values_and_extreme_corners():
 
 
 def test_daily_catalog_is_explicit_and_does_not_collect_diagnostics():
-    assert set(E2E) == set(BEHAVIORS)
+    assert set(BEHAVIORS) <= set(E2E)
     selections = combined(E2E, E2E)
     for case in daily_cases():
         assert any(node.endswith(f"test_public_behavior[{'-'.join(case)}]") for node in selections)
-    assert all(node.startswith("tests/mla/e2e/test_regression.py::") for node in selections)
+    assert all(node.startswith("tests/mla/e2e/") for node in selections)
+    assert all(
+        "::" in node or node == "tests/mla/e2e/interface/test_forward.py" for node in selections
+    )
     assert not any("cost_boundary" in node or "profile" in node for node in selections)
     preview = json.loads(
         subprocess.check_output(

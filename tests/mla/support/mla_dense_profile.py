@@ -19,12 +19,7 @@ import torch_npu
 from tests.mla.support.mla_cann_baseline import CannCall, check_vendor_configuration, environment
 from tests.mla.support.mla_dense_build import ROOT, build_probes
 from tests.mla.support.mla_profile_cases import CASES, KV_CASES, LONG_KV_CASES, S1G_CASES
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import (
-    check_case,
-    launch,
-    load_probes,
-    make_case,
-)
+from tests.mla.support.components.dense import check_case, launch, load_probes, make_case
 
 
 NAMES = ("oracle", "migrated", "native_cann")

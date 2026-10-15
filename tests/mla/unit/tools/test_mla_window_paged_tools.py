@@ -19,7 +19,7 @@ from tests.mla.support.mla_window_paged_cases import (
 from tests.mla.support.mla_public_performance import summarize_mixed
 from tests.mla.unit.tools.test_mla_validation_policy import mixed_reports
 from tests.mla.unit.tools.test_mla_validation import args
-from tests.mla.unit.window_bsnd.test_flash_attn_npu_v3_mla_window_schedule import normalized
+from tests.mla.support.components.window_schedule import normalized
 
 
 def test_selection_and_environment(tmp_path):

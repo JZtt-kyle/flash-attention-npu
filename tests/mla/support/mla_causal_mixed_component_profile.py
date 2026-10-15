@@ -10,8 +10,8 @@ import torch
 
 from tests.mla.support.mla_causal_bsnd_used_profile import build_source
 from tests.mla.support.mla_causal_tnd_profile import sample_kernels
-from tests.mla.unit.causal_mixed.test_flash_attn_npu_v3_mla_causal_mixed_metadata import request_for
-from tests.mla.e2e.causal_mixed.test_flash_attn_npu_v3_mla_causal_mixed_public import (
+from tests.mla.support.components.causal_mixed_metadata import request_for
+from tests.mla.support.public_cases.causal_mixed_public import (
     prepare,
     spec,
     call as mixed_call,
@@ -19,8 +19,8 @@ from tests.mla.e2e.causal_mixed.test_flash_attn_npu_v3_mla_causal_mixed_public i
     effective,
     compare,
 )
-from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_attention import make_case
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import Schedule
+from tests.mla.support.components.causal_attention import make_case
+from tests.mla.support.components.dense import Schedule
 
 
 CASES = [

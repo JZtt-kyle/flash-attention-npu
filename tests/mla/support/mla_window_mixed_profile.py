@@ -3,8 +3,8 @@
 import torch
 from tests.mla.support.mla_mixed_profile import CannMixedCall
 from tests.mla.support.mla_window_tnd_profile import accuracy as tnd_accuracy
-from tests.mla.e2e.window_tnd.test_flash_attn_npu_v3_mla_window_tnd_public import effective
-from tests.mla.unit.window_bsnd.test_flash_attn_npu_v3_mla_window_attention import normalized_window
+from tests.mla.support.public_cases.window_tnd_public import effective
+from tests.mla.support.components.window_attention import normalized_window
 
 
 def window_for(case):
@@ -59,11 +59,7 @@ if __name__ == "__main__":
     import sys
     from tests.mla.support.mla_causal_mixed_profile import profile
     from tests.mla.support.mla_window_mixed_cases import PERFORMANCE_CASES
-    from tests.mla.e2e.window_mixed.test_flash_attn_npu_v3_mla_window_mixed_public import (
-        prepare,
-        call,
-        metadata,
-    )
+    from tests.mla.support.public_cases.window_mixed_public import prepare, call, metadata
 
     profile(
         *sys.argv[1:],

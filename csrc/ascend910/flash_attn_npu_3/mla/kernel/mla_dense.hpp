@@ -470,7 +470,9 @@ class MlaDense : private MlaNonPaged<InputT, HasKvLengths, false, false, false, 
 // validated uint32[B] effective KV lengths and a whole-M M08a partition.
 // This wrapper is not referenced by production metadata or dispatch.
 template <typename InputT>
-class MlaCausalBsnd : private MlaTaskRing<InputT, true, false, false, false, false, false, true> {
+class MlaCausalBsnd
+    : private MlaTaskRing<InputT, /*HasKvLengths=*/true, /*IsTnd=*/false, /*MixedKv=*/false, /*HasUsed=*/false,
+                          /*HasStrides=*/false, /*IsPaged=*/false, /*IsCausal=*/true> {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, float scale, GM_ADDR qc, GM_ADDR qr,
                                       GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
@@ -482,7 +484,9 @@ class MlaCausalBsnd : private MlaTaskRing<InputT, true, false, false, false, fal
 // Validated contiguous BSND, uint32[B] KV lengths, normalized window and the
 // M09a complete-M partition. No public or production caller in this step.
 template <typename InputT>
-class MlaWindowBsnd : private MlaTaskRing<InputT, true, false, false, false, false, false, false, true> {
+class MlaWindowBsnd
+    : private MlaTaskRing<InputT, /*HasKvLengths=*/true, /*IsTnd=*/false, /*MixedKv=*/false, /*HasUsed=*/false,
+                          /*HasStrides=*/false, /*IsPaged=*/false, /*IsCausal=*/false, /*IsWindow=*/true> {
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, MlaWindowKernelParams window, float scale,
                                       GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR output, GM_ADDR lse,

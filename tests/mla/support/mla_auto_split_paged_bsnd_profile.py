@@ -3,7 +3,7 @@
 import json
 import torch
 from tests.common.compare import assert_fa_close
-from tests.mla.e2e.auto_split_paged_bsnd.test_public import (
+from tests.mla.support.public_cases.auto_split_paged_bsnd_public import (
     prepare as prepare_base,
     call,
     reference,

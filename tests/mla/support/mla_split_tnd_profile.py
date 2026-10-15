@@ -2,7 +2,13 @@
 
 import torch
 from tests.common.compare import assert_fa_close
-from tests.mla.e2e.split_tnd.test_public import prepare, call, reference, compare, effective
+from tests.mla.support.public_cases.split_tnd_public import (
+    prepare,
+    call,
+    reference,
+    compare,
+    effective,
+)
 from tests.mla.support.mla_window_tnd_profile import WindowTndCall
 from tests.mla.support.mla_split_tnd_cases import PERFORMANCE_CASES
 

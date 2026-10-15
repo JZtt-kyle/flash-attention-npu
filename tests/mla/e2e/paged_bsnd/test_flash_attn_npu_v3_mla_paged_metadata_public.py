@@ -16,19 +16,19 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_metadata_signature import metadata
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward, _inputs
+from tests.mla.support.public_cases.contract import _forward, _inputs
 from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvcache import malformed
-from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_metadata import decode_record
-from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_metadata_aicpu import (
+from tests.mla.support.components.paged_metadata import decode_record
+from tests.mla.support.components.paged_metadata_aicpu import (
     paged_probe as paged_probe,
     host_record,
 )
 from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_metadata_consumer import (
     paged_consumer as paged_consumer,
-    context_for,
     decode,
 )
-from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_schedule import (
+from tests.mla.support.components.paged_metadata_consumer import context_for
+from tests.mla.support.components.paged_schedule import (
     paged_artifacts as paged_artifacts,
     paged_oracles as paged_oracles,
     execute,

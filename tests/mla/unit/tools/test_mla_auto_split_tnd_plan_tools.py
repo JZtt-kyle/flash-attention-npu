@@ -53,4 +53,4 @@ def test_existing_commands_and_e2e_are_unchanged():
         == ["tests/mla/unit/split_kv/test_split_kv.py"]
     )
     assert all("auto_split_tnd_plan" not in path for path in runner.SUITES["e2e"])
-    assert '"mla_auto_split_tnd_plan.cpp"' not in (runner.ROOT / "setup.py").read_text()
+    assert '"mla_auto_split_tnd_plan.cpp"' in (runner.ROOT / "setup.py").read_text()

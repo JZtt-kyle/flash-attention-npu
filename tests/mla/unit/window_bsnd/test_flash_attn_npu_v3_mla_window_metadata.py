@@ -7,14 +7,14 @@ import subprocess
 
 import pytest
 from tests.mla.support.mla_cpu_driver import CpuDriver
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_schedule import MLA, ROOT
+from tests.mla.support.components.schedule import MLA, ROOT
 from tests.mla.unit.window_bsnd.test_flash_attn_npu_v3_mla_window_schedule import (
     window_artifacts as window_artifacts,
     drivers as drivers,
-    normalized,
     source_case,
     check_schedule,
 )
+from tests.mla.support.components.window_schedule import normalized
 from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_schedule import (
     evaluate,
     schedule_case,

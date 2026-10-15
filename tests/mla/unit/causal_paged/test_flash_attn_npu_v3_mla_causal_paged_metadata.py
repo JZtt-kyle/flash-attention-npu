@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from tests.mla.support.mla_causal_build import CpuDriver
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_schedule import MLA, ROOT
+from tests.mla.support.components.schedule import MLA, ROOT
 from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_schedule import (
     causal_artifacts as causal_artifacts,
     drivers as drivers,
@@ -16,13 +16,13 @@ from tests.mla.unit.causal_bsnd.test_flash_attn_npu_v3_mla_causal_schedule impor
     schedule_case,
     check_schedule,
 )
-from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_schedule import (
+from tests.mla.support.components.paged_schedule import (
     paged_artifacts as paged_artifacts,
     paged_oracles as paged_oracles,
     paged_case,
     execute,
 )
-from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_metadata import encode
+from tests.mla.support.components.paged_metadata import encode
 
 
 @pytest.fixture(scope="module")

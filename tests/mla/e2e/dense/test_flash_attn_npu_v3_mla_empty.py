@@ -10,8 +10,9 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
 from tests.test_flash_attn_npu_v3_metadata_signature import metadata as call_metadata
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvcache import cached, generate, metadata_args
+from tests.mla.support.public_cases.contract import _forward
+from tests.mla.support.public_cases.kvcache import cached, generate
+from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvcache import metadata_args
 from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_kvcache import (
     test_public_runtime_error as runtime_error_case,
 )

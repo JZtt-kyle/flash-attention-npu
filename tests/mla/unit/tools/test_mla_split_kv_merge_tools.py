@@ -25,7 +25,18 @@ def test_selection_identity(tmp_path, suite):
     assert env["MLA_VALIDATION_NPU"] == "1"
     assert env["MLA_SPLIT_KV_MERGE_DIR"] == str(tmp_path / "probes")
     assert not runner.is_e2e(runner.SUITES[suite])
-    assert all("/split_kv_merge/" in p for p in runner.SUITES[suite] if p.endswith(".py"))
+    # Production split modules consume the same merge fixture without
+    # transferring ownership of their unit cases to the merge module.
+    if suite.startswith("split-kv-merge") or suite == "unit-split_kv_merge":
+        owner = "split_kv_merge"
+    else:
+        owner = {
+            "auto-split-bsnd": "auto_split_bsnd",
+            "split-bsnd": "split_kv_bsnd",
+            "split-bsnd-source": "split_kv_bsnd",
+            "split-tnd": "split_tnd",
+        }.get(suite, suite.removeprefix("unit-"))
+    assert all(f"/{owner}/" in p for p in runner.SUITES[suite] if p.endswith(".py"))
 
 
 def test_no_inheritance_and_failures(tmp_path, monkeypatch):

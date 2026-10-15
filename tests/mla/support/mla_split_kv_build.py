@@ -8,13 +8,7 @@ import subprocess
 
 from tests.mla.support.mla_causal_build import source_blobs, toolchain_identity
 from tests.mla.support.mla_window_build import FA3_COMMIT, fa3_blob
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_schedule import (
-    CANN_COMMIT,
-    FIA,
-    MLA,
-    ROOT,
-    source_function,
-)
+from tests.mla.support.components.schedule import CANN_COMMIT, FIA, MLA, ROOT, source_function
 
 BLOCK_SHA256 = "4c9b132fdbff869716ca673f087cf2ede20f041fa8923c2f181394b716981083"
 WORKSPACE_FUNCTIONS = (

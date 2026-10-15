@@ -19,21 +19,17 @@ import torch_npu
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_dense_build import ROOT, sha256
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import load_probe
+from tests.mla.support.components.metadata import load_probe
 
 
 def profile(probe_dir, producer_manifest, output, layout="bsnd"):
     paged = layout in ("paged-bsnd", "paged-tnd")
     if paged:
         if layout == "paged-tnd":
-            from tests.mla.e2e.paged_tnd import (
-                test_flash_attn_npu_v3_mla_paged_tnd_production as cases_api,
-            )
+            from tests.mla.support.public_cases import paged_tnd_production as cases_api
         else:
-            from tests.mla.e2e.paged_bsnd import (
-                test_flash_attn_npu_v3_mla_paged_bsnd_production as cases_api,
-            )
-        from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_attention import (
+            from tests.mla.support.public_cases import paged_bsnd_production as cases_api
+        from tests.mla.support.components.paged_attention import (
             configure_producer,
             launch,
             load_attention,
@@ -42,14 +38,10 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
         production_case = cases_api.make_case
     elif layout in ("tnd-stride", "mixed-stride"):
         if layout == "tnd-stride":
-            from tests.mla.e2e.tnd import (
-                test_flash_attn_npu_v3_mla_tnd_stride_production as cases_api,
-            )
+            from tests.mla.support.public_cases import tnd_stride_production as cases_api
         else:
-            from tests.mla.e2e.mixed import (
-                test_flash_attn_npu_v3_mla_mixed_stride_production as cases_api,
-            )
-        from tests.mla.unit.tnd.test_flash_attn_npu_v3_mla_tnd_stride import (
+            from tests.mla.support.public_cases import mixed_stride_production as cases_api
+        from tests.mla.support.components.tnd_stride import (
             configure_producer,
             launch,
             load_attention,
@@ -57,10 +49,8 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
 
         production_case = cases_api.production_case
     elif layout == "bsnd-stride":
-        from tests.mla.e2e.bsnd import (
-            test_flash_attn_npu_v3_mla_bsnd_stride_production as cases_api,
-        )
-        from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_stride import (
+        from tests.mla.support.public_cases import bsnd_stride_production as cases_api
+        from tests.mla.support.components.bsnd_stride import (
             configure_producer,
             launch,
             load_attention,
@@ -68,13 +58,13 @@ def profile(probe_dir, producer_manifest, output, layout="bsnd"):
 
         production_case = cases_api.make_case
     elif layout == "mixed":
-        from tests.mla.e2e.mixed import test_flash_attn_npu_v3_mla_mixed_used as cases_api
+        from tests.mla.support.public_cases import mixed_used as cases_api
     else:
         assert layout == "bsnd"
-        from tests.mla.e2e.bsnd import test_flash_attn_npu_v3_mla_bsnd_used as cases_api
+        from tests.mla.support.public_cases import bsnd_used as cases_api
 
     if layout not in ("bsnd-stride", "tnd-stride", "mixed-stride", "paged-bsnd", "paged-tnd"):
-        from tests.mla.unit.used.test_flash_attn_npu_v3_mla_used_attention import (
+        from tests.mla.support.components.used_attention import (
             configure_producer,
             launch,
             load_attention,

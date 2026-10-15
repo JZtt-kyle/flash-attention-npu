@@ -10,10 +10,8 @@ import subprocess
 import pytest
 
 from tests.mla.support.mla_metadata_build import MLA, ROOT, sha256
+from tests.mla.support.components.bsnd_metadata import PREFIX, SENTINEL
 from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_metadata import (
-    PREFIX,
-    SENTINEL,
-    arguments,
     bsnd_builder as bsnd_builder,
     build,
     check_source,
@@ -21,10 +19,16 @@ from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_metadata import (
 )
 from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_schedule import (
     length_artifacts as length_artifacts,
-    length_case,
     length_oracle as length_oracle,
 )
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata_consumer import CORRUPTIONS, Context
+from tests.mla.support.components.bsnd_schedule import length_case
+from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata_consumer import CORRUPTIONS
+from tests.mla.support.components.metadata_consumer import Context
+
+from tests.mla.support.components.bsnd_metadata_consumer import (
+    context_for as context_for,
+    expected_schedule as expected_schedule,
+)
 
 
 BSND_CORRUPTIONS = [
@@ -99,22 +103,6 @@ def bsnd_consumer(tmp_path_factory):
     return lib, directory
 
 
-def context_for(row, values, dtype):
-    # Independent trusted generation supplies workspace/blockDim. Mutations
-    # never change this caller context, and shape/platform come from the call.
-    p = arguments(values, dtype).platform
-    return Context(
-        dtype,
-        *values[:4],
-        p.aic,
-        p.aiv,
-        row[21],
-        row[385] | row[386] << 32,
-        0 if not all(values[i] for i in (0, 1, 3)) else p.libapi,
-        p.memory,
-    )
-
-
 def decode(
     consumer, row, context, lengths, *, words=None, count=None, address=None, length_address=None
 ):
@@ -138,13 +126,6 @@ def decode(
     if result:
         assert list(output) == [SENTINEL] * 89
     return result, list(output), list(reads)
-
-
-def expected_schedule(row):
-    used = row[20]
-    return [row[i] for i in (8, 11, 10, 12, 15, 16, 20, 21, 19, 367, 369)] + [
-        row[23 + axis * 26 + core] if core < used else 0 for axis in range(3) for core in range(26)
-    ]
 
 
 @pytest.mark.parametrize("dtype,aic", itertools.product((1, 2), (1, 15, 20, 26)))

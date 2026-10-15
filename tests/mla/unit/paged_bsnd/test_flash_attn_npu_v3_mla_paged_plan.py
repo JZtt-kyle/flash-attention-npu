@@ -22,18 +22,19 @@ from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_metadata import 
     paged_builder as paged_builder,
     paged_oracles as paged_oracles,
     check_source,
-    expected_record,
-    paged_case,
     run_builder,
 )
+from tests.mla.support.components.paged_metadata import expected_record, paged_case
 from tests.mla.unit.paged_bsnd.test_flash_attn_npu_v3_mla_paged_metadata_consumer import (
     paged_consumer as paged_consumer,
+    decode,
+)
+from tests.mla.support.components.paged_metadata_consumer import (
     CacheLayout,
     Context,
     Memory,
     Query,
     TensorLayout,
-    decode,
     expected_schedule,
 )
 

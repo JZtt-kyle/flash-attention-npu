@@ -16,16 +16,19 @@ import subprocess
 import pytest
 
 from tests.mla.support.mla_cpu_driver import evaluate_cpu
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_schedule import (
+from tests.mla.support.components.schedule import (
     CANN_COMMIT,
     FIA,
     FUNCTIONS,
     MLA,
     ROOT,
     SOURCE_FILES,
-    case,
     run,
     source_function,
+)
+
+from tests.mla.support.components.bsnd_schedule import (
+    length_case as length_case,
 )
 
 
@@ -106,14 +109,6 @@ def length_oracle(length_artifacts):
         "#define OP_LOGI(...) ((void)0)\n#define OP_LOGD(...) ((void)0)\n"
     )
     return compile_driver(length_artifacts, oracle=True)
-
-
-def length_case(lengths=None, *, count=None, **shape):
-    values = case(**shape)
-    supplied = [] if lengths is None else list(lengths)
-    if count is None:
-        count = len(supplied)
-    return values + [int(lengths is not None), count, len(supplied), *supplied]
 
 
 def evaluate(binary, cases, *, automatic_fd=False, dense=False):

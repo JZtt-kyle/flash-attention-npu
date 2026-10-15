@@ -11,6 +11,7 @@ import sys
 
 from tests.mla.support.mla_dense_build import ROOT, build_probes, sha256
 from tests.mla.support.mla_metadata_build import build_probe
+from tests.mla.support.mla_validation_dependencies import python_dependencies
 
 
 def files_identity(paths):
@@ -21,7 +22,17 @@ def build_inputs():
     paths = [ROOT / "setup.py", Path(__file__)]
     paths += list((ROOT / "csrc/ascend910").rglob("*"))
     paths += list((ROOT / "csrc/catlass/include").rglob("*"))
-    paths += list((ROOT / "tests/mla/support").glob("mla_*build.py"))
+    # Only builders used by prepare() belong to production build identity.
+    # CPU oracle/profile helpers have their own manifests and must not force
+    # a production rebuild after an unrelated test edit.
+    baseline = {str(p.relative_to(ROOT)): None for p in (ROOT / "tests").rglob("*.py")}
+    baseline["setup.py"] = None
+    paths += [
+        ROOT / path
+        for path in python_dependencies(
+            ROOT, ["tests/mla/support/mla_validation_build.py"], baseline
+        )
+    ]
     for suffix in ("*.cpp", "*.h", "*.aicpu"):
         paths += list((ROOT / "tests/mla/support").glob(suffix))
     cann = Path(os.environ["ASCEND_HOME_PATH"]).resolve()

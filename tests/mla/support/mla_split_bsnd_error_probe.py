@@ -9,7 +9,7 @@ import sys
 import time
 import torch
 from flash_attn_npu_3 import flash_attn_npu_interface as api
-from tests.mla.e2e.split_kv_bsnd.test_public import make_case, metadata, invoke
+from tests.mla.support.public_cases.split_kv_bsnd_public import make_case, metadata, invoke
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
 
 

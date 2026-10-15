@@ -12,7 +12,7 @@ import torch
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.e2e.tnd.test_flash_attn_npu_v3_mla_varlen_used import inputs
+from tests.mla.support.public_cases.varlen_used import inputs
 
 
 def run(kind, fault, directory, layout="contiguous"):

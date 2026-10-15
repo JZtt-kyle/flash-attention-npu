@@ -8,7 +8,8 @@
 
 namespace flash_attn::mla::Kernel {
 template <typename InputT, bool IsTnd, bool IsCausal = false, bool IsWindow = false>
-class MlaPaged : private MlaTaskRing<InputT, true, IsTnd, false, false, true, true, IsCausal, IsWindow> {
+class MlaPaged : private MlaTaskRing<InputT, /*HasKvLengths=*/true, IsTnd, /*MixedKv=*/false, /*HasUsed=*/false,
+                                     /*HasStrides=*/true, /*IsPaged=*/true, IsCausal, IsWindow> {
   public:
     // The caller has passed LoadPagedMetadata on every core, checked Q/qv
     // storage and matching query layout, and bound cache addresses to this call.

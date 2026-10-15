@@ -7,7 +7,8 @@
 
 namespace flash_attn::mla::Kernel {
 template <typename InputT, bool IsTnd, bool HasStrides = false, bool IsCausal = false, bool IsWindow = false>
-class MlaUsed : private MlaTaskRing<InputT, true, IsTnd, false, true, HasStrides, false, IsCausal, IsWindow> {
+class MlaUsed : private MlaTaskRing<InputT, /*HasKvLengths=*/true, IsTnd, /*MixedKv=*/false, /*HasUsed=*/true,
+                                    HasStrides, /*IsPaged=*/false, IsCausal, IsWindow> {
   public:
     // Validate v5 and all four current arrays on every core before TPipe,
     // synchronization or writes. IsTnd must match the validated Q layout.

@@ -1,7 +1,6 @@
 """Production BSND strides: public/raw dispatch, source/math and view lifetime."""
 
-from contextlib import contextmanager, nullcontext
-import ctypes as ct
+from contextlib import nullcontext
 import gc
 import json
 import os
@@ -16,35 +15,38 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.mla_metadata_error_probe import forbid_host_readback
-from tests.mla.support.mla_dense_build import ROOT
 from tests.mla.support.mla_profile_cases import STRIDE_CASES
-from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_attention import values_for
+from tests.mla.support.components.bsnd_attention import values_for
 from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_metadata import check_source
 from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_schedule import (
     evaluate,
     length_artifacts as length_artifacts,
     length_oracle as length_oracle,
 )
-from tests.mla.unit.bsnd.test_flash_attn_npu_v3_mla_bsnd_stride import (
+from tests.mla.support.components.bsnd_stride import (
     BOUNDARY_CASES,
     LAYOUT_CASES,
     NAMES,
-    PERFORMANCE_CASES as COMPONENT_CASES,
     WIDE_CASES,
     launch,
-    make_case as make_probe_case,
     spec,
     stride_attention as stride_attention,
     stride_producer as stride_producer,
     strides_for,
 )
-from tests.mla.e2e.bsnd.test_flash_attn_npu_v3_mla_bsnd_used import check_result
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward
+from tests.mla.support.public_cases.bsnd_used import check_result
+from tests.mla.support.public_cases.contract import _forward
+
+from tests.mla.support.public_cases.bsnd_stride_production import (
+    PERFORMANCE_CASES as PERFORMANCE_CASES,
+    cached as cached,
+    forward as forward,
+    forward_args as forward_args,
+    make_case as make_case,
+    storage_fault as storage_fault,
+)
 
 
-# Fix the production component matrix before collection. Production uses every
-# platform core for length-dependent launches; the source uses the same schedule.
-PERFORMANCE_CASES = [dict(c, aic=None) for c in COMPONENT_CASES]
 ACCURACY_CASES = (
     LAYOUT_CASES
     + BOUNDARY_CASES
@@ -52,19 +54,6 @@ ACCURACY_CASES = (
     + [spec(5, f"combined_{n}", (2, 5, 5, 17), [5, 3], [17, 7]) for n in (65536, 65537)]
     + [spec(5, "independent", uq=[3, 1])]
 )
-
-
-def make_case(probes, producer, config, **kwargs):
-    return make_probe_case(probes, producer, config, full_launch=True, **kwargs)
-
-
-def forward_args(case):
-    args = dict(case["devices"]["migrated"], softmax_scale=case["scale"])
-    if case["config"]["version"] == 5:
-        args["seqused_q"] = case["inputs"][2]
-    if case["config"]["version"] != 1:
-        args["seqused_k"] = case["inputs"][3]
-    return args
 
 
 def generate(args):
@@ -81,29 +70,6 @@ def generate(args):
         headdim_v=512,
         num_splits=1,
     )
-
-
-def cached(args, metadata=None):
-    return api.flash_attn_with_kvcache(
-        args["q"],
-        args["k"],
-        args["v"],
-        qv=args["qv"],
-        cache_seqlens=args.get("seqused_k"),
-        scheduler_metadata=metadata,
-        softmax_scale=args.get("softmax_scale"),
-        num_splits=1,
-        return_softmax_lse=True,
-    )
-
-
-def forward(case, entry="public", metadata=None):
-    args = forward_args(case)
-    if entry == "cpp" or case["config"]["version"] == 5:
-        return _forward("cpp" if entry == "cpp" else "eager", args)
-    if case["config"]["version"] == 2:
-        return cached(args, metadata)
-    return api.flash_attn_func(**args, num_splits=1, return_attn_probs=True)
 
 
 def check_production(probes, case, entry="public"):
@@ -293,50 +259,6 @@ def test_stream_and_storage_lifetime(dtype, used):
         assert (out[1, :q1].cpu() == 0).all() and lse[1, :, :q1].cpu().isneginf().all()
         torch.testing.assert_close(lse[0, :, :q0].cpu(), torch.full((8, q0), 17.0).log())
     creator.synchronize()
-
-
-@pytest.fixture(scope="module")
-def storage_fault(tmp_path_factory):
-    directory = tmp_path_factory.mktemp("storage-fault")
-    library = directory / "storage.so"
-    torch_root = Path(torch.__file__).resolve().parent
-    subprocess.run(
-        [
-            "g++",
-            "-shared",
-            "-fPIC",
-            "-std=c++17",
-            "-D_GLIBCXX_USE_CXX11_ABI=1",
-            "-I" + str(torch_root / "include"),
-            str(ROOT / "tests/mla/support/mla_tensor_storage_probe.cpp"),
-            "-L" + str(torch_root / "lib"),
-            "-Wl,-rpath," + str(torch_root / "lib"),
-            "-lc10",
-            "-o",
-            str(library),
-        ],
-        check=True,
-    )
-    lib = ct.CDLL(str(library))
-    lib.mla_test_storage_bytes.argtypes = [ct.c_uint64, ct.c_uint64]
-    lib.mla_test_storage_bytes.restype = ct.c_uint64
-
-    @contextmanager
-    def inject(tensor):
-        # Change only host byte-size metadata; preserve allocation and streams.
-        # NPU Storage.resize_ queues copies and is unsuitable for this fixture.
-        # Compact logical bytes still fit: rejection must use the actual outer
-        # strides and the full allocation, even when all used lengths are zero.
-        truncated = (tensor.storage_offset() + tensor.numel()) * tensor.element_size()
-        assert truncated < tensor.untyped_storage().size()
-        previous = lib.mla_test_storage_bytes(tensor._cdata, truncated)
-        try:
-            assert tensor.untyped_storage().size() == truncated
-            yield
-        finally:
-            assert lib.mla_test_storage_bytes(tensor._cdata, previous) == truncated
-
-    return inject
 
 
 @pytest.mark.parametrize("name", NAMES)

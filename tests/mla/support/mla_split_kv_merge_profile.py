@@ -12,7 +12,7 @@ import time
 import torch
 import torch_npu
 
-from tests.mla.unit.split_kv_merge import test_merge as suite
+from tests.mla.support.components import split_kv_merge_merge as suite
 from tests.mla.support.mla_split_kv_merge_cases import PERFORMANCE_CASES
 
 

@@ -17,9 +17,9 @@ from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_cann_baseline import check_vendor_configuration, environment, file_info
 from tests.mla.support.mla_causal_tnd_profile import sample_kernels
 from tests.mla.support.mla_paged_profile import CannPagedCall
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_metadata import load_probe
-from tests.mla.e2e.causal_paged import test_flash_attn_npu_v3_mla_causal_paged_public as bsnd
-from tests.mla.e2e.causal_paged_tnd import test_flash_attn_npu_v3_mla_causal_paged_tnd_public as tnd
+from tests.mla.support.components.metadata import load_probe
+from tests.mla.support.public_cases import causal_paged_public as bsnd
+from tests.mla.support.public_cases import causal_paged_tnd_public as tnd
 
 
 class CausalPagedCall(CannPagedCall):

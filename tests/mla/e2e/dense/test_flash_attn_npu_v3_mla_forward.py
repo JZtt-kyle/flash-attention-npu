@@ -10,13 +10,10 @@ import torch
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_ref import mla_reference_pair
-from tests.mla.e2e.dense.test_flash_attn_npu_v3_mla_contract import _forward
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import (
-    launch,
-    make_case,
-    make_rounding_case,
-)
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import probes as probes
+from tests.mla.support.public_cases.contract import _forward
+from tests.mla.support.components.dense import launch, make_case
+from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_dense import make_rounding_case
+from tests.mla.support.components.dense import probes as probes
 
 
 def public(case, *, scale=None):

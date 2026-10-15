@@ -18,7 +18,7 @@ import subprocess
 import pytest
 import torch
 
-from tests.mla.unit.dense.test_flash_attn_npu_v3_mla_schedule import CANN_COMMIT, MLA, ROOT
+from tests.mla.support.components.schedule import CANN_COMMIT, MLA, ROOT
 
 I64_MAX = (1 << 63) - 1
 U64_MAX = (1 << 64) - 1

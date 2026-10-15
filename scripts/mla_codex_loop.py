@@ -19,8 +19,11 @@
 --resume 用于接管旧版遗留会话；多个旧会话未完成时必须明确指定 ID。
 恢复的是对话历史和磁盘工作，不会还原被终止进程的内存或自动续跑测试进程。
 开发轮必须恰好新增一个线性提交；文档轮允许没有提交。
+从干净工作区开始的轮次必须干净结束，不能把漏提交的源码留给下一轮。
 本脚本的成功检查不替代 AGENTS.md 要求的测试和验收。
-文档随每步更新，阶段结束或契约变化时按影响范围核对；不按轮数插入审计。
+文档随每步更新；自上次文档轮起每成功完成五轮开发，自动专门修正优化文档再继续。
+开发次数上限不包含文档轮；到达上限时先完成已到期文档轮再退出。
+旧计数已超期时补做一次；未完成轮次优先恢复，失败不推进计数。
 --review-docs 显式运行一次文档核验后退出；--check 不启动模型或修改状态。
 --retire-pending 仅归档待办轮次并退出，不计成功、不删除源码/日志或开启开发。
 
@@ -44,6 +47,9 @@ import time
 import uuid
 
 
+DOC_REVIEW_INTERVAL = 5
+
+
 LEGACY_PROMPTS = {
     "development": "继续MLA迁移开发",
     "documentation": (
@@ -65,13 +71,18 @@ DEV_PROMPT = (
     "新模块完成后新增自己的 E2E；回归失败再单点运行所属模块的单元测试，不累计历史单元组。"
     "复用数学 reference 缓存；开发自检、代表检查和提交验收不重复计算相同 reference。"
     "build/ 只保留 mla-codex-loop 无头日志和状态；其他产物放仓库外 MLA_WORK_DIR。不要把旧无 mask 测试"
-    "当成新增能力验收。文档随本步更新，阶段结束或契约改变时按影响范围核对，"
-    "不要按开发轮数全面审计。验收无法完成时如实更新交接并停止，不能提交为已闭环。"
+    "当成新增能力验收。文档随本步更新，阶段结束或契约改变时按影响范围核对。"
+    "循环会在每五轮成功开发后另开专门的文档修正优化轮。"
+    "验收无法完成时如实更新交接并停止，不能提交为已闭环。"
 )
 DOC_PROMPT = (
-    "按 AGENTS.md 核对当前 MLA 阶段涉及的文档与代码及验收证据，先读 status.md 和 plan.md。"
-    "只修正发现的问题；不推进功能或重跑无关设备矩阵。保持 design/plan/status 三种职责，"
-    "完成相关检查后至多提交一次并停止；无需修改时说明核对结果。"
+    "专门进行一次 MLA 文档修正优化，处理开发累积的腐化、冗余和错误。"
+    "先读 AGENTS.md、docs/mla/status.md 和 plan.md，再核对 design.md 与相关代码、固定来源及验收证据。"
+    "修正过期或矛盾的能力描述、步骤状态、命令、路径和链接；合并重复内容，压缩已完成步骤的历史细节，"
+    "保持 design/plan/status 的契约、计划、当前交接三种职责及唯一下一步，历史从 Git 查询。"
+    "用户最新约定优先；证据缺失、失败和未运行如实标记，不把文档陈述当作实现或验收依据。"
+    "保留既有未提交工作，只修改本轮文档；不推进功能，不探测设备、重建扩展或重跑无关设备矩阵。"
+    "完成一致性、链接和适用质量检查后至多提交一次并停止；无需修改时说明核对范围与结果。"
 )
 PROMPTS = {"development": DEV_PROMPT, "documentation": DOC_PROMPT}
 
@@ -147,6 +158,8 @@ def read_state(path, repo):
             or not re.fullmatch(r"[0-9a-f]{40,64}", pending["head_before"])
             or type(pending.get("attempts")) is not int
             or pending["attempts"] < 0
+            or type(pending.get("automatic_review", False)) is not bool
+            or type(pending.get("started_clean", False)) is not bool
         ):
             raise ValueError(f"未完成轮次格式错误：{path}")
         if pending.get("session_id"):
@@ -330,6 +343,10 @@ def validate_commit(repo, pending):
             )
     elif git(repo, "rev-list", "--parents", "-n", "1", "HEAD").split() != [after, before]:
         raise RuntimeError("相对本轮最初起点并非只新增一个线性提交，请核对后再恢复")
+    if pending.get("started_clean") and git(
+        repo, "status", "--porcelain", "--untracked-files=normal"
+    ):
+        raise RuntimeError("本轮从干净工作区开始，但结束时仍有未提交改动；保留本轮，不开始下一轮")
     return after
 
 
@@ -499,6 +516,10 @@ def run_session(args, codex, state, path):
         save_state(path, state)
 
 
+def doc_review_due(state):
+    return state["development_runs"] - state["reviewed_runs"] >= DOC_REVIEW_INTERVAL
+
+
 def run_loop(args, codex, path, state):
     completed = 0
     limit = args.max_dev_runs or (5 if args.dry_run else 0)
@@ -507,11 +528,14 @@ def run_loop(args, codex, path, state):
         validate_start(args.repo, pending)
         if pending and args.review_docs and pending["kind"] != "documentation":
             raise RuntimeError("还有未完成开发轮次，不能插入文档核验")
-        if not pending and limit and completed >= limit:
+        if pending:
+            kind = pending["kind"]
+        elif args.review_docs or doc_review_due(state):
+            kind = "documentation"
+        elif limit and completed >= limit:
             return
-        kind = (
-            pending["kind"] if pending else ("documentation" if args.review_docs else "development")
-        )
+        else:
+            kind = "development"
         if not pending:
             pending = {
                 "kind": kind,
@@ -521,6 +545,10 @@ def run_loop(args, codex, path, state):
                 "attempts": 0,
                 "model": args.model,
                 "profile": args.profile,
+                "automatic_review": kind == "documentation" and not args.review_docs,
+                "started_clean": not git(
+                    args.repo, "status", "--porcelain", "--untracked-files=normal"
+                ),
             }
             if not args.dry_run:
                 directory = Path(
@@ -548,7 +576,11 @@ def run_loop(args, codex, path, state):
                 f"累计开发 {state['development_runs']} 次，最近文档核验覆盖到第 {state['reviewed_runs']} 次。",
                 flush=True,
             )
-        if kind == "documentation" or (limit and completed >= limit):
+        if kind == "documentation" and (
+            args.review_docs or not pending.get("automatic_review", False)
+        ):
+            return
+        if limit and completed >= limit and not doc_review_due(state):
             return
         if not args.dry_run:
             time.sleep(args.interval)
@@ -580,7 +612,10 @@ def main():
         help="目标仓库，默认当前脚本所属仓库",
     )
     parser.add_argument(
-        "--max-dev-runs", type=int, default=0, help="本次完成的开发次数（含恢复轮）；0 表示持续运行"
+        "--max-dev-runs",
+        type=int,
+        default=0,
+        help="本次完成的开发次数（含恢复轮）；到期文档轮完成后退出；0 表示持续运行",
     )
     parser.add_argument("--interval", type=float, default=5, help="轮次间隔秒数，默认 5")
     parser.add_argument("--model", help="覆盖模型，默认沿用配置或未完成轮的参数")
@@ -652,7 +687,13 @@ def main():
                         head=git(args.repo, "rev-parse", "HEAD"),
                         pending=state["pending"],
                         development_runs=state["development_runs"],
-                        automatic_doc_review=False,
+                        reviewed_runs=state["reviewed_runs"],
+                        automatic_doc_review=True,
+                        doc_review_interval=DOC_REVIEW_INTERVAL,
+                        doc_review_due=doc_review_due(state),
+                        working_tree_clean=not git(
+                            args.repo, "status", "--porcelain", "--untracked-files=normal"
+                        ),
                         cli=cli,
                     ),
                     ensure_ascii=False,

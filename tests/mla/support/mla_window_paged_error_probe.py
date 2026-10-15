@@ -3,11 +3,7 @@
 import os
 import sys
 import torch
-from tests.mla.e2e.window_paged.test_flash_attn_npu_v3_mla_window_paged_public import (
-    production,
-    metadata,
-    call,
-)
+from tests.mla.support.public_cases.window_paged_public import production, metadata, call
 
 
 def main():

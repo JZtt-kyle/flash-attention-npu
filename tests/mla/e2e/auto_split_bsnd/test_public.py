@@ -9,26 +9,13 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.common.compare import assert_fa_close
-from tests.mla.e2e.split_kv_bsnd.test_public import make_case as explicit_case, metadata, invoke
+from tests.mla.support.public_cases.split_kv_bsnd_public import metadata, invoke
 from tests.mla.support.mla_auto_split_bsnd_reference import references
 
-
-def make_case(dtype="fp16", **kwargs):
-    return explicit_case(dtype, splits=0, **kwargs)
-
-
-def geometry(record, batch):
-    words = record.cpu().tolist()
-    base = 410 + 8 * batch
-    count = words[base + 3]
-    ends = list(
-        zip(
-            words[base + 4 : base + 4 + count],
-            words[base + 30 : base + 30 + count],
-            words[base + 56 : base + 56 + count],
-        )
-    )
-    return words[15], words[16], ends
+from tests.mla.support.public_cases.auto_split_bsnd_public import (
+    geometry as geometry,
+    make_case as make_case,
+)
 
 
 def compare(c, result, record=None, tile=None):
