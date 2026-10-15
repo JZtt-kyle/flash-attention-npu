@@ -193,7 +193,8 @@ std::vector<at::Tensor> mha_fwd(
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(q_v_ ? 576.0f : 192.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (!q_v_) {
-            TORCH_CHECK(!cu_seqlens_q_ || (max_seqlen_q_ && max_seqlen_k_), "MLA: compact TND requires max_seqlen_q/k");
+            TORCH_CHECK(!cu_seqlens_q_ || (max_seqlen_q_ && (!cu_seqlens_k_ || max_seqlen_k_)),
+                        "MLA: compact TND requires max_seqlen_q/k");
             return flash_attn::mla::PrefillBsndForward(q, k, v, scale, num_splits, window_size_left, window_size_right,
                                                        is_causal, seqused_q_, seqused_k_, scheduler_metadata_,
                                                        cu_seqlens_q_, cu_seqlens_k_, max_seqlen_q_.value_or(0),
@@ -854,7 +855,11 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                     "legacy numerical options");
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
         if (headdim == 192) {
-            TORCH_CHECK(!cu_seqlens_q && !page_size, "MLA prefill metadata is not implemented yet for TND or PA");
+            TORCH_CHECK(!page_size, "MLA prefill metadata is not implemented yet for PA");
+            if (cu_seqlens_q)
+                return flash_attn::mla::PrefillMixedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q,
+                                                               num_heads_kv, dtype, cache_seqlens, *cu_seqlens_q,
+                                                               num_splits, window_size_left, window_size_right, causal);
             return flash_attn::mla::PrefillBsndMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q,
                                                           num_heads_kv, dtype, cache_seqlens, num_splits,
                                                           window_size_left, window_size_right, causal);

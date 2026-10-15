@@ -20,7 +20,7 @@ __aicore__ inline bool LoadPrefill(const MlaPrefillBsndLaunchArgs& a, Kernel::Me
         (a.usedQuery && !ValidUsedMetadataAddress(a.usedQuery, c.batch)) ||
         (a.usedKv && !ValidUsedMetadataAddress(a.usedKv, c.batch)) ||
         (c.tnd && (!ValidUsedMetadataAddress(a.cuQuery, uint64_t(c.batch) + 1) ||
-                   !ValidUsedMetadataAddress(a.cuKv, uint64_t(c.batch) + 1))) ||
+                   (c.tnd == 1 && !ValidUsedMetadataAddress(a.cuKv, uint64_t(c.batch) + 1)))) ||
         AscendC::GetBlockNum() != c.cores ||
         c.dtype != (AscendC::IsSameType<MLA_PREFILL_TYPE, half>::value ? uint32_t(MlaMetadataDtype::Fp16)
                                                                        : uint32_t(MlaMetadataDtype::Bf16)) ||
@@ -99,7 +99,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_PREFILL_INIT(MlaPrefillBsndLaunchAr
         const auto& c = a.context;
         const uint64_t rows = uint64_t(c.totalQ) * c.heads;
         PrefillInitialize<MLA_PREFILL_TYPE>(a.out, rows * 128, MLA_PREFILL_TYPE(0));
-        PrefillInitialize<float>(a.lse, rows, c.totalK ? -float(1.0 / 0.0) : float(1.0 / 0.0));
+        PrefillInitialize<float>(a.lse, rows, (c.tnd == 1 ? c.totalK : c.sk) ? -float(1.0 / 0.0) : float(1.0 / 0.0));
         if (c.splits != 1) {
             const uint64_t capacity = c.splits ? c.splits : 26;
             PrefillInitialize<float>(a.accum, rows * capacity * 128, 0.0f);
@@ -140,8 +140,8 @@ __global__ __aicore__ __mix__(1, 2) void MLA_PREFILL_ATTENTION(MlaPrefillBsndLau
             const uint64_t qStart = read(PrefillSequenceWord(c, b));
             const uint64_t kStart = read(PrefillSequenceWord(c, b) + 2);
             current.q += qStart * a.params.q.rowStride * 2;
-            current.k += kStart * a.params.k.rowStride * 2;
-            current.v += kStart * a.params.v.rowStride * 2;
+            current.k += (c.tnd == 1 ? kStart * a.params.k.rowStride : uint64_t(b) * a.params.k.batchStride) * 2;
+            current.v += (c.tnd == 1 ? kStart * a.params.v.rowStride : uint64_t(b) * a.params.v.batchStride) * 2;
             current.out += qStart * c.heads * 128 * 2;
             current.lse += qStart * 4;
             current.params.batch = 1;

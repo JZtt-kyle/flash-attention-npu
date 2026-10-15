@@ -200,8 +200,8 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         "MLA: supported representation without qv requires Dq=192 and Dv=128",
     )
     check(
-        varlen_q == varlen_k and not paged_kv,
-        "MLA prefill forward is not implemented yet for mixed or paged layouts",
+        (varlen_q or not varlen_k) and not paged_kv,
+        "MLA prefill forward is not implemented yet for BSND Q with TND KV or paged layouts",
     )
     check(varlen_q or q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
     check(
@@ -1584,8 +1584,107 @@ def _mla_prefill_forward(
             used_k,
             metadata,
         )
+    if cu_q is not None:
+        _check_mla_mixed_inputs(q, k, cu_q, max_q, used_k, None, used_q)
+        return torch.ops.flash_attn_npu_3._mla_prefill_mixed_forward(
+            q, k, v, cu_q, max_q, splits, left, right, causal, scale, used_k, used_q, metadata
+        )
     return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_forward(
         q, k, v, splits, left, right, causal, scale, used_k, used_q, metadata
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_prefill_mixed_metadata")
+def _mla_prefill_mixed_metadata_fake(
+    batch_size,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_heads_q,
+    num_heads_kv,
+    qkv_dtype,
+    cache_seqlens,
+    cu_seqlens_q,
+    num_splits=1,
+    window_left=-1,
+    window_right=-1,
+    causal=False,
+    seqused_q=None,
+):
+    if qkv_dtype not in (torch.float16, torch.bfloat16):
+        raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
+    _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
+    _check_mla_metadata_query_prefix(cu_seqlens_q, batch_size, cache_seqlens.device)
+    _check_mla_used(cache_seqlens, batch_size, seqused_q, cache_seqlens)
+    words = _mla_prefill_bsnd_budget(
+        batch_size,
+        max_seqlen_q,
+        max_seqlen_k,
+        num_heads_q,
+        num_heads_kv,
+        num_splits,
+        window_left,
+        window_right,
+        causal,
+        total_q=0,
+        total_k=0,
+    )
+    return cache_seqlens.new_empty((words,))
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_prefill_mixed_forward")
+def _mla_prefill_mixed_forward_fake(
+    q,
+    k,
+    v,
+    cu_seqlens_q,
+    max_seqlen_q,
+    num_splits=1,
+    window_left=-1,
+    window_right=-1,
+    causal=False,
+    softmax_scale=None,
+    cache_seqlens=None,
+    seqused_q=None,
+    scheduler_metadata=None,
+):
+    _check_mla_inputs(q, k, v, varlen_q=True)
+    if q.shape[-1] != 192 or v.shape[-1] != 128:
+        raise RuntimeError("MLA: prefill requires 192/128 tensors")
+    _check_mla_mixed_inputs(q, k, cu_seqlens_q, max_seqlen_q, cache_seqlens, None, seqused_q)
+    _check_mla_dense_options(softmax_scale=softmax_scale, num_splits=num_splits, allow_split=True)
+    words = _mla_prefill_bsnd_budget(
+        k.shape[0],
+        max_seqlen_q,
+        k.shape[1],
+        q.shape[1],
+        k.shape[2],
+        num_splits,
+        window_left,
+        window_right,
+        causal,
+        total_q=q.shape[0],
+        total_k=k.shape[0] * k.shape[1],
+    )
+    if scheduler_metadata is not None and (
+        scheduler_metadata.dtype != torch.int32
+        or scheduler_metadata.device != q.device
+        or scheduler_metadata.shape != (words,)
+        or not scheduler_metadata.is_contiguous()
+    ):
+        raise RuntimeError(
+            "MLA: prefill scheduler_metadata must be same-device contiguous int32 with matching word count"
+        )
+    tq, h, _ = q.shape
+    capacity = num_splits or 26
+    return (
+        q.new_empty((tq, h, 128)),
+        q.new_empty((h, tq), dtype=torch.float32),
+        torch.empty((0,), device=q.device)
+        if num_splits == 1
+        else q.new_empty((capacity, h, tq, 128), dtype=torch.float32),
+        torch.empty((0,), device=q.device)
+        if num_splits == 1
+        else q.new_empty((capacity, h, tq), dtype=torch.float32),
     )
 
 
@@ -4147,8 +4246,23 @@ def _get_scheduler_metadata_fake(
             prefill=headdim == 192,
         )
         if headdim == 192:
-            if cu_seqlens_q is not None or page_size is not None:
-                raise RuntimeError("MLA prefill metadata is not implemented yet for TND or PA")
+            if page_size is not None:
+                raise RuntimeError("MLA prefill metadata is not implemented yet for PA")
+            if cu_seqlens_q is not None:
+                return torch.ops.flash_attn_npu_3._mla_prefill_mixed_metadata(
+                    batch_size,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    num_heads_q,
+                    num_heads_kv,
+                    qkv_dtype,
+                    cache_seqlens,
+                    cu_seqlens_q,
+                    num_splits,
+                    window_size_left,
+                    window_size_right,
+                    causal,
+                )
             return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_metadata(
                 batch_size,
                 max_seqlen_q,
@@ -4300,10 +4414,12 @@ def get_scheduler_metadata(
     Its legacy ``softcap`` and ``softmax_scale`` arguments are keyword-only; a
     positive legacy softcap enables softcapping even when has_softcap is omitted.
     ``has_softcap=True`` requires a positive legacy softcap for this protocol.
-    MLA supports 64/512 compressed inputs and 192/128 BSND prefill, with
-    matching qkv_dtype. Prefill accepts GQA and returns v27 for all masks and
-    num_splits=0..256: 368 + 2*B + 2*B*Hkv int32 words. Its TND/PA layouts
-    remain unsupported. The following v1-v26 descriptions concern 64/512.
+    MLA supports 64/512 compressed inputs and 192/128 nonpaged prefill, with
+    matching qkv_dtype. Prefill accepts GQA, all masks and num_splits=0..256.
+    BSND returns v27 (368 + 2*B + 2*B*Hkv int32 words); TND Q with BSND cache
+    returns v29 (372 + 8*B + 2*B*Hkv words). Compact TND Q/KV uses the varlen
+    entry's internal v28 generator. PA prefill remains unsupported.
+    The following v1-v26 descriptions concern 64/512.
     Nonpaged and paged BSND/TND queries accept num_splits=0..256.
     cache_seqlens must be a same-device contiguous int32 tensor of shape
     (batch_size,); None/integer lengths are kvcache conveniences only.
@@ -4360,8 +4476,23 @@ def get_scheduler_metadata(
             prefill=headdim == 192,
         )
         if headdim == 192:
-            if cu_seqlens_q is not None or page_size is not None:
-                raise RuntimeError("MLA prefill metadata is not implemented yet for TND or PA")
+            if page_size is not None:
+                raise RuntimeError("MLA prefill metadata is not implemented yet for PA")
+            if cu_seqlens_q is not None:
+                return torch.ops.flash_attn_npu_3._mla_prefill_mixed_metadata(
+                    batch_size,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    num_heads_q,
+                    num_heads_kv,
+                    qkv_dtype,
+                    cache_seqlens,
+                    cu_seqlens_q,
+                    num_splits,
+                    window_size[0],
+                    window_size[1],
+                    causal,
+                )
             return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_metadata(
                 batch_size,
                 max_seqlen_q,

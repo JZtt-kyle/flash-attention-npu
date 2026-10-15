@@ -120,4 +120,8 @@ def daily_suites():
         f"tests/mla/e2e/prefill_tnd/test_public.py::{name}"
         for name in ("test_daily", "test_empty", "test_fake", "test_compile")
     ]
+    suites["prefill_mixed"] = [
+        f"tests/mla/e2e/prefill_mixed/test_public.py::{name}"
+        for name in ("test_daily", "test_empty", "test_fake", "test_compile")
+    ]
     return suites

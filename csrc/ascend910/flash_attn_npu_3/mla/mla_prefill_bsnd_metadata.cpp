@@ -10,7 +10,7 @@
 namespace flash_attn::mla {
 bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
 {
-    const auto& c = a.context;
+    auto c = a.context;
     MlaPrefillBsndLayout l{};
     if (!a.output || a.output % 4 || !PrefillBsndLayout(c, l) || a.words != l.words ||
         a.words > (UINT64_MAX - a.output) / 4)
@@ -27,7 +27,7 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
     auto* out = reinterpret_cast<uint32_t*>(a.output);
     std::fill(out, out + a.words, 0);
     out[0] = kMlaMetadataMagic;
-    out[1] = out[2] = c.tnd ? kMlaPrefillTndVersion : kMlaPrefillBsndVersion;
+    out[1] = out[2] = c.tnd == 2 ? kMlaPrefillMixedVersion : c.tnd ? kMlaPrefillTndVersion : kMlaPrefillBsndVersion;
     out[3] = a.words;
     out[4] = c.dtype;
     out[5] = 1;
@@ -36,22 +36,29 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
         (a.usedKv && c.batch > (UINT64_MAX - a.usedKv) / 4) ||
         (c.dtype != uint32_t(MlaMetadataDtype::Fp16) && c.dtype != uint32_t(MlaMetadataDtype::Bf16)))
         return true;
-    if (c.tnd &&
-        (!a.cuQuery || !a.cuKv || a.cuQuery % 4 || a.cuKv % 4 || uint64_t(c.batch) + 1 > (UINT64_MAX - a.cuQuery) / 4 ||
-         uint64_t(c.batch) + 1 > (UINT64_MAX - a.cuKv) / 4))
+    if (c.tnd && (!a.cuQuery || a.cuQuery % 4 || uint64_t(c.batch) + 1 > (UINT64_MAX - a.cuQuery) / 4 ||
+                  (c.tnd == 1 && (!a.cuKv || a.cuKv % 4 || uint64_t(c.batch) + 1 > (UINT64_MAX - a.cuKv) / 4))))
         return true;
-    if (!c.tnd && (a.cuQuery || a.cuKv))
+    if ((!c.tnd && a.cuQuery) || (c.tnd != 1 && a.cuKv) || a.inferTotalQ > 1 || (a.inferTotalQ && c.tnd != 2))
         return true;
+    if (a.inferTotalQ) {
+        c.totalQ = reinterpret_cast<const uint32_t*>(a.cuQuery)[c.batch];
+        if (!PrefillBsndLayout(c, l))
+            return true;
+    }
     try {
         MlaUsedLengths allocation;
         if (c.tnd &&
-            ParseUsedLengths(
-                {c.batch, c.heads, {MlaSequenceLayout::Tnd, c.totalQ, c.sq}, {MlaSequenceLayout::Tnd, c.totalK, c.sk}},
-                {{reinterpret_cast<const int32_t*>(a.cuQuery), uint64_t(c.batch) + 1},
-                 {reinterpret_cast<const int32_t*>(a.cuKv), uint64_t(c.batch) + 1},
-                 {reinterpret_cast<const int32_t*>(a.usedQuery), a.usedQuery ? c.batch : 0},
-                 {reinterpret_cast<const int32_t*>(a.usedKv), a.usedKv ? c.batch : 0}},
-                allocation) != MlaScheduleStatus::Success)
+            ParseUsedLengths({c.batch,
+                              c.heads,
+                              {MlaSequenceLayout::Tnd, c.totalQ, c.sq},
+                              {c.tnd == 1 ? MlaSequenceLayout::Tnd : MlaSequenceLayout::Bsnd,
+                               c.tnd == 1 ? int64_t(c.totalK) : int64_t(c.batch) * c.sk, c.sk}},
+                             {{reinterpret_cast<const int32_t*>(a.cuQuery), uint64_t(c.batch) + 1},
+                              {reinterpret_cast<const int32_t*>(a.cuKv), c.tnd == 1 ? uint64_t(c.batch) + 1 : 0},
+                              {reinterpret_cast<const int32_t*>(a.usedQuery), a.usedQuery ? c.batch : 0},
+                              {reinterpret_cast<const int32_t*>(a.usedKv), a.usedKv ? c.batch : 0}},
+                             allocation) != MlaScheduleStatus::Success)
             return true;
         std::vector<uint32_t> result(a.words, 0);
         const uint32_t header[] = {kMlaMetadataMagic,
@@ -108,6 +115,7 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
                 const auto& seq = allocation.sequences[b];
                 result[word] = uint32_t(seq.queryStart);
                 result[word + 2] = uint32_t(seq.kvStart);
+                result[word + 3] = uint32_t(seq.kvStart >> 32);
                 result[word + 4] = seq.queryCapacity;
                 result[word + 5] = seq.kvCapacity;
             }

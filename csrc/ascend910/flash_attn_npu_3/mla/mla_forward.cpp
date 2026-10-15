@@ -2167,7 +2167,7 @@ std::tuple<at::Tensor, at::Tensor> DenseForwardOp(const at::Tensor& q, const at:
 namespace {
 MlaPrefillBsndContext PrefillContext(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads,
                                      at::ScalarType dtype, int64_t splits, int64_t left, int64_t right, bool causal,
-                                     uint32_t flags, const MlaPlatformInfo& platform, bool tnd = false,
+                                     uint32_t flags, const MlaPlatformInfo& platform, uint32_t tnd = 0,
                                      uint32_t totalQ = 0, uint32_t totalK = 0)
 {
     TORCH_CHECK(FitsDenseShape(tnd ? 0 : batch, sq, heads, sk) && kvHeads > 0 && heads % kvHeads == 0 && splits >= 0 &&
@@ -2250,21 +2250,23 @@ std::vector<at::Tensor> PrefillBsndForward(const at::Tensor& q, const at::Tensor
     TORCH_CHECK(q.size(-1) == 192 && v.size(-1) == 128, "MLA: prefill requires 192/128 tensors");
     TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
     TORCH_CHECK(tnd || !usedQ || !supplied, "MLA: prefill Q-used with explicit metadata is not implemented yet");
-    if (tnd)
+    if (cuK)
         CheckTndInputs(q, k, *cuQ, *cuK, maxQ, maxK);
+    else if (tnd)
+        CheckTndBsndForwardInputs(q, k, *cuQ, maxQ, usedK, std::nullopt);
     const int64_t batch = tnd ? cuQ->numel() - 1 : q.size(0);
     CheckUsedInputs(q, batch, usedQ, usedK);
     const c10::OptionalDeviceGuard guard(device_of(q));
     // Explicit metadata snapshots must still be checked against this call's
     // full capacity when cache_seqlens is omitted.
-    const auto currentK = !tnd && supplied && !usedK
-                              ? std::optional<at::Tensor>(at::full({q.size(0)}, k.size(1), q.options().dtype(at::kInt)))
+    const auto currentK = !cuK && supplied && !usedK
+                              ? std::optional<at::Tensor>(at::full({batch}, k.size(1), q.options().dtype(at::kInt)))
                               : usedK;
     auto platform = CausalPlatform(q.device().index(), true);
     auto c =
-        PrefillContext(batch, tnd ? maxQ : q.size(1), tnd ? maxK : k.size(1), q.size(-2), k.size(-2), q.scalar_type(),
+        PrefillContext(batch, tnd ? maxQ : q.size(1), cuK ? maxK : k.size(1), q.size(-2), k.size(-2), q.scalar_type(),
                        splits, left, right, causal, uint32_t(bool(usedQ)) | (uint32_t(bool(currentK)) << 1), platform,
-                       tnd, tnd ? q.size(0) : 0, tnd ? k.size(0) : 0);
+                       tnd ? (cuK ? 1 : 2) : 0, tnd ? q.size(0) : 0, cuK ? k.size(0) : 0);
     MlaPrefillBsndLayout l{};
     PrefillBsndLayout(c, l);
     if (supplied) {
@@ -2290,13 +2292,14 @@ std::vector<at::Tensor> PrefillBsndForward(const at::Tensor& q, const at::Tensor
     auto metadata = supplied ? *supplied : at::empty({l.words}, q.options().dtype(at::kInt));
     auto args = PrefillMetadataArgs(c, metadata, usedQ, currentK);
     args.cuQuery = tnd ? PrefillPointer(*cuQ) : 0;
-    args.cuKv = tnd ? PrefillPointer(*cuK) : 0;
+    args.cuKv = cuK ? PrefillPointer(*cuK) : 0;
     auto stream = c10_npu::getCurrentNPUStream();
     for (const auto& t : {q, k, v, out, lse, accum, accumLse, workspace, metadata})
         RecordPrefill(t, stream);
     if (tnd) {
         RecordPrefill(*cuQ, stream);
-        RecordPrefill(*cuK, stream);
+        if (cuK)
+            RecordPrefill(*cuK, stream);
     }
     if (usedQ)
         RecordPrefill(*usedQ, stream);
@@ -2331,8 +2334,8 @@ std::vector<at::Tensor> PrefillBsndForward(const at::Tensor& q, const at::Tensor
                 scale,
                 c.window,
                 (tnd ? CheckTndTensorLayout(q) : CheckBsndTensorLayout(q)),
-                (tnd ? CheckTndTensorLayout(k) : CheckBsndTensorLayout(k)),
-                (tnd ? CheckTndTensorLayout(v) : CheckBsndTensorLayout(v))};
+                (cuK ? CheckTndTensorLayout(k) : CheckBsndTensorLayout(k)),
+                (cuK ? CheckTndTensorLayout(v) : CheckBsndTensorLayout(v))};
     RunCausalLaunch("ascendc_mla_prefill_bsnd", [a, args, supplied, q, k, v, out, lse, accum, accumLse, workspace,
                                                  metadata, usedQ, currentK, cuQ, cuK]() mutable {
         if (!supplied)
@@ -2403,10 +2406,56 @@ at::Tensor PrefillTndMetadataOp(const at::Tensor& q, const at::Tensor& k, const 
     return metadata;
 }
 
+at::Tensor PrefillMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, int64_t kvHeads,
+                                  at::ScalarType dtype, const at::Tensor& lengths, const at::Tensor& cuQ,
+                                  int64_t splits, int64_t left, int64_t right, bool causal,
+                                  const std::optional<at::Tensor>& usedQ)
+{
+    CheckTndBsndMetadataInputs(batch, maxQ, sk, heads, dtype, lengths, cuQ);
+    CheckUsedInputs(lengths, batch, usedQ, lengths);
+    const c10::OptionalDeviceGuard guard(device_of(lengths));
+    auto c = PrefillContext(batch, maxQ, sk, heads, kvHeads, dtype, splits, left, right, causal,
+                            2 | uint32_t(bool(usedQ)), CausalPlatform(lengths.device().index(), true), 2);
+    MlaPrefillBsndLayout l{};
+    PrefillBsndLayout(c, l);
+    auto metadata = at::empty({l.words}, lengths.options());
+    auto args = PrefillMetadataArgs(c, metadata, usedQ, lengths);
+    args.cuQuery = PrefillPointer(cuQ);
+    args.inferTotalQ = 1;
+    auto stream = c10_npu::getCurrentNPUStream();
+    for (const auto& t : {cuQ, lengths, metadata})
+        RecordPrefill(t, stream);
+    if (usedQ)
+        RecordPrefill(*usedQ, stream);
+    RunCausalLaunch("ascendc_mla_prefill_mixed_metadata", [metadata, cuQ, lengths, usedQ, args, stream]() mutable {
+        ComputeMlaPrefillBsndMetadata<<<1, nullptr, stream.stream(false)>>>(&args, sizeof(args));
+        return 0;
+    });
+    return metadata;
+}
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+PrefillMixedForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& cuQ,
+                      int64_t maxQ, int64_t splits, int64_t left, int64_t right, bool causal,
+                      std::optional<double> scale, const std::optional<at::Tensor>& usedK,
+                      const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& metadata)
+{
+    auto result = PrefillBsndForward(q, k, v, scale.value_or(1.0 / std::sqrt(192.0)), splits, left, right, causal,
+                                     usedQ, usedK, metadata, cuQ, std::nullopt, maxQ);
+    return {result[0], result[1], result[2], result[3]};
+}
+
 } // namespace flash_attn::mla
 
 TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 {
+    m.def("_mla_prefill_mixed_forward(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, int max_seqlen_q, "
+          "int num_splits=1, int window_left=-1, int window_right=-1, bool causal=False, "
+          "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? seqused_q=None, "
+          "Tensor? scheduler_metadata=None) -> (Tensor, Tensor, Tensor, Tensor)");
+    m.def("_mla_prefill_mixed_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
+          "int num_heads_kv, ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q, "
+          "int num_splits=1, int window_left=-1, int window_right=-1, bool causal=False, "
+          "Tensor? seqused_q=None) -> Tensor");
     m.def("_mla_prefill_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
           "int max_seqlen_q, int max_seqlen_k, int num_splits=1, int window_left=-1, int window_right=-1, "
           "bool causal=False, float? softmax_scale=None, Tensor? seqused_q=None, Tensor? seqused_k=None, "
@@ -2547,6 +2596,8 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
 {
+    m.impl("_mla_prefill_mixed_forward", &flash_attn::mla::PrefillMixedForwardOp);
+    m.impl("_mla_prefill_mixed_metadata", &flash_attn::mla::PrefillMixedMetadataOp);
     m.impl("_mla_prefill_tnd_forward", &flash_attn::mla::PrefillTndForwardOp);
     m.impl("_mla_prefill_tnd_metadata", &flash_attn::mla::PrefillTndMetadataOp);
     m.impl("_mla_prefill_bsnd_forward", &flash_attn::mla::PrefillBsndForwardOp);
@@ -2576,6 +2627,8 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, AutogradPrivateUse1, m)
 {
+    m.impl("_mla_prefill_mixed_forward", torch::CppFunction::makeFallthrough());
+    m.impl("_mla_prefill_mixed_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_prefill_tnd_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_prefill_tnd_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_prefill_bsnd_forward", torch::CppFunction::makeFallthrough());

@@ -120,10 +120,13 @@ def reference(c, record):
     for name, value in c["raw"].items():
         capacities, seq, heads = (c["q"], sq, h) if name == "q" else (c["k"], sk, hk)
         dst = value.new_zeros((b, seq, heads, value.shape[-1]))
-        start = 0
-        for i, length in enumerate(capacities):
-            dst[i, :length] = value[start : start + length]
-            start += length
+        if value.ndim == 4:
+            dst.copy_(value)
+        else:
+            start = 0
+            for i, length in enumerate(capacities):
+                dst[i, :length] = value[start : start + length]
+                start += length
         padded[name] = (
             dst.reshape(b, seq, hk, g if name == "q" else 1, value.shape[-1])
             .permute(0, 2, 1, 3, 4)

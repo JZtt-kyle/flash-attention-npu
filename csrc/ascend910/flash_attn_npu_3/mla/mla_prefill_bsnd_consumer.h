@@ -52,7 +52,7 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
     MlaPrefillBsndLayout l{};
     if (!PrefillBsndLayout(c, l) || words != l.words)
         return S::InvalidBuffer;
-    const uint32_t version = c.tnd ? 28 : 27;
+    const uint32_t version = c.tnd == 2 ? 29 : c.tnd ? 28 : 27;
     const auto status = ReadMetadataHeader(PrefillHeaderView<Reader>{read}, words, l.words, version, version, c.dtype);
     if (status != S::Success)
         return status;
@@ -82,7 +82,8 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
         geometry.batch = c.batch;
         geometry.usedFlags = c.usedFlags;
         geometry.query = {1, {c.totalQ, 0}, c.sq};
-        geometry.kv = {1, {c.totalK, 0}, c.sk};
+        const uint64_t totalK = c.tnd == 1 ? c.totalK : uint64_t(c.batch) * c.sk;
+        geometry.kv = {c.tnd == 1 ? 1U : 0U, {uint32_t(totalK), uint32_t(totalK >> 32)}, c.sk};
         for (uint32_t axis = 0; axis < 2; ++axis) {
             uint32_t maximum;
             const auto checked =
@@ -105,7 +106,7 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
     auto& t = used.tiling;
     t.batch = c.batch * c.kvHeads;
     t.sq = c.tnd && !c.totalQ ? 0 : c.sq;
-    t.sk = c.tnd && !c.totalK ? 0 : c.sk;
+    t.sk = c.tnd == 1 && !c.totalK ? 0 : c.sk;
     t.heads = c.heads / c.kvHeads;
     t.mBaseSize = l.m;
     t.s2BaseSize = l.n;

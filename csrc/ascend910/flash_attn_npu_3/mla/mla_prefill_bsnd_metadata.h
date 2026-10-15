@@ -13,6 +13,7 @@
 namespace flash_attn::mla {
 constexpr uint32_t kMlaPrefillBsndVersion = 27;
 constexpr uint32_t kMlaPrefillTndVersion = 28;
+constexpr uint32_t kMlaPrefillMixedVersion = 29;
 // v27 has 20 header words and B pairs of effective lengths; v28 has 24 header
 // words and B allocation/used spans. Both retain the 346-word native partition
 // tail and B*Hkv+1 uint64 M prefixes, without device addresses.
@@ -20,7 +21,8 @@ struct MlaPrefillBsndContext {
     uint32_t batch, sq, sk, heads, kvHeads, splits, dtype, cores, usedFlags;
     MlaWindowKernelParams window;
     uint64_t workspaceBytes;
-    // v28 adds compact allocation geometry; zero keeps v27 BSND unchanged.
+    // Layout: 0 = v27 BSND, 1 = v28 TND, 2 = v29 TND Q / BSND KV.
+    // v29 retains v28 spans, but KV spans describe rectangular cache slots.
     uint32_t tnd = 0, totalQ = 0, totalK = 0;
 };
 struct MlaPrefillBsndLayout {
@@ -41,11 +43,12 @@ MLA_PREFILL_INLINE uint32_t PrefillTailWord(const MlaPrefillBsndContext& c)
 }
 MLA_PREFILL_INLINE bool PrefillBsndLayout(const MlaPrefillBsndContext& c, MlaPrefillBsndLayout& out)
 {
-    if (!c.heads || !c.kvHeads || c.heads % c.kvHeads || c.splits > 256 || !c.cores || c.cores > 26 || c.tnd > 1 ||
+    if (!c.heads || !c.kvHeads || c.heads % c.kvHeads || c.splits > 256 || !c.cores || c.cores > 26 || c.tnd > 2 ||
         c.totalQ > INT32_MAX || c.totalK > INT32_MAX || (c.tnd && uint64_t(c.totalQ) * c.heads > kMlaMaxBatchRows) ||
-        (!c.tnd && (c.totalQ || c.totalK)) || c.usedFlags > 3 || c.window.kind > 2 || c.window.left < -1 ||
-        c.window.right < -1 || c.window.left > INT32_MAX || c.window.right > INT32_MAX || c.sq > kMlaMaxQueryLength ||
-        c.sk > kMlaMaxKvLength || c.heads > kMlaMaxQueryHeads || uint64_t(c.sq) * c.heads > kMlaMaxDenseRows ||
+        ((!c.tnd && c.totalQ) || (c.tnd != 1 && c.totalK)) || c.usedFlags > 3 || c.window.kind > 2 ||
+        c.window.left < -1 || c.window.right < -1 || c.window.left > INT32_MAX || c.window.right > INT32_MAX ||
+        c.sq > kMlaMaxQueryLength || c.sk > kMlaMaxKvLength || c.heads > kMlaMaxQueryHeads ||
+        uint64_t(c.sq) * c.heads > kMlaMaxDenseRows ||
         (!c.tnd && uint64_t(c.batch) * c.sq > kMlaMaxBatchRows / c.heads) ||
         uint64_t(c.batch) * c.kvHeads > (UINT32_MAX - 758) / 10 ||
         uint64_t(c.batch) * ((c.tnd ? 8 : 2) + uint64_t(2) * c.kvHeads) > UINT32_MAX - 372)
@@ -69,7 +72,7 @@ MLA_PREFILL_INLINE bool PrefillBsndLayout(const MlaPrefillBsndContext& c, MlaPre
         (c.tnd ? uint64_t(c.totalQ ? c.totalQ : 1) : uint64_t(c.batch ? c.batch : 1) * (c.sq ? c.sq : 1)) * c.heads;
     if (strideRows > uint64_t(INT64_MAX) / 512 / publicCapacity)
         return false;
-    if (c.batch && c.sq && c.sk && (!c.tnd || (c.totalQ && c.totalK))) {
+    if (c.batch && c.sq && c.sk && (!c.tnd || (c.totalQ && (c.tnd == 2 || c.totalK)))) {
         r.groups = uint64_t(c.batch) * c.kvHeads * ((uint64_t(c.sq) * g + r.m - 1) / r.m);
         if (c.tnd) {
             const uint64_t compact = (uint64_t(c.totalQ) * g / r.m + c.batch) * c.kvHeads;
@@ -93,6 +96,8 @@ struct MlaPrefillBsndMetadataArgs {
     uint64_t usedQuery, usedKv, output;
     uint32_t words;
     uint64_t cuQuery = 0, cuKv = 0;
+    // Public mixed metadata receives only the device Q prefix, not a Q tensor.
+    uint32_t inferTotalQ = 0;
 };
 // Unsafe output/overlap returns false without writes. Other failures publish
 // a nonzero status and zero payload; successful snapshots own their lengths.
