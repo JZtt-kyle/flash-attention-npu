@@ -1,5 +1,7 @@
 """TND explicit-split inputs fixed by independent coverage before measurement."""
 
+from tests.mla.support.mla_split_stage_cases import split_stage_cases
+
 from tests.mla.support.mla_window_tnd_cases import spec as window_spec
 
 
@@ -52,3 +54,7 @@ PERFORMANCE_CASES = [
     spec(q=(1, 3), k=(16384, 17), h=2, window=(-1, -1), splits=256),
     spec(q=(7, 3), k=(33, 17), uk=[0, 0], h=4, window=(2, 1), splits=8),
 ]
+
+
+# Stage selection changes only performance; all correctness cases above stay intact.
+PERFORMANCE_CASES = split_stage_cases(PERFORMANCE_CASES, "split-tnd-profile")

@@ -1,5 +1,7 @@
 """Fixed performance inputs chosen by coverage before measurement (both dtypes)."""
 
+from tests.mla.support.mla_split_stage_cases import split_stage_cases
+
 PERFORMANCE_CASES = [
     dict(shape=(1, 1, 128, 16384), window=(-1, -1), splits=2),
     dict(shape=(2, 3, 16, 8193), window=(-1, -1), splits=8),
@@ -10,3 +12,7 @@ PERFORMANCE_CASES = [
     dict(shape=(1, 1, 16, 16384), window=(-1, -1), splits=256),
     dict(shape=(2, 7, 16, 33), window=(2, 1), lengths=[0, 0], splits=8),
 ]
+
+
+# Stage selection changes only performance; all correctness cases above stay intact.
+PERFORMANCE_CASES = split_stage_cases(PERFORMANCE_CASES, "split-bsnd-profile")

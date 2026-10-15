@@ -1,5 +1,7 @@
 """Fixed native automatic PA inputs; every shape has an independent coverage purpose."""
 
+from tests.mla.support.mla_split_stage_cases import split_stage_cases
+
 from tests.mla.support.mla_split_paged_bsnd_cases import spec as explicit_spec
 
 
@@ -36,3 +38,7 @@ PERFORMANCE_CASES = [
     spec(page=1024, q=3, lengths=(16384, 17), heads=2, window=(-1, -1)),
     spec(page=112, q=7, lengths=(0, 0), heads=4, capacity=224),
 ]
+
+
+# Stage selection changes only performance; all correctness cases above stay intact.
+PERFORMANCE_CASES = split_stage_cases(PERFORMANCE_CASES, "auto-split-paged-bsnd-profile")

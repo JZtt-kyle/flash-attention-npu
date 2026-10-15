@@ -1,5 +1,7 @@
 """Mixed native automatic inputs fixed by coverage before execution or timing."""
 
+from tests.mla.support.mla_split_stage_cases import split_stage_cases
+
 from tests.mla.support.mla_window_mixed_cases import spec as mixed_spec
 
 
@@ -40,3 +42,7 @@ PERFORMANCE_CASES = [
     spec(q=(7, 3), k=(0, 0), capacity=33, h=4, window=(2, 1)),
     spec(q=(3,) * 32, k=(33, 17) * 16, capacity=33, h=2, window=(-1, -1)),
 ]
+
+
+# Stage selection changes only performance; all correctness cases above stay intact.
+PERFORMANCE_CASES = split_stage_cases(PERFORMANCE_CASES, "auto-split-mixed-profile")

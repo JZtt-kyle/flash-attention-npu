@@ -1,6 +1,7 @@
 """Deterministic daily case limits, independent of test or timing results."""
 
 from tests.mla.paths import original_nodeid
+from tests.mla.support.mla_split_stage_cases import split_stage_cases
 
 from collections import defaultdict
 import hashlib
@@ -42,6 +43,9 @@ WINDOW_STAGE_SUITES = dict(
 
 
 def window_public_cases(specs, group):
+    if os.environ.get("MLA_SPLIT_STAGE_PERFORMANCE") == "1":
+        suite = next(name for name, layout in WINDOW_STAGE_SUITES.items() if layout == group)
+        return split_stage_cases(specs, suite)
     if os.environ.get("MLA_WINDOW_STAGE_PERFORMANCE") != "1":
         return list(specs)
     selection = stage_selection(specs, group)
@@ -195,5 +199,6 @@ def check_public_performance(result):
     if (
         os.environ.get("MLA_CAUSAL_STAGE_PERFORMANCE") != "1"
         and os.environ.get("MLA_WINDOW_STAGE_PERFORMANCE") != "1"
+        and os.environ.get("MLA_SPLIT_STAGE_PERFORMANCE") != "1"
     ):
         assert result["passed"], result["mean_ratio"]

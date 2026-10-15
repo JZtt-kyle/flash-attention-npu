@@ -1219,13 +1219,17 @@ Tq=0 而 B/maxQ/C 均非零时，生产适配器将静态计划的单核发射�
 
 **阶段范围：** 性能只验收本步已迁移的能力和执行路径。在 FD 迁移完成前，全部约定形状均用固定 CANN 源的非 FD Kernel、相同逻辑输入/基本块/核数/端点，与迁移 Kernel 对照；布局转换的边界按 [7.1](#71-固定性能矩阵与阶段边界) 和 [7.2](#72-参考工具与对照边界) 单列。记录逐例 Kernel 耗时及独立 probe 调用耗时，不能把预分配 probe 的调用时间当成公开 E2E。原生 CANN 自动调度同样不启用 FD 的用例，另按下述公开 metadata E2E 门槛验收。原生 CANN 会启用尚未迁移 FD 的用例，其原生 E2E 仅记录能力差距，不作为非 FD 迁移的阻塞项；不因此前置 FD、开放 `num_splits=0` 或改变 `num_splits=1` 语义。
 
-源执行路径是否已迁移，按固定源调度字段和分派证据判定，不能按耗时结果筛选。保留完整预定矩阵和原始数据；FD、mask、PA 等能力接通后，对应路径再纳入验收。非 PA BSND、TND Q/KV、混合 TND Q + BSND KV 及 BSND PA 自动 split 组已接通原生自动 FD，因此这些组把 FD 与非 FD 一并纳入平均，保留逐例与分类结果；其他布局的未迁移原生 FD 仍单列。CANN 没有公开的 FA3 `num_splits=1` 等价开关时，使用明确标识的独立源 probe 作组件对照，保留原生 CANN 分派及库，不将改装调用冒充原生 E2E。
+源执行路径是否已迁移，按固定源调度字段和分派证据判定，不能按耗时结果筛选。保留完整预定矩阵和原始数据；FD、mask、PA 等能力接通后，对应路径再纳入验收。非 PA BSND、TND Q/KV、混合 TND Q + BSND KV、BSND PA 和 TND PA 五种自动 split 组均已接通原生自动 FD，因此自动组把 FD 与非 FD 一并纳入平均，保留逐例与分类结果。单分片/显式分片策略与原生自动 FD 不等价，这些组继续按 6.2.12 单列原生 FD；不能因自动路径已接通而改变其同路径对照分类。CANN 没有公开的 FA3 `num_splits=1` 等价开关时，使用明确标识的独立源 probe 作组件对照，保留原生 CANN 分派及库，不将改装调用冒充原生 E2E。
 
 **公开 E2E：** 用户明确的“不劣化”指 **走 MLA metadata 路径的 FA3 公开调用端到端（E2E）延迟**。在同一健康、空闲的 910B、同一输入/精度/软件栈上比较。固定 seed、预热、计时次数和同步方式，交替重复测量 CANN/新实现；保存每例耗时及运行信息。按用户调整，固定集合最多 100 个输入配置（dtype、shape、scale、长度、stride），不足 100 个时保留实际数量。双方执行路径均已迁移的配置参与验收：每个入口/R 的比值为两侧 5 轮×20 次 wall 样本中位数之比；先在一个配置内等权平均已定义的入口/R，再对所有适用配置等权取算术平均，目标 `mean_ratio <= 1.0`。单例退化只记录，不作为提交阻塞；同时报告逐例、各入口/R 均值和退化数量，不按测得耗时筛选用例。缺失结果、空集合、NaN/非正耗时或计时协议不符仍失败。原生 FD 等未迁移路径按上述规则单列，不填充平均值。
 
 当前五种 causal 布局使用 [`mla_public_performance.py`](../../tests/mla/support/mla_public_performance.py) 合并 FP16/BF16，校验集合、分段和原始耗时比；各 `causal-*-profile` 保存 `public-profile/average.json`。单布局默认按其固定清单限量并验收平均值。M08 阶段使用 `--causal-stage-performance`，在采样前经 [`mla_validation_policy.py`](../../tests/mla/support/mla_validation_policy.py) 为 BSND、TND、混合、BSND PA、TND PA 各固定选择至多 10 个输入，含双 dtype 合计最多 100 个配置。PA 按页大小分层，其余按 used、stride 和实际长度分层，再按既有内容哈希选择；保存候选、选中和未选中清单，不按耗时筛选。阶段各布局平均值保留为诊断，最终由 [`mla_causal_stage_performance.py`](../../tests/mla/support/mla_causal_stage_performance.py) 对所有适用配置等权平均验收；它要求五布局完整、运行身份及共享源码版本一致、原始证据哈希有效，并从原始耗时重新计算结果。缺失汇总不能声明阶段性能通过。R=1/4、5 次 warmup、5 轮×20 次 wall 及完成同步保持不变；该选项不用于正确性组，也不改变其默认矩阵。
 
 M09 五种窗口布局使用 `--window-stage-performance` 和同一确定性分层/100 配置上限，候选来自各窗口布局固定 `PERFORMANCE_CASES`，不改变专项正确性集合。阶段汇总使用 `mla_causal_stage_performance.py --mask window`，额外核验原始 window/causal 输入身份；仍要求全部五布局和完整原始证据。本模块与阶段的组合正确性、累计日常 E2E 以及普通 FA3 回归必须实际运行，不能以无 mask 历史结果代替。
+
+M10 使用 `--split-stage-performance`，由 [`固定阶段清单`](../../tests/mla/support/mla_split_stage_cases.py) 从既有十五组选择输入：BSND 显式四个，其余各三个，双 dtype 合计 92 配置。五布局各有 single/window、explicit 和 automatic 组；单分片保留长度/stride/页与 mask 边界，显式和自动组各覆盖 none/causal/window、长 KV 与独立 stride。选择只作用于性能，日常和专项正确性清单不变；阶段只运行各组的公开 profile 节点，不累计历史组件性能；原生分派核验后、计时前拒绝适用集合为空的组。BSND 显式包含 used=512 的非 FD 代表，保留其他原生 FD 输入作分类记录。缓存入口保留隐式/生成/复用各 R=1/4，varlen 按既有单入口 R=1/4，BSND 整容量另保留 func 段。配置内按实际定义段等权，配置间等权，不按组均值平均。
+
+[`M10 阶段汇总`](../../tests/mla/support/mla_split_stage_performance.py) 要求全部十五组、同一运行环境/共享源码身份、绑定且哈希有效的原始证据及固定选中清单；逐组从原始 FP16/BF16 耗时重新计算，保留全部配置、分段、各布局/分片模式和排除项。自动组纳入原生 FD，单分片/显式组的 FD 策略差异和非 template=5 的原生模板仍单列。个别组退化仅作诊断，最终以所有适用配置的算术平均 ≤1 验收；缺失阶段汇总不能声明通过。
 
 E2E 从公开 Python 入口开始，测至对应调用段的 O/LSE 完成，计入入口校验、调度、输出/workspace 分配、必要转换、发射、流间依赖和全部设备计算。输入 H2D 与一次性视图准备沿用基线的对称计时边界；两边使用一致的完成同步方式。只测内部 launcher、device event span 或 profiler kernel 时间均不能替代该口径。
 
@@ -1379,3 +1383,19 @@ python3 -m tests.mla.support.native_package
 构建自动使用上游声明的第三方依赖；可通过 `MLA_NATIVE_DEPS` 指向已下载的依赖缓存，`MLA_CANN_SOURCE_ROOT` 指向固定源仓，`MLA_NATIVE_ROOT` 指定原生包工作目录。已有包须通过当前配方、输入声明和完整内容校验，不能仅因目录存在就复用。来源校验读取固定 Git 对象并核对包内头文件，不要求只读 CANN 工作区的 HEAD 或未提交内容与构建版本相同。`native_inputs/*.json` 保留原固定源构建生成的 FP16/BF16 输入声明；编译 keys 覆盖原 dense、TND、BSND PA、TND PA 的已用组合，实际分派仍由独立证据核验。
 
 `MLA_WORK_DIR` 默认在 `/tmp/flash-attention-npu-mla-<仓库标识>`；构建/probe/reference 在 `mla-validation-artifacts/`，默认结果在 `results/`，原生 CANN 在 `native/`。可用 `--artifacts`、`--output` 指定其他仓库外目录。`build/` 仅保留无头模式的 `mla-codex-loop/` 日志、锁和恢复状态，执行器不得依赖旧步骤目录。`/tmp` 可被系统清理；长期继承时设置持久工作目录，证据缺失就重新执行，不声称仍可继承。
+
+### 7.5 M10 阶段覆盖
+
+阶段范围为 512+64、Hkv=1、FP16/BF16；五布局均开放 `num_splits=0/1/2..256` 和 none/causal/window。累计日常 E2E 的 `BEHAVIORS` 检查单分片三 mask，十个 split 模块的 `test_daily` 检查自动/显式三 mask，并检查实际 O/LSE 与 FP32 accumulator。每个用例的精确节点和参数以统一驱动 `cases.json`、`selection.json` 为准，不把下表当成额外的全笛卡尔积要求。
+
+| 布局 | 显式 / 自动公开专项 | 独立布局边界 |
+| --- | --- | --- |
+| BSND | [显式](../../tests/mla/e2e/split_kv_bsnd/test_public.py) / [自动](../../tests/mla/e2e/auto_split_bsnd/test_public.py) | 矩形 allocation/used、空 batch/Q/KV、S=193/255/256 扩展、原生 Direct/FD、长 KV |
+| TND Q/KV | [显式](../../tests/mla/e2e/split_tnd/test_public.py) / [自动](../../tests/mla/e2e/auto_split_tnd/test_public.py) | 双前缀、非均匀/空段、Q/K-used 间隙、声明最大值与实际 allocation、原 token accumulator 地址 |
+| TND Q + BSND KV | [显式](../../tests/mla/e2e/split_mixed/test_public.py) / [自动](../../tests/mla/e2e/auto_split_mixed/test_public.py) | 紧凑 Q 与矩形 KV 起点、Q-used 内部路径及公开 metadata 拒绝边界、storage/stride、长度和视图复用 |
+| BSND PA | [显式](../../tests/mla/e2e/split_paged_bsnd/test_public.py) / [自动](../../tests/mla/e2e/auto_split_paged_bsnd/test_public.py) | 页边界、页重排/重复、独立 cache stride、Q-used、零容量/全零实际 KV、页/描述符校验 |
+| TND PA | [显式](../../tests/mla/e2e/split_paged_tnd/test_public.py) / [自动](../../tests/mla/e2e/auto_split_paged_tnd/test_public.py) | 非均匀/空 Q 前缀、页与 allocation 联合寻址、非空 allocation 全零 Q-used、原 allocation 未用槽初始化 |
+
+各专项同时维护 real/fake/compile、长度或内容/scale 更新、合法 metadata 复用、失败恢复、stream/内存生命周期及不支持参数的拒绝。单/显式/自动的空行和未用 accumulator 槽按各自已定义契约检查，不把未规定的 Q padding 值统一化。长 KV 和多块/多片代表保留在专项，日常只运行小输入；协议损坏 Trap 和固定源数值组件仍归原模块，在相关实现变化或回归定位时执行，不因阶段收尾累计历史单元。
+
+阶段性能按第 7 节的 92 配置清单执行，组合正确性按本节及累计日常清单执行；两者不能互相替代。192/128 prefill、softcap、非默认调度及完整 graph replay 不属于 M10 交付，910C 不作本轮实机验收声明。

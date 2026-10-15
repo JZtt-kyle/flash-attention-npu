@@ -63,6 +63,19 @@ def test_actual_launch_and_fd_classification(native_log):
     assert result["artifacts"][str(log)] == sha256(log)
 
 
+def test_stage_dispatch_guard_is_connected(native_log, monkeypatch):
+    log, vendor, _ = native_log
+    monkeypatch.setenv("MLA_SPLIT_STAGE_PERFORMANCE", "1")
+    monkeypatch.setenv("MLA_SPLIT_STAGE_SUITE", "split-bsnd-profile")
+    parse_dispatch(log, "fp16", 4, vendor)
+    text = log.read_text().replace("105000000010000001", "105000000010100001")
+    log.write_text(text.replace("105000000010200001", "105000000010300001"))
+    with pytest.raises(ValueError, match="before timing"):
+        parse_dispatch(log, "fp16", 4, vendor)
+    monkeypatch.setenv("MLA_SPLIT_STAGE_SUITE", "auto-split-bsnd-profile")
+    parse_dispatch(log, "fp16", 4, vendor)
+
+
 @pytest.mark.parametrize(
     "fault",
     [

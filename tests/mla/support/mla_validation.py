@@ -29,6 +29,7 @@ from tests.mla.support.mla_dense_build import ROOT, sha256
 from tests.mla.support.mla_validation_build import matching_files
 from tests.mla.support.mla_validation_dependencies import suite_sources
 from tests.mla.support.mla_validation_selection import INCREMENTAL_SUITES
+from tests.mla.support.mla_split_stage_cases import SPLIT_STAGE_POLICY, SPLIT_STAGE_SUITES
 from tests.mla.support.mla_validation_policy import (
     DEFAULT_MAX_CASES,
     POLICY_VERSION,
@@ -82,6 +83,17 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "split-bsnd-public": ["tests/mla/e2e/split_kv_bsnd/test_public.py"],
+    "auto-split-bsnd-public": ["tests/mla/e2e/auto_split_bsnd/test_public.py"],
+    "split-tnd-public": ["tests/mla/e2e/split_tnd/test_public.py"],
+    "split-stage-tools": [
+        "tests/mla/unit/tools/test_mla_split_stage_performance.py",
+        "tests/mla/unit/tools/test_mla_native_dispatch.py",
+        "tests/mla/unit/tools/test_mla_validation.py",
+        "tests/mla/unit/tools/test_mla_validation_policy.py",
+        "tests/mla/unit/tools/test_mla_causal_stage_performance.py",
+        "tests/mla/unit/tools/test_organization.py",
+    ],
     "auto-split-paged-tnd-tools": [
         "tests/mla/unit/tools/test_mla_auto_split_paged_tnd_production_tools.py",
         "tests/mla/unit/tools/test_flash_attn_npu_v3_mla_build.py::test_aicpu_sources_by_backend",
@@ -887,6 +899,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "split-stage-tools",
     "auto-split-paged-tnd-tools",
     "auto-split-paged-bsnd-tools",
     "auto-split-paged-tnd-protocol-tools",
@@ -1183,7 +1196,7 @@ def execute(command, env, directory, lock_fds=()):
     return record
 
 
-def pytest_command(suite, directory, collect=False):
+def pytest_command(suite, directory, collect=False, *, split_stage=False):
     command = [
         sys.executable,
         "-m",
@@ -1197,6 +1210,8 @@ def pytest_command(suite, directory, collect=False):
         "addopts=",
         "--random-sample=0",
     ]
+    if split_stage:
+        command += ["-k", "native_public_profile"]
     if collect:
         return command + ["--collect-only"]
     return command + [f"--basetemp={directory / 'tmp'}", f"--junitxml={directory / 'results.xml'}"]
@@ -1243,6 +1258,9 @@ def environment(args, directory, suite):
         "MLA_TND_PAGED_KVCACHE_DIR": "kvcache",
     }.items():
         env[variable] = str(directory / child)
+    if getattr(args, "split_stage_performance", False) and suite in SPLIT_STAGE_SUITES:
+        env["MLA_SPLIT_STAGE_PERFORMANCE"] = "1"
+        env["MLA_SPLIT_STAGE_SUITE"] = suite
     if suite == "e2e":
         env["MLA_E2E_SELECTION"] = "1"
     if getattr(args, "causal_stage_performance", False) and suite in CAUSAL_STAGE_SUITES:
@@ -1410,6 +1428,13 @@ def cache_stats(path):
 
 
 def run(args):
+    args.split_stage_performance = getattr(args, "split_stage_performance", False)
+    if args.split_stage_performance and (
+        getattr(args, "window_stage_performance", False)
+        or getattr(args, "causal_stage_performance", False)
+        or not set(args.suite) <= set(SPLIT_STAGE_SUITES)
+    ):
+        raise ValueError("--split-stage-performance requires only M10 performance suites")
     args.window_stage_performance = getattr(args, "window_stage_performance", False)
     args.causal_stage_performance = getattr(args, "causal_stage_performance", False)
     if args.window_stage_performance and (
@@ -1441,6 +1466,8 @@ def run(args):
                     max_cases_per_suite=args.max_cases,
                     full_matrix=args.full_matrix,
                     selection_policy=POLICY_VERSION,
+                    split_stage_performance=args.split_stage_performance,
+                    split_stage_policy=SPLIT_STAGE_POLICY,
                     window_stage_performance=args.window_stage_performance,
                     causal_stage_performance=args.causal_stage_performance,
                     causal_stage_policy=CAUSAL_STAGE_POLICY,
@@ -1457,7 +1484,10 @@ def run(args):
                     else [],
                     suites={
                         name: pytest_command(
-                            name, args.output / "attempt-N" / name, args.collect_only
+                            name,
+                            args.output / "attempt-N" / name,
+                            args.collect_only,
+                            split_stage=args.split_stage_performance,
                         )
                         for name in args.suite
                     },
@@ -1501,6 +1531,8 @@ def run(args):
             max_cases_per_suite=args.max_cases,
             full_matrix=args.full_matrix,
             selection_policy=POLICY_VERSION,
+            split_stage_performance=args.split_stage_performance,
+            split_stage_policy=SPLIT_STAGE_POLICY,
             window_stage_performance=args.window_stage_performance,
             causal_stage_performance=args.causal_stage_performance,
             causal_stage_policy=CAUSAL_STAGE_POLICY,
@@ -1604,6 +1636,8 @@ def run(args):
                     case_limit=args.max_cases,
                     full_matrix=args.full_matrix,
                     selection_policy=POLICY_VERSION,
+                    split_stage_performance=args.split_stage_performance,
+                    split_stage_policy=SPLIT_STAGE_POLICY,
                     window_stage_performance=args.window_stage_performance,
                     causal_stage_performance=args.causal_stage_performance,
                     causal_stage_policy=CAUSAL_STAGE_POLICY,
@@ -1634,7 +1668,9 @@ def run(args):
             if not args.collect_only:
                 state.pop(suite, None)
                 save(state_path, state)
-            command = pytest_command(suite, directory, args.collect_only)
+            command = pytest_command(
+                suite, directory, args.collect_only, split_stage=args.split_stage_performance
+            )
             if needs_build and suite not in CPU_SUITES:
                 # Probe libraries are shared; numerical outputs and loaded
                 # manifests belong to this attempt, not the mutable cache.
@@ -1763,6 +1799,11 @@ def main():
         "--window-stage-performance",
         action="store_true",
         help="Measure five window layouts within 100 total dtype/input configurations",
+    )
+    parser.add_argument(
+        "--split-stage-performance",
+        action="store_true",
+        help="Measure M10 five layouts and three split modes using 92 fixed configurations",
     )
     limits = parser.add_mutually_exclusive_group()
     limits.add_argument(

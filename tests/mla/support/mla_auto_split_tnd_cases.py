@@ -1,5 +1,7 @@
 """Native TND automatic inputs, fixed by coverage before correctness or timing."""
 
+from tests.mla.support.mla_split_stage_cases import split_stage_cases
+
 from tests.mla.support.mla_window_tnd_cases import spec as window_spec
 
 
@@ -50,3 +52,7 @@ PERFORMANCE_CASES = [
     # Enough direct work to exercise reuse of each core's temporary raw slot.
     spec(q=(3,) * 32, k=(33, 17) * 16, h=2, window=(-1, -1)),
 ]
+
+
+# Stage selection changes only performance; all correctness cases above stay intact.
+PERFORMANCE_CASES = split_stage_cases(PERFORMANCE_CASES, "auto-split-tnd-profile")

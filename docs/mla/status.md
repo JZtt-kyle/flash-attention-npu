@@ -1,53 +1,76 @@
 # MLA 当前状态
 
-**M10c10 TND PA 原生自动 split 完整接入，必要验收通过。** 分支 `feat/mla-cann-migration`，接手基线 `49a5704`；当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。唯一下一步为 [M10 阶段收尾](plan.md#唯一下一步-m10阶段收尾)，本次提交后停止，不开始下一步。
+**M10 阶段收尾已完成。** 分支 `feat/mla-cann-migration`，接手基线 `a6efbd2`。五种 512+64 布局的自动/单/显式 split 与三 mask 已完成组合、公开行为和阶段性能验收。唯一下一步是 [M11a：192/128 共享数值组件](plan.md#唯一下一步-m11a)，本轮提交后停止。
 
-## 本步行为
+## 本轮改动
 
-512+64、Hkv=1、FP16/BF16 的 TND Q + ND PA KV 支持 `num_splits=0`，包含 none/causal/window、host/AICPU、v26、init/partial/merge、公开 cache/metadata 和 real/fake/compile。五布局现均接受 0..256。v26 为 `756+7B` 字，复用紧凑 Q 原生分区、PA partial 和 TND merge；返回真实 FP32 `[26,H,T,512]` / `[26,H,T]` accumulator，保留原 allocation 地址与未用槽 0/-inf。协议与表示域差异见 [design 6.2.31](design.md#6231-tnd-pa-原生自动-split-完整接入)。
+统一驱动新增 `--split-stage-performance`：固定十五组共 92 个配置（含双 dtype），保留候选/选中/未选中清单；原生分派核验后、计时前拒绝适用集合为空；阶段汇总从绑定的原始耗时重新计算配置等权平均。增加三个只含公开测试的组别，避免阶段收尾累计历史组件单元。生产 host/AICPU/Kernel、metadata、公开 real/fake、构建参数和 CATLASS 均未改。
 
-修正上轮搬迁遗留的 12 个文件中的组件导入名，复用共享 PA 固定源 fixture；受影响九个历史模块仅做收集检查，272 个节点成功收集，不计为数值通过。历史 TND 自动拒绝断言改为负 split 拒绝，新自动能力由本步三 mask 正向用例验收。CANN/CATLASS 未修改，共享数值 Block/Tile 算法未更换。
+计时仍为 R=1/4、5 次预热、5×20 wall，转换与完成同步边界不变。性能选择不影响正确性清单；组合覆盖与拒绝边界见 [design 7.5](design.md#75-m10-阶段覆盖)。
 
-## 当次闭环证据
+## 本次闭环证据
 
-证据根 `/tmp/mla-m10c10/`，所有集合先 dry-run/collect-only，未使用 `--max-cases` 或 `--resume`，继承通过结果为 0。最终集合启动后只修改文档。源码、实际用例、工具链、原始证据及构建输入/依赖/产物经统一驱动既有函数复核有效，结果见 `final-evidence-check.json`。
+证据根 `/tmp/mla-m10-close/`。最终工具为 `tools-final/summary.json`，正确性为 `acceptance-final/summary.json`，性能为 `performance-final/summary.json` 及 `performance-stage.json`。全部先 dry-run/collect-only，固定源码后实际执行，无 `--resume`、`--max-cases` 或完整矩阵扩展；继承通过结果为 0。
 
 | 检查 | 结果 | 用时 |
 | --- | --- | --- |
-| 协议工具 | 14 passed | 9.7 s |
-| 生产工具，含真实 AICPU 编译 | 38 passed | 14.9 s |
-| 本模块完整协议 | 452 passed | 47.4 s |
-| 同集合 ASan/UBSan/LSan | 452 passed | 155.0 s |
-| 固定源 partial/merge 与双数学 | 12 passed | 210.6 s |
-| 公开专项 | 100 passed | 123.4 s |
-| release Trap | 48 passed | 657.7 s |
-| 累计日常 MLA E2E | 314 passed | 60.2 s |
-| 普通 FA3 回归 | 516 passed | 26.9 s |
-| 固定公开性能 | 12 配置，平均比 0.832628 ≤1 | 285.7 s |
+| 受影响工具 | 195 passed | 81.9 s |
+| 累计日常 MLA E2E | 314 passed | 61.2 s |
+| 普通 FA3 回归 | 516 passed | 35.1 s |
+| BSND 显式 / 自动公开专项 | 53 / 53 passed | 42.4 / 34.9 s |
+| TND 显式 / 自动公开专项 | 58 / 59 passed | 65.0 / 49.1 s |
+| mixed 显式 / 自动公开专项 | 85 / 89 passed | 71.4 / 61.0 s |
+| BSND PA 显式 / 自动公开专项 | 80 / 80 passed | 114.3 / 100.5 s |
+| TND PA 显式 / 自动公开专项 | 92 / 100 passed | 106.4 / 102.9 s |
+| 阶段公开性能 | 15 组、92 配置全部实测，阶段平均通过 | 3632.2 s |
 
-各组均为 0 failed/skipped；公开专项与日常 E2E 有重叠，不相加作为独立用例总数。固定源 24 项 O/LSE 对照全部逐元素一致，双数学通过；真实 FP32 accumulator 同时核对源和双数学，没有新增源精度限制。48 项 Trap 各用新进程/context，全部在设备事件同步阶段拒绝，无超时。
+正确性各组均 0 failed/skipped；公开专项合计 749 次通过，包含与日常及组间重叠，不作独立用例总数。正确性组共用时 844.1 s；MLA reference 1004 次命中，普通 FA3 随机输入 1 次命中、30 次生成缓存。性能 reference 168 次全部命中，待测实现仍实际执行。30 份性能诊断精度报告的 216 个数学状态均为 passed，未使用源精度限制豁免；源分派和策略差异保留在原始报告中。
 
-公开性能全部 12 个 dtype/输入配置适用，含八个原生 FD 配置，无排除；三入口及 R=1/4 等权平均。4/12 配置、24/72 分段退化，单例不阻塞平均门槛；保留全部单例、分段、原生分派及 AICPU/init/partial/merge 明细。六段平均比为：隐式 R1/R4 **0.9159/0.8090**，生成 R1/R4 **1.0269/0.7506**，复用 R1/R4 **0.8065/0.6869**。
+阶段实测 92 配置，**64 个适用配置的算术平均为 0.5997372294 ≤1**；28 个原生 FD 配置来自单/显式 split 的策略差异，单列不计平均。五个自动组全部纳入原生 FD。保留 8 个退化配置、50 个退化入口/R 分段，逐例和分段均值在 `performance-stage.json`，所有原始样本在各组 `public-profile/`。以下组均值仅作诊断，阶段按配置等权，不按组均值平均：
 
-- `cpu-acceptance/summary.json` 保存协议工具、完整协议与 sanitizer；生产工具最终证据在 `tools-final/summary.json`。完整设备证据为 `acceptance/summary.json`，对应 `attempt-1792066747635981340/`；性能在该 attempt 的 `auto-split-paged-tnd-profile/public-profile/average.json` 及各 dtype 原始报告。
-- 长测前 10 项代表/成本检查通过（`device-check/summary.json`，121.8 s），最终公开组重跑覆盖。最大代表 accumulator 52.3 MiB；最慢代表含 reference 33.9 s。代表后补入非空 allocation、Q-used 全零的正向双 dtype 边界，验证无任务初始化；最终公开集合为新模块 94 节点及六个相关历史边界，性能配置未变。
-- 当前源码构建 558.4 s，runtime 核验 21.0 s；最终准备核验并复用产物 1.3 s，runtime 20.9 s。数学缓存按内容复用：源数值组 10 hit/2 miss，公开组 27 hit/52 miss，日常 E2E 400 hit/0 miss，普通回归 31 hit/0 miss；实际实现全部执行。
-- 开发预检修正了负例夹具的 int32 输入溢出及一个使用 BSND 总量的旧溢出配置；失败保留于 `cpu/`、`cpu-retry/`。沙箱 sanitizer 的 452 项断言通过，但退出时 LSan 被 ptrace 限制阻断，整组记失败（`cpu-final/`）；在宿主保持原配置重跑通过（`cpu-host/`、最终 `cpu-acceptance/`），未关闭检查或缩减集合。
+| 布局 | 单 split | 显式 split | 自动 split |
+| --- | --- | --- | --- |
+| BSND | 0.5559 | 0.6801 | 1.0103 |
+| TND | 0.3489 | 0.2862 | 0.7656 |
+| mixed | 0.4184 | 0.4241 | 0.6515 |
+| BSND PA | 0.4084 | 0.3852 | 0.8007 |
+| TND PA | 0.3976 | 0.4108 | 0.7649 |
+
+BSND 自动组均值 1.0103 及其退化配置完整保留，不影响按约定全阶段平均验收。完整固定输入见 `performance-final-selection.json` 和各组 `split-stage-selection-*.json`；最终策略为 2。`final-check.json` 复用统一驱动函数核对 28 组原始证据、源码、外部依赖和收集/实测用例清单，以及实际加载库、构建源/依赖/产物和 native 包，全部有效。`accuracy-summary.json` 索引本次诊断精度证据。
+
+本轮未运行历史数值组件、协议/sanitizer/Trap 或组件性能：对应实现未变，阶段回归走公开 E2E 与专项。192/128 prefill、softcap、非默认调度仍拒绝；完整 graph replay 和 910C 实机未验收。
+
+## 失败修正与证据边界
+
+首次 90 配置在 `performance/summary.json`：五个单 split 组完成后，BSND 显式三个输入全部触发原生 FD，排除后适用集合为空，汇总失败；其余组未运行。根据原生分派补入既有下标 4（used=512，非 FD template=5），保留原有全部输入，形成 92 配置；没有按耗时筛选。五个显式组双 dtype 的分派预核对在 `native-selection-check.json`，不继承其中的历史性能。新增计时前适用集合检查后，工具、正确性及完整性能全部按最终身份重跑。
+
+开发工具旧 mock 参数失败保留于 `tools/`，修正后的最终工具组通过。沙箱无法查询 ascend_hal 的收集失败保留于 `acceptance-collect/`、`performance-collect/`，宿主最终收集与执行通过；这些失败不记为数值通过。接手证据核对在 `handoff-check.json`；修正前的 `tools-retry/`、`acceptance/` 和 `performance/` 不替代最终证据。`profile-format-check.json` 只检查历史报告格式。
 
 ## 环境与复现
 
-Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1；CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。宿主卡 6 为 Ascend910B3。实际加载本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `56641e271f3949ebb3e0f66d1f9757afae81a0f4c3f5071be672f01a3f3d7b93`。
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1；CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。卡 6 为 Ascend910B3；实际加载本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `56641e271f3949ebb3e0f66d1f9757afae81a0f4c3f5071be672f01a3f3d7b93`。正确性准备复用构建 1.3 s、runtime 核验 20.8 s；性能准备 1.2 / 21.4 s。
 
-产物与数学缓存为 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`，构建身份由 `prepare.json` 核验；native 包为 `/tmp/mla-m10c3b/native/opp/vendors/mla_ca18aee_transformer`，配方、内容及实际分派均已核验。`build/` 只保留 `mla-codex-loop/`；未改无头循环状态。临时原始证据清理后不可继承，持久保存应设置持久 `MLA_WORK_DIR`。
+构建/reference 缓存为 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`；native 包为 `/tmp/mla-m10c3b/native/opp/vendors/mla_ca18aee_transformer`，当前配方/内容有效。性能启动前卡 6 健康、无其他计算进程，快照在 `performance-final-device-before.log`，驱动持有卡锁。`build/` 仅保留无头日志/状态，未改循环计数；临时证据清理后不可继承。
 
 ```bash
-python3 -m tests.mla --suite auto-split-paged-tnd-protocol-tools \
-  auto-split-paged-tnd-tools unit-auto_split_paged_tnd_protocol \
-  auto-split-paged-tnd-protocol-sanitize --output /tmp/mla-m10c10/repro-cpu
+python3 -m tests.mla --suite split-stage-tools --output /tmp/mla-m10-close/repro-tools
 MLA_NATIVE_ROOT=/tmp/mla-m10c3b/native python3 -m tests.mla \
-  --suite unit-auto_split_paged_tnd auto-split-paged-tnd-public \
-  auto-split-paged-tnd-trap e2e ordinary auto-split-paged-tnd-profile \
-  --device 6 --output /tmp/mla-m10c10/repro-device
+  --suite e2e ordinary split-bsnd-public auto-split-bsnd-public \
+  split-tnd-public auto-split-tnd-public split-mixed-public auto-split-mixed-public \
+  split-paged-bsnd-public auto-split-paged-bsnd-public \
+  split-paged-tnd-public auto-split-paged-tnd-public \
+  --device 6 --output /tmp/mla-m10-close/repro-correctness
+MLA_NATIVE_ROOT=/tmp/mla-m10c3b/native python3 -m tests.mla \
+  --split-stage-performance --suite split-bsnd-profile \
+  window-paged-profile window-paged-tnd-profile window-bsnd-profile \
+  window-tnd-profile window-mixed-profile split-tnd-profile split-mixed-profile \
+  split-paged-bsnd-profile split-paged-tnd-profile \
+  auto-split-bsnd-profile auto-split-tnd-profile auto-split-mixed-profile \
+  auto-split-paged-bsnd-profile auto-split-paged-tnd-profile \
+  --device 6 --output /tmp/mla-m10-close/repro-performance
+python3 -m tests.mla.support.mla_split_stage_performance \
+  --evidence /tmp/mla-m10-close/repro-performance/summary.json \
+  --output /tmp/mla-m10-close/repro-stage.json
 ```
 
-复现先同参数 dry-run/collect-only，sanitizer 需可正常执行 LSan 的宿主环境。日常仅用 `python3 -m tests.mla --device 6`，不默认重跑本步单元/专项。提交前差异与 `git diff --check`、仓库适用六项质量 hooks、55 处受影响链接/锚点检查通过（`quality-final.log`、`doc-links.json`）。M10 阶段收尾未运行，192/128 prefill、softcap、非默认调度仍拒绝，完整 graph replay 和 910C 实机尚未验收。
+复现先同参数 dry-run/collect-only；实机和需要查询芯片的收集在宿主执行。日常仍为 `python3 -m tests.mla --device 6`。收尾的 `ci/code_quality.sh --staged`、`git diff --check` 均通过，质量记录为 `quality-final.log`；三份文档的契约、表格及 521 个本地链接/锚点已核对。

@@ -193,7 +193,7 @@ sys.exit(code)
     exit_file = tmp_path / "exit"
     exit_file.write_text("0")
     monkeypatch.setattr(
-        runner, "pytest_command", lambda *a: [sys.executable, str(script), str(exit_file)]
+        runner, "pytest_command", lambda *a, **kw: [sys.executable, str(script), str(exit_file)]
     )
     assert runner.run(config) == 0
     first = json.loads((config.output / "summary.json").read_text())["groups"][suite]

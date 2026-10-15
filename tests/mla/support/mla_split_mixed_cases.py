@@ -1,5 +1,7 @@
 """Mixed explicit split inputs fixed by coverage before execution or timing."""
 
+from tests.mla.support.mla_split_stage_cases import split_stage_cases
+
 from tests.mla.support.mla_window_mixed_cases import spec as mixed_spec
 
 
@@ -36,3 +38,7 @@ PERFORMANCE_CASES = [
     spec(q=(1, 3), k=(16384, 17), capacity=16384, h=2, window=(-1, -1), splits=256),
     spec(q=(7, 3), k=(0, 0), capacity=33, h=4, window=(2, 1)),
 ]
+
+
+# Stage selection changes only performance; all correctness cases above stay intact.
+PERFORMANCE_CASES = split_stage_cases(PERFORMANCE_CASES, "split-mixed-profile")

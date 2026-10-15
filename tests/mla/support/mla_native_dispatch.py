@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import re
 
+from tests.mla.support.mla_split_stage_cases import check_split_stage_dispatch
+
 
 def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -82,6 +84,7 @@ def parse_dispatch(log, dtype, count, vendor):
                 current = None
     if current is not None or len(cases) != count or not registrations:
         raise RuntimeError("Incomplete native dispatch or missing package registration")
+    check_split_stage_dispatch(cases)
     return dict(
         dtype=dtype,
         cases=cases,

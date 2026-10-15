@@ -1,5 +1,7 @@
 """BSND PA explicit split inputs fixed before correctness and timing runs."""
 
+from tests.mla.support.mla_split_stage_cases import split_stage_cases
+
 
 def spec(
     page=112,
@@ -70,3 +72,7 @@ PERFORMANCE_CASES = [
     spec(page=1024, q=3, lengths=(16384, 17), heads=2, splits=256, window=(-1, -1)),
     spec(page=112, q=7, lengths=(0, 0), heads=4, splits=8, capacity=224),
 ]
+
+
+# Stage selection changes only performance; all correctness cases above stay intact.
+PERFORMANCE_CASES = split_stage_cases(PERFORMANCE_CASES, "split-paged-bsnd-profile")
