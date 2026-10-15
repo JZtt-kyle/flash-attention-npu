@@ -27,5 +27,7 @@ struct MlaSplitKvMergeParams {
     // Production Q-used controls mask geometry; sq remains allocation stride.
     // Independent components leave this zero and use sq (zero-Q has no task).
     uint32_t queryLength = 0;
+    // HeadDim=128 BSND specialization: heads is the per-KV-head group size.
+    uint32_t kvHeads = 1, kvHead = 0;
 };
 } // namespace flash_attn::mla

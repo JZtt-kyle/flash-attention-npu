@@ -4,7 +4,8 @@ namespace flash_attn::mla {
 
 MlaLayoutStatus BuildBsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTensorLayout& output)
 {
-    if (view.sizes[0] < 0 || view.sizes[1] < 0 || view.sizes[2] <= 0 || (view.sizes[3] != 64 && view.sizes[3] != 512)) {
+    if (view.sizes[0] < 0 || view.sizes[1] < 0 || view.sizes[2] <= 0 ||
+        (view.sizes[3] != 64 && view.sizes[3] != 128 && view.sizes[3] != 192 && view.sizes[3] != 512)) {
         return MlaLayoutStatus::InvalidShape;
     }
     if (view.strides[0] < 0 || view.strides[1] < 0 || view.strides[2] < 0 || view.strides[3] != 1) {

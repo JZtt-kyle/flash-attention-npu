@@ -132,7 +132,15 @@ inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const
     }
     TORCH_CHECK(q.size(-1) == 192 && v.size(-1) == 128,
                 "MLA: supported representation without qv requires Dq=192 and Dv=128");
-    TORCH_CHECK(false, "NPU FlashAttention MLA prefill forward is not implemented yet");
+    TORCH_CHECK(!varlenQ && !varlenK && !pagedKV,
+                "MLA prefill forward is not implemented yet for TND, mixed or paged layouts");
+    TORCH_CHECK(q.size(0) == k.size(0), "MLA: dense batch sizes must match");
+    TORCH_CHECK(FitsDenseShape(q.size(0), q.size(1), headsQ, k.size(1)), "MLA: prefill BSND shape bounds exceeded");
+    for (const auto& t : {q, k, v}) {
+        TORCH_CHECK(!t.requires_grad(), "MLA prefill forward is not implemented yet for gradients");
+        CheckBsndTensorLayout(t);
+    }
+    return true;
 }
 
 inline uint32_t CheckTndInputs(const at::Tensor& q, const at::Tensor& k, const at::Tensor& cuQ, const at::Tensor& cuK,
@@ -161,9 +169,9 @@ inline bool CheckMetadataBoundary(int64_t headDim, int64_t headDimV)
     if (headDim == headDimV) {
         return false;
     }
-    // This selects only the schedule family. Forward still requires qv and
-    // independently checks the actual tensors and the record's geometry.
-    TORCH_CHECK(headDim == 64 && headDimV == 512,
+    // This selects the representation's schedule family. Forward independently
+    // checks qv presence, actual tensors and the record's geometry.
+    TORCH_CHECK((headDim == 64 && headDimV == 512) || (headDim == 192 && headDimV == 128),
                 "NPU FlashAttention MLA scheduler metadata is not implemented yet for these head dimensions");
     return true;
 }

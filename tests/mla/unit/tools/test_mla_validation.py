@@ -200,7 +200,9 @@ sys.exit(code)
     config.resume = True
     assert runner.run(config) == 0
     assert json.loads((config.output / "summary.json").read_text())["groups"][suite]["status"] == (
-        "inherited" if runner.is_e2e(runner.SUITES[suite]) else "passed"
+        "inherited"
+        if runner.is_e2e(runner.SUITES[suite]) and suite not in runner.PERFORMANCE_SUITES
+        else "passed"
     )
     Path(first["directory"], "cases.json").unlink()
     exit_file.write_text("7")

@@ -12,7 +12,15 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def parse_dispatch(log, dtype, count, vendor):
+def e2e_applicable(template, fd, *, representation="compressed", include_native_fd=False):
+    if representation not in ("compressed", "prefill"):
+        raise ValueError("Unknown MLA representation")
+    return template in ((3, 4) if representation == "prefill" else (5,)) and (
+        include_native_fd or not fd
+    )
+
+
+def parse_dispatch(log, dtype, count, vendor, *, representation="compressed"):
     vendor = Path(vendor).resolve()
     root = vendor / "op_impl/ai_core/tbe/kernel"
     configs = list(root.glob("config/ascend910b/**/fused_infer_attention_score.json"))
@@ -78,7 +86,7 @@ def parse_dispatch(log, dtype, count, vendor):
                     native_tiling_key=key,
                     native_template=template,
                     native_fd=fd,
-                    e2e_applicable=template == 5 and not fd,
+                    e2e_applicable=e2e_applicable(template, fd, representation=representation),
                 )
                 cases.append(current)
                 current = None
@@ -87,6 +95,7 @@ def parse_dispatch(log, dtype, count, vendor):
     check_split_stage_dispatch(cases)
     return dict(
         dtype=dtype,
+        representation=representation,
         cases=cases,
         registrations=registrations,
         artifacts={str(p.resolve()): sha256(p) for p in (Path(log), configs[0], metadata, binary)},

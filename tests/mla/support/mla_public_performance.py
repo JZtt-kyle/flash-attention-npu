@@ -9,6 +9,7 @@ from pathlib import Path
 import statistics
 
 from tests.mla.support.mla_validation_policy import PUBLIC_MAX_CASES
+from tests.mla.support.mla_native_dispatch import e2e_applicable
 
 
 SEGMENTS = {
@@ -40,6 +41,9 @@ def summarize(reports, cases_per_dtype, *, include_native_fd=False):
         raise ValueError("Expected 1..50 input cases per dtype")
     if len(reports) != 2 or {r["dtype"] for r in reports} != {"fp16", "bf16"}:
         raise ValueError("Expected exactly one FP16 and one BF16 report")
+    representation = reports[0].get("representation", "compressed")
+    if any(r.get("representation", "compressed") != representation for r in reports):
+        raise ValueError("Dtype representations differ")
     if include_native_fd and not all(r.get("automatic_split") for r in reports):
         raise ValueError("Native FD acceptance requires automatic split reports")
     if include_native_fd and any(
@@ -63,7 +67,14 @@ def summarize(reports, cases_per_dtype, *, include_native_fd=False):
             raise ValueError("Missing window input identity")
         identities.append([input_identity(row) for row in report["results"]])
         for index, row in enumerate(report["results"]):
-            applicable = row["native_template"] == 5 and (include_native_fd or not row["native_fd"])
+            applicable = e2e_applicable(
+                row["native_template"],
+                row["native_fd"],
+                representation=representation,
+                include_native_fd=(
+                    row.get("num_splits") == 0 if representation == "prefill" else include_native_fd
+                ),
+            )
             if row["e2e_applicable"] != applicable:
                 raise ValueError("Inconsistent native dispatch classification")
             item = dict(dtype=report["dtype"], index=index, **input_identity(row))
@@ -93,7 +104,11 @@ def summarize(reports, cases_per_dtype, *, include_native_fd=False):
     mean = statistics.fmean(item["mean_ratio"] for item in cases)
     return dict(
         passed=mean <= 1.0,
-        includes_native_fd=include_native_fd,
+        includes_native_fd=include_native_fd
+        or (
+            representation == "prefill"
+            and any(row.get("num_splits") == 0 for r in reports for row in r["results"])
+        ),
         threshold=1.0,
         mean_ratio=mean,
         weighting="equal input/dtype weight; equal entry/R weight within each input",

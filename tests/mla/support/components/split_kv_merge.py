@@ -37,8 +37,12 @@ class Params(ct.Structure):
         ]
         + [(name, ct.c_int64) for name in ("left", "right")]
         + [(name, ct.c_uint16 * 256) for name in ("begin", "end")]
-        + [("adapt", ct.c_uint32)]
+        + [(name, ct.c_uint32) for name in ("adapt", "query_length", "kv_heads", "kv_head")]
     )
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("kv_heads", 1)
+        super().__init__(*args, **kwargs)
 
 
 @pytest.fixture(scope="module", params=("fp16", "bf16"))

@@ -124,7 +124,7 @@ MLA_AUTO_INLINE void Offsets(const MlaAutoSplitBsndSchedule& s, uint64_t row, ui
 // Geometry and invocation descriptors must already be independently validated.
 // This common checker consumes a logical used-span view plus the native tail;
 // it never calls a producer or recomputes the source's optimal partition.
-template <bool IsTnd, bool IsPaged = false, typename Reader>
+template <bool IsTnd, bool IsPaged = false, bool Prefill = false, typename Reader>
 MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitPartitions(const Reader& read, const MlaUsedMetadataContext& c,
                                                               const MlaWindowKernelParams& w,
                                                               const MlaUsedKernelSchedule& used,
@@ -138,7 +138,7 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitPartitions(const Reader& read
     auto& a = s.used.tiling;
     const uint64_t totalQ = UsedMetadataTotal(c.query);
     const bool empty = IsTnd ? !totalQ || !UsedMetadataTotal(c.kv) : !c.batch || !a.sq || !a.sk;
-    if (c.aicNum > 1) {
+    if (c.aicNum > 1 && !Prefill) {
         // FP32 accumulator storage and contiguous strides are independent of
         // the much smaller FD workspace. Used lengths may all be zero while
         // the allocation capacity still overflows. Empty tensors retain strides.
@@ -293,7 +293,7 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitPartitions(const Reader& read
     }
     if (end != fdParts[heads])
         return Status::InvalidEndpoints;
-    if (!empty) {
+    if (!empty && !Prefill) {
         const uint64_t rows = c.aicNum == 1 ? 0 : uint64_t(2) * c.aicNum * a.mBaseSize;
         const uint64_t reserve =
             2 * uint64_t(c.aicNum) * (6 * uint64_t(a.mm1ResSize) + 8 * uint64_t(a.mm2ResSize) + 8 * a.mBaseSize);

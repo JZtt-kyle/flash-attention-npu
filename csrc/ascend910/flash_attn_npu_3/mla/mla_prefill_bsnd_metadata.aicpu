@@ -1,0 +1,11 @@
+// Source copyrights/licenses are retained in the included scheduler files.
+#include "aicpu_api.h"
+#include "mla_prefill_bsnd_metadata.cpp"
+#include "detail/cann_split_core.cpp"
+__global__ __aicpu__ uint32_t ComputeMlaPrefillBsndMetadata(void* args)
+{
+    if (!args || !flash_attn::mla::BuildPrefillBsndMetadata(
+                     *static_cast<const flash_attn::mla::MlaPrefillBsndMetadataArgs*>(args))) return 1;
+    AscendC::DataStoreBarrier();
+    return 0;
+}

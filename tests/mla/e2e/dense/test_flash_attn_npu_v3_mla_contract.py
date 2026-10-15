@@ -33,9 +33,9 @@ def test_mla_supported_subset_and_rejections(entry, representation, layout, dtyp
             assert args[name].stride(-1) == 1
             assert not args[name].is_contiguous()
             assert args[name].storage_offset() > 0
-    if representation == "compressed":
+    if representation == "compressed" or layout == "dense":
         out, lse, *_ = _forward(entry, args)
-        assert out.shape == (*args["q"].shape[:-1], 512) and out.dtype == dtype
+        assert out.shape == (*args["q"].shape[:-1], args["v"].shape[-1]) and out.dtype == dtype
         assert (
             lse.shape == ((4, 4) if layout in ("tnd", "paged_tnd") else (2, 4, 3))
             and lse.dtype == torch.float32
@@ -128,16 +128,13 @@ def test_mla_empty_contract(entry, representation, sq, sk, dtype):
     args["k"], args["v"] = args["k"][:, :sk], args["v"][:, :sk]
     if args["qv"] is not None:
         args["qv"] = args["qv"][:, :sq]
-    if representation == "prefill":
-        with pytest.raises(RuntimeError, match="forward is not implemented yet"):
-            _forward(entry, args)
-    else:
+    if representation in ("compressed", "prefill"):
         args = {
             name: value.contiguous() if isinstance(value, torch.Tensor) else value
             for name, value in args.items()
         }
         out, lse, *_ = _forward(entry, args)
-        assert out.shape == (2, sq, 4, 512) and lse.shape == (2, 4, sq)
+        assert out.shape == (2, sq, 4, args["v"].shape[-1]) and lse.shape == (2, 4, sq)
         if entry != "fake":
             assert out.cpu().count_nonzero() == 0
             if sk == 0:
@@ -154,7 +151,7 @@ def test_public_rejects_before_metadata_or_dispatch(
         pytest.fail("MLA reached ordinary metadata/kernel dispatch")
 
     monkeypatch.setattr(api, "get_scheduler_metadata", unexpected)
-    supported = representation == "compressed"
+    supported = representation == "compressed" or public_entry != "varlen"
     if not supported:
         monkeypatch.setattr(api, "_flash_attn_forward", unexpected)
     with FakeTensorMode() if fake else nullcontext():
@@ -169,7 +166,8 @@ def test_public_rejects_before_metadata_or_dispatch(
                 out, lse, *_ = api.flash_attn_with_kvcache(
                     **args, num_splits=1, return_softmax_lse=True
                 )
-            assert out.shape == ((4, 4, 512) if public_entry == "varlen" else (2, 3, 4, 512))
+            width = 512 if representation == "compressed" else 128
+            assert out.shape == ((4, 4, width) if public_entry == "varlen" else (2, 3, 4, width))
             assert lse.shape == ((4, 4) if public_entry == "varlen" else (2, 4, 3))
             return
         with pytest.raises(RuntimeError, match="forward is not implemented yet"):
@@ -227,11 +225,14 @@ def test_mla_metadata_auto_default_and_rejections(entry, dims, dtype, has_softca
         cache_seqlens=torch.full((2,), 17, dtype=torch.int32, device="npu"),
         has_softcap=has_softcap,
     )
-    if dims == (64, 512) and not has_softcap:
+    if dims in ((64, 512), (192, 128)) and not has_softcap:
         record = api.get_scheduler_metadata(**args)
-        assert record.shape == (778,) and record.dtype == torch.int32
+        assert (
+            record.shape == ((778,) if dims == (64, 512) else (376,))
+            and record.dtype == torch.int32
+        )
         if entry != "fake":
-            assert record.cpu()[1:3].tolist() == [18, 18]
+            assert record.cpu()[1:3].tolist() == ([18, 18] if dims == (64, 512) else [27, 27])
     else:
         with pytest.raises(RuntimeError, match="MLA scheduler metadata is not implemented yet"):
             api.get_scheduler_metadata(**args)

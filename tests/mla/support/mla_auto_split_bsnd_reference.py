@@ -6,8 +6,9 @@ from tests.mla.support import mla_ref
 from tests.mla.support.mla_ref import normalize_fa3_window
 
 
-def references(raw, qlens, klens, endpoints, m, n, causal, window, scale):
-    splits = 26
+def references(raw, qlens, klens, endpoints, m, n, causal, window, scale, *, num_splits=0):
+    splits = num_splits or 26
+    value_dim = raw["v"].shape[-1]
     batch, sq, heads, _ = raw["q"].shape
     sk = raw["k"].shape[1]
     names = [
@@ -24,6 +25,7 @@ def references(raw, qlens, klens, endpoints, m, n, causal, window, scale):
         causal=causal,
         window=window,
         scale=scale,
+        num_splits=num_splits,
     )
 
     def compute():
@@ -32,9 +34,9 @@ def references(raw, qlens, klens, endpoints, m, n, causal, window, scale):
         for precision in ("high", "low"):
             high = precision == "high"
             dtype = torch.float64 if high else raw["q"].dtype
-            out = torch.zeros((batch, sq, heads, 512), dtype=raw["q"].dtype)
+            out = torch.zeros((batch, sq, heads, value_dim), dtype=raw["q"].dtype)
             lse = torch.full((batch, heads, sq), -torch.inf)
-            accum = torch.zeros((splits, batch, heads, sq, 512), dtype=torch.float32)
+            accum = torch.zeros((splits, batch, heads, sq, value_dim), dtype=torch.float32)
             accum_lse = torch.full((splits, batch, heads, sq), -torch.inf)
             if sk == 0:
                 lse.fill_(torch.inf)
@@ -42,10 +44,12 @@ def references(raw, qlens, klens, endpoints, m, n, causal, window, scale):
                 if not q or not k:
                     continue
                 qr = raw["q"][b, :q].transpose(0, 1).to(dtype)
-                qc = raw["qv"][b, :q].transpose(0, 1).to(dtype)
                 kr = raw["k"][b, :k, 0].to(dtype)
                 kv = raw["v"][b, :k, 0].to(dtype)
-                scores = (qr if high else qr * scale) @ kr.T + (qc if high else qc * scale) @ kv.T
+                scores = (qr if high else qr * scale) @ kr.T
+                if raw.get("qv") is not None:
+                    qc = raw["qv"][b, :q].transpose(0, 1).to(dtype)
+                    scores += (qc if high else qc * scale) @ kv.T
                 scores = scores * scale if high else scores.float()
                 center = torch.arange(q)[:, None] + k - q
                 keys = torch.arange(k)[None, :]
@@ -78,8 +82,14 @@ def references(raw, qlens, klens, endpoints, m, n, causal, window, scale):
                     last = (int(union[-1]) + n) // n if union.numel() else 0
                     owned = {}
                     for tile in range(first, last):
-                        owner = next(
-                            i for i, end in enumerate(endpoints) if (b, block, tile) < tuple(end)
+                        owner = (
+                            (tile - first) // ((last - first + splits - 1) // splits)
+                            if num_splits
+                            else next(
+                                i
+                                for i, end in enumerate(endpoints)
+                                if (b, block, tile) < tuple(end)
+                            )
                         )
                         owned.setdefault(owner, []).append(tile)
                     for split, tiles in enumerate(owned.values()):

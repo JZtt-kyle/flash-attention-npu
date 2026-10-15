@@ -2,6 +2,14 @@
 #include <torch/extension.h>
 
 namespace flash_attn::mla {
+at::Tensor PrefillBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads,
+                                 at::ScalarType dtype, const at::Tensor& lengths, int64_t splits, int64_t left,
+                                 int64_t right, bool causal);
+std::vector<at::Tensor> PrefillBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, float scale,
+                                           int64_t splits, int64_t left, int64_t right, bool causal,
+                                           const std::optional<at::Tensor>& usedQ,
+                                           const std::optional<at::Tensor>& usedK,
+                                           const std::optional<at::Tensor>& metadata);
 // TND explicit/native automatic split (v19/v20). Shared host adapters validate
 // allocation/used lengths and optional records before launching the kernels.
 std::vector<at::Tensor> SplitTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,

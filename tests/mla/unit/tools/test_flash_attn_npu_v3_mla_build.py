@@ -92,6 +92,7 @@ def test_aicpu_sources_by_backend():
         expected = [f"csrc/{directory}/fa_metadata.aicpu"]
         if name == "flash_attn_npu_3.flash_attn_npu_3":
             expected.append(f"csrc/{directory}/mla/mla_metadata.aicpu")
+            expected.append(f"csrc/{directory}/mla/mla_prefill_bsnd_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_bsnd_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_tnd_metadata.aicpu")
             expected.append(f"csrc/{directory}/mla/mla_tnd_bsnd_metadata.aicpu")
