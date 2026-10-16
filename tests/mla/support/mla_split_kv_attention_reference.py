@@ -60,6 +60,8 @@ def partial_math(inputs, spec, m, n, upcast):
         scores = (q if upcast else q * scale) @ k.T
         scores += (qc if upcast else qc * scale) @ v.T
         scores = scores * scale if upcast else scores.float()
+        if spec.get("softcap", 0) > 0:
+            scores = spec["softcap"] * torch.tanh(scores / spec["softcap"])
         scores = scores.masked_fill(~mask, -torch.inf)
         maximum = scores[valid].amax(-1)
         weights = torch.exp(scores[valid] - maximum[:, None])

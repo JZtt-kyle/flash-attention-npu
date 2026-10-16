@@ -20,6 +20,7 @@
 #include "mla_cube.hpp"
 #include "../tile/mla_vector_ops.hpp"
 #include "../tile/mla_causal_mask.hpp"
+#include "../tile/mla_softcap.hpp"
 #include "lib/matmul_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 
@@ -30,6 +31,7 @@ struct VectorParams : CubeParams {
     static constexpr bool softmaxLseFlag = true;
     uint32_t subBlockNum;
     float scaleValue;
+    float softcap = 0.0f;
 };
 constexpr SoftmaxConfig FIA_SOFTMAX_FLASHV2_CFG_WITHOUT_BRC = {false, 0, 0, SoftmaxMode::SOFTMAX_OUTPUT_WITHOUT_BRC};
 
@@ -306,7 +308,11 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow, IsPartial>::
 
     Maxs(nUpdateTmp, nUpdateTmp, (T)(-30.0), calCount); // N = max(n(i) - n(i-1), -30)
     AscendC::PipeBarrier<PIPE_V>();
-    Adds(epsUb, epsUb, (T)(0.000001), calCount);
+    // Zero scale gives exact uniform weights. The source epsilon would
+    // perturb their sum across KV blocks and flip output midpoint rounding.
+    // Keep the original aMLA correction for nonuniform scores and cap=0.
+    const T epsilon = constInfo.softcap != 0.0f && constInfo.scaleValue == 0.0f ? FLOAT_ZERO : (T)0.000001;
+    Adds(epsUb, epsUb, epsilon, calCount);
     AscendC::PipeBarrier<PIPE_V>();
     Add(nUpdateTmp, nUpdateTmp, epsUb, calCount);
     AscendC::PipeBarrier<PIPE_V>();
@@ -341,6 +347,7 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow, IsPartial>::
     WaitFlag<AscendC::HardEvent::MTE2_V>(SYNC_INPUT_BUF1_FLAG);
 
     Muls(mmResUb, mmResUb, constInfo.scaleValue, dealRowCount * columnCount);
+    Tile::Softcap(mmResUb, tmpBuff1.Get<uint8_t>(), computeSize, constInfo.softcap);
 
     AscendC::PipeBarrier<PIPE_V>();
     if constexpr (IsCausal || IsWindow) {
@@ -635,6 +642,10 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow, IsPartial>::
     LocalTensor<OUT_T> tmpBmm2ResCastTensor = outputBuff1.Get<OUT_T>();
     WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
     if constexpr (IsSameType<OUT_T, bfloat16_t>::value) { // bf16 采取四舍六入五成双模式
+        Cast(tmpBmm2ResCastTensor, bmm2ResUb, AscendC::RoundMode::CAST_RINT, dealRowCount * columnCount);
+    } else if (constInfo.softcap != 0.0f) {
+        // Softcap has no source oracle. Match the mathematical output's
+        // ties-to-even cast; retain the pinned source's rounding when off.
         Cast(tmpBmm2ResCastTensor, bmm2ResUb, AscendC::RoundMode::CAST_RINT, dealRowCount * columnCount);
     } else {
         Cast(tmpBmm2ResCastTensor, bmm2ResUb, AscendC::RoundMode::CAST_ROUND, dealRowCount * columnCount);

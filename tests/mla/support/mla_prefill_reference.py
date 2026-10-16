@@ -48,6 +48,8 @@ def equations(inputs, spec, upcast):
             v = inputs["v"][b, :length, h].to(dtype)
             scores = (q if upcast else q * scale) @ k.T
             scores = scores * scale if upcast else scores.float()
+            if spec.get("softcap", 0) > 0:
+                scores = spec["softcap"] * torch.tanh(scores / spec["softcap"])
             queries = torch.arange(row, row + count) // g
             center = queries[:, None] + length - sq
             keys = torch.arange(length)

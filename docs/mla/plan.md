@@ -1,15 +1,16 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**已完成 M14 prefill 阶段收尾；下一步是 M15a softcap 独立数值闭环。** 当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
+本页只记录实施顺序、产物和完成条件。**已完成 M15a softcap 独立数值闭环；下一步是 M15b BSND softcap 完整公开接入。** 当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
 
-## 唯一下一步 M15a
+## 唯一下一步 M15b
 
-完成 softcap 独立数值组件，再接入完整公开行为。范围以 [design 4.1/4.2](design.md#4-功能边界) 的 SC01、MD01 为准，不混入 pack_gqa、sm_margin 或图执行。
+将已验证的 softcap 数值组件接入 **BSND 布局的 512+64 和 192/128 完整公开行为**，稳定的三 mask、自动/1/显式 split 随同接入；范围以 [design 4.1/4.2](design.md#4-功能边界) 的 SC01、MD01 为准。一个提交包含 host、AICPU、Kernel、metadata、公开 real/fake 入口和必要验收，不按层或开关拆轮，不混入其他布局、pack_gqa、sm_margin 或图执行。
 
-- 拆分依据：softcap 在两分量总分数乘 scale 后引入新非线性，影响饱和区、在线 softmax、partial 与归并精度；既有无 softcap 数值组件未覆盖该风险，CANN 没有同义参数，不能用源逐元素一致豁免数学失败。这是独立数值算法风险，不按布局、mask 或 split 开关拆轮。
-- 独立产物：复用当前 Kernel / Block / Tile、双数学 reference 和 probe 驱动，覆盖 512+64 与 192/128 的 softcap 数值路径及其真实 partial/merge；组件测试归 `tests/mla/unit/softcap/`，共享夹具按现有 `support/components/` 组织。公开入口在数值闭环和完整接入前继续明确拒绝。
-- 实现前补齐实际文件、必跑命令及继承依赖。应新增双 dtype、softcap=0/15、scale/饱和区、三 mask、单/多片、空行和重复执行的独立用例；复用现有输入和数学缓存，不机械展开布局全积。softcap=0 需保留固定源与原数学行为；非零值用双数学口径，CANN 无同义参数的性能明确单列。
-- 完成条件：910B 双 dtype 的数学、O/LSE、真实 partial/归并、边界和适用组件性能通过；共享数值路径受影响时实跑相关累计 E2E。保存可复现组件产物与证据后，再将 metadata、host/AICPU/Kernel 和公开 real/fake/compile/生命周期作为完整调用行为接通，稳定 mask/split 一并验收。
+- 产物与影响路径：复用 M15a 的 Tile、两种 Vector、partial/FD 与 probe；在 BSND 共用前向、调度生成/消费、launcher 和 Python real/fake 路径传递真实 softcap。metadata 的 `has_softcap` 只表示特征，前向提供当次数值；正 cap 可跨层改值，旧记录、特征冲突与尚未开放布局须明确拒绝。协议字段/版本按实际兼容边界确定，不另建通用框架。
+- 必增验收：两种表示、双 dtype、三 mask、自动/单片/多片、默认/零/负 scale、空行/空片/used 长度、stride、真实 accumulator；cap=0 固定源，非零 cap 独立双数学。新增公开 real/fake/compile、metadata 复用时改正 cap、长度/布局/特征冲突、生命周期与设备 Trap，并在 `regression_cases.py` 注册本模块小输入 E2E。
+- 必跑组：先为新 BSND 行为注册所属单元/公开专项和性能夹具，按 `python3 -m tests.mla --dry-run` / `--collect-only` 核对；当前步新增模块单元、受影响公开专项及 `--suite e2e ordinary`。metadata/发射变化按影响补 CPU 边界、ASan/UBSan 与实际加载检查；公开调用开销按 design 第 7 节验收。非零 cap 无同义 CANN attention，明确单列性能边界，不用无 cap 结果替代新能力。
+- 证据与依赖：M15a 的组件数值已闭环，后续不累计继承历史单元或性能；只按统一驱动身份和原始证据复核既有 E2E，受影响路径实跑。沿用数学内容缓存；若修改共享数值、FD、协议或发射，先补 plan 的具体影响和命令，再重跑对应模块及受影响 E2E。接手证据入口见 status。
+- 完成条件：BSND softcap 的上述完整调用与数学、真实 accumulator、复用/拒绝边界和适用公开性能通过；其他布局继续明确拒绝。更新文档、质量检查后提交一次即停。
 
 ## 后续里程碑：M15–M17
 
@@ -17,7 +18,7 @@
 
 | 里程碑 | 剩余产物与边界 | 完成条件 |
 | --- | --- | --- |
-| M15：softcap/调度选项 | softcap 数学独立闭环；pack_gqa、sm_margin 按共享调度影响划分 | 有效数学/调度语义、资源校验及适用 E2E，不能忽略参数 |
+| M15：softcap/调度选项 | 各布局 softcap 完整公开接入；pack_gqa、sm_margin 按共享调度影响划分 | 有效数学/调度语义、资源校验及适用 E2E，不能忽略参数 |
 | M16：图执行 | 固定输入重放与图内长度更新/metadata 重生成分别闭环 | eager/图一致、跨层复用、多 stream 与 fake/真实输出一致 |
 | M17：全范围收尾 | 冻结能力，按覆盖矩阵验收并补用户示例；实现问题先修复再验收 | 必迁组合、精度/平均公开 E2E/普通 FA3 回归；910B/C 实现与资源兼容，实机仍用 910B；README 调用与边界 |
 
@@ -36,6 +37,7 @@
 | M12a–b | 192/128 紧凑 TND、TND Q + BSND cache 完整公开前向，v28/v29；allocation/used 与独立 stride |
 | M13a–b | 192/128 BSND/TND Q + ND PA KV 完整公开前向，v30/v31；页几何、allocation/used、实际页访问与隔离 Trap |
 | M14 | 192/128 五布局组合收尾；修正过期拒绝测试，复用固定 60 配置并增加原样本阶段汇总，完成公开专项、累计 E2E、普通回归与性能验收 |
+| M15a | softcap 无同义源的新非线性独立风险闭环：512+64 / 192/128 的 scale 后、mask 前计算、近零精度、输出中点舍入、零 scale 均匀权重与真实 partial/FD；组件双数学及分段性能，公开仍拒绝 |
 | 工具整理、R1、R2 | 统一验收与缓存/证据管理、模块归属与共享 helper、共用前向分派、文档轮和无头交接；原 R3 的内核可读性核对合入 R2 |
 
 M11–M13 的布局步均包含 host/AICPU/Kernel、metadata、real/fake/compile、三 mask、自动/1/显式 split、真实 FP32 accumulator 及公开 E2E/性能验收。M14 的组合覆盖映射在 design 7.6，阶段证据与未开放边界在 status；不在 plan 重复用例数量、耗时或性能结果。

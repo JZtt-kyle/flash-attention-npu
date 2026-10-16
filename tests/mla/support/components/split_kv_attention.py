@@ -101,7 +101,7 @@ def make_case(probes, spec, first=0):
     return case
 
 
-def launch(probes, case, name):
+def launch(probes, case, name, *, softcap=0.0):
     d = case["device"]
     pointers = [
         d["qv"],
@@ -113,7 +113,8 @@ def launch(probes, case, name):
         case["workspace"][name],
     ]
     fallback = case["storage"][0][1].data_ptr()
-    return probes[0][name].launch_partial(
+    function = probes[0][name].launch_softcap if softcap != 0 else probes[0][name].launch_partial
+    return function(
         torch.npu.current_stream().npu_stream,
         *(x.data_ptr() if x.numel() else fallback for x in pointers),
         ct.byref(case["schedule"]),
@@ -121,6 +122,7 @@ def launch(probes, case, name):
         case["device_lengths"][name].data_ptr(),
         case["mask"].data_ptr(),
         ct.byref(case["oracle_partial"] if name == "oracle" else case["partial"]),
+        *((softcap,) if softcap != 0 else ()),
     )
 
 

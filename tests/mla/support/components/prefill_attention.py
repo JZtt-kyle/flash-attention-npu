@@ -20,6 +20,7 @@ class Params(ct.Structure):
         [(k, ct.c_uint32) for k in ("batch", "sq", "sk", "heads", "kv_heads", "m", "n", "cores")]
         + [("scale", ct.c_float), ("window", WindowParams)]
         + [(k, Layout) for k in ("q", "k", "v")]
+        + [("softcap", ct.c_float)]
     )
 
 
@@ -37,11 +38,16 @@ def load(dtype, directory):
     (directory / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     libs = {k: ct.CDLL(v["path"]) for k, v in manifest["libraries"].items()}
     for key in ("migrated", "oracle"):
+        libs[key].prefill_params_size.restype = ct.c_uint32
+        if libs[key].prefill_params_size() != ct.sizeof(Params):
+            raise RuntimeError("Prefill launch ABI does not match the loaded probe")
         libs[key].launch_prefill.argtypes = [ct.c_void_p] * 17 + [ct.c_int]
         libs[key].launch_prefill.restype = ct.c_int
     for key in ("merge_migrated", "merge_oracle"):
         libs[key].launch_merge.argtypes = [ct.c_void_p] * 9
         libs[key].launch_merge.restype = ct.c_int
+        libs[key].launch_merge_softcap.argtypes = [ct.c_void_p] * 9 + [ct.c_float]
+        libs[key].launch_merge_softcap.restype = ct.c_int
     (directory / "loaded.json").write_text(json.dumps(manifest["libraries"], indent=2) + "\n")
     from tests.mla.support.components.dense import Schedule
 
@@ -137,6 +143,7 @@ def make_case(spec, dtype, max_cores):
     for key, value in device.items():
         span = sum((size - 1) * stride for size, stride in zip(value.shape, value.stride())) + 1
         setattr(p, key, Layout(*value.stride()[:3], span))
+    p.softcap = spec.get("softcap", 0.0)
     tasks = fragment_rows(spec)
     capacity = min(max_cores, len(tasks))
     outputs = {
@@ -274,11 +281,13 @@ def prepare_merge(case, raw):
     return dict(groups=groups, outputs=outputs, accum=accum, storage=storage, splits=s)
 
 
-def launch_merge(libs, case, name, *, canonical=False):
+def launch_merge(libs, case, name, *, canonical=False, softcap=0.0):
     for group in case["groups"]:
         p = type(group["params"]).from_buffer_copy(group["params"])
         p.adapt = int(name == "migrated" and not canonical)
-        code = libs["merge_" + name].launch_merge(
+        library = libs["merge_" + name]
+        function = library.launch_merge if softcap == 0 else library.launch_merge_softcap
+        code = function(
             torch.npu.current_stream().npu_stream,
             *(
                 t.data_ptr()
@@ -289,6 +298,7 @@ def launch_merge(libs, case, name, *, canonical=False):
                 )
             ),
             ct.byref(p),
+            *(() if softcap == 0 else (softcap,)),
         )
         if code:
             return code

@@ -17,14 +17,15 @@ template <typename OutputT, uint32_t HeadDim = 512>
 class MlaSplitKvMerge {
   public:
     __aicore__ inline void operator()(const MlaSplitKvMergeParams& params, GM_ADDR out, GM_ADDR sum, GM_ADDR maximum,
-                                      GM_ADDR result, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse, TPipe* pipe)
+                                      GM_ADDR result, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse, TPipe* pipe,
+                                      float softcap = 0.0f)
     {
         if ASCEND_IS_AIV {
             if (GetBlockIdx() != 0) {
                 return;
             }
             Block::MlaSplitKvMerge<OutputT, false, false, HeadDim> block;
-            block.Init(params, out, sum, maximum, result, lse, accum, accumLse, pipe);
+            block.Init(params, out, sum, maximum, result, lse, accum, accumLse, pipe, softcap);
             const uint32_t tile = block.TileRows();
             for (uint32_t start = 0; start < params.rows; start += tile) {
                 block.Run(start, Min(tile, params.rows - start));

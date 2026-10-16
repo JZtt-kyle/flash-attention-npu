@@ -54,7 +54,7 @@ using OracleFd = typename std::conditional<g_coreType == AscendC::AIC, FiaBlockV
 __global__ __aicore__ __mix__(1, 2) void PARTIAL_ENTRY(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
                                                        GM_ADDR kvList, GM_ADDR output, GM_ADDR lse, GM_ADDR workspace,
                                                        MlaDenseKernelSchedule params, float scale, GM_ADDR lengths,
-                                                       GM_ADDR mask, MlaSplitKvKernelParams partial)
+                                                       GM_ADDR mask, MlaSplitKvKernelParams partial, float softcap)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     SetSyncBaseAddr(ffts);
@@ -162,22 +162,26 @@ __global__ __aicore__ __mix__(1, 2) void PARTIAL_ENTRY(uint64_t ffts, GM_ADDR qc
     }
 #else
     flash_attn::mla::Kernel::MlaSplitKvBsnd<InputT> op;
-    op(params, partial, scale, qc, qr, kv, kr, workspace, &pipe, lengths);
+    op(params, partial, scale, qc, qr, kv, kr, workspace, &pipe, lengths, softcap);
 #endif
 #endif
 }
 
-extern "C" int launch_partial(void* stream, void* qc, void* qr, void* kv, void* kr, void* kvList, void* output,
+extern "C" int launch_softcap(void* stream, void* qc, void* qr, void* kv, void* kr, void* kvList, void* output,
                               void* lse, void* workspace, const MlaDenseKernelSchedule* params, float scale,
-                              void* lengths, void* mask, const MlaSplitKvKernelParams* partial)
+                              void* lengths, void* mask, const MlaSplitKvKernelParams* partial, float softcap)
 {
-    if (!params || !partial || partial->window.kind > 2 ||
+    if (!params || !partial || !std::isfinite(softcap) || softcap < 0 || partial->window.kind > 2 ||
         (partial->window.kind == 2 &&
          ((partial->window.left < 0 && params->sk != 0) || (partial->window.right < 0 && params->sq != 0))) ||
         !std::isfinite(scale) || !lengths || !mask || params->cvRatio != 2 || params->usedCoreNum == 0 ||
         params->usedCoreNum > 26 || params->blockDim != params->usedCoreNum) {
         return -1;
     }
+#ifdef MLA_DENSE_ORACLE
+    if (softcap != 0.0f)
+        return -1; // Never silently run uncapped CANN as a softcap oracle.
+#endif
     if (params->batch == 0 || params->sq == 0) {
         return 0;
     }
@@ -199,10 +203,18 @@ extern "C" int launch_partial(void* stream, void* qc, void* qr, void* kv, void* 
 #endif
     PARTIAL_ENTRY<<<params->blockDim, nullptr, stream>>>(
         ffts, (uint8_t*)qc, (uint8_t*)qr, (uint8_t*)kv, (uint8_t*)kr, (uint8_t*)kvList, (uint8_t*)output, (uint8_t*)lse,
-        (uint8_t*)workspace, *params, scale, (uint8_t*)lengths, (uint8_t*)mask, *partial);
+        (uint8_t*)workspace, *params, scale, (uint8_t*)lengths, (uint8_t*)mask, *partial, softcap);
 #if !defined(__NPU_ARCH__)
     return batchLaunchCount == before + 1 ? batchLaunchError : -2;
 #else
     return 0;
 #endif
+}
+
+extern "C" int launch_partial(void* stream, void* qc, void* qr, void* kv, void* kr, void* kvList, void* output,
+                              void* lse, void* workspace, const MlaDenseKernelSchedule* params, float scale,
+                              void* lengths, void* mask, const MlaSplitKvKernelParams* partial)
+{
+    return launch_softcap(stream, qc, qr, kv, kr, kvList, output, lse, workspace, params, scale, lengths, mask, partial,
+                          0.0f);
 }

@@ -852,6 +852,20 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 
 输入/输出、长度、metadata、workspace 按 [5.8](#58-stream-与内存生命周期) 保活。O 和 accumulator 初始化为 0，LSE/accumulator LSE 为 -inf；非分页整个 KV 分配容量为零时，O/LSE 遵循 [3.3](#33-共同契约)，TND 以实际 Tk 判断。返回 dtype/shape 见 [2.2](#22-后端选项与返回值)。BSND 布局专项位于 [`e2e/prefill_bsnd/`](../../tests/mla/e2e/prefill_bsnd/)，其他布局见各协议节；各入口独立验收，不能由数值组件通过推断。
 
+#### 6.5.3 softcap 独立数值组件
+
+[`Softcap` Tile](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_softcap.hpp) 在完整 QK 分数乘 scale 后、mask 前计算 `cap * tanh(score / cap)`；512+64 的内容与 RoPE 必须先求和，192/128 使用完整 Q/K 行。cap=0 直接旁路。两条 Vector 共用此 Tile，复用原 online softmax/aMLA、P 舍入、FP32 partial 和 FD 归并顺序。
+
+非零路径复用 AscendC FP32 `Tanh`。其指数相减在近零处可能丢失有效位，因此 `|score/cap|≤1/8` 用 `x*(1-x²/3+2*x⁴/15-17*x⁶/315)`，截断相对误差小于 FP32 精度。按 2048 元素切片复用原有 32 KiB softmax scratch；tanh 输入、输出和临时区不重叠，不增加 UB/GM 预算或同步协议。该参数只随当次 Kernel/Block 调用传递，prefill 参数仍非序列化 ABI；metadata 和公开入口在完整接入前继续按 [2.2](#22-后端选项与返回值) 拒绝非零 softcap。
+
+最终 O 的 FP16 cast 在非零 cap 下使用 `CAST_RINT`，与数学 reference 的中点取偶一致；直接写回和 FD 共用这一规则，FP32 partial 不受影响。cap=0 保留固定源的 `CAST_ROUND`；BF16 沿用原有 `CAST_RINT`。FD 的 cap 作为默认零的调用参数传递，不增加 merge record 字段。
+
+压缩 aMLA 在非零 cap 且 scale=0 时，可见分数恒为零、权重均匀，去掉 `1e-6` 修正扰动，避免连续 KV 块的精确均值偏离输出中点。非零 scale 的 aMLA 修正、整数指数更新、P dtype 和跨核同步仍沿用源路径；cap=0 保持全部源算术。
+
+[`softcap 模块`](../../tests/mla/unit/softcap/test_attention.py) 复用两个 fragment reference、现有 probe/FD 及数学内容缓存，检查双 dtype 的饱和、两分量抵消、近零、三 mask、单/多片、空行、真实 accumulator 与重复执行；集合在 [`mla_softcap_cases.py`](../../tests/mla/support/mla_softcap_cases.py)。非零 cap 没有同义 CANN 对照，按 `tests/common/compare.py` 已有 softcap 双数学阈值检查，不接受源精度豁免；cap=0 仍实际运行固定源并逐元素比较。组件性能沿用既有计时协议，非零项的无 cap CANN 耗时只作额外开销参照，不能计入同义源或公开 E2E 平均。
+
+性能分别记录预分配 partial attention 与单 M 块的 canonical FD，另列原始行适配和多片 accumulator 写回的 wall 样本。FD 对照两侧消费相同 capped partial，只比较归并算术及最终 cast，不表示 CANN 支持 softcap attention。固定输入、样本和 profiler 原始对应关系由 [`mla_softcap_profile.py`](../../tests/mla/support/mla_softcap_profile.py) 复用现有计时驱动保存。
+
 ### 6.6 同步依赖与组件复用结论
 
 `ExecuteTask(t)` 在 Cube 上依次发出 `QK(t)`、`PV(t-1)`；Vector 上依次执行 `V1(t-1)`、`V2(t-2)`。创建结束后仍须排空任务环。下表均为源 mode 2 跨 Cube/Vector 事件，编号不与本地 HardEvent 混为一个命名空间。

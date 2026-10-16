@@ -14,6 +14,7 @@
 // cast, rescale/add/divide order and ping-pong workspace. This differs from
 // the compressed MLA aMLA update. Mask and empty-row mapping use FA3 semantics.
 #pragma once
+#include "../tile/mla_softcap.hpp"
 #include "mla_prefill_cube.hpp"
 #include "../tile/mla_vector_ops.hpp"
 #include "../tile/mla_causal_mask.hpp"
@@ -205,6 +206,7 @@ __aicore__ inline void MlaPrefillVector<InputT, SOFTMAX_WITH_BRC, Partial>::Deal
     inputQue1.DeQue<MM1_OUT_T>();
 
     Muls(mmResUb, mmResUb, params.scale, computeSize);
+    Tile::Softcap(mmResUb, tmpBuff1.Get<uint8_t>(), computeSize, params.softcap);
     if (params.window.kind) {
         PipeBarrier<PIPE_V>();
         const int64_t delta = int64_t(task.kvLength) - task.queryLength;
@@ -466,6 +468,8 @@ MlaPrefillVector<InputT, SOFTMAX_WITH_BRC, Partial>::Bmm2ResCopyOut(const Prefil
         PipeBarrier<PIPE_V>();
         auto tmp = outputQue1.AllocTensor<InputT>();
         if constexpr (IsSameType<InputT, bfloat16_t>::value)
+            Cast(tmp, value, RoundMode::CAST_RINT, rows * 128);
+        else if (params.softcap != 0.0f)
             Cast(tmp, value, RoundMode::CAST_RINT, rows * 128);
         else
             Cast(tmp, value, RoundMode::CAST_ROUND, rows * 128);

@@ -8,6 +8,7 @@ struct MlaPrefillParams {
     float scale;
     MlaWindowKernelParams window;
     MlaBsndTensorLayout q, k, v;
+    float softcap = 0.0f;
 };
 // A validated fragment of one S1G block for one KV head. The caller owns
 // partitioning and bounds; begin/end are S2 tile indices, rows exclude padding.

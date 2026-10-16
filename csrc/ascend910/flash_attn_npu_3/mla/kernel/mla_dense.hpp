@@ -59,7 +59,8 @@ class MlaTaskRing {
                                GM_ADDR kvLengths, uint32_t totalQuery = 0, const MlaBsndInputLayouts* layouts = nullptr,
                                bool kvIsTnd = IsTnd && !MixedKv, GM_ADDR pageTable = nullptr,
                                const MlaPagedCacheLayout* pagedLayout = nullptr,
-                               MlaWindowKernelParams windowParams = {}, const MlaSplitKvKernelParams* partial = nullptr)
+                               MlaWindowKernelParams windowParams = {}, const MlaSplitKvKernelParams* partial = nullptr,
+                               float softcap = 0.0f)
     {
         params = schedule;
         if constexpr (IsWindow) {
@@ -128,7 +129,7 @@ class MlaTaskRing {
             cube.AllocEventID();
         }
         if ASCEND_IS_AIV {
-            Block::VectorParams vectorParams{cubeParams, ratio, scale};
+            Block::VectorParams vectorParams{cubeParams, ratio, scale, softcap};
             vector.Init(vectorParams, output, lse);
             if constexpr (IsPartial) {
                 vector.InitPartial(workspace + partial->outOffsetBytes, workspace + partial->sumOffsetBytes,

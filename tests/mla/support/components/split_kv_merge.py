@@ -215,7 +215,7 @@ def make_case(probes, spec):
     return allocate_case(probes, spec, tasks, raw, inputs)
 
 
-def launch(probes, case, name, *, canonical=False):
+def launch(probes, case, name, *, canonical=False, softcap=0.0):
     for group in case["groups"]:
         p = Params.from_buffer_copy(group["params"])
         if name == "oracle" or canonical:
@@ -225,10 +225,13 @@ def launch(probes, case, name, *, canonical=False):
             *case["outputs"][name],
             *case["accum"],
         ]
-        status = probes["libs"][name].launch_merge(
+        library = probes["libs"][name]
+        function = library.launch_merge if softcap == 0 else library.launch_merge_softcap
+        status = function(
             torch.npu.current_stream().npu_stream,
             *(t.data_ptr() if t is not None else 0 for t in tensors),
             ct.byref(p),
+            *(() if softcap == 0 else (softcap,)),
         )
         if status:
             return status

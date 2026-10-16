@@ -166,9 +166,13 @@ extern "C" int launch_prefill(void* stream, void* q, void* k, void* v, void* qr,
 {
     if (!p || !tasks || !q || !k || !v || !out || !lse || !ws || !po || !su || !ma || !qlens || !klens || !mask ||
         p->cores < 1 || p->cores > 26 || !p->kvHeads || !p->heads || p->heads % p->kvHeads ||
-        !std::isfinite(p->scale) || !p->mBase || p->mBase > 512 || !p->nBase || p->nBase > 8192 || p->window.kind > 2 ||
-        partial < 0 || partial > 1)
+        !std::isfinite(p->scale) || !std::isfinite(p->softcap) || p->softcap < 0 || !p->mBase || p->mBase > 512 ||
+        !p->nBase || p->nBase > 8192 || p->window.kind > 2 || partial < 0 || partial > 1)
         return -1;
+#ifdef MLA_DENSE_ORACLE
+    if (p->softcap != 0.0f)
+        return -1; // The pinned CANN algorithm has no equivalent softcap.
+#endif
     if (p->mBase > 128 && p->nBase > 1024)
         return -1;
     for (uint32_t i = 0; i < p->cores; ++i) {
@@ -214,4 +218,9 @@ extern "C" int launch_prefill(void* stream, void* q, void* k, void* v, void* qr,
 #else
     return 0;
 #endif
+}
+
+extern "C" uint32_t prefill_params_size()
+{
+    return sizeof(MlaPrefillParams);
 }

@@ -25,9 +25,11 @@ class MlaSplitKvMerge {
 
   public:
     __aicore__ inline void Init(const MlaSplitKvMergeParams& p, GM_ADDR out, GM_ADDR sum, GM_ADDR maximum,
-                                GM_ADDR result, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse, TPipe* pipe)
+                                GM_ADDR result, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse, TPipe* pipe,
+                                float softcap = 0.0f)
     {
         params = p;
+        roundToEven = softcap != 0.0f;
         partial.SetGlobalBuffer((__gm__ float*)out);
         sums.SetGlobalBuffer((__gm__ float*)sum);
         maxima.SetGlobalBuffer((__gm__ float*)maximum);
@@ -223,6 +225,8 @@ class MlaSplitKvMerge {
         auto cast = castBuf.Get<OutputT>();
         if constexpr (std::is_same<OutputT, bfloat16_t>::value) {
             Cast(cast, reduced, RoundMode::CAST_RINT, rows * HeadDim);
+        } else if (roundToEven) {
+            Cast(cast, reduced, RoundMode::CAST_RINT, rows * HeadDim);
         } else {
             Cast(cast, reduced, RoundMode::CAST_ROUND, rows * HeadDim);
         }
@@ -257,6 +261,7 @@ class MlaSplitKvMerge {
     }
 
     MlaSplitKvMergeParams params;
+    bool roundToEven = false;
     GlobalTensor<float> partial, sums, maxima, outputLse, accumulator, accumulatorLse;
     GlobalTensor<OutputT> output;
     TBuf<> sumBuf, maxBuf, weightBuf, rowMaxBuf, rowSumBuf, lseBuf, partialBuf[2], reduceBuf, castBuf;

@@ -26,10 +26,10 @@ class MlaSplitKvBsnd : private MlaTaskRing<InputT, /*HasKvLengths=*/true, /*IsTn
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& schedule, const MlaSplitKvKernelParams& partial,
                                       float scale, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace,
-                                      TPipe* pipe, GM_ADDR lengths)
+                                      TPipe* pipe, GM_ADDR lengths, float softcap = 0.0f)
     {
         this->Run(schedule, scale, qc, qr, kv, kr, workspace, workspace, workspace, pipe, lengths, 0, nullptr, false,
-                  nullptr, nullptr, partial.window, &partial);
+                  nullptr, nullptr, partial.window, &partial, softcap);
     }
 };
 // Production uses allocation/used spans and the existing independent input

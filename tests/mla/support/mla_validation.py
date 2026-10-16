@@ -88,6 +88,14 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "softcap-tools": [
+        "tests/mla/unit/tools/test_mla_softcap_tools.py",
+        "tests/mla/unit/tools/test_mla_prefill_tools.py",
+        "tests/mla/unit/tools/test_organization.py",
+    ],
+    "softcap-check": ["tests/mla/unit/softcap/test_attention.py", "-k", "representative"],
+    "softcap-profile-check": ["tests/mla/unit/softcap/component_profile.py"],
+    "softcap-profile": ["tests/mla/unit/softcap/component_profile.py"],
     "prefill-stage-tools": [
         "tests/mla/unit/tools/test_mla_prefill_stage_performance.py",
         "tests/mla/unit/tools/test_mla_validation.py",
@@ -961,6 +969,8 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "softcap-profile",
+    "softcap-profile-check",
     "prefill-paged-tnd-profile",
     "prefill-paged-bsnd-profile",
     "prefill-paged-tnd-profile-check",
@@ -1011,6 +1021,10 @@ WINDOW_DEVICE_SUITES = {
     "window-bsnd-public",
 }
 STANDALONE_CHECK_SUITES = {
+    "softcap-check",
+    "softcap-profile-check",
+    "softcap-profile",
+    "unit-softcap",
     "prefill-check",
     "prefill-profile-check",
     "unit-prefill_attention",
@@ -1037,6 +1051,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "softcap-tools",
     "prefill-stage-tools",
     "prefill-paged-tnd-tools",
     "prefill-paged-bsnd-tools",
@@ -1419,6 +1434,8 @@ def environment(args, directory, suite):
         MLA_PAGED_ATTENTION_REUSE="1",
         MLA_PAGED_METADATA_LIBRARY=str(args.artifacts / "producer/metadata.so"),
     )
+    if suite in {"softcap-profile", "softcap-profile-check"}:
+        env["MLA_SOFTCAP_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {
         "unit-prefill_paged_tnd",
         "unit-prefill_paged_bsnd",
@@ -1952,6 +1969,20 @@ def run(args):
                         status="failed",
                         error="Build artifacts or dependencies changed during validation",
                     )
+            if (
+                suite
+                in {"softcap-check", "unit-softcap", "softcap-profile", "softcap-profile-check"}
+                and not args.collect_only
+                and result["returncode"] == 0
+            ):
+                try:
+                    for representation, kind in (
+                        ("compressed", "split_kv_merge"),
+                        ("prefill", "prefill_merge"),
+                    ):
+                        validate_causal_builds(directory / representation, kind=kind)
+                except (OSError, ValueError, KeyError, RuntimeError) as exc:
+                    result.update(status="failed", error=str(exc))
             if (
                 suite
                 in CAUSAL_DEVICE_SUITES
