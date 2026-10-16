@@ -161,7 +161,6 @@ def test_static_rejections(entry, fault, match):
     [
         "split0",
         "split2",
-        "softcap",
         "pack",
         "margin",
         "chunk",
@@ -190,7 +189,6 @@ def test_unconnected_options(entry, fault):
             args["scheduler_metadata"] = torch.empty(413, dtype=torch.int32, device="npu")
         else:
             key, value = {
-                "softcap": ("softcap", 1.0),
                 "pack": ("pack_gqa", False),
                 "margin": ("sm_margin", 1),
                 "chunk": ("attention_chunk", 1),

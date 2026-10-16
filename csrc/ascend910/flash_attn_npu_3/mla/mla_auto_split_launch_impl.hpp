@@ -48,8 +48,10 @@ __aicore__ inline bool LoadAutoSplit(GM_ADDR metadata, const AutoContext& c, con
                                  : MLA_AUTO_TND ? kMlaAutoSplitTndVersion
                                                 : kMlaAutoSplitBsndVersion;
     constexpr bool kvIsTnd = MLA_AUTO_TND && !MLA_AUTO_MIXED;
-    if (ReadAutoSplitMetadata<MLA_AUTO_TND, version, kvIsTnd>(read, kMlaAutoSplitFixedWords + 10 * c.used.batch, c,
-                                                              inputs, arrays, s) != MlaMetadataReadStatus::Success) {
+    if (ReadAutoSplitMetadata<MLA_AUTO_TND, version, kvIsTnd,
+                              kvIsTnd ? kMlaSoftcapAutoSplitTndVersion : kMlaSoftcapAutoSplitBsndVersion>(
+            read, kMlaAutoSplitFixedWords + 10 * c.used.batch, c, inputs, arrays, s) !=
+        MlaMetadataReadStatus::Success) {
         AscendC::Trap();
         return false;
     }
@@ -187,7 +189,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
             if constexpr (MLA_AUTO_TND) {
                 Kernel::MlaSplitKvUsedTnd<MLA_AUTO_TYPE> op;
                 op(tiling, p, scale, qc, qr, kv, kr, workspace, &pipe, metadata + kMlaUsedMetadataPrefixWords * 4,
-                   layouts, c.used.query.totalTokens.low, !MLA_AUTO_MIXED);
+                   layouts, c.used.query.totalTokens.low, !MLA_AUTO_MIXED, softcap);
             } else {
                 Kernel::MlaSplitKvUsedBsnd<MLA_AUTO_TYPE, true> op;
                 op(tiling, p, scale, qc, qr, kv, kr, workspace, &pipe, metadata + kMlaUsedMetadataPrefixWords * 4,
@@ -254,7 +256,7 @@ aclError MLA_AUTO_LAUNCH(const AutoLaunchArgs& args)
 {
     const auto& a = args.used;
     AutoContext c{a.context, a.window};
-#if !MLA_AUTO_TND && !MLA_AUTO_MIXED
+#if !MLA_AUTO_MIXED
     c.hasSoftcap = a.softcap > 0;
 #endif
     {

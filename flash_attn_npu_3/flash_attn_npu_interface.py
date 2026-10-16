@@ -1176,7 +1176,9 @@ def _mla_split_tnd_forward_fake(
     seqused_q=None,
     seqused_k=None,
     scheduler_metadata=None,
+    softcap=0.0,
 ):
+    _check_mla_dense_options(softcap=softcap, allow_softcap=True)
     out, lse = _mla_causal_tnd_forward_fake(
         q,
         k,
@@ -1190,8 +1192,8 @@ def _mla_split_tnd_forward_fake(
         seqused_q,
         seqused_k,
     )
-    if num_splits != 0 and not 2 <= num_splits <= 256:
-        raise RuntimeError("MLA: TND split requires num_splits=0 or [2,256]")
+    if num_splits != 0 and not (1 if softcap > 0 else 2) <= num_splits <= 256:
+        raise RuntimeError("MLA: TND split requires 0 or [2,256], or 1 with softcap")
     words = _mla_split_bsnd_words(cu_seqlens_q.numel() - 1, num_splits)
     _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
     if scheduler_metadata is not None and (
@@ -1227,8 +1229,12 @@ def _mla_split_tnd_forward_fake(
     return (
         out,
         lse,
-        q.new_empty((capacity, q.shape[1], q.shape[0], 512), dtype=torch.float32),
-        q.new_empty((capacity, q.shape[1], q.shape[0]), dtype=torch.float32),
+        torch.empty((0,), device=q.device)
+        if num_splits == 1
+        else q.new_empty((capacity, q.shape[1], q.shape[0], 512), dtype=torch.float32),
+        torch.empty((0,), device=q.device)
+        if num_splits == 1
+        else q.new_empty((capacity, q.shape[1], q.shape[0]), dtype=torch.float32),
     )
 
 
@@ -1248,6 +1254,7 @@ def _mla_split_tnd_metadata_fake(
     causal=False,
     seqused_q=None,
     seqused_k=None,
+    has_softcap=False,
 ):
     _mla_split_tnd_forward_fake(
         q,
@@ -1265,6 +1272,7 @@ def _mla_split_tnd_metadata_fake(
         None,
         seqused_q,
         seqused_k,
+        softcap=1.0 if has_softcap else 0.0,
     )
     return q.new_empty(
         (_mla_split_bsnd_words(cu_seqlens_q.numel() - 1, num_splits),), dtype=torch.int32
@@ -1528,7 +1536,7 @@ def _mla_prefill_bsnd_metadata_fake(
     has_softcap=False,
 ):
     if has_softcap and page_size:
-        raise RuntimeError("MLA: softcap is only implemented for non-paged BSND")
+        raise RuntimeError("MLA: softcap is only implemented for non-paged BSND or TND Q/KV")
     words = _mla_prefill_bsnd_budget(
         batch_size,
         max_seqlen_q,
@@ -1644,8 +1652,8 @@ def _mla_prefill_forward(
     page_table=None,
     softcap=0.0,
 ):
-    if softcap != 0 and (page_table is not None or cu_q is not None or cu_k is not None):
-        raise RuntimeError("MLA: softcap is only implemented for non-paged BSND")
+    if softcap != 0 and (page_table is not None or ((cu_q is None) != (cu_k is None))):
+        raise RuntimeError("MLA: softcap is only implemented for non-paged BSND or TND Q/KV")
     if page_table is not None:
         if cu_q is not None:
             return torch.ops.flash_attn_npu_3._mla_prefill_mixed_forward(
@@ -1685,6 +1693,7 @@ def _mla_prefill_forward(
             used_q,
             used_k,
             metadata,
+            softcap,
         )
     if cu_q is not None:
         _check_mla_mixed_inputs(q, k, cu_q, max_q, used_k, None, used_q)
@@ -1850,6 +1859,7 @@ def _mla_prefill_tnd_metadata_fake(
     causal=False,
     seqused_q=None,
     seqused_k=None,
+    has_softcap=False,
 ):
     words = _check_prefill_tnd(
         q,
@@ -1886,7 +1896,9 @@ def _mla_prefill_tnd_forward_fake(
     seqused_q=None,
     seqused_k=None,
     scheduler_metadata=None,
+    softcap=0.0,
 ):
+    _check_mla_dense_options(softcap=softcap, allow_softcap=True)
     words = _check_prefill_tnd(
         q,
         k,
@@ -1948,9 +1960,9 @@ def _mla_split_forward(
 ):
     """Select the existing split operator; its registered fake uses the same route."""
     if softcap != 0 and (
-        page_table is not None or cu_seqlens_q is not None or cu_seqlens_k is not None
+        page_table is not None or ((cu_seqlens_q is None) != (cu_seqlens_k is None))
     ):
-        raise RuntimeError("MLA: softcap is only implemented for non-paged BSND")
+        raise RuntimeError("MLA: softcap is only implemented for non-paged BSND or TND Q/KV")
     ops = torch.ops.flash_attn_npu_3
     options = dict(
         num_splits=num_splits,
@@ -1997,6 +2009,7 @@ def _mla_split_forward(
                 max_seqlen_q,
                 max_seqlen_k,
                 seqused_k=seqused_k,
+                softcap=softcap,
                 **options,
             )
         return ops._mla_split_mixed_forward(
@@ -2059,7 +2072,7 @@ def _mla_forward(
         allow_split=True,
         attention_chunk=attention_chunk,
         softcap=softcap,
-        allow_softcap=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
+        allow_softcap=page_table is None and ((cu_seqlens_q is None) == (cu_seqlens_k is None)),
         pack_gqa=pack_gqa,
         sm_margin=sm_margin,
         rotary_interleaved=rotary_interleaved,
@@ -2287,7 +2300,7 @@ def _flash_attn_forward(
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
-            allow_softcap=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
+            allow_softcap=page_table is None and ((cu_seqlens_q is None) == (cu_seqlens_k is None)),
             num_splits=num_splits,
             allow_split=cu_seqlens_k is None or cu_seqlens_q is not None,
             pack_gqa=pack_gqa,
@@ -2528,7 +2541,7 @@ def _flash_attn_forward_fake(
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
-            allow_softcap=cu_seqlens_q is None and cu_seqlens_k is None and page_table is None,
+            allow_softcap=page_table is None and ((cu_seqlens_q is None) == (cu_seqlens_k is None)),
             num_splits=num_splits,
             allow_split=cu_seqlens_k is None or cu_seqlens_q is not None,
             pack_gqa=pack_gqa,

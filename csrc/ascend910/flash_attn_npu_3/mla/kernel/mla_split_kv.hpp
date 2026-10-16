@@ -59,10 +59,10 @@ class MlaSplitKvUsedTnd
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
                                       GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace, TPipe* pipe,
                                       GM_ADDR spans, const MlaBsndInputLayouts& layouts, uint32_t totalQ,
-                                      bool kvIsTnd = true)
+                                      bool kvIsTnd = true, float softcap = 0.0f)
     {
         this->Run(s, scale, qc, qr, kv, kr, workspace, workspace, workspace, pipe, spans, totalQ, &layouts, kvIsTnd,
-                  nullptr, nullptr, p.window, &p);
+                  nullptr, nullptr, p.window, &p, softcap);
     }
 };
 // PA keeps logical fragment endpoints and resolves physical pages in Copy.

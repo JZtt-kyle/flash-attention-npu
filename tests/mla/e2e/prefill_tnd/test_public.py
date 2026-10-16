@@ -248,7 +248,6 @@ def test_streams_and_lifetime(dtype):
         "split",
         "metadata",
         "grad",
-        "softcap",
         "cache_batch",
         "last_stride",
     ],
@@ -279,8 +278,6 @@ def test_rejections(entry, fault):
             args["scheduler_metadata"] = metadata(c)[:-1]
         elif fault == "grad":
             args["v"].requires_grad_(True)
-        elif fault == "softcap":
-            args["softcap"] = 1
         elif fault == "cache_batch":
             # One cache batch cannot match the two query allocation segments.
             args["k"] = args["k"].unsqueeze(0)

@@ -11,8 +11,10 @@ struct MlaSplitTndContext {
     MlaUsedMetadataContext used;
     MlaWindowKernelParams window;
     uint32_t splits;
+    uint32_t hasSoftcap = 0;
 };
 constexpr uint32_t kMlaSplitTndVersion = 19;
+constexpr uint32_t kMlaSoftcapSplitTndVersion = 35;
 // v5 allocation/used prefix and spans, then window(kind,left,right), splits,
 // and B+1 low/high uint64 compact M prefixes. No addresses or CPU objects.
 inline bool SplitTndMetadataWords(int64_t batch, uint32_t& words)
@@ -26,7 +28,9 @@ struct MlaSplitTndMetadataArgs {
     MlaUsedMetadataArgs input;
     MlaWindowConfig window;
     int64_t splits;
+    uint32_t hasSoftcap = 0;
 };
 bool BuildSplitTndMetadata(const MlaUsedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
-                           uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&, int64_t splits);
+                           uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&, int64_t splits,
+                           uint32_t hasSoftcap = 0);
 } // namespace flash_attn::mla

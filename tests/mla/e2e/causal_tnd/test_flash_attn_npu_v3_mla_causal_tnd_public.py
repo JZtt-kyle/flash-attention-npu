@@ -130,7 +130,6 @@ def test_boundaries(dtype, fake):
                     call(dict(args, **{name: value}), entry)
         for option in (
             dict(num_splits=2),
-            dict(softcap=1.0),
             dict(pack_gqa=True),
         ):
             with pytest.raises(RuntimeError, match="MLA"):

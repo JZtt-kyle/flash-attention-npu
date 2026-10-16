@@ -7,7 +7,8 @@
 
 namespace flash_attn::mla {
 bool BuildSplitTndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype, uint32_t* output,
-                           uint32_t words, const MlaUsedInputs& inputs, const MlaWindowConfig& window, int64_t splits)
+                           uint32_t words, const MlaUsedInputs& inputs, const MlaWindowConfig& window, int64_t splits,
+                           uint32_t hasSoftcap)
 {
     uint32_t expected;
     if (!SplitTndMetadataWords(shape.batch, expected) || words != expected)
@@ -15,13 +16,14 @@ bool BuildSplitTndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& pla
     struct Context {
         const MlaWindowConfig& window;
         int64_t splits;
+        uint32_t hasSoftcap;
         MlaSplitTndPlan plan;
-    } context{window, splits, {}};
+    } context{window, splits, hasSoftcap, {}};
     const auto builder = [](const MlaUsedShape& s, const MlaPlatformInfo& p, const MlaUsedInputs& in,
                             MlaUsedSchedule& schedule, const void* opaque) {
         auto& c = *const_cast<Context*>(static_cast<const Context*>(opaque));
-        if (s.query.layout != MlaSequenceLayout::Tnd || s.kv.layout != MlaSequenceLayout::Tnd || c.splits < 2 ||
-            c.splits > 256)
+        if (s.query.layout != MlaSequenceLayout::Tnd || s.kv.layout != MlaSequenceLayout::Tnd || c.hasSoftcap > 1 ||
+            c.splits < (c.hasSoftcap ? 1 : 2) || c.splits > 256)
             return MlaScheduleStatus::InvalidSplit;
         auto status = BuildUsedSchedule(s, p, in, schedule);
         if (status != MlaScheduleStatus::Success)
@@ -43,7 +45,7 @@ bool BuildSplitTndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& pla
     if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, builder, &context, false,
                                        words - base))
         return false;
-    output[1] = output[2] = kMlaSplitTndVersion;
+    output[1] = output[2] = hasSoftcap ? kMlaSoftcapSplitTndVersion : kMlaSplitTndVersion;
     if (output[5] == 0) {
         MlaWindow normalized{};
         NormalizeWindow(window, normalized);

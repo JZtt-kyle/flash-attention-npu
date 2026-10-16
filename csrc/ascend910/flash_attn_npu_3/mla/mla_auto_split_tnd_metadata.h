@@ -7,6 +7,7 @@
 
 namespace flash_attn::mla {
 constexpr uint32_t kMlaAutoSplitTndVersion = 20;
+constexpr uint32_t kMlaSoftcapAutoSplitTndVersion = 36;
 // Same tail schema as v18, distinct identity and TND allocation geometry.
 inline bool AutoSplitTndMetadataWords(int64_t batch, uint32_t& words)
 {
@@ -18,11 +19,13 @@ inline bool AutoSplitTndMetadataWords(int64_t batch, uint32_t& words)
 struct MlaAutoSplitTndContext {
     MlaUsedMetadataContext used;
     MlaWindowKernelParams window;
+    uint32_t hasSoftcap = 0;
 };
 struct MlaAutoSplitTndMetadataArgs {
     MlaUsedMetadataArgs input;
     MlaWindowConfig window;
+    uint32_t hasSoftcap = 0;
 };
 bool BuildAutoSplitTndMetadata(const MlaUsedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
-                               uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&);
+                               uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&, uint32_t hasSoftcap = 0);
 } // namespace flash_attn::mla

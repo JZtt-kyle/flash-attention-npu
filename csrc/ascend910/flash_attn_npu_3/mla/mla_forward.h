@@ -23,7 +23,7 @@ std::vector<at::Tensor> SplitTndForward(const at::Tensor& q, const at::Tensor& k
                                         int64_t maxQ, int64_t maxK, float scale, int64_t left, int64_t right,
                                         bool causal, int64_t splits, const std::optional<at::Tensor>& usedQ,
                                         const std::optional<at::Tensor>& usedK,
-                                        const std::optional<at::Tensor>& metadata);
+                                        const std::optional<at::Tensor>& metadata, float softcap = 0.0f);
 std::vector<at::Tensor> SplitBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                          const at::Tensor& qv, float scale, int64_t windowLeft, int64_t windowRight,
                                          bool causal, int64_t splits, const std::optional<at::Tensor>& cacheSeqlens,

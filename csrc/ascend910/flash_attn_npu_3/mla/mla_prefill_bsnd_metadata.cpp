@@ -27,7 +27,7 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
     auto* out = reinterpret_cast<uint32_t*>(a.output);
     std::fill(out, out + a.words, 0);
     out[0] = kMlaMetadataMagic;
-    out[1] = out[2] = c.hasSoftcap ? kMlaSoftcapPrefillBsndVersion
+    out[1] = out[2] = c.hasSoftcap ? (c.tnd == 1 ? kMlaSoftcapPrefillTndVersion : kMlaSoftcapPrefillBsndVersion)
                       : c.pageSize ? (c.tnd ? kMlaPrefillPagedTndVersion : kMlaPrefillPagedBsndVersion)
                       : c.tnd == 2 ? kMlaPrefillMixedVersion
                       : c.tnd      ? kMlaPrefillTndVersion

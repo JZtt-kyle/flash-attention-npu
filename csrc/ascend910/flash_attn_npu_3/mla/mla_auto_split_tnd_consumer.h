@@ -24,7 +24,8 @@ MLA_AUTO_TND_INLINE MlaMetadataReadStatus ReadAutoSplitTndMetadata(const Reader&
                                                                    const Arrays& arrays,
                                                                    MlaAutoSplitTndKernelSchedule& output)
 {
-    return ReadAutoSplitMetadata<true, kMlaAutoSplitTndVersion>(read, words, context, inputs, arrays, output);
+    return ReadAutoSplitMetadata<true, kMlaAutoSplitTndVersion, true, kMlaSoftcapAutoSplitTndVersion>(
+        read, words, context, inputs, arrays, output);
 }
 // Queries require an unchanged, successfully validated record and context.
 // All failures leave output untouched. Effective lengths govern mask geometry;

@@ -153,4 +153,8 @@ def daily_suites():
         f"tests/mla/e2e/softcap_bsnd/test_public.py::{name}"
         for name in ("test_daily", "test_empty", "test_fake", "test_compile")
     ]
+    suites["softcap_tnd"] = [
+        f"tests/mla/e2e/softcap_tnd/test_public.py::{name}"
+        for name in ("test_daily", "test_empty", "test_fake", "test_compile")
+    ]
     return suites

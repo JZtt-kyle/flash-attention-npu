@@ -318,7 +318,8 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitPartitions(const Reader& read
     return Status::Success;
 }
 
-template <bool IsTnd, uint32_t Version, bool IsKvTnd = IsTnd, typename Reader, typename Arrays, typename Context>
+template <bool IsTnd, uint32_t Version, bool IsKvTnd = IsTnd, uint32_t SoftcapVersion = kMlaSoftcapAutoSplitBsndVersion,
+          typename Reader, typename Arrays, typename Context>
 MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, uint32_t words, const Context& context,
                                                             const MlaUsedMetadataInputs& inputs, const Arrays& arrays,
                                                             MlaAutoSplitBsndSchedule& output)
@@ -329,11 +330,11 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
     if (c.batch > (UINT32_MAX - kMlaAutoSplitFixedWords) / 10)
         return Status::InvalidBuffer;
     uint32_t version = Version;
-    if constexpr (Version == kMlaAutoSplitBsndVersion) {
+    if constexpr (Version == kMlaAutoSplitBsndVersion || (IsTnd && IsKvTnd)) {
         if (context.hasSoftcap > 1)
             return Status::ShapeMismatch;
         if (context.hasSoftcap)
-            version = kMlaSoftcapAutoSplitBsndVersion;
+            version = SoftcapVersion;
     }
     auto status = ReadMetadataHeader(read, words, kMlaAutoSplitFixedWords + 10 * c.batch, version, version, c.dtype);
     if (status != Status::Success)

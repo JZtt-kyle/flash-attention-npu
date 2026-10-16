@@ -186,7 +186,7 @@ std::vector<at::Tensor> mha_fwd(
                         is_rotary_interleaved,
                     "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
         TORCH_CHECK(
-            attention_chunk == 0 && (softcap == 0.0f || (!cu_seqlens_q_ && !cu_seqlens_k_ && !page_table_)) &&
+            attention_chunk == 0 && (softcap == 0.0f || (!page_table_ && bool(cu_seqlens_q_) == bool(cu_seqlens_k_))) &&
                 (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 && (!cu_seqlens_k_ || cu_seqlens_q_))) &&
                 !pack_gqa_.has_value() && sm_margin == 0,
             "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
@@ -224,7 +224,7 @@ std::vector<at::Tensor> mha_fwd(
                 return flash_attn::mla::SplitTndForward(q, k, v, *q_v_, *cu_seqlens_q_, *cu_seqlens_k_, *max_seqlen_q_,
                                                         *max_seqlen_k_, scale, window_size_left, window_size_right,
                                                         is_causal, num_splits, seqused_q_, seqused_k_,
-                                                        scheduler_metadata_);
+                                                        scheduler_metadata_, softcap);
             }
             return flash_attn::mla::SplitBsndForward(q, k, v, *q_v_, scale, window_size_left, window_size_right,
                                                      is_causal, num_splits, seqused_k_, seqused_q_, scheduler_metadata_,
