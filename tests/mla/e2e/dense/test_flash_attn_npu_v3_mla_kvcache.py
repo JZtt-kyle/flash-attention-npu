@@ -129,7 +129,6 @@ def test_public_record_matches_host(bsnd_probe, dtype, shape):
         ("qkv_dtype", torch.float32),
         ("headdim_v", 128),
         ("attention_chunk", 1),
-        ("has_softcap", True),
         ("num_splits", 0),
         ("num_splits", 2),
         ("pack_gqa", False),

@@ -134,7 +134,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
                                                           GM_ADDR workspace, GM_ADDR metadata, AutoContext c,
                                                           MlaUsedMetadataInputs inputs, float scale,
                                                           MlaBsndInputLayouts layouts, GM_ADDR out, GM_ADDR lse,
-                                                          GM_ADDR accum, GM_ADDR accumLse)
+                                                          GM_ADDR accum, GM_ADDR accumLse, float softcap)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     MlaAutoSplitBsndSchedule s{};
@@ -191,7 +191,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
             } else {
                 Kernel::MlaSplitKvUsedBsnd<MLA_AUTO_TYPE, true> op;
                 op(tiling, p, scale, qc, qr, kv, kr, workspace, &pipe, metadata + kMlaUsedMetadataPrefixWords * 4,
-                   layouts);
+                   layouts, softcap);
             }
         }
         if ASCEND_IS_AIV {
@@ -205,7 +205,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
                 AscendC::TPipe pipe;
                 Block::MlaSplitKvMerge<MLA_AUTO_TYPE, true, MLA_AUTO_TND> block;
                 block.Init(merge, workspace + p.outOffsetBytes, workspace + p.sumOffsetBytes,
-                           workspace + p.maxOffsetBytes, out, lse, accum, accumLse, &pipe);
+                           workspace + p.maxOffsetBytes, out, lse, accum, accumLse, &pipe, softcap);
                 for (uint32_t row = begin; row < end; row += 8)
                     block.Run(row, end - row < 8 ? end - row : 8);
             }
@@ -215,7 +215,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
 }
 __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_MERGE(GM_ADDR workspace, GM_ADDR metadata, AutoContext c,
                                                         MlaUsedMetadataInputs inputs, GM_ADDR out, GM_ADDR lse,
-                                                        GM_ADDR accum, GM_ADDR accumLse)
+                                                        GM_ADDR accum, GM_ADDR accumLse, float softcap)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     MlaAutoSplitBsndSchedule s{};
@@ -241,7 +241,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_MERGE(GM_ADDR workspace, GM_AD
                 AscendC::TPipe pipe;
                 Block::MlaSplitKvMerge<MLA_AUTO_TYPE, false, MLA_AUTO_TND> block;
                 block.Init(p, workspace + r.outOffset, workspace + r.sumOffset, workspace + r.maxOffset, out, lse,
-                           accum, accumLse, &pipe);
+                           accum, accumLse, &pipe, softcap);
                 const uint32_t tile = block.TileRows();
                 for (uint32_t row = 0; row < p.rows; row += tile)
                     block.Run(row, p.rows - row < tile ? p.rows - row : tile);
@@ -254,6 +254,9 @@ aclError MLA_AUTO_LAUNCH(const AutoLaunchArgs& args)
 {
     const auto& a = args.used;
     AutoContext c{a.context, a.window};
+#if !MLA_AUTO_TND && !MLA_AUTO_MIXED
+    c.hasSoftcap = a.softcap > 0;
+#endif
     {
         MlaBatchLaunchScope launch;
         MLA_AUTO_INIT<<<a.context.blockDim, nullptr, a.stream>>>(a.metadata, c, a.inputs, a.output, a.lse, args.accum,
@@ -267,16 +270,16 @@ aclError MLA_AUTO_LAUNCH(const AutoLaunchArgs& args)
         return ACL_SUCCESS;
     {
         MlaBatchLaunchScope launch;
-        MLA_AUTO_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.workspace,
-                                                                    a.metadata, c, a.inputs, a.scale, a.layouts,
-                                                                    a.output, a.lse, args.accum, args.accumLse);
+        MLA_AUTO_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(
+            a.ffts, a.qc, a.qr, a.kv, a.kr, a.workspace, a.metadata, c, a.inputs, a.scale, a.layouts, a.output, a.lse,
+            args.accum, args.accumLse, a.softcap);
         const auto error = launch.Result();
         if (error != ACL_SUCCESS)
             return error;
     }
     MlaBatchLaunchScope launch;
     MLA_AUTO_MERGE<<<a.context.blockDim, nullptr, a.stream>>>(a.workspace, a.metadata, c, a.inputs, a.output, a.lse,
-                                                              args.accum, args.accumLse);
+                                                              args.accum, args.accumLse, a.softcap);
     return launch.Result();
 }
 } // namespace flash_attn::mla

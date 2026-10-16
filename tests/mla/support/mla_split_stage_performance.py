@@ -1,4 +1,4 @@
-"""Recompute M10's fixed five-layout, three-mode public performance gate."""
+"""Recompute M10's full stage or explicitly selected groups from fixed inputs."""
 
 import argparse
 from collections import defaultdict
@@ -20,6 +20,7 @@ from tests.mla.support.mla_split_stage_cases import (
     split_stage_selection,
 )
 from tests.mla.support.mla_validation import digest, reusable
+from tests.mla.support.mla_validation_policy import PUBLIC_MAX_CASES
 
 
 def recompute(suite, reports, specs):
@@ -45,7 +46,14 @@ def recompute(suite, reports, specs):
     return function(reports, specs, include_native_fd=automatic)
 
 
-def load_evidence(paths):
+def load_evidence(paths, suites=None):
+    required = list(SPLIT_STAGE_SUITES) if suites is None else list(suites)
+    if (
+        not required
+        or len(set(required)) != len(required)
+        or not set(required) <= set(SPLIT_STAGE_SUITES)
+    ):
+        raise ValueError("Expected distinct known M10 performance suites")
     groups, source_identity, evidence = {}, {}, []
     runtime = None
     for path in paths:
@@ -60,6 +68,8 @@ def load_evidence(paths):
             raise ValueError("Stage runtime identities differ or are missing")
         runtime = current_runtime
         for suite in SPLIT_STAGE_SUITES:
+            if suite not in required:
+                continue
             record = summary["groups"].get(suite)
             if record is None or record.get("status") == "not_run":
                 continue
@@ -105,8 +115,12 @@ def load_evidence(paths):
                     directory=str(directory),
                 )
             )
-    if set(groups) != set(SPLIT_STAGE_SUITES):
-        raise ValueError("All fifteen M10 layout/split groups are required")
+    if set(groups) != set(required):
+        raise ValueError(
+            "All fifteen M10 layout/split groups are required"
+            if suites is None
+            else "All requested M10 groups are required"
+        )
     layouts = defaultdict(lambda: dict(cases=[], excluded=[], regressed_segments=0))
     segments = defaultdict(list)
     for suite, group in groups.items():
@@ -126,7 +140,33 @@ def load_evidence(paths):
             measured_cases=len(target["cases"]) + len(target["excluded"]),
             mean_ratio=statistics.fmean(c["mean_ratio"] for c in target["cases"]),
         )
-    result = summarize_stage(layouts)
+    if suites is None:
+        result = summarize_stage(layouts)
+    else:
+        # Incremental regressions may affect fewer than five layouts. Retain
+        # each selected input/dtype's equal weight, including slower groups.
+        cases = [dict(c, layout=name) for name, r in layouts.items() for c in r["cases"]]
+        excluded = [dict(c, layout=name) for name, r in layouts.items() for c in r["excluded"]]
+        measured = len(cases) + len(excluded)
+        if not cases or not 0 < measured <= PUBLIC_MAX_CASES:
+            raise ValueError("Invalid selected configuration count")
+        mean = statistics.fmean(c["mean_ratio"] for c in cases)
+        result = dict(
+            scope="selected-groups",
+            selected_suites=required,
+            passed=mean <= 1,
+            threshold=1.0,
+            mean_ratio=mean,
+            max_configurations=PUBLIC_MAX_CASES,
+            weighting="equal input/dtype weight; equal entry/R weight within each input",
+            measured_cases=measured,
+            applicable_cases=len(cases),
+            excluded_cases=len(excluded),
+            regressed_cases=sum(c["mean_ratio"] > 1 for c in cases),
+            regressed_segments=sum(r["regressed_segments"] for r in groups.values()),
+            cases=cases,
+            excluded=excluded,
+        )
     return dict(
         result,
         policy=SPLIT_STAGE_POLICY,
@@ -145,9 +185,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path, action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--suite",
+        nargs="+",
+        choices=SPLIT_STAGE_SUITES,
+        help="Explicit regression groups; omit to require the complete M10 stage",
+    )
     args = parser.parse_args()
     try:
-        result = load_evidence(args.evidence)
+        result = load_evidence(args.evidence, args.suite)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         result = dict(passed=False, error=str(exc))
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -82,7 +82,7 @@ __aicore__ inline void PrefillMerge(const MlaPrefillBsndLaunchArgs& a, const Mla
     Block::MlaSplitKvMerge<MLA_PREFILL_TYPE, true, IsTnd, 128> merge;
     merge.Init(p, (GM_ADDR)a.workspace + l.outOffset + row * 128 * 4, (GM_ADDR)a.workspace + l.sumOffset + row * 8 * 4,
                (GM_ADDR)a.workspace + l.maxOffset + row * 8 * 4, (GM_ADDR)a.out, (GM_ADDR)a.lse, (GM_ADDR)a.accum,
-               (GM_ADDR)a.accumLse, &pipe);
+               (GM_ADDR)a.accumLse, &pipe, a.params.softcap);
     for (uint32_t start = begin; start < end; start += merge.TileRows())
         merge.Run(start, merge.TileRows() < end - start ? merge.TileRows() : end - start);
 }

@@ -162,15 +162,13 @@ def test_public_mla_avoids_ordinary_metadata(
 
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
-@pytest.mark.parametrize("option", ["split", "chunk", "softcap", "schedule", "append", "grad"])
+@pytest.mark.parametrize("option", ["split", "chunk", "schedule", "append", "grad"])
 def test_mla_options_cannot_fall_through(entry, representation, option, dtype):
     args = _inputs(representation, dtype=dtype)
     if option == "split":
         args["num_splits"] = -1
     elif option == "chunk":
         args.update(causal=True, attention_chunk=1)
-    elif option == "softcap":
-        args["softcap"] = 15.0
     elif option == "schedule":
         args.update(
             pack_gqa=True,
@@ -206,14 +204,17 @@ def test_mla_metadata_auto_default_and_rejections(entry, dims, dtype, has_softca
         cache_seqlens=torch.full((2,), 17, dtype=torch.int32, device="npu"),
         has_softcap=has_softcap,
     )
-    if dims in ((64, 512), (192, 128)) and not has_softcap:
+    if dims in ((64, 512), (192, 128)):
         record = api.get_scheduler_metadata(**args)
         assert (
             record.shape == ((778,) if dims == (64, 512) else (376,))
             and record.dtype == torch.int32
         )
         if entry != "fake":
-            assert record.cpu()[1:3].tolist() == ([18, 18] if dims == (64, 512) else [27, 27])
+            version = (
+                (33 if has_softcap else 18) if dims == (64, 512) else (34 if has_softcap else 27)
+            )
+            assert record.cpu()[1:3].tolist() == [version] * 2
     else:
         with pytest.raises(RuntimeError, match="MLA scheduler metadata is not implemented yet"):
             api.get_scheduler_metadata(**args)
@@ -262,7 +263,6 @@ def test_mla_metadata_auto_default_and_rejections(entry, dims, dtype, has_softca
         "v_descale",
         "rotary_interleaved",
         "attention_chunk",
-        "softcap",
         "num_splits",
         "pack_gqa",
         "sm_margin",
@@ -278,7 +278,7 @@ def test_each_unsupported_dense_option(entry, option, dtype):
         args[option] = True
     elif option == "num_splits":
         args[option] = -1
-    elif option in ("attention_chunk", "softcap", "sm_margin"):
+    elif option in ("attention_chunk", "sm_margin"):
         args[option] = 1
     else:
         args[option] = torch.empty(1, device="npu")

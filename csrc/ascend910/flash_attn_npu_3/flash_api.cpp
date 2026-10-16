@@ -186,10 +186,11 @@ std::vector<at::Tensor> mha_fwd(
                         is_rotary_interleaved,
                     "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
         TORCH_CHECK(
-            attention_chunk == 0 && softcap == 0.0f &&
+            attention_chunk == 0 && (softcap == 0.0f || (!cu_seqlens_q_ && !cu_seqlens_k_ && !page_table_)) &&
                 (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 && (!cu_seqlens_k_ || cu_seqlens_q_))) &&
                 !pack_gqa_.has_value() && sm_margin == 0,
             "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
+        TORCH_CHECK(std::isfinite(softcap) && softcap >= 0, "MLA: softcap must be finite and non-negative in FP32");
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(q_v_ ? 576.0f : 192.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
         if (!q_v_) {
@@ -198,9 +199,9 @@ std::vector<at::Tensor> mha_fwd(
             return flash_attn::mla::PrefillBsndForward(q, k, v, scale, num_splits, window_size_left, window_size_right,
                                                        is_causal, seqused_q_, seqused_k_, scheduler_metadata_,
                                                        cu_seqlens_q_, cu_seqlens_k_, max_seqlen_q_.value_or(0),
-                                                       max_seqlen_k_.value_or(0), page_table_);
+                                                       max_seqlen_k_.value_or(0), page_table_, softcap);
         }
-        if (num_splits != 1) {
+        if (num_splits != 1 || softcap > 0) {
             if (page_table_) {
                 if (cu_seqlens_q_) {
                     TORCH_CHECK(max_seqlen_q_, "MLA: TND paged split requires max_seqlen_q");
@@ -226,8 +227,8 @@ std::vector<at::Tensor> mha_fwd(
                                                         scheduler_metadata_);
             }
             return flash_attn::mla::SplitBsndForward(q, k, v, *q_v_, scale, window_size_left, window_size_right,
-                                                     is_causal, num_splits, seqused_k_, seqused_q_,
-                                                     scheduler_metadata_);
+                                                     is_causal, num_splits, seqused_k_, seqused_q_, scheduler_metadata_,
+                                                     softcap);
         }
         if (window_size_left != -1 || window_size_right != -1) {
             if (page_table_) {
@@ -849,8 +850,9 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
         TORCH_CHECK(headdim == 192 || num_heads_kv == 1,
                     "MLA scheduler metadata is not implemented yet outside the dense shape bounds");
         TORCH_CHECK(!cu_seqlens_k && !cu_seqlens_k_new && !seqused_q && !cache_leftpad && max_seqlen_k_new == 0 &&
-                        attention_chunk == 0 && !has_softcap && (num_splits >= 0 && num_splits <= 256) &&
-                        !pack_gqa.has_value() && sm_margin == 0 && !softcap_ && !softmax_scale,
+                        attention_chunk == 0 && (!has_softcap || (!cu_seqlens_q && !page_size)) &&
+                        (num_splits >= 0 && num_splits <= 256) && !pack_gqa.has_value() && sm_margin == 0 &&
+                        !softcap_ && !softmax_scale,
                     "MLA scheduler metadata is not implemented yet for these length, mask, split, scheduling or "
                     "legacy numerical options");
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
@@ -863,9 +865,9 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                                                std::nullopt, page_size.value_or(0));
             return flash_attn::mla::PrefillBsndMetadataOp(
                 batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, dtype, cache_seqlens, num_splits,
-                window_size_left, window_size_right, causal, page_size.value_or(0));
+                window_size_left, window_size_right, causal, page_size.value_or(0), has_softcap);
         }
-        if (num_splits != 1) {
+        if (num_splits != 1 || has_softcap) {
             if (page_size) {
                 return flash_attn::mla::PagedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, *page_size,
                                                         dtype, cache_seqlens, cu_seqlens_q, causal, window_size_left,
@@ -878,7 +880,7 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
             }
             return flash_attn::mla::SplitBsndMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, dtype,
                                                         cache_seqlens, window_size_left, window_size_right, causal,
-                                                        num_splits);
+                                                        num_splits, has_softcap);
         }
         if (window_size_left != -1 || window_size_right != -1) {
             if (page_size) {

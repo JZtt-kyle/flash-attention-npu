@@ -94,9 +94,11 @@ split 请求在单 split 的窗口/causal 分派之前选择下表协议；每�
 | BSND / ND PA | kvcache | [v30](#514-192128-bsnd-pa-prefill-记录)；KV used、逻辑容量及 `page_size` |
 | TND / ND PA | kvcache | [v31](#515-192128-tnd-pa-prefill-记录)；v30 条件加 Q 前缀/max |
 
+非零 softcap 目前开放非 PA BSND / BSND 的两种表示：压缩单片/显式片使用 v32，自动片使用 v33；192/128 的三种 split 模式均使用 v34。三 mask 同步支持，记录和复用边界见 [5.16](#516-bsnd-softcap-记录)。上表其余记录均为 cap=0。
+
 ### 2.2 后端选项与返回值
 
-512+64 的五种布局及 192/128 的五种布局均支持无 mask、右下 causal、有限/单侧窗口及 causal 叠加，窗口按 [6.2.6](#626-独立-cpu-window-归一化与范围) 归一化。split 与记录选择统一见 [2.1](#21-入口与记录选择)。其他选项限定为 `softcap=0`、`pack_gqa=None`、`sm_margin=0`、`attention_chunk=0` 和 `rotary_interleaved=True`；追加 KV、rotary/量化输入、cache 重映射/leftpad 等由 Python 与 C++ 明确拒绝。metadata 生成器要求 `has_softcap=False`、`max_seqlen_k_new=0`，拒绝数值 scale/softcap 兼容关键字。
+512+64 的五种布局及 192/128 的五种布局均支持无 mask、右下 causal、有限/单侧窗口及 causal 叠加，窗口按 [6.2.6](#626-独立-cpu-window-归一化与范围) 归一化。split 与记录选择统一见 [2.1](#21-入口与记录选择)。非 PA BSND 的两种表示接受非负有限 FP32 `softcap`；正值启用 [6.5.3](#653-softcap-独立数值组件) 的数值语义，零值旁路。其他布局仍要求 `softcap=0`。其余选项限定为 `pack_gqa=None`、`sm_margin=0`、`attention_chunk=0` 和 `rotary_interleaved=True`；追加 KV、rotary/量化输入、cache 重映射/leftpad 等由 Python 与 C++ 明确拒绝。metadata 的 `has_softcap=True` 同样只开放非 PA BSND，表示特征而非 cap 数值；生成器仍要求 `max_seqlen_k_new=0`，拒绝数值 scale/softcap 兼容关键字。
 
 func/varlen/内部前向的 `num_splits` 默认 1，kvcache/metadata 默认 0；普通与分页 cache 的 BSND/TND query 默认均使用自动路径。各已开放布局接受 0..256，负值明确拒绝。生成器 `qkv_dtype` 默认 BF16，必须匹配当次输入。前向默认 scale 见 [3.3](#33-共同契约)，显式值须能表示为有限 FP32；scale 不进入 MLA metadata。
 
@@ -113,7 +115,7 @@ func/varlen/内部前向的 `num_splits` 默认 1，kvcache/metadata 默认 0；
 
 accumulator 使用原 Q allocation 地址，不压紧 Q-used。自动容量 26 是后端资源上界，不代表物理 AIC 数或均匀 26 分片；实际每 M 的片数由固定 CANN 原生端点决定。Direct 的原始 FP32 O 写第 0 片，其余片和无贡献行初始化为 0/-inf。func/varlen 不公开 accumulator；不能把空 tensor 或最终低精度 O 转成 FP32 当作真实分片结果。
 
-softcap 和非默认调度选项仍属待迁移目标，当前明确拒绝。完整 graph replay 尚未验收，不能由 fake/compile 或多流测试推断完成。910B C1V2 与容量限制属于本后端，不是官方 FA3 的通用限制。
+其他布局的非零 softcap 和非默认调度选项仍属待迁移目标，当前明确拒绝。完整 graph replay 尚未验收，不能由 fake/compile 或多流测试推断完成。910B C1V2 与容量限制属于本后端，不是官方 FA3 的通用限制。
 
 ## 3. 两种 MLA 的接口映射
 
@@ -273,6 +275,9 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v29](#513-192128-混合-prefill-记录) | 29 / 29 | 372+8B+2B·Hkv | 192/128 TND Q + BSND KV，Q allocation、cache used、三 mask 和单/显式/自动 split |
 | [v30](#514-192128-bsnd-pa-prefill-记录) | 30 / 30 | 372+2B+2B·Hkv | 192/128 BSND Q + ND PA KV，页大小身份、独立 K/V 和 GQA、三 mask 与全部 split 模式 |
 | [v31](#515-192128-tnd-pa-prefill-记录) | 31 / 31 | 372+8B+2B·Hkv | 192/128 TND Q + ND PA KV，Q allocation/used 与页大小身份、三 mask 与全部 split 模式 |
+| [v32](#516-bsnd-softcap-记录) | 32 / 32 | 416+10B | 512+64 非 PA BSND softcap，三 mask 与单/显式 split |
+| [v33](#516-bsnd-softcap-记录) | 33 / 33 | 758+10B | 512+64 非 PA BSND softcap，三 mask 与原生自动 split |
+| [v34](#516-bsnd-softcap-记录) | 34 / 34 | 368+2B+2B·Hkv | 192/128 非 PA BSND softcap，三 mask 与单/显式/自动 split |
 
 协议能表达某布局，不代表该布局已接通生产入口。生成记录、设备校验、独立 attention、入口调用分别验收；当前接入层次见 [status](status.md)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 使用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
 
@@ -281,7 +286,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 - 保留官方参数名、顺序与默认值。`get_scheduler_metadata` 没有 `qv`、`cu_seqlens_k` 或 `seqused_q` 参数；`flash_attn_func` / `flash_attn_varlen_func` 没有显式 metadata 参数，采用内部生成。显式复用通过只读 kvcache 接入，不增加公共参数。
 - 非分页生成器必须接收设备连续 `int32[B]` 的 `cache_seqlens`。无 Q 前缀时 `max_seqlen_q/k` 是 BSND 分配容量；有 `cu_seqlens_q:int32[B+1]` 时 Q 为 TND、KV 仍为 BSND，max Q 为逐段上界、max K 为 cache 容量。Q 总量由 AICPU 从前缀尾值推导并由前向与真实 shape 核对。版本按 [2.1](#21-入口与记录选择) 的布局、split 和 mask 选择；v2/v4 等单 split 规则不适用于默认 `num_splits=0`。
 - None/整数便利长度只属于 kvcache，语义及物化规则见 2.1；显式记录仍须逐项核对当次长度，None 不表示信任记录快照。
-- 记录保存静态几何、dtype、调度特征、切块、分核及长度快照，不保存地址、scale、stride 或可变 scratch。前向独立校验真实 qv 与 Q/K/V；softcap 接入后的数值同样由前向提供，不由 `has_softcap` 代替。
+- 记录保存静态几何、dtype、调度特征、切块、分核及长度快照，不保存地址、scale、stride 或可变 scratch。前向独立校验真实 qv 与 Q/K/V；softcap 数值同样由前向提供，不由 `has_softcap` 代替。
 - 无记录时内部生成，显式复用时省去 AICPU 生成；两者共用源调度函数。host 只读 shape/dtype/stride 等静态信息，长度值由 AICPU/设备读取，不增加长度 D2H、`.item()` 或主机同步。host 分配预算仍可能计算调度，见 [6.7](#67-生产接入与构建)。
 - 同设备、同调度条件和长度下可跨层复用；长度变化后重新生成。记录可克隆或用连续偏移视图复用，不依赖 Python 私有属性。每次调用独占 O/LSE/workspace；stream 和输入只读要求见 [5.8](#58-stream-与内存生命周期)。
 
@@ -293,9 +298,9 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 #### 共同编码与失败规则
 
-[`mla_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h) 定义 v1–v26 的共同前缀：`magic=0x4d4c4131`；前八字依次为 magic、version、kind、wordCount、dtype、生成状态、源调度状态、保留位。其后 393 字为 `MlaMetadataSchedule`，保存几何、端点、FD 记账、workspace 与局部资源需求。保留位为零；64 位字段拆为低/高 32 位，只要求 4 字节对齐，允许奇数 storage offset。v27–v31 复用 magic/dtype 和 low/high 编码，采用 [5.11–5.15](#511-192128-bsnd-prefill-记录) 的 prefill 头部与布局扩展。
+[`mla_metadata.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.h) 定义 v1–v26 及 v32/v33 的共同前缀：`magic=0x4d4c4131`；前八字依次为 magic、version、kind、wordCount、dtype、生成状态、源调度状态、保留位。其后 393 字为 `MlaMetadataSchedule`，保存几何、端点、FD 记账、workspace 与局部资源需求。保留位为零；64 位字段拆为低/高 32 位，只要求 4 字节对齐，允许奇数 storage offset。v27–v31 及 v34 复用 magic/dtype 和 low/high 编码，采用 [5.11–5.15](#511-192128-bsnd-prefill-记录) 的 prefill 头部与布局扩展。
 
-v2–v26 生成器先按静态 B 计算精确字数，要求 wordCount 不超过 `UINT32_MAX`，再检查输出地址、对齐、地址加法及与输入的区间重叠。不安全输出返回失败且不写记录；区间判断不做可能溢出的终点加法。只读输入可以相互别名，不能与输出重叠。输出安全但 dtype、描述符、形状、长度值或调度失败时，写非成功头部并清零八字头后的**全部载荷**，包括快照。v3–v26 成功记录从调度器拥有的快照序列化，不二次读取原始前缀或 used。
+v2–v26 及 v32/v33 生成器先按静态 B 计算精确字数，要求 wordCount 不超过 `UINT32_MAX`，再检查输出地址、对齐、地址加法及与输入的区间重叠。不安全输出返回失败且不写记录；区间判断不做可能溢出的终点加法。只读输入可以相互别名，不能与输出重叠。输出安全但 dtype、描述符、形状、长度值或调度失败时，写非成功头部并清零八字头后的**全部载荷**，包括快照。v3–v26 及 v32/v33 成功记录从调度器拥有的快照序列化，不二次读取原始前缀或 used。
 
 | 生成错误 | v1 / v2 | v3 | v4–v26 |
 | --- | --- | --- | --- |
@@ -360,7 +365,7 @@ v2–v26 生成器先按静态 B 计算精确字数，要求 wordCount 不超过
 
 ### 5.8 stream 与内存生命周期
 
-v1–v6 的生产或独立生成路径使用当前 stream / AICPU stream 的双事件依赖。v7–v31 在调用者当前 stream 顺序提交 AICPU 生成和 attention 消费：长度更新先于生成，生成的设备写屏障完成后才能执行消费。各 `Mla*MetadataArgs` 中的地址仅属于当次发射；对长度和记录登记实际使用的 allocator stream，并保留 tensor 生命周期。生成完成后记录不依赖原长度存储，但每次消费仍须与当次长度比较。
+v1–v6 的生产或独立生成路径使用当前 stream / AICPU stream 的双事件依赖。v7–v34 在调用者当前 stream 顺序提交 AICPU 生成和 attention 消费：长度更新先于生成，生成的设备写屏障完成后才能执行消费。各 `Mla*MetadataArgs` 中的地址仅属于当次发射；对长度和记录登记实际使用的 allocator stream，并保留 tensor 生命周期。生成完成后记录不依赖原长度存储，但每次消费仍须与当次长度比较。
 
 上述当前 stream 路径发射前通过 `NPUStream::stream()` 排空 torch_npu 的 host 提交队列，保证此前排入的长度更新等任务已提交，再在调用线程使用现有 ASC 发射器；该操作不等待设备完成。设置 `ASCEND_LAUNCH_BLOCKING` 或 `TORCH_NPU_SANITIZER` 时保留 `RunOpApiV2` 调试路径。前向与独立生成均保留发射错误检查、profiler 标记和输入/输出生命周期；不依赖 torch_npu 未导出的私有发射符号。
 
@@ -407,7 +412,7 @@ CPU/AICPU 构造器复用长度解析与对应计划。消费者先检查真实 
 
 ### 5.11 192/128 BSND prefill 记录
 
-v27–v31 共用生成器、消费者及前向实现，布局由调用方 context 决定，不从记录切换。共同复用规则：形状、allocation/used、归一化 mask、split、dtype 或平台改变须重生成；内容、scale、合法 stride、记录克隆及连续 offset view 不改变身份。公开 kvcache/metadata 没有 Q-used 参数；内部 BSND（v27/v30）的 Q-used 只支持隐式记录，内部 TND Q（v28/v29/v31）支持 Q-used 与显式记录组合，每次消费仍完整核对当前长度。PA 另绑定 P，并逐次检查所有 live 页。
+v27–v31 及 v34 共用生成器、消费者及前向实现，布局由调用方 context 决定，不从记录切换。共同复用规则：形状、allocation/used、归一化 mask、split、dtype 或平台改变须重生成；内容、scale、合法 stride、记录克隆及连续 offset view 不改变身份。公开 kvcache/metadata 没有 Q-used 参数；内部 BSND（v27/v30/v34）的 Q-used 只支持隐式记录，内部 TND Q（v28/v29/v31）支持 Q-used 与显式记录组合，每次消费仍完整核对当前长度。PA 另绑定 P，并逐次检查所有 live 页。
 
 [`v27 定义与预算`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_prefill_bsnd_metadata.h) 采用 20 字头、B 对 Q/KV 实际长度、既有 346 字原生端点 tail 和 B·Hkv+1 个 uint64 M 前缀。v1–v26 固定 512+64/Hkv=1 和对应 scratch，不能表达这里的独立 192/128 地址、GQA 分组及通用 M/N；复用端点算法及消费者，不复制逐任务列表。
 
@@ -477,6 +482,14 @@ v31 复用 [v29](#513-192128-混合-prefill-记录) 的 24 字头、8 字 alloca
 数值任务将 Q/O 定位到 allocation 起点，LSE 的 head stride 保留完整 Tq；PA 保持物理 K/V 池地址，仅把页表移到当前逻辑 batch 行，再复用 [v30 PA Copy](#514-192128-bsnd-pa-prefill-记录)。TND 固定 M=512，N 从 512 按 P 对齐后裁剪到逻辑容量。初始化、归并和输出采用 v28 的 TND 坐标；未用 allocation 槽位与所有空 KV 行为 0/-inf。metadata、前缀、used、页表、独立 K/V 和 workspace 按当前流保活。
 
 布局专项位于 [`e2e/prefill_paged_tnd/`](../../tests/mla/e2e/prefill_paged_tnd/)，覆盖 allocation 与页访问的联合语义、固定源对照及 Trap；native 布局与计时边界见 [7.2](#72-参考工具与对照边界)。
+
+### 5.16 BSND softcap 记录
+
+`has_softcap` 绑定是否启用非零 cap，不绑定当次数值；v17/v18/v27 无法表达这一特征冲突，因此沿用其字段布局而以 v32/v33/v34 区分。v32 同时允许 S=1，复用显式 partial/merge 的任务和 workspace 预算，返回的 accumulator 仍为空；v33 保留原生自动分核和容量 26，v34 保留 prefill 的单片 direct 与多片归并。没有新增调度或序列化数值算法。
+
+host/AICPU context 携带默认零的特征位，producer 设置相应 version/kind，consumer 必须与当次前向的 `softcap>0` 匹配；记录不能自行切换当次前向的特征。其他字段、完整长度/几何/资源校验及错误 Trap 沿用既有消费者。所有静态 shape、mask、split、dtype、长度和平台复用条件继续生效；同为正 cap 时可改变 cap、scale、内容、独立 stride、输入地址，须正确建立跨 stream 依赖。BSND Q-used 仍只允许隐式记录。
+
+公开 func/kvcache、raw C++ 以及 real/fake 内部算子均传递真实 cap；TND、混合和 PA 明确拒绝非零 cap / `has_softcap=True`。本步专项在 [`e2e/softcap_bsnd/`](../../tests/mla/e2e/softcap_bsnd/)，CPU 调度与独立协议边界在 [`unit/softcap_bsnd/`](../../tests/mla/unit/softcap_bsnd/)。
 
 ## 6. 代码结构
 
@@ -846,7 +859,7 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 
 #### 6.5.2 prefill 共用生产接入
 
-[`PrefillBsndForward`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 是五布局共用的 host 前向，支持 qv=None、独立 K/V、GQA 与完整 storage/stride 校验；BSND/TND/mixed 私有算子、公开前向及 raw C++ 汇入此实现。Q/K 前缀与可选页参数选择 v27–v31 和对应 Copy 特化，所有版本共用 `ComputeMlaPrefillBsndMetadata` AICPU 入口。记录和寻址差异见 [5.11–5.15](#511-192128-bsnd-prefill-记录)，生产不转调原生 CANN。
+[`PrefillBsndForward`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 是五布局共用的 host 前向，支持 qv=None、独立 K/V、GQA 与完整 storage/stride 校验；BSND/TND/mixed 私有算子、公开前向及 raw C++ 汇入此实现。Q/K 前缀与可选页参数选择 v27–v31 和对应 Copy 特化，非 PA BSND 正 cap 使用 v34；所有版本共用 `ComputeMlaPrefillBsndMetadata` AICPU 入口。记录和寻址差异见 [5.11–5.15](#511-192128-bsnd-prefill-记录)，生产不转调原生 CANN。
 
 [`launcher`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_prefill_bsnd_launch_impl.hpp) 按平台物理 AIC 数分波，单 split 使用 direct；显式/自动 split 写真实 FP32 partial 后在同流运行 128 维归并。scratch 为 `aicNum*(12*M*Align32(N)+16*M*128)` 字节；多片持久区每槽 `M*(128+8+8)*4` 字节，容量按最大 M 组数乘显式 S 或实际 AIC 数分配。公开自动 accumulator 首维仍固定 26，独立验证分配和地址上界。归并参数携带 KV head 索引与数量；BSND 的 O/LSE 回写 `[B,Sq,Hq,128]` / `[B,Hq,Sq]`，TND Q 按 [5.12](#512-192128-tnd-prefill-记录) 回写原 allocation 坐标，accumulator 见 [2.2](#22-后端选项与返回值)。
 
@@ -856,7 +869,7 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 
 [`Softcap` Tile](../../csrc/ascend910/flash_attn_npu_3/mla/tile/mla_softcap.hpp) 在完整 QK 分数乘 scale 后、mask 前计算 `cap * tanh(score / cap)`；512+64 的内容与 RoPE 必须先求和，192/128 使用完整 Q/K 行。cap=0 直接旁路。两条 Vector 共用此 Tile，复用原 online softmax/aMLA、P 舍入、FP32 partial 和 FD 归并顺序。
 
-非零路径复用 AscendC FP32 `Tanh`。其指数相减在近零处可能丢失有效位，因此 `|score/cap|≤1/8` 用 `x*(1-x²/3+2*x⁴/15-17*x⁶/315)`，截断相对误差小于 FP32 精度。按 2048 元素切片复用原有 32 KiB softmax scratch；tanh 输入、输出和临时区不重叠，不增加 UB/GM 预算或同步协议。该参数只随当次 Kernel/Block 调用传递，prefill 参数仍非序列化 ABI；metadata 和公开入口在完整接入前继续按 [2.2](#22-后端选项与返回值) 拒绝非零 softcap。
+非零路径复用 AscendC FP32 `Tanh`。其指数相减在近零处可能丢失有效位，因此 `|score/cap|≤1/8` 用 `x*(1-x²/3+2*x⁴/15-17*x⁶/315)`，截断相对误差小于 FP32 精度。按 2048 元素切片复用原有 32 KiB softmax scratch；tanh 输入、输出和临时区不重叠，不增加 UB/GM 预算或同步协议。该参数只随当次 Kernel/Block 调用传递，prefill 参数仍非序列化 ABI；BSND 已按 [5.16](#516-bsnd-softcap-记录) 完整接入，其他布局继续按 [2.2](#22-后端选项与返回值) 拒绝非零 softcap。
 
 最终 O 的 FP16 cast 在非零 cap 下使用 `CAST_RINT`，与数学 reference 的中点取偶一致；直接写回和 FD 共用这一规则，FP32 partial 不受影响。cap=0 保留固定源的 `CAST_ROUND`；BF16 沿用原有 `CAST_RINT`。FD 的 cap 作为默认零的调用参数传递，不增加 merge record 字段。
 
@@ -938,12 +951,12 @@ CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射使用线�
 | `mla_tnd_metadata.aicpu`、`mla_tnd_bsnd_metadata.aicpu`、`mla_used_metadata.aicpu` | v3、v4、v5 |
 | `mla_causal_metadata.aicpu`、`mla_window_metadata.aicpu` | 非 PA causal v7–v9、window v12–v14 |
 | `mla_paged_metadata.aicpu` | PA 无 mask v6、causal v10/v11、window v15/v16 |
-| `mla_split_bsnd_metadata.aicpu`、`mla_auto_split_bsnd_metadata.aicpu` | BSND 显式 v17、原生自动 v18 |
+| `mla_split_bsnd_metadata.aicpu`、`mla_auto_split_bsnd_metadata.aicpu` | BSND 显式 v17、原生自动 v18；softcap 单/显式 v32、自动 v33 |
 | `mla_split_tnd_metadata.aicpu`、`mla_auto_split_tnd_metadata.aicpu` | TND 显式 v19、原生自动 v20 |
 | `mla_split_mixed_metadata.aicpu`、`mla_auto_split_mixed_metadata.aicpu` | 混合显式 v21、原生自动 v22 |
 | `mla_split_paged_bsnd_metadata.aicpu`、`mla_auto_split_paged_bsnd_metadata.aicpu` | BSND PA 显式 v23、原生自动 v24 |
 | `mla_split_paged_tnd_metadata.aicpu`、`mla_auto_split_paged_tnd_metadata.aicpu` | TND PA 显式 v25、原生自动 v26 |
-| `mla_prefill_bsnd_metadata.aicpu` | 192/128 五布局 v27–v31，共用生成器与原生分核 |
+| `mla_prefill_bsnd_metadata.aicpu` | 192/128 五布局 v27–v31 及 BSND softcap v34，共用生成器与原生分核 |
 
 192/128 的五布局由 `mla_dispatch_fp16_prefill_bsnd.cpp` / `mla_dispatch_bf16_prefill_bsnd.cpp` 薄实例共用 prefill launcher，沿用文件名，不按布局另建数值核。公开生成器与内部前向复用对应构造器；带 TND Q 的公开生成模式在设备上安全解析前缀，生产前向再核对总量。split 单元同时编入所属计划/预算和安全协议，PA 构建包含静态布局与双 dtype 实例。编译选项、头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，运行验收须核对实际加载路径、哈希和链接对象。
 
@@ -1038,6 +1051,8 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | `--prefill-stage-performance` | [`mla_prefill_stage_cases.py`](../../tests/mla/support/mla_prefill_stage_cases.py) 引用五布局既有清单，每布局六输入、双 dtype 共 60 配置，全部选中 | [`mla_prefill_stage_performance.py`](../../tests/mla/support/mla_prefill_stage_performance.py) 校验固定选择、共享源码/环境、native 分派、绑定证据及完整 5×20 wall / 5×10 kernel 原始样本；按配置等权汇总五布局 |
 
 阶段选择只影响性能，不改变正确性集合，也不自动打开完整矩阵。汇总要求相同运行环境/共享源码、完整选中清单和哈希有效的原始证据；从每个入口/R 的原始耗时重新计算，先配置内等权，再全部适用配置等权。保留各布局、分片模式、单例/分段退化及排除项；组均值只作诊断，不能按组均值代替配置平均。缺失汇总、空适用集合或身份不匹配不能声明阶段通过。M10 的单片组保留窗口/长度/stride/页边界，显式与自动组覆盖三 mask 和长 KV；BSND 显式保留 used=512 的非 FD 代表及其余 FD 输入分类。
+
+增量回归可在采样前固定受影响的 split 组，并以 `mla_split_stage_performance --suite <组...>` 汇总同一集合；结果明确标记 `selected-groups`，要求指定组完整、证据有效，继续按所有适用配置等权平均，而非要求每组均值≤1。省略 `--suite` 仍要求完整十五组；指定组结果不能称为 M10 阶段收尾。
 
 M14 沿用每个布局的三种 mask、single/explicit/automatic 请求、GQA 与 KV 尾块/长序列。PA 保留页大小边界，TND PA 另保留独立 Q allocation 和 stride。固定选择在 dry-run 和采样前的 summary 中记录；`profile-check` 是廉价包/分派检查，不计阶段性能。汇总读取已有 `accuracy.json`、`dispatch.json`、`wall-samples.json`、`kernel-samples.json` 与 `profile.json`，不另建采样格式；single/explicit 的原生 FD 单列，automatic 的原生 FD 参与平均。使用 `python3 -m tests.mla.support.mla_prefill_stage_performance --evidence <性能目录>/summary.json --output <阶段结果>.json` 完成阶段门槛，五个 profile 组退出成功不能替代该汇总。
 
@@ -1170,6 +1185,6 @@ python3 -m tests.mla.support.native_package
 | [BSND PA](../../tests/mla/e2e/prefill_paged_bsnd/test_public.py) | page=16/112/528/1024 代表、容量取整与尾页、页重排、独立 cache/table stride、Q-used、空容量和零 KV、内容/scale/页/视图复用 |
 | [TND PA](../../tests/mla/e2e/prefill_paged_tnd/test_public.py) | PA 边界叠加非均匀/空 Q allocation、Q-used 原位置、max 声明、全零 Q-used 与全部 live 页校验、公开 metadata 生成与复用 |
 
-各模块保留 real/fake/compile、静态拒绝、长度更新、stream/内存生命周期专项；共享拒绝契约继续覆盖 softcap、非默认调度、追加 cache 等未开放项。编译测试不等于完整图重放，后者留在 M16。设备 Trap 和调度/数值单元在布局步完成，协议或设备实现变化时再按影响范围实测，不因阶段汇总修改而重跑全部历史单元。
+各模块保留 real/fake/compile、静态拒绝、长度更新、stream/内存生命周期专项；共享拒绝契约继续覆盖其他布局的 softcap、非默认调度、追加 cache 等未开放项。编译测试不等于完整图重放，后者留在 M16。设备 Trap 和调度/数值单元在布局步完成，协议或设备实现变化时再按影响范围实测，不因阶段汇总修改而重跑全部历史单元。
 
 阶段使用累计小输入 E2E、上述五布局公开专项、普通 FA3 回归及 7.1 的 60 配置公开性能。阶段结果与实测环境只在 status 保存；性能配置的 source/native 精度检查、kernel 退化或 FD 单列不能替代公开调用正确性，也不能写成所有单例提速。

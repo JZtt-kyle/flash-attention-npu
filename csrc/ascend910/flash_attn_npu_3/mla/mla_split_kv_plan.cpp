@@ -40,7 +40,7 @@ MlaScheduleStatus BuildSplitKvPlanLayout(const MlaSplitKvPlanConfig& c, MlaSplit
         c.mBaseSize > 256 || c.s2BaseSize < 1 || c.s2BaseSize > 512) {
         return MlaScheduleStatus::UnsupportedShape;
     }
-    if (c.numSplits < 2 || c.numSplits > 256) {
+    if (c.numSplits < 1 || c.numSplits > 256) {
         return MlaScheduleStatus::InvalidSplit;
     }
     if (c.aicNum < 1 || c.aicNum > kMlaMaxAic || c.blockDim < 1 || c.blockDim > c.aicNum ||

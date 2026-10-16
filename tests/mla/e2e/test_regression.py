@@ -196,7 +196,7 @@ def test_public_compile(capability):
     compare(case, compiled(case["tensors"]["q"]))
 
 
-@pytest.mark.parametrize("option", ["num_splits", "softcap"])
+@pytest.mark.parametrize("option", ["num_splits"])
 def test_unopened_options(option):
     case = prepare("dense", "fp16", "lengths")
     case["options"][option] = -1 if option == "num_splits" else 2

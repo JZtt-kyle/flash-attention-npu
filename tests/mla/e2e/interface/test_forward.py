@@ -132,7 +132,6 @@ def test_default_compile(layout):
 @pytest.mark.parametrize(
     "name,value",
     [
-        ("softcap", 1.0),
         ("attention_chunk", 1),
         ("num_splits", -1),
         ("pack_gqa", False),

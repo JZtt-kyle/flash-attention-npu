@@ -9,6 +9,7 @@
 
 namespace flash_attn::mla {
 constexpr uint32_t kMlaAutoSplitBsndVersion = 18;
+constexpr uint32_t kMlaSoftcapAutoSplitBsndVersion = 33;
 static_assert(kMlaMaxAic == 26, "Changing endpoint capacity requires a new wire version");
 // v5 geometry/lengths remain independently validated. The tail contains window
 // (3), native usedCoreNum (1), AIC endpoints (3*26), FD scalars (4), FD arrays
@@ -25,13 +26,15 @@ inline bool AutoSplitBsndMetadataWords(int64_t batch, uint32_t& words)
 struct MlaAutoSplitBsndContext {
     MlaUsedMetadataContext used;
     MlaWindowKernelParams window;
+    uint32_t hasSoftcap = 0;
 };
 struct MlaAutoSplitBsndMetadataArgs {
     MlaUsedMetadataArgs input;
     MlaWindowConfig window;
+    uint32_t hasSoftcap = 0;
 };
 // Static public allocation capacity; native per-M partitions remain variable.
 constexpr uint32_t kMlaAutoSplitCapacity = kMlaMaxAic;
 bool BuildAutoSplitBsndMetadata(const MlaUsedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
-                                uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&);
+                                uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&, uint32_t hasSoftcap = 0);
 } // namespace flash_attn::mla

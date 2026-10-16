@@ -6,7 +6,9 @@ from tests.mla.support import mla_ref
 from tests.mla.support.mla_ref import normalize_fa3_window
 
 
-def references(raw, qlens, klens, endpoints, m, n, causal, window, scale, *, num_splits=0):
+def references(
+    raw, qlens, klens, endpoints, m, n, causal, window, scale, *, num_splits=0, softcap=0.0
+):
     splits = num_splits or 26
     value_dim = raw["v"].shape[-1]
     batch, sq, heads, _ = raw["q"].shape
@@ -26,6 +28,7 @@ def references(raw, qlens, klens, endpoints, m, n, causal, window, scale, *, num
         window=window,
         scale=scale,
         num_splits=num_splits,
+        softcap=softcap,
     )
 
     def compute():
@@ -51,6 +54,8 @@ def references(raw, qlens, klens, endpoints, m, n, causal, window, scale, *, num
                     qc = raw["qv"][b, :q].transpose(0, 1).to(dtype)
                     scores += (qc if high else qc * scale) @ kv.T
                 scores = scores * scale if high else scores.float()
+                if softcap > 0:
+                    scores = softcap * torch.tanh(scores / softcap)
                 center = torch.arange(q)[:, None] + k - q
                 keys = torch.arange(k)[None, :]
                 visible = torch.ones((q, k), dtype=torch.bool)

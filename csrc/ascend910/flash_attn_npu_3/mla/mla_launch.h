@@ -55,6 +55,7 @@ struct MlaUsedLaunchArgs {
     MlaUsedMetadataContext context;
     MlaUsedMetadataInputs inputs;
     float scale;
+    float softcap = 0.0f;
     MlaBsndInputLayouts layouts{};
     bool hasStrides = false;
     bool causal = false;

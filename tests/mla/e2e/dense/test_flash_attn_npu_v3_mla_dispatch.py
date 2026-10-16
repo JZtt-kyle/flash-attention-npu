@@ -189,7 +189,6 @@ def test_dispatcher_rejects_gradients_without_recording(dtype, fake, name, infer
         ("causal", True),
         ("window_size", (3, 0)),
         ("attention_chunk", 4),
-        ("softcap", 1.0),
         ("num_splits", 0),
         ("pack_gqa", False),
         ("sm_margin", 1),

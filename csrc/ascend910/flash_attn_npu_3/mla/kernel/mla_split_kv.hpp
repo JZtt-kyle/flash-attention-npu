@@ -42,10 +42,10 @@ class MlaSplitKvUsedBsnd
   public:
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
                                       GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace, TPipe* pipe,
-                                      GM_ADDR spans, const MlaBsndInputLayouts& layouts)
+                                      GM_ADDR spans, const MlaBsndInputLayouts& layouts, float softcap = 0.0f)
     {
         this->Run(s, scale, qc, qr, kv, kr, workspace, workspace, workspace, pipe, spans, 0, &layouts, false, nullptr,
-                  nullptr, p.window, &p);
+                  nullptr, p.window, &p, softcap);
     }
 };
 // TND allocation starts and independent strides are already carried by v5

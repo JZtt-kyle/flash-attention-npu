@@ -58,7 +58,7 @@ __aicore__ inline uint32_t SplitBatch(const Kernel::MetadataReader& read, uint32
 __global__ __aicore__ __mix__(1, 2) void MLA_SPLIT_PARTIAL(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv,
                                                            GM_ADDR kr, GM_ADDR workspace, GM_ADDR metadata,
                                                            MlaSplitBsndContext c, MlaUsedMetadataInputs inputs,
-                                                           float scale, MlaBsndInputLayouts layouts)
+                                                           float scale, MlaBsndInputLayouts layouts, float softcap)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     MlaSplitBsndSchedule s{};
@@ -90,13 +90,14 @@ __global__ __aicore__ __mix__(1, 2) void MLA_SPLIT_PARTIAL(uint64_t ffts, GM_ADD
         AscendC::TPipe pipe;
         Kernel::MlaSplitKvUsedBsnd<MLA_SPLIT_TYPE> op;
         op(tiling, partial, scale, qc, qr, kv, kr, workspace, &pipe, metadata + kMlaUsedMetadataPrefixWords * 4,
-           layouts);
+           layouts, softcap);
     }
 #endif
 }
 __global__ __aicore__ __mix__(1, 2) void MLA_SPLIT_MERGE(uint64_t ffts, GM_ADDR workspace, GM_ADDR metadata,
                                                          MlaSplitBsndContext c, MlaUsedMetadataInputs inputs,
-                                                         GM_ADDR out, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse)
+                                                         GM_ADDR out, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse,
+                                                         float softcap)
 {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
     MlaSplitBsndSchedule s{};
@@ -137,7 +138,7 @@ __global__ __aicore__ __mix__(1, 2) void MLA_SPLIT_MERGE(uint64_t ffts, GM_ADDR 
             AscendC::TPipe pipe;
             Block::MlaSplitKvMerge<MLA_SPLIT_TYPE> block;
             block.Init(p, workspace + s.outOffset + row * 512 * 4, workspace + s.sumOffset + row * 8 * 4,
-                       workspace + s.maxOffset + row * 8 * 4, out, lse, accum, accumLse, &pipe);
+                       workspace + s.maxOffset + row * 8 * 4, out, lse, accum, accumLse, &pipe, softcap);
             const uint32_t tile = block.TileRows();
             for (uint32_t start = 0; start < p.rows; start += tile)
                 block.Run(start, (tile < p.rows - start ? tile : p.rows - start));
@@ -148,18 +149,18 @@ __global__ __aicore__ __mix__(1, 2) void MLA_SPLIT_MERGE(uint64_t ffts, GM_ADDR 
 aclError MLA_SPLIT_LAUNCH(const MlaSplitBsndLaunchArgs& args)
 {
     const auto& a = args.used;
-    MlaSplitBsndContext c{a.context, a.window, args.splits};
+    MlaSplitBsndContext c{a.context, a.window, args.splits, uint32_t(a.softcap > 0)};
     {
         MlaBatchLaunchScope launch;
-        MLA_SPLIT_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.workspace,
-                                                                     a.metadata, c, a.inputs, a.scale, a.layouts);
+        MLA_SPLIT_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(
+            a.ffts, a.qc, a.qr, a.kv, a.kr, a.workspace, a.metadata, c, a.inputs, a.scale, a.layouts, a.softcap);
         const auto error = launch.Result();
         if (error != ACL_SUCCESS)
             return error;
     }
     MlaBatchLaunchScope launch;
     MLA_SPLIT_MERGE<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.workspace, a.metadata, c, a.inputs, a.output,
-                                                               a.lse, args.accum, args.accumLse);
+                                                               a.lse, args.accum, args.accumLse, a.softcap);
     return launch.Result();
 }
 } // namespace flash_attn::mla

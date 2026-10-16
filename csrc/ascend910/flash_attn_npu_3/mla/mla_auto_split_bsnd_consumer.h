@@ -328,7 +328,14 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
     const auto& c = context.used;
     if (c.batch > (UINT32_MAX - kMlaAutoSplitFixedWords) / 10)
         return Status::InvalidBuffer;
-    auto status = ReadMetadataHeader(read, words, kMlaAutoSplitFixedWords + 10 * c.batch, Version, Version, c.dtype);
+    uint32_t version = Version;
+    if constexpr (Version == kMlaAutoSplitBsndVersion) {
+        if (context.hasSoftcap > 1)
+            return Status::ShapeMismatch;
+        if (context.hasSoftcap)
+            version = kMlaSoftcapAutoSplitBsndVersion;
+    }
+    auto status = ReadMetadataHeader(read, words, kMlaAutoSplitFixedWords + 10 * c.batch, version, version, c.dtype);
     if (status != Status::Success)
         return status;
     if (c.query.layout != uint32_t(IsTnd) || c.kv.layout != uint32_t(IsKvTnd))

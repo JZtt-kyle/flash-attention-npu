@@ -192,6 +192,34 @@ def test_full_stage_recomputes_equal_input_weights_and_native_fd(tmp_path):
     assert not slow["passed"] and slow["regressed_cases"] == 92
 
 
+def test_selected_groups_keep_configuration_weights_and_full_stage_boundary(tmp_path):
+    suites = [
+        "split-bsnd-profile",
+        "auto-split-bsnd-profile",
+        "auto-split-tnd-profile",
+        "auto-split-mixed-profile",
+    ]
+    path = stage_evidence(tmp_path, {"auto-split-bsnd-profile": 1.3})
+    summary = json.loads(path.read_text())
+    summary["groups"] = {s: summary["groups"][s] for s in suites}
+    path.write_text(json.dumps(summary))
+    result = load_evidence([path], suites)
+    assert result["scope"] == "selected-groups" and result["selected_suites"] == suites
+    assert result["measured_cases"] == result["applicable_cases"] == 26
+    assert result["passed"] and result["mean_ratio"] == pytest.approx((20 * 0.8 + 6 * 1.3) / 26)
+    assert result["regressed_cases"] == 6
+    assert not result["groups"]["auto-split-bsnd-profile"]["passed"]
+    assert set(result["groups"]) == set(suites)
+    with pytest.raises(ValueError, match="All fifteen"):
+        load_evidence([path])
+
+
+@pytest.mark.parametrize("suites", [[], ["unknown"], ["split-bsnd-profile"] * 2])
+def test_invalid_selected_groups_rejected(suites):
+    with pytest.raises(ValueError, match="distinct known"):
+        load_evidence([], suites)
+
+
 @pytest.mark.parametrize("mode", ["single", "explicit", "automatic"])
 def test_dispatch_applicability_checked_before_timing(monkeypatch, mode):
     fd = [dict(native_template=5, native_fd=True)]
@@ -213,6 +241,7 @@ def test_dispatch_applicability_checked_before_timing(monkeypatch, mode):
             check_split_stage_dispatch(cases)
 
 
+@pytest.mark.parametrize("subset", [False, True])
 @pytest.mark.parametrize(
     "fault",
     [
@@ -230,7 +259,7 @@ def test_dispatch_applicability_checked_before_timing(monkeypatch, mode):
         "runtime",
     ],
 )
-def test_incomplete_or_modified_stage_evidence_rejected(tmp_path, fault):
+def test_incomplete_or_modified_stage_evidence_rejected(tmp_path, fault, subset):
     path = stage_evidence(tmp_path)
     summary = json.loads(path.read_text())
     suite = "auto-split-paged-tnd-profile"
@@ -280,11 +309,12 @@ def test_incomplete_or_modified_stage_evidence_rejected(tmp_path, fault):
         paths.append(second)
     path.write_text(json.dumps(summary))
     with pytest.raises((ValueError, KeyError)):
-        load_evidence(paths)
+        load_evidence(paths, [suite, "split-bsnd-profile"] if subset else None)
 
 
+@pytest.mark.parametrize("subset", [False, True])
 @pytest.mark.parametrize("ratio,code", [(0.8, 0), (1.1, 1)])
-def test_stage_cli_propagates_gate(tmp_path, ratio, code):
+def test_stage_cli_propagates_gate(tmp_path, ratio, code, subset):
     path = stage_evidence(tmp_path, ratio)
     output = tmp_path / "result.json"
     result = subprocess.run(
@@ -296,6 +326,7 @@ def test_stage_cli_propagates_gate(tmp_path, ratio, code):
             str(path),
             "--output",
             str(output),
+            *(["--suite", "split-bsnd-profile", "auto-split-tnd-profile"] if subset else []),
         ],
         capture_output=True,
         text=True,

@@ -14,7 +14,7 @@ void Emit(const T& a)
         first = false;
     }
 }
-int main()
+int main(int argc, char** argv)
 {
     std::vector<uint32_t> data;
     std::vector<int32_t> qs, ks;
@@ -53,6 +53,9 @@ int main()
             int64_t b, q, k, h, cores, ratio, left, right;
             uint32_t dtype, uq, uk, causal, mode;
             std::cin >> b >> q >> k >> h >> cores >> ratio >> dtype >> uq >> uk >> left >> right >> causal >> mode;
+            uint32_t hasSoftcap = 0;
+            if (argc > 1 && std::strcmp(argv[1], "--softcap") == 0)
+                std::cin >> hasSoftcap;
             if (b < 0 || b > 60000)
                 return 2;
             qs.resize(b);
@@ -89,7 +92,8 @@ int main()
             if (mode == 4)
                 shape.query.layout = MlaSequenceLayout::Tnd;
             MlaWindowConfig window{q, k, left, right, bool(causal)};
-            const bool built = BuildAutoSplitBsndMetadata(shape, platform, dtype, data.data(), words, in, window);
+            const bool built =
+                BuildAutoSplitBsndMetadata(shape, platform, dtype, data.data(), words, in, window, hasSoftcap);
             const uint32_t generated = data[5];
             MlaWindow w{};
             NormalizeWindow(window, w);
@@ -130,7 +134,8 @@ int main()
             c = {{dtype, uint32_t(b), uint32_t(h), uq + 2 * uk, axis(b * q, q), axis(b * k, k), uint32_t(cores),
                   uint32_t(cores * ratio), uint32_t(nonempty ? cores : 1), nonempty ? uint64_t(INT64_MAX) : 0, 0,
                   platform.localMemory},
-                 {uint32_t(w.kind), w.left, w.right}};
+                 {uint32_t(w.kind), w.left, w.right},
+                 hasSoftcap};
             inputs = {arr(in.cuQuery), arr(in.cuKv), arr(in.usedQuery), arr(in.usedKv)};
             std::cout << "{\"built\":" << built << ",\"generated\":" << generated
                       << ",\"intact\":" << (data.front() == 0xdeadbeef) << ',';

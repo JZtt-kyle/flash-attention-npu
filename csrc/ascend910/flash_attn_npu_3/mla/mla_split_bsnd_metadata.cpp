@@ -8,7 +8,7 @@
 namespace flash_attn::mla {
 bool BuildSplitBsndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                             uint32_t* output, uint32_t words, const MlaUsedInputs& inputs,
-                            const MlaWindowConfig& window, int64_t splits)
+                            const MlaWindowConfig& window, int64_t splits, uint32_t hasSoftcap)
 {
     uint32_t expected;
     if (!SplitBsndMetadataWords(shape.batch, expected) || words != expected)
@@ -16,13 +16,14 @@ bool BuildSplitBsndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& pl
     struct Context {
         const MlaWindowConfig& window;
         int64_t splits;
+        uint32_t hasSoftcap;
         MlaSplitKvPlan plan;
-    } context{window, splits, {}};
+    } context{window, splits, hasSoftcap, {}};
     const auto builder = [](const MlaUsedShape& s, const MlaPlatformInfo& p, const MlaUsedInputs& in,
                             MlaUsedSchedule& schedule, const void* opaque) {
         auto& c = *const_cast<Context*>(static_cast<const Context*>(opaque));
-        if (s.query.layout != MlaSequenceLayout::Bsnd || s.kv.layout != MlaSequenceLayout::Bsnd || c.splits < 2 ||
-            c.splits > 256)
+        if (s.query.layout != MlaSequenceLayout::Bsnd || s.kv.layout != MlaSequenceLayout::Bsnd || c.hasSoftcap > 1 ||
+            c.splits < (c.hasSoftcap ? 1 : 2) || c.splits > 256)
             return MlaScheduleStatus::InvalidSplit;
         auto status = BuildUsedSchedule(s, p, in, schedule);
         if (status != MlaScheduleStatus::Success)
@@ -44,7 +45,7 @@ bool BuildSplitBsndMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& pl
     if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, builder, &context, false,
                                        words - base))
         return false;
-    output[1] = output[2] = kMlaSplitBsndVersion;
+    output[1] = output[2] = hasSoftcap ? kMlaSoftcapSplitBsndVersion : kMlaSplitBsndVersion;
     if (output[5] == 0) {
         MlaWindow normalized{};
         NormalizeWindow(window, normalized);

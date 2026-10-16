@@ -61,6 +61,12 @@ def norm(q, k, left, right, causal):
 # Purposeful tuples include mask/geometry/ownership interactions; no implicit
 # quota or cartesian product hides the expensive and boundary configurations.
 CASES = [
+    (
+        "single-softcap-plan",
+        config(q=7, h=8, m=17, n=512, s=1),
+        [(7, 1057), (3, 0)],
+        (530, 1, 0),
+    ),
     ("window-cross-wave", config(), [(9, 1057), (5, 3)], (530, 1, 0)),
     (
         "causal-original-q",
@@ -126,9 +132,14 @@ def check_layout(drivers, c):
     rows = groups * s * m
     assert layout["geometry"] == [groups, groups * s, rows, int(empty)]
     source = drivers[2].evaluate([[4, 0, b, q, b * q, h, s]])[0]
-    assert source == [5, s, b, h, q, 512, 4, s, b, h, q]
+    # FA3 exposes no accumulator for S=1. Persistent partial workspace below
+    # is separate from these public accumulator descriptors.
+    assert source == ([0, 0] if s == 1 else [5, s, b, h, q, 512, 4, s, b, h, q])
     for key, shape in [("accum", [s, b, h, q, 512]), ("lse_accum", [s, b, h, q])]:
         tensor = layout[key]
+        if s == 1:
+            assert tensor == dict(rank=0, shape=[0] * 5, strides=[0] * 5, elements=0, bytes=0)
+            continue
         strides = [math.prod(max(1, v) for v in shape[i + 1 :]) for i in range(len(shape))]
         assert tensor == dict(
             rank=len(shape),
@@ -250,6 +261,11 @@ def test_source_ranges_ownership_and_persistent_rows(drivers, name, c, lengths, 
                 probes = sorted({0, end - begin - 1, min(end - begin - 1, h - 1 - begin % h)})
                 addresses = drivers[0].evaluate([[4, t, row] for row in probes])
                 for row, address in zip(probes, addresses):
+                    if s == 1:
+                        # Row includes a public accumulator address, which is
+                        # absent for S=1; persistent task/merge slots were checked above.
+                        assert address["status"] != 0 and address["unchanged"]
+                        continue
                     query, head = divmod(begin + row, h)
                     lse = ((batch * h + head) * qcap + query) * 4
                     alse = (((split * b + batch) * h + head) * qcap + query) * 4
@@ -306,7 +322,6 @@ INVALID = [
     (5, 513),
     (6, -1),
     (6, 0),
-    (6, 1),
     (6, 257),
     (6, 2**32 + 2),
     (7, 0),

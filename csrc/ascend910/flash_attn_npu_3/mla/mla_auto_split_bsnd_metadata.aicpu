@@ -17,7 +17,7 @@ __global__ __aicpu__ uint32_t ComputeMlaAutoSplitBsndMetadata(void* args)
     const auto& a = *static_cast<const MlaAutoSplitBsndMetadataArgs*>(args);
     const auto& in = a.input;
     if (!BuildAutoSplitBsndMetadata(in.shape, in.platform, in.dtype, reinterpret_cast<uint32_t*>(in.outputAddr),
-                                   in.outputWords, UsedMetadataInputs(in), a.window)) return 1;
+                                   in.outputWords, UsedMetadataInputs(in), a.window, a.hasSoftcap)) return 1;
     AscendC::DataStoreBarrier();
     return 0;
 }

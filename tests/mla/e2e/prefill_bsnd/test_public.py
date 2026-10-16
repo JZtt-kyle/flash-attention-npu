@@ -263,7 +263,6 @@ def test_concurrent_host_launches():
         "metadata_shape",
         "q_used_metadata",
         "split",
-        "softcap",
         "page_size",
     ],
 )
@@ -289,8 +288,6 @@ def test_rejections(entry, fault):
             args.update(seqused_q=c["lengths"], scheduler_metadata=metadata(c))
         elif fault == "split":
             args["num_splits"] = 257
-        elif fault == "softcap":
-            args["softcap"] = 0.5
         elif fault == "page_size":
             # This cache has 65 tokens per page, outside the supported alignment.
             args["page_table"] = torch.zeros((2, 1), dtype=torch.int32, device="npu")

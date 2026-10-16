@@ -16,6 +16,7 @@ constexpr uint32_t kMlaPrefillTndVersion = 28;
 constexpr uint32_t kMlaPrefillMixedVersion = 29;
 constexpr uint32_t kMlaPrefillPagedBsndVersion = 30;
 constexpr uint32_t kMlaPrefillPagedTndVersion = 31;
+constexpr uint32_t kMlaSoftcapPrefillBsndVersion = 34;
 // v27 has 20 header words and B pairs of effective lengths; v28 has 24 header
 // words and B allocation/used spans. v29 shares those spans; v30 has a 24-word
 // header and B effective-length pairs. All retain the 346-word native partition
@@ -30,6 +31,7 @@ struct MlaPrefillBsndContext {
     uint32_t tnd = 0, totalQ = 0, totalK = 0;
     // v30/v31: BSND/TND Q and independent 192/128 ND paged KV.
     uint32_t pageSize = 0;
+    uint32_t hasSoftcap = 0;
 };
 struct MlaPrefillBsndLayout {
     uint32_t words, m, n, capacity;
@@ -49,7 +51,8 @@ MLA_PREFILL_INLINE uint32_t PrefillTailWord(const MlaPrefillBsndContext& c)
 }
 MLA_PREFILL_INLINE bool PrefillBsndLayout(const MlaPrefillBsndContext& c, MlaPrefillBsndLayout& out)
 {
-    if (!c.heads || !c.kvHeads || c.heads % c.kvHeads || c.splits > 256 || !c.cores || c.cores > 26 || c.tnd > 2 ||
+    if (c.hasSoftcap > 1 || (c.hasSoftcap && (c.tnd || c.pageSize)) || !c.heads || !c.kvHeads || c.heads % c.kvHeads ||
+        c.splits > 256 || !c.cores || c.cores > 26 || c.tnd > 2 ||
         (c.pageSize && (c.tnd == 1 || c.pageSize < 16 || c.pageSize > 1024 || c.pageSize % 16 || c.sk % c.pageSize)) ||
         c.totalQ > INT32_MAX || c.totalK > INT32_MAX || (c.tnd && uint64_t(c.totalQ) * c.heads > kMlaMaxBatchRows) ||
         ((!c.tnd && c.totalQ) || (c.tnd != 1 && c.totalK)) || c.usedFlags > 3 || c.window.kind > 2 ||

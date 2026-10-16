@@ -46,9 +46,7 @@ def daily_suites():
         suites[name].append(f"{path}::test_public_fake[{name}]")
         if name in COMPILE_BEHAVIORS:
             suites[name].append(f"{path}::test_public_compile[{name}]")
-    suites["dense"] += [
-        f"{path}::test_unopened_options[{name}]" for name in ("num_splits", "softcap")
-    ]
+    suites["dense"] += [f"{path}::test_unopened_options[{name}]" for name in ("num_splits",)]
     split = "tests/mla/e2e/split_kv_bsnd/test_public.py"
     suites["split_kv_bsnd"] = [
         f"{split}::test_daily",
@@ -149,6 +147,10 @@ def daily_suites():
     ]
     suites["prefill_mixed"] = [
         f"tests/mla/e2e/prefill_mixed/test_public.py::{name}"
+        for name in ("test_daily", "test_empty", "test_fake", "test_compile")
+    ]
+    suites["softcap_bsnd"] = [
+        f"tests/mla/e2e/softcap_bsnd/test_public.py::{name}"
         for name in ("test_daily", "test_empty", "test_fake", "test_compile")
     ]
     return suites
