@@ -15,6 +15,8 @@
 // strides; source split/combined RoPE both map to the full 192-wide row.
 #pragma once
 #include "../mla_prefill_params.h"
+#include "../mla_paged_inputs.h"
+#include "../tile/mla_paged_copy.hpp"
 #include "../tile/mla_prefill_cube_ops.hpp"
 namespace flash_attn::mla::Block {
 using namespace AscendC;
@@ -28,7 +30,7 @@ struct PrefillConstants {
     static constexpr uint32_t FIA_SYNC_MODE2 = 2, syncC1V1 = 7, syncV1C2 = 8, syncC2V2 = 9, preLoadNum = 2;
     uint32_t mmResUbSize, vec1ResUbSize, bmm2ResUbSize, s2BaseSize, gSize;
 };
-template <typename InputT>
+template <typename InputT, bool Paged = false>
 class MlaPrefillCube {
     using T = float;
     using Q_T = InputT;
@@ -43,13 +45,16 @@ class MlaPrefillCube {
     };
 
   public:
-    __aicore__ inline void Init(const MlaPrefillParams& p, TPipe* pipe, GM_ADDR q, GM_ADDR k, GM_ADDR v)
+    __aicore__ inline void Init(const MlaPrefillParams& p, TPipe* pipe, GM_ADDR q, GM_ADDR k, GM_ADDR v,
+                                const MlaPagedCacheInputs* cache = nullptr)
     {
         InitParams({p.mBase * Tile::Align(p.nBase, 32), p.mBase * Tile::Align(p.nBase, 32), p.mBase * 128, p.nBase,
                     p.heads / p.kvHeads});
         queryGmTensor.Init(q, p.sq, p.heads / p.kvHeads, 192, &p.q);
         keyGmTensor.Init(k, p.sk, p.kvHeads, 192, &p.k);
         valueGmTensor.Init(v, p.sk, p.kvHeads, 128, &p.v);
+        if constexpr (Paged)
+            paged.Init(k, v, (GM_ADDR)cache->table.address, cache->layout);
         InitBuffers(pipe);
     }
     __aicore__ inline void InitParams(const PrefillConstants& constInfo);
@@ -152,6 +157,21 @@ class MlaPrefillCube {
     Tile::DenseTensor<InputT, true> queryGmTensor, keyGmTensor, valueGmTensor;
     Tile::CopyQueryGmToL1<InputT, true> copyQueryGmToL1;
     Tile::CopyKvGmToL1<InputT, true> copyKvGmToL1;
+    Tile::PagedCache<InputT> paged;
+    template <bool Key>
+    __aicore__ inline void CopyPaged(Tile::L1Tensor<InputT>& dst, const Tile::KvCoord& coord, uint32_t head)
+    {
+        const auto& layout = Key ? paged.layout.k : paged.layout.v;
+        const auto& tensor = Key ? paged.k : paged.v;
+        uint32_t done = 0;
+        while (done < coord.s2DealSize) {
+            const auto segment = paged.Segment(coord.batchIdx, coord.s2Idx + done, coord.s2DealSize - done);
+            const uint64_t offset = (Key ? segment.kOffset : segment.vOffset) + uint64_t(head) * layout.headStride;
+            Tile::CopySingleMatrixNDToNZ(dst.tensor[uint64_t(done) * 16], tensor[offset + coord.dIdx], segment.rowCount,
+                                         coord.dDealSize, layout.rowStride, dst.rowCount);
+            done += segment.rowCount;
+        }
+    }
     Array<GlobalTensor<float>, 2> mm1ResGm, mm2ResGm;
     Array<GlobalTensor<InputT>, 2> vec1ResGm;
     static constexpr IsResetLoad3dConfig LOAD3DV2_CONFIG = {false, false};
@@ -159,8 +179,8 @@ class MlaPrefillCube {
     LoadData3DParamsV2<InputT> loadData3DParams;
     LoadData2DParams mm1LoadDataBTransposeToL0Params, mm2LoadDataBToL0Params;
 };
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::InitParams(const PrefillConstants& constInfo)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::InitParams(const PrefillConstants& constInfo)
 {
     this->constInfo = constInfo;
 
@@ -194,24 +214,24 @@ __aicore__ inline void MlaPrefillCube<InputT>::InitParams(const PrefillConstants
     mm2LoadDataBToL0Params.ifTranspose = true; // 将小Z格式转置为小N
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::InitMm1GlobalTensor(const GlobalTensor<MM_OUT_T>& mm1ResGm)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::InitMm1GlobalTensor(const GlobalTensor<MM_OUT_T>& mm1ResGm)
 {
     // mm1
     this->mm1ResGm.Init(mm1ResGm, constInfo.mmResUbSize);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::InitMm2GlobalTensor(const GlobalTensor<KV_T>& vec1ResGm,
-                                                                   const GlobalTensor<MM_OUT_T>& mm2ResGm)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::InitMm2GlobalTensor(const GlobalTensor<KV_T>& vec1ResGm,
+                                                                          const GlobalTensor<MM_OUT_T>& mm2ResGm)
 {
     // mm2
     this->vec1ResGm.Init(vec1ResGm, constInfo.vec1ResUbSize);
     this->mm2ResGm.Init(mm2ResGm, constInfo.bmm2ResUbSize);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::InitBuffers(TPipe* pipe)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::InitBuffers(TPipe* pipe)
 {
     // L1 Q
     pipe->InitBuffer(L1_Q, L1_Q_SIZE * L1_Q_BUFCNT * sizeof(Q_T));
@@ -238,8 +258,8 @@ __aicore__ inline void MlaPrefillCube<InputT>::InitBuffers(TPipe* pipe)
     cL0Tensor.Init(L0_C.Get<T>());
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::AllocEventID()
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::AllocEventID()
 {
     for (uint32_t i = 0; i < L1_KP_BUFCNT; ++i) {
         SetFlag<HardEvent::MTE1_MTE2>(KP_EVENT0 + i);
@@ -256,8 +276,8 @@ __aicore__ inline void MlaPrefillCube<InputT>::AllocEventID()
     SetFlag<HardEvent::FIX_M>(L0C_EVENT1);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::FreeEventID()
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::FreeEventID()
 {
     for (uint32_t i = 0; i < L1_KP_BUFCNT; ++i) {
         WaitFlag<HardEvent::MTE1_MTE2>(KP_EVENT0 + i);
@@ -274,9 +294,9 @@ __aicore__ inline void MlaPrefillCube<InputT>::FreeEventID()
     WaitFlag<HardEvent::FIX_M>(L0C_EVENT1);
 }
 
-template <typename InputT>
+template <typename InputT, bool Paged>
 template <uint32_t M_L1_SIZE, bool FORCE>
-__aicore__ inline void MlaPrefillCube<InputT>::ResetLoad3DConfig()
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::ResetLoad3DConfig()
 {
     if constexpr (!FORCE) {
         if (this->load3DL1SizeCfg == M_L1_SIZE) {
@@ -290,11 +310,11 @@ __aicore__ inline void MlaPrefillCube<InputT>::ResetLoad3DConfig()
     SetLoadDataPaddingValue<Q_T>(0);
 }
 
-template <typename InputT>
+template <typename InputT, bool Paged>
 template <uint32_t M_L1_SPLIT_Size, typename T1>
-__aicore__ inline void MlaPrefillCube<InputT>::LoadAToL0(uint32_t dstBufId, const LocalTensor<T1>& l1Tensor,
-                                                         uint32_t mL1Size, uint32_t subMStart, uint32_t subMSize,
-                                                         uint32_t subKStart, uint32_t subKSize)
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::LoadAToL0(uint32_t dstBufId, const LocalTensor<T1>& l1Tensor,
+                                                                uint32_t mL1Size, uint32_t subMStart, uint32_t subMSize,
+                                                                uint32_t subKStart, uint32_t subKSize)
 {
     auto srcTensor = l1Tensor[mL1Size * subKStart][GetC0Num<T1>() * subMStart];
     auto dstTensor = this->aL0Tensor[dstBufId];
@@ -312,10 +332,11 @@ __aicore__ inline void MlaPrefillCube<InputT>::LoadAToL0(uint32_t dstBufId, cons
     }
 }
 
-template <typename InputT>
+template <typename InputT, bool Paged>
 __aicore__ inline void
-MlaPrefillCube<InputT>::LoadBTransposeToL0(uint32_t dstBufId, const LocalTensor<KV_T>& l1Tensor, uint32_t nL1Size,
-                                           uint32_t subNStart, uint32_t subNSize, uint32_t subKStart, uint32_t subKSize)
+MlaPrefillCube<InputT, Paged>::LoadBTransposeToL0(uint32_t dstBufId, const LocalTensor<KV_T>& l1Tensor,
+                                                  uint32_t nL1Size, uint32_t subNStart, uint32_t subNSize,
+                                                  uint32_t subKStart, uint32_t subKSize)
 {
     auto srcTensor = l1Tensor[nL1Size * subKStart][GetC0Num<KV_T>() * subNStart];
     auto dstTensor = this->bL0Tensor[dstBufId];
@@ -333,10 +354,10 @@ MlaPrefillCube<InputT>::LoadBTransposeToL0(uint32_t dstBufId, const LocalTensor<
     }
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::LoadBToL0(uint32_t dstBufId, const LocalTensor<KV_T>& l1Tensor,
-                                                         uint32_t kL1Size, uint32_t subKStart, uint32_t subKSize,
-                                                         uint32_t subNStart, uint32_t subNSize)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::LoadBToL0(uint32_t dstBufId, const LocalTensor<KV_T>& l1Tensor,
+                                                                uint32_t kL1Size, uint32_t subKStart, uint32_t subKSize,
+                                                                uint32_t subNStart, uint32_t subNSize)
 {
     mm2LoadDataBToL0Params.srcStride = kL1Size / BLOCK_CUBE;
 
@@ -350,10 +371,11 @@ __aicore__ inline void MlaPrefillCube<InputT>::LoadBToL0(uint32_t dstBufId, cons
     }
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::FixpipeCToGM(GlobalTensor<MM_OUT_T>& mmResGm, uint32_t cL0BufId,
-                                                            uint32_t dstStride, uint32_t subMStart, uint32_t subMSize,
-                                                            uint32_t subNStart, uint32_t subNSize)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::FixpipeCToGM(GlobalTensor<MM_OUT_T>& mmResGm, uint32_t cL0BufId,
+                                                                   uint32_t dstStride, uint32_t subMStart,
+                                                                   uint32_t subMSize, uint32_t subNStart,
+                                                                   uint32_t subNSize)
 {
     FixpipeParamsV220 fixParams;
     fixParams.nSize = subNSize;
@@ -368,8 +390,8 @@ __aicore__ inline void MlaPrefillCube<InputT>::FixpipeCToGM(GlobalTensor<MM_OUT_
     Fixpipe<MM_OUT_T, T, CFG_ROW_MAJOR>(dstTensor, cL0Tensor, fixParams);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::ComputeMm1(const PrefillInfo& info)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::ComputeMm1(const PrefillInfo& info)
 {
 
     Axis m(info.actMBaseSize);
@@ -486,8 +508,8 @@ __aicore__ inline void MlaPrefillCube<InputT>::ComputeMm1(const PrefillInfo& inf
     CrossCoreSetFlag<PrefillConstants::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC1V1);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::ComputeMm2(const PrefillInfo& info)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::ComputeMm2(const PrefillInfo& info)
 {
 
     CrossCoreWaitFlag(constInfo.syncV1C2);
@@ -596,9 +618,9 @@ __aicore__ inline void MlaPrefillCube<InputT>::ComputeMm2(const PrefillInfo& inf
     CrossCoreSetFlag<PrefillConstants::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC2V2);
 }
 
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::CopyQToL1(uint32_t slot, const PrefillInfo& info, uint32_t row,
-                                                         uint32_t count)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::CopyQToL1(uint32_t slot, const PrefillInfo& info, uint32_t row,
+                                                                uint32_t count)
 {
     auto src = queryGmTensor;
     src.gmTensor = src.gmTensor[uint64_t(info.n2Idx) * constInfo.gSize * src.HeadStride()];
@@ -606,29 +628,36 @@ __aicore__ inline void MlaPrefillCube<InputT>::CopyQToL1(uint32_t slot, const Pr
     Tile::QueryCoord coord{0, 0, info.gS1Idx + row, 0, count, 192, info.bIdx};
     copyQueryGmToL1(dst, src, coord);
 }
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::CopyKToL1(uint32_t slot, const PrefillInfo& info, uint32_t col,
-                                                         uint32_t count)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::CopyKToL1(uint32_t slot, const PrefillInfo& info, uint32_t col,
+                                                                uint32_t count)
 {
     auto src = keyGmTensor;
     src.gmTensor = src.gmTensor[uint64_t(info.n2Idx) * src.HeadStride()];
     Tile::L1Tensor<InputT> dst{kpL1Tensor[slot], Tile::Align(count, 16)};
     Tile::KvCoord coord{0, 0, info.s2Idx * constInfo.s2BaseSize + col, 0, count, 192, info.bIdx};
-    copyKvGmToL1(dst, src, coord);
+    if constexpr (Paged)
+        CopyPaged<true>(dst, coord, info.n2Idx);
+    else
+        copyKvGmToL1(dst, src, coord);
 }
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::CopyVToL1(uint32_t slot, const PrefillInfo& info, uint32_t col,
-                                                         uint32_t count)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::CopyVToL1(uint32_t slot, const PrefillInfo& info, uint32_t col,
+                                                                uint32_t count)
 {
     auto src = valueGmTensor;
     src.gmTensor = src.gmTensor[uint64_t(info.n2Idx) * src.HeadStride()];
     Tile::L1Tensor<InputT> dst{vL1Tensor[slot], Tile::Align(count, 16)};
     Tile::KvCoord coord{0, 0, info.s2Idx * constInfo.s2BaseSize + col, 0, count, 128, info.bIdx};
-    copyKvGmToL1(dst, src, coord);
+    if constexpr (Paged)
+        CopyPaged<false>(dst, coord, info.n2Idx);
+    else
+        copyKvGmToL1(dst, src, coord);
 }
-template <typename InputT>
-__aicore__ inline void MlaPrefillCube<InputT>::CopyPToL1(uint32_t slot, const PrefillInfo& info, uint32_t stride,
-                                                         uint32_t row, uint32_t rows, uint32_t col, uint32_t cols)
+template <typename InputT, bool Paged>
+__aicore__ inline void MlaPrefillCube<InputT, Paged>::CopyPToL1(uint32_t slot, const PrefillInfo& info, uint32_t stride,
+                                                                uint32_t row, uint32_t rows, uint32_t col,
+                                                                uint32_t cols)
 {
     Tile::CopySingleMatrixNDToNZ(kpL1Tensor[slot], vec1ResGm[info.loop % 2][stride * row + col], rows, cols, stride,
                                  Tile::Align(rows, 16));

@@ -1,82 +1,71 @@
 # MLA 当前状态
 
-**M12b 混合 prefill 已闭环，M12 非 PA 布局完成。** 分支 `feat/mla-cann-migration`，接手基线 `2185af9` 时工作树干净。本轮交付一个完整可调用行为；唯一下一步为 [M13a：BSND PA prefill](plan.md#唯一下一步-m13a)，本轮提交后停止。
+**M13a BSND PA prefill 已完成。** 分支 `feat/mla-cann-migration`，接手基线 `6329ef8` 时工作树干净。唯一下一步是 [M13b TND PA prefill](plan.md#唯一下一步-m13b)，本轮提交后停止。
 
 ## 当前实现与边界
 
-192/128 TND Q + BSND cache 已接通 host/AICPU/Kernel/v29/公开 real/fake/compile，支持 qv=None、独立 K/V、GQA、Q allocation、cache used、完整 storage/stride、三 mask 及自动/1/显式 split，返回 O/LSE 和真实 FP32 accumulator。复用 M11/M12a 数值与调度；Q/O/归并沿用紧凑 allocation 坐标，K/V 各自按真实 BSND batch stride 定位。接口、版本与空值规则见 [design 5.13](design.md#513-192128-混合-prefill-记录)。
+192/128 BSND Q + ND PA KV 已接通 host/AICPU/Kernel/v30/公开 real/fake/compile，支持 qv=None、独立 K/V、GQA、合法 P、完整 storage/stride、非单调/重复/共享页、三 mask、自动/1/显式 split 和真实 FP32 accumulator。复用既有页段 Copy、通用 prefill 数值与调度；契约见 [design 5.14](design.md#514-192128-bsnd-pa-prefill-记录)。
 
-公开 cache 与 metadata 沿用 FA3 签名，内部算子另支持 Q-used。v29 复用 v28 的 span/partition 格式，以独立布局身份拒绝跨版本复用；AICPU 从 Q 前缀获得总 token 数，消费者绑定实际 Q/cache 几何与当前长度。克隆、连续 offset view、内容/scale/合法 stride 变化可复用。
+v30 在既有有效长度和原生 partition 记录上增加 P 身份；逻辑容量为页表宽度乘 P。每次消费检查当前有效页，即使 Q-used=0；页表和独立 K/V 按当前流保活。metadata 可跨克隆、连续 offset view、内容/scale、合法 stride 和有效页映射复用；长度、P 或调度几何变化须重生成。PA 复用 TND 的统一设备初始化和按独立行块分配向量核的归并，单行运算次序不变，全部空 KV 行 O/LSE 为 0/-inf。
 
-PA prefill、softcap、非默认调度与完整 graph replay 仍未开放，910C 未实机验证。原有 512+64 五布局及 192/128 BSND/TND 保持支持；本轮共享源码改变，累计 E2E 已实际运行，继承旧 E2E 为 0。
+192/128 TND PA、softcap、非默认调度及完整 graph replay 仍未开放，910C 未实机验证。既有 512+64 五布局和非 PA prefill 三布局保持支持。
 
-## 最近闭环证据
+## 本轮证据
 
-证据根 `/tmp/mla-m12b/`。最终固定源码的 16 组必要检查全部实际通过，无失败、跳过或未运行，汇总为 `acceptance-final/summary.json`，尝试为 `attempt-1792105685818507750`。`collect-final/summary.json` 核对完整集合，`evidence-review.json` 使用统一驱动既有校验确认用例、原始哈希、当前依赖、生产构建、实际加载、固定源 probe 与 native 包有效。接手复核见 `handoff-review.json`；继承旧 E2E 为 0。BSND/TND 单元是本轮共享 producer/consumer 的直接影响检查。
+证据根 `/tmp/mla-m13a/`。最终 CPU 组为 `cpu-optimized/summary.json`（`attempt-1792112660486344900`），设备组为 `optimized/summary.json`（`attempt-1792112805051335030`）。`collect-optimized/summary.json`、`optimized-dry-run.log` 核对集合；无截断或随机采样。
 
-| 必跑组 | 本次结果 | 秒 |
+上一轮闭环 E2E 继承为 0；本轮仅由 `--resume` 继承同一优化源码/构建的 8 项代表 E2E，来自 `optimized/attempt-1792112313700097760`，原实跑 28.4 s，身份和原始证据均由驱动核验。其余本轮必要组实际执行。最终 `evidence-review.json` 复用统一驱动的 `reusable`、源码依赖、构建/loaded 和 native 校验，13 组原始证据、当前依赖及实际用例清单全部有效；无失败或未运行的必跑组。
+
+| 必跑组 | 结果 | 秒 |
 | --- | --- | --- |
-| `prefill-mixed-tools` | 56 passed | 10.2 |
-| `unit-prefill_mixed` | 110 passed | 22.1 |
-| `prefill-mixed-sanitize` | 110 passed | 71.0 |
-| `unit-prefill_tnd` | 113 passed | 22.1 |
-| `prefill-tnd-sanitize` | 113 passed | 70.5 |
-| `unit-prefill_bsnd` | 82 passed | 21.9 |
-| `prefill-bsnd-sanitize` | 82 passed | 70.4 |
-| `prefill-mixed-check` | 8 passed | 23.0 |
-| `prefill-mixed-public` | 118 passed | 36.4 |
-| `prefill-mixed-profile-check` | 1 passed | 206.1 |
-| `e2e` | 403 passed | 68.3 |
+| `prefill-paged-bsnd-tools` | 46 passed | 10.0 |
+| `unit-prefill_paged_bsnd` | 130 passed | 23.6 |
+| `prefill-paged-bsnd-sanitize` | 130 passed | 77.6 |
+| `prefill-paged-bsnd-check` | 本轮 E2E 继承 8 | 0（原 28.4） |
+| `prefill-paged-bsnd-profile-check` | 1 passed | 213.6 |
+| `prefill-paged-bsnd-public` | 120 passed | 37.6 |
+| `e2e` | 437 passed | 70.0 |
 | `ordinary` | 516 passed | 26.1 |
-| `prefill-mixed-profile` | 1 passed | 256.3 |
-| `prefill-tnd-profile` | 1 passed | 242.4 |
-| `prefill-bsnd-profile` | 1 passed | 263.4 |
-| `prefill-mixed-trap` | 48 passed | 652.1 |
+| `prefill-paged-bsnd-profile` | 1 passed | 245.9 |
+| `prefill-bsnd-profile` | 1 passed | 264.6 |
+| `prefill-tnd-profile` | 1 passed | 245.4 |
+| `prefill-mixed-profile` | 1 passed | 254.4 |
+| `prefill-paged-bsnd-trap` | 40 passed | 553.7 |
 
-固定源三 mask × 单/多 split 的 24 项 O/LSE 对照逐元素一致，双数学和真实 FP32 partial 通过。最终 check/public 的 reference 命中 14/160 次，无重算；待测实现实际执行。最大成本输入 `[B,maxQ,Hq,maxK,Hkv]=[2,257,8,4097,2]`，双 dtype 缓存命中后各约 0.70 s，进程峰值约 2 GiB，见公开组的 `cost-*.json`。新日常清单 33 项，累计集合 403 项。
+固定源三 mask × 单/多 split 的 24 项 O/LSE 对照逐元素一致，双数学及真实 FP32 partial 通过。迁移侧实际读 PA，固定源数值片段接收独立 CPU 页表 gather 的逻辑 K/V；原生公开 PA 分派另由固定包验证，实测为 template 3，含 PA/BRC/FD keys。
+
+新增日常清单 34 项，累计 437 项。最大成本配置 `[B,Sq,Hq,C,Hkv]=[2,257,8,4144,2]`、P=112、used=4097，双 dtype 各约 2.97/2.99 s，峰值约 2.83 GiB，见公开组 `cost-*.json`。最终公开/reference 命中 77 次、E2E 598 次、普通 31 次；profile-check 命中 2 次，四个完整性能组各命中 12 次。待测实现均实际执行，未重复计算相同 reference。
 
 ### 公开性能
 
-三组各固定 12 配置（含双 dtype），其中 6 个自动 split 配置参与平均，另外 6 个原生 FD 单/显式 split 配置按既有边界单列。配置及入口/R 等权，门槛 ≤1；全部单例、分段、wall/kernel 样本、native 分派和采样环境保存在各组 `public-profile/`。
+每组固定 12 配置（含双 dtype），其中 6 个自动 split 配置参与平均，另 6 个原生 FD 单/显式 split 配置按既有边界单列。配置及入口/R 等权，门槛 ≤1；全部单例、分段、wall/kernel 样本和 native 分派保存在各组 `public-profile/`。
 
 | 布局 | 平均耗时比 FA3/CANN | 配置退化 | 分段退化 | kernel-only 退化（含单列项） |
 | --- | --- | --- | --- | --- |
-| 混合 | 0.722767 | 0/6 | 3 | 12/12 |
-| TND 受影响路径 | 0.746656 | 0/6 | 0 | 12/12 |
-| BSND 受影响路径 | 0.957891 | 0/6 | 14 | 12/12 |
+| BSND PA | 0.778481 | 0/6 | 9 | 12/12 |
+| 非 PA BSND | 0.948506 | 0/6 | 14 | 12/12 |
+| TND | 0.744971 | 0/6 | 0 | 12/12 |
+| 混合 | 0.728750 | 0/6 | 4 | 12/12 |
 
-| 分段均比 | 混合 R=1 / R=4 | BSND R=1 / R=4 |
+| PA 分段 | R=1 | R=4 |
 | --- | --- | --- |
-| 显式复用 | 0.913307 / 0.511874 | 0.988472 / 0.735452 |
-| 生成后调用 | 0.759579 / 0.557634 | 0.962632 / 0.798898 |
-| 隐式生成 | 0.994772 / 0.599435 | 1.253239 / 0.838283 |
-| func | 不适用 | 1.279030 / 0.916650 |
+| 显式复用 | 1.009813 | 0.531630 |
+| 生成后调用 | 0.807560 | 0.585231 |
+| 隐式生成 | 1.113886 | 0.622766 |
 
-TND varlen 的 R=1/4 为 0.762468/0.730844。kernel-only 全部慢于原生，原始样本完整保留；验收按约定的平均公开 E2E。采样固定 CPU 0、卡 6，预热与 5×20 wall、5×10 kernel 次数和同步边界不变；native 混合 KV gather 位于逐次计时内。
+kernel-only 仍全部慢于原生，原始结果完整保留；验收按约定的平均公开 E2E。采样固定 CPU 0、卡 6，预热、5×20 wall、5×10 kernel 与同步边界不变；native 必需的 Q/K/V/页表 packing 位于逐次计时内。
 
-最终 profile-check 命中 reference 2 次，混合性能命中 7 次并首次计算 5 项，TND/BSND 性能各命中 12 次，累计 E2E/ordinary 命中 558/31 次。没有为自检或重跑重复计算相同 reference。
+### 失败修正与恢复
 
-### 修正与复现
+首次完整 PA 平均 1.076908 未过门槛，证据为 `acceptance-final/attempt-1792110624392155150`；驱动当时停止，未把失败记作通过。优化仅为 PA 复用既有 TND 的设备统一初始化与按行并行归并，原输入与门槛未变。随后 profile-check 发现解析器仅允许 TND 初始化，修正为同时核对 PA，并新增双 dtype 的缺失/重复/顺序/dtype/非 PA 拒绝检查，保留完整初始化计时；最终性能均实际重跑。
 
-`cpu` 的窄化编译错误、`public` 的 metadata adapter 缺少内部默认参数已修正。`cpu-fixed` 在 sandbox 下 LeakSanitizer 因进程环境受限退出，改在主机环境实跑并通过，未把异常退出计为通过。新增物理 Sk=0 边界及修正接口/用例说明后，旧源码身份的结果不再用于最终闭环；`acceptance` 在性能采样期间主动停止，最终全部检查在 `acceptance-final` 重跑，缓存 reference 仍复用。一次 collect 期间说明变化被驱动拒绝，修正后已完整收集。
-
-最终 dry-run/collect 见 `final-dry-run.log`、`collect-final/summary.json`；本轮未使用截断或随机采样。文档与相关契约、链接、表格已核对，结果见 `doc-links.json`；实现预检与完整 staged 质量检查见 `quality-code-final.log`、`quality-final.log`。所有产物及原始失败/中断记录均留在仓库外。
+开发期 native 配方缺少 BSND PA key、诊断数量夹具和旧能力拒绝断言均已修正。沙箱设备不可见的收集、源码变化导致失效的 sanitizer、等待集合收集时中断的代表检查均保留原始记录，未计通过。固定 CANN 源仓和 CATLASS 未修改。构建中间产物、数学缓存与验收原始数据在仓库外，`build/` 仅有无头循环日志。
 
 ```bash
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
-export MLA_NATIVE_ROOT=/tmp/mla-m12a/native
-python3 -m tests.mla --suite \
-  prefill-mixed-tools unit-prefill_mixed prefill-mixed-sanitize \
-  unit-prefill_tnd prefill-tnd-sanitize unit-prefill_bsnd prefill-bsnd-sanitize \
-  prefill-mixed-check prefill-mixed-public prefill-mixed-profile-check e2e ordinary \
-  prefill-mixed-profile prefill-tnd-profile prefill-bsnd-profile prefill-mixed-trap \
-  --device 6 --output /tmp/mla-m12b/acceptance-final
+export MLA_NATIVE_ROOT=/tmp/mla-m13a/native
+python3 -m tests.mla --suite prefill-paged-bsnd-tools unit-prefill_paged_bsnd prefill-paged-bsnd-sanitize --output /tmp/mla-m13a/cpu-optimized
+python3 -m tests.mla --suite prefill-paged-bsnd-check prefill-paged-bsnd-profile-check prefill-paged-bsnd-public e2e ordinary prefill-paged-bsnd-profile prefill-bsnd-profile prefill-tnd-profile prefill-mixed-profile prefill-paged-bsnd-trap --resume --output /tmp/mla-m13a/optimized
 ```
 
-## 环境与产物
-
-卡 6 为 Ascend910B3、20 AIC；Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1，CANN `/usr/local/Ascend/cann-9.0.0-beta.2`。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`，固定 CANN 源 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，FA3 `d15f1531a460ba456f41b01a774f33ab2db8febf`；CANN 源只读，CATLASS 未修改。
-
-实际扩展为仓库 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `799bd5d56298bd1865202f972e5c198754c250d064acbf1f4dfd4aa273fdc788`；最终 runtime 位于上述 attempt 的 `runtime.json`。独立准备 561.7 s 后，统一驱动因 visible-device 环境身份不同完整重建 545.6 s；最终准备校验复用 1.4 s。生产 manifest 在工作根 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/prepare.json`；构建/reference 在该 artifacts 目录，数值 probe 在工作根 `prefill-probes/`，`build/` 只保留无头日志/状态。
-
-native 包复用 `/tmp/mla-m12a/native/opp/vendors/mla_ca18aee_transformer`，已含通用 TND template 3/4 keys，混合预检查双 dtype 实测 template 3。这些 `/tmp` 原始证据被清理后不得继续继承。当前闭环提交由 `git log -1 -- docs/mla/status.md` 定位。
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`；卡 6 Ascend910B3、20 AIC。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`，固定 CANN `ca18aee610729ca5270a44e2d84c751bc687fbf0`。实际加载本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `2875a1bba07f77ece050eb359ce3c8f3196920a31c3dd16cda2497ef12d4b72c`；构建 manifest 在 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/prepare.json`。质量检查 `env PYTHONPATH=/tmp/mla-m10c8a/quality ci/code_quality.sh --staged` 通过，日志 `quality-final.log`；`git diff --check` 及本次改动的 23 个文档链接检查通过，见 `doc-links.json`。本轮仅提交一次，随后停止；当前闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。

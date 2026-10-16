@@ -76,11 +76,12 @@ bool ValidPage(const MlaPagedCacheLayout& layout, int32_t page)
 } // namespace
 
 MlaLayoutStatus BuildPagedCacheLayout(const MlaPageTableView& table, const MlaBsndTensorView& k,
-                                      const MlaBsndTensorView& v, MlaPagedCacheLayout& output)
+                                      const MlaBsndTensorView& v, MlaPagedCacheLayout& output, bool prefill)
 {
     if (k.sizes[0] < 0 || uint64_t(k.sizes[0]) > uint64_t(INT32_MAX) + 1 || k.sizes[1] < 16 || k.sizes[1] > 1024 ||
-        k.sizes[1] % 16 != 0 || k.sizes[2] != 1 || k.sizes[3] != 64 || v.sizes[0] != k.sizes[0] ||
-        v.sizes[1] != k.sizes[1] || v.sizes[2] != 1 || v.sizes[3] != 512) {
+        k.sizes[1] % 16 != 0 || (prefill ? k.sizes[2] <= 0 : k.sizes[2] != 1) || k.sizes[3] != (prefill ? 192 : 64) ||
+        v.sizes[0] != k.sizes[0] || v.sizes[1] != k.sizes[1] || v.sizes[2] != k.sizes[2] ||
+        v.sizes[3] != (prefill ? 128 : 512)) {
         return MlaLayoutStatus::InvalidShape;
     }
     MlaPagedCacheLayout layout{};

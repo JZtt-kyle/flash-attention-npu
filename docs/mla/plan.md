@@ -1,15 +1,16 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**M10 的五种 512+64 布局及阶段收尾、M11 的 192/128 BSND、M12 的紧凑 TND 与混合布局已完成。** 当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
+本页只记录实施顺序、产物和完成条件。**M10 的五种 512+64 布局及阶段收尾、M11 的 192/128 BSND、M12 的紧凑 TND 与混合布局、M13a 的 BSND PA 已完成。** 当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
 
-## 唯一下一步 M13a
+## 唯一下一步 M13b
 
-一次接通 192/128 的 BSND Q + ND PA KV 完整公开行为，复用 [M11 数值组件](design.md#651-192128-通用非量化数值组件)、现有 PA 地址/Copy、调度校验与 prefill 生产入口。M12b 已闭环；下一轮只推进 M13a，不开始 TND PA。
+一次接通 192/128 的 TND Q + ND PA KV 完整公开行为，复用 M12a 的 Q allocation/used、M13a 的 PA 地址/Copy、既有通用数值与原生调度。M13a 已闭环；下一轮只推进 M13b，不提前开始 M14 阶段收尾。
 
-- 产物：同一提交完成 BSND PA 的 host、AICPU、Kernel、metadata、公开 real/fake/compile；支持 qv=None、独立 K/V、GQA、合法页大小、页表/used、空值和完整 storage/stride，返回 O/LSE 与真实 FP32 accumulator。无 mask、causal、window 和自动/1/显式 split 随布局接入。
-- 接口与影响：沿用固定 FA3 的 page_table/cache/metadata 契约，明确逻辑页、物理页、KV head、192/128 分量与输出/归并地址。优先复用既有 PA 校验、源算法和数值组件；记录扩展须说明现有格式不能表达的语义或安全边界。只有新增数值算法或共享协议有独立未覆盖风险时才写明风险、独立产物及完成条件后拆步，不按层或开关拆轮。
-- 实施前准备：在本节补齐具体代码路径及共享头文件、地址、发射、构建影响，列出新增模块准确的必跑组/命令、选择依据与可继承 E2E 的依赖。新增 CPU 固定源差分/边界/sanitizer、双 dtype 数值及 real/fake/compile、页大小/stride/长度/空值/复用/生命周期/Trap，登记自己的日常 E2E；回归以累计小输入清单为主，不累计无关历史单元。
-- 长测门槛：统一驱动先 dry-run/collect；先检查工具与廉价夹具，核对并准备通用 prefill PA 所需 native keys，不能仅凭现有 TND 包存在而开始采样。再跑代表及最大成本边界，固定实现后运行新行为和实际受影响路径的 correctness、普通回归与公开平均性能；相同 reference 使用内容缓存，输入、R、阈值及计时边界不变。
+- 产物：同一提交完成 TND PA 的 host、AICPU、Kernel、metadata、公开 real/fake/compile；支持 qv=None、独立 K/V、GQA、合法 P、Q allocation/used、页表/cache used、空值及完整 storage/stride，返回 O/LSE 与真实 FP32 accumulator。无 mask、causal、window 和自动/1/显式 split 随布局接入。
+- 接口与影响：沿用固定 FA3 的 TND query、page_table/cache/metadata 契约，明确 Q allocation 起点、逻辑/物理页、KV head 与 TND 输出/归并地址。优先复用 `mla_prefill_bsnd_metadata`、consumer、launch、`mla_forward`、`flash_api.cpp` 与 Python 分派，以及既有 PA Copy、统一初始化和按行归并；若扩展记录，说明既有格式无法表达的 allocation/页大小身份。不得按实现层、mask 或 split 开关拆轮。
+- 实施前准备：在本节补齐具体修改文件及共享头、地址、发射、构建影响，列出新模块准确必跑组/命令、选择依据和可继承 E2E 的依赖。新增 CPU 固定源差分/边界/sanitizer、双 dtype 数值和 real/fake/compile、页大小/Q allocation/stride/长度/空值/复用/生命周期/Trap，登记自己的小输入日常 E2E；回归运行累计清单，不累计历史单元。
+- 长测门槛：统一驱动先 dry-run/collect；先完成工具与廉价夹具检查，核对并准备通用 TND PA 的 native keys，不能仅凭 M13a 包存在开始采样。再跑代表及相关最大成本边界，固定实现后执行新行为和实际受影响路径的 correctness、普通回归及公开平均性能；共享 reference 使用内容缓存，输入、R、阈值和计时边界不变。
+- 证据继承：从本轮 status 的 summary、用例清单及依赖/构建 manifest 复核；仅依赖未变且原始证据完整的 E2E 正确性可继承，单元及性能实际执行。生产构建或共享源码改变后重跑受影响集合，不把旧无 mask 检查视为 TND PA 的新增能力验收。
 - 完成条件：完整可调用行为及必要验证闭环，原始证据、依赖/构建和实际加载有效，相关文档与质量检查通过，提交一次后停止；验证受限或失败时如实更新 status，不提交为已闭环。
 
 ## 后续里程碑：M13–M17
@@ -18,7 +19,7 @@
 
 | 里程碑 | 剩余产物与边界 | 完成条件 |
 | --- | --- | --- |
-| M13：prefill PA | M13a BSND PA，M13b TND PA；各一次接通页访问、metadata、三 mask、自动/1/显式 split 和公开行为 | 合法 P 代表边界、独立 K/V 与内容/RoPE stride、长度/空值/复用/生命周期、数值及 PA 公开 E2E/性能 |
+| M13：prefill PA | M13a BSND PA 已完成；剩余 M13b TND PA 一次接通页访问、metadata、三 mask、自动/1/显式 split 和公开行为 | 合法 P 代表边界、独立 K/V 与内容/RoPE stride、长度/空值/复用/生命周期、数值及 PA 公开 E2E/性能 |
 | M14：prefill 组合收尾 | 核对 M11–M13 的必迁组合、补明确缺口并完成阶段验收；不再按 mask × split × 布局重复开接入轮 | 前序入口已实测必要组合；新发现的算法缺口按风险单列，已有有效 E2E 按规则继承，阶段性能实际执行 |
 | M15：softcap/调度选项 | softcap 数学独立闭环；pack_gqa、sm_margin 按共享调度影响划分 | 有效数学/调度语义、资源校验及适用 E2E，不能忽略参数 |
 | M16：图执行 | 固定输入重放与图内长度更新/metadata 重生成分别闭环 | eager/图一致、跨层复用、多 stream 与 fake/真实输出一致 |
@@ -39,6 +40,7 @@
 | M11b | 完整 BSND prefill host/AICPU/Kernel/v27/real/fake/compile，三 mask、自动/1/显式 split、真实 accumulator、公开 E2E 与性能闭环 |
 | M12a | 完整紧凑 TND prefill host/AICPU/Kernel/v28/real/fake/compile，allocation/used、GQA/stride、三 mask、自动/1/显式 split、真实 accumulator、公开 E2E 与性能闭环 |
 | M12b | 完整 TND Q + BSND cache prefill host/AICPU/Kernel/v29/real/fake/compile，Q allocation、独立 KV stride/used、三 mask、自动/1/显式 split、真实 accumulator、公开 metadata 复用及 E2E/性能闭环；M12 完成 |
+| M13a | 完整 BSND Q + ND PA KV prefill host/AICPU/Kernel/v30/real/fake/compile，独立 K/V 与 GQA、页大小/stride/used、三 mask、自动/1/显式 split、真实 accumulator、公开 E2E/性能与隔离 Trap 闭环 |
 | 工具整理、R1、R2 | 统一验收与缓存/证据管理、模块归属与共享 helper、共用前向分派、文档轮和无头交接；原 R3 的内核可读性核对合入 R2 |
 
 ```bash

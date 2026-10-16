@@ -12,12 +12,12 @@
 
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
-template <typename InputT, bool Brc, bool Partial>
+template <typename InputT, bool Brc, bool Partial, bool Paged = false>
 class MlaPrefill {
   public:
     __aicore__ inline void Run(const MlaPrefillParams& p, const MlaPrefillTask& t, uint32_t core, GM_ADDR q, GM_ADDR k,
                                GM_ADDR v, GM_ADDR out, GM_ADDR lse, GM_ADDR workspace, GM_ADDR partial, GM_ADDR sums,
-                               GM_ADDR maxima, TPipe* pipe)
+                               GM_ADDR maxima, TPipe* pipe, const MlaPagedCacheInputs* cache = nullptr)
     {
         if (t.begin == t.end) {
             if ASCEND_IS_AIV {
@@ -33,7 +33,7 @@ class MlaPrefill {
         pv.SetGlobalBuffer((__gm__ float*)(workspace + p.cores * 2 * r1 * 6 + core * 2 * r2 * 4));
         previous.SetGlobalBuffer((__gm__ float*)(workspace + p.cores * (2 * r1 * 6 + 2 * r2 * 4) + core * 2 * r2 * 4));
         if ASCEND_IS_AIC {
-            cube.Init(p, pipe, q, k, v);
+            cube.Init(p, pipe, q, k, v, cache);
             cube.InitMm1GlobalTensor(qk);
             cube.InitMm2GlobalTensor(prob, pv);
             cube.AllocEventID();
@@ -122,7 +122,7 @@ class MlaPrefill {
         SetFlag<HardEvent::MTE3_V>(0);
         WaitFlag<HardEvent::MTE3_V>(0);
     }
-    Block::MlaPrefillCube<InputT> cube;
+    Block::MlaPrefillCube<InputT, Paged> cube;
     Block::MlaPrefillVector<InputT, Brc, Partial> vector;
 };
 } // namespace flash_attn::mla::Kernel

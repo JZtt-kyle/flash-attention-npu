@@ -14,8 +14,10 @@ namespace flash_attn::mla {
 constexpr uint32_t kMlaPrefillBsndVersion = 27;
 constexpr uint32_t kMlaPrefillTndVersion = 28;
 constexpr uint32_t kMlaPrefillMixedVersion = 29;
+constexpr uint32_t kMlaPrefillPagedBsndVersion = 30;
 // v27 has 20 header words and B pairs of effective lengths; v28 has 24 header
-// words and B allocation/used spans. Both retain the 346-word native partition
+// words and B allocation/used spans. v29 shares those spans; v30 has a 24-word
+// header and B effective-length pairs. All retain the 346-word native partition
 // tail and B*Hkv+1 uint64 M prefixes, without device addresses.
 struct MlaPrefillBsndContext {
     uint32_t batch, sq, sk, heads, kvHeads, splits, dtype, cores, usedFlags;
@@ -24,6 +26,8 @@ struct MlaPrefillBsndContext {
     // Layout: 0 = v27 BSND, 1 = v28 TND, 2 = v29 TND Q / BSND KV.
     // v29 retains v28 spans, but KV spans describe rectangular cache slots.
     uint32_t tnd = 0, totalQ = 0, totalK = 0;
+    // v30: BSND Q and independent 192/128 ND paged KV. No addresses in the record.
+    uint32_t pageSize = 0;
 };
 struct MlaPrefillBsndLayout {
     uint32_t words, m, n, capacity;
@@ -31,7 +35,7 @@ struct MlaPrefillBsndLayout {
 };
 MLA_PREFILL_INLINE uint32_t PrefillSequenceWord(const MlaPrefillBsndContext& c, uint32_t b)
 {
-    return c.tnd ? 24 + 8 * b : 20 + 2 * b;
+    return c.tnd ? 24 + 8 * b : (c.pageSize ? 24 : 20) + 2 * b;
 }
 MLA_PREFILL_INLINE uint32_t PrefillLengthWord(const MlaPrefillBsndContext& c, uint32_t b)
 {
@@ -44,6 +48,7 @@ MLA_PREFILL_INLINE uint32_t PrefillTailWord(const MlaPrefillBsndContext& c)
 MLA_PREFILL_INLINE bool PrefillBsndLayout(const MlaPrefillBsndContext& c, MlaPrefillBsndLayout& out)
 {
     if (!c.heads || !c.kvHeads || c.heads % c.kvHeads || c.splits > 256 || !c.cores || c.cores > 26 || c.tnd > 2 ||
+        (c.pageSize && (c.tnd || c.pageSize < 16 || c.pageSize > 1024 || c.pageSize % 16 || c.sk % c.pageSize)) ||
         c.totalQ > INT32_MAX || c.totalK > INT32_MAX || (c.tnd && uint64_t(c.totalQ) * c.heads > kMlaMaxBatchRows) ||
         ((!c.tnd && c.totalQ) || (c.tnd != 1 && c.totalK)) || c.usedFlags > 3 || c.window.kind > 2 ||
         c.window.left < -1 || c.window.right < -1 || c.window.left > INT32_MAX || c.window.right > INT32_MAX ||
@@ -56,10 +61,12 @@ MLA_PREFILL_INLINE bool PrefillBsndLayout(const MlaPrefillBsndContext& c, MlaPre
     const uint32_t g = c.heads / c.kvHeads;
     MlaPrefillBsndLayout r{};
     r.words = PrefillTailWord(c) + 348 + 2 * c.batch * c.kvHeads;
-    // Exact non-PA BSND/TND CalcInnerSize/CalcMBaseSize rules from fixed CANN.
+    // Exact CalcInnerSize/CalcMBaseSize rules from fixed CANN, including PA alignment.
     r.n = !c.tnd && c.sq <= 16 ? (g < 5 ? 8192 : g < 10 ? 4096 : 2048) : 512;
     if (c.window.kind && r.n > 1024)
         r.n = 1024;
+    if (c.pageSize && r.n > c.pageSize && r.n % c.pageSize)
+        r.n = r.n / c.pageSize * c.pageSize;
     if (r.n > c.sk)
         r.n = c.sk;
     if (!r.n)

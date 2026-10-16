@@ -198,7 +198,7 @@ std::vector<at::Tensor> mha_fwd(
             return flash_attn::mla::PrefillBsndForward(q, k, v, scale, num_splits, window_size_left, window_size_right,
                                                        is_causal, seqused_q_, seqused_k_, scheduler_metadata_,
                                                        cu_seqlens_q_, cu_seqlens_k_, max_seqlen_q_.value_or(0),
-                                                       max_seqlen_k_.value_or(0));
+                                                       max_seqlen_k_.value_or(0), page_table_);
         }
         if (num_splits != 1) {
             if (page_table_) {
@@ -855,14 +855,15 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                     "legacy numerical options");
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
         if (headdim == 192) {
-            TORCH_CHECK(!page_size, "MLA prefill metadata is not implemented yet for PA");
+            TORCH_CHECK(!page_size || *page_size != 0, "MLA: prefill page_size must be nonzero");
+            TORCH_CHECK(!page_size || !cu_seqlens_q, "MLA prefill metadata is not implemented yet for TND PA");
             if (cu_seqlens_q)
                 return flash_attn::mla::PrefillMixedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q,
                                                                num_heads_kv, dtype, cache_seqlens, *cu_seqlens_q,
                                                                num_splits, window_size_left, window_size_right, causal);
-            return flash_attn::mla::PrefillBsndMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q,
-                                                          num_heads_kv, dtype, cache_seqlens, num_splits,
-                                                          window_size_left, window_size_right, causal);
+            return flash_attn::mla::PrefillBsndMetadataOp(
+                batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, dtype, cache_seqlens, num_splits,
+                window_size_left, window_size_right, causal, page_size.value_or(0));
         }
         if (num_splits != 1) {
             if (page_size) {

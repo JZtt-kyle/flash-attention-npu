@@ -120,6 +120,19 @@ def daily_suites():
         f"tests/mla/e2e/prefill_tnd/test_public.py::{name}"
         for name in ("test_daily", "test_empty", "test_fake", "test_compile")
     ]
+    suites["prefill_paged_bsnd"] = [
+        f"tests/mla/e2e/prefill_paged_bsnd/test_public.py::{name}"
+        for name in (
+            "test_daily",
+            "test_empty",
+            "test_fake",
+            "test_compile",
+            "test_default_and_integer_lengths",
+            "test_content_scale_page_and_stride_reuse",
+            "test_q_used_and_broadcast",
+            "test_lifetime",
+        )
+    ]
     suites["prefill_mixed"] = [
         f"tests/mla/e2e/prefill_mixed/test_public.py::{name}"
         for name in ("test_daily", "test_empty", "test_fake", "test_compile")

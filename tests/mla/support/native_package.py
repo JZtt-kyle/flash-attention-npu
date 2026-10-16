@@ -41,6 +41,12 @@ LAYOUT_KEYS = (
     105000000010200002,
     103000000030000003,
     104000000030000003,
+    # Generic BSND PA: query/KV layout digit 1, PA bit 2, BRC bit 4.
+    # The generated +100000 variants set the native FD bit, independent of mask.
+    103000000010200001,
+    104000000010200001,
+    103000000010600001,
+    104000000010600001,
 )
 # FIA's empty-KV template uses the same key for both output dtypes; the MLA
 # dtype offset does not apply (arch22/fia_tiling_empty_tensor.cpp).

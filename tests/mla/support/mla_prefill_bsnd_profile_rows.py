@@ -32,16 +32,18 @@ def partition_kernels(rows, labels, specs, dtype):
             ):
                 raise ValueError("Missing prefill attention/merge phase")
             initializers = [r for r in group if "MlaPrefillTnd" in r["Name"]]
-            if "q" in specs[label["case"]]:
+            # PA reuses the validated TND initializer; keep the original
+            # nonpaged BSND phase contract and account for the whole launch.
+            if "q" in specs[label["case"]] or "page" in specs[label["case"]]:
                 expected = prefix.replace("Bsnd", "Tnd") + "Init"
                 if (
                     len(initializers) != 1
                     or expected not in initializers[0]["Name"]
                     or group.index(initializers[0]) >= group.index(kernels[0])
                 ):
-                    raise ValueError("Missing or invalid TND initialization phase")
+                    raise ValueError("Missing or invalid device initialization phase")
             elif initializers:
-                raise ValueError("Unexpected TND initialization in BSND")
+                raise ValueError("Unexpected device initialization in nonpaged BSND")
         else:
             kernels = [group[-1]]
         if any("ComputeMla" in row["Name"] for row in group):

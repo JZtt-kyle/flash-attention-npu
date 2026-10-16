@@ -75,3 +75,23 @@ def compile_drivers(directory):
         + "\n"
     )
     return binaries
+
+
+def compile_paged_layout(directory):
+    """Use this module's compiler/sanitizer flags for the independent PA view harness."""
+    command = json.loads((directory / "prefill-command.json").read_text())
+    begin = next(
+        i for i, word in enumerate(command) if word.endswith("mla_prefill_bsnd_metadata.cpp")
+    )
+    command = command[:begin] + [
+        str(MLA / "mla_paged_layout.cpp"),
+        str(MLA / "mla_bsnd_layout.cpp"),
+        str(ROOT / "tests/mla/support/mla_prefill_paged_layout_driver.cpp"),
+        "-o",
+        str(directory / "paged-layout"),
+    ]
+    (directory / "paged-layout-command.json").write_text(json.dumps(command, indent=2) + "\n")
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    (directory / "paged-layout-compile.log").write_text(result.stdout + result.stderr)
+    result.check_returncode()
+    return directory / "paged-layout"

@@ -4,6 +4,7 @@
 #include "mla_prefill_bsnd_metadata.h"
 #include "mla_auto_split_bsnd_consumer.h"
 #include "mla_split_bsnd_consumer.h"
+#include "mla_paged_metadata_consumer.h"
 #if defined(__NPU_ARCH__)
 #define MLA_PREFILL_INLINE __aicore__ inline
 #else
@@ -52,7 +53,7 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
     MlaPrefillBsndLayout l{};
     if (!PrefillBsndLayout(c, l) || words != l.words)
         return S::InvalidBuffer;
-    const uint32_t version = c.tnd == 2 ? 29 : c.tnd ? 28 : 27;
+    const uint32_t version = c.pageSize ? 30 : c.tnd == 2 ? 29 : c.tnd ? 28 : 27;
     const auto status = ReadMetadataHeader(PrefillHeaderView<Reader>{read}, words, l.words, version, version, c.dtype);
     if (status != S::Success)
         return status;
@@ -75,6 +76,8 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
             return S::ShapeMismatch;
     if (c.workspaceBytes < l.bytes)
         return S::InvalidWorkspace;
+    if (c.pageSize && (read(20) != c.pageSize || read(21) || read(22) || read(23)))
+        return S::ShapeMismatch;
     if (c.tnd) {
         if (read(20) != c.totalQ || read(21) != c.totalK || read(22) || read(23))
             return S::ShapeMismatch;
@@ -95,7 +98,7 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
         for (uint32_t b = 0; b < c.batch; ++b) {
             const uint32_t q = c.usedFlags & 1 ? arrays(0, b) : c.sq;
             const uint32_t k = c.usedFlags & 2 ? arrays(1, b) : c.sk;
-            if (q > c.sq || k > c.sk || read(20 + 2 * b) != q || read(21 + 2 * b) != k)
+            if (q > c.sq || k > c.sk || read(PrefillLengthWord(c, b)) != q || read(PrefillLengthWord(c, b) + 1) != k)
                 return S::InvalidUsedLengths;
         }
     const uint32_t tail = PrefillTailWord(c);
@@ -119,6 +122,35 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
     context.kv.maxLength = c.sk;
     return ReadAutoSplitPartitions<false, false, true>(PrefillPartitionView<Reader>{read, c}, context, c.window, used,
                                                        output);
+}
+// Page IDs are invocation data: validate every effective page, including
+// batches with no Q work, before any output write or synchronization.
+template <typename Reader, typename Pages>
+MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillPagedCache(const Reader& read, const MlaPrefillBsndContext& c,
+                                                               const MlaPagedCacheInputs& cache, const Pages& pages)
+{
+    using S = MlaMetadataReadStatus;
+    if (!c.pageSize)
+        return S::ShapeMismatch;
+    MlaPagedMetadataContext geometry{};
+    geometry.batch = c.batch;
+    geometry.pageSize = c.pageSize;
+    geometry.logicalKvCapacity = c.sk;
+    const auto status = CheckPagedCacheDescriptor(geometry, cache, c.kvHeads, 192, 128);
+    if (status != S::Success)
+        return status;
+    for (uint32_t b = 0; b < c.batch; ++b) {
+        const uint32_t length = read(PrefillLengthWord(c, b) + 1);
+        if (length > c.sk)
+            return S::InvalidCacheLengths;
+        const uint32_t count = (length + c.pageSize - 1) / c.pageSize;
+        for (uint32_t i = 0; i < count; ++i) {
+            const int32_t id = int32_t(pages(uint64_t(b) * cache.layout.tableRowStride + i));
+            if (id < 0 || uint64_t(id) >= cache.layout.physicalPages)
+                return S::InvalidPageTable;
+        }
+    }
+    return S::Success;
 }
 template <typename Reader>
 MLA_PREFILL_INLINE bool PrefillBsndTask(const Reader& read, const MlaPrefillBsndContext& c,

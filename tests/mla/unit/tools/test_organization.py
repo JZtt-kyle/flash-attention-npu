@@ -75,13 +75,14 @@ def test_e2e_budget_covers_modules_and_dtypes_without_performance():
         for i in range(30)
     ]
     assert select_e2e_nodeids(nodes) == nodes
-    chosen = select_e2e_nodeids(nodes, 60)
-    assert len(chosen) == 60 == len(set(chosen))
+    diagnostic_limit = 2 * len(E2E)
+    chosen = select_e2e_nodeids(nodes, diagnostic_limit)
+    assert len(chosen) == diagnostic_limit == len(set(chosen))
     assert {n.split("/")[3] for n in chosen} == set(E2E)
     for module in E2E:
         for dtype in ("fp16", "bf16"):
             assert any(f"/{module}/" in n and dtype in n for n in chosen)
-    assert set(select_e2e_nodeids(list(reversed(nodes)), 60)) == set(chosen)
+    assert set(select_e2e_nodeids(list(reversed(nodes)), diagnostic_limit)) == set(chosen)
     assert all(not p.endswith("_profile.py") for p in combined(E2E, E2E))
     modules = list(E2E)
     assert combined(modules + modules, E2E) == combined(modules, E2E)

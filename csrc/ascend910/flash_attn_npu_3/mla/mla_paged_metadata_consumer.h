@@ -40,18 +40,22 @@ MLA_PAGED_INLINE bool ValidPagedMetadataAddress(uint64_t address, uint64_t count
 }
 
 // Validate the full physical view, including pages unused by this invocation.
-// Hkv=1, so headStride never contributes; singleton/empty strides stay unused.
+// Default Hkv=1 preserves compressed MLA; prefill passes its actual KV heads.
+// Singleton/empty strides stay unused.
 MLA_PAGED_INLINE bool ValidPagedCacheTensor(const MlaBsndTensorLayout& x, const MlaPagedMetadataArray& buffer,
-                                            uint64_t pages, uint64_t pageSize, uint64_t dim)
+                                            uint64_t pages, uint64_t pageSize, uint64_t dim, uint64_t heads = 1)
 {
-    if (x.batchStride > INT64_MAX || x.rowStride > INT64_MAX || x.headStride > INT64_MAX ||
+    if (!heads || !pageSize || x.batchStride > INT64_MAX || x.rowStride > INT64_MAX || x.headStride > INT64_MAX ||
         !ValidPagedMetadataAddress(buffer.address, buffer.count, 2)) {
         return false;
     }
     uint64_t span = 0;
     if (pages != 0) {
         constexpr uint64_t maxElements = INT64_MAX / 2;
-        if (x.rowStride > (maxElements - dim) / (pageSize - 1)) {
+        if (heads > 1 && x.headStride > (maxElements - dim) / (heads - 1))
+            return false;
+        dim += (heads - 1) * x.headStride;
+        if (pageSize > 1 && x.rowStride > (maxElements - dim) / (pageSize - 1)) {
             return false;
         }
         span = dim + (pageSize - 1) * x.rowStride;
@@ -64,11 +68,12 @@ MLA_PAGED_INLINE bool ValidPagedCacheTensor(const MlaBsndTensorLayout& x, const 
 }
 
 MLA_PAGED_INLINE MlaMetadataReadStatus CheckPagedCacheDescriptor(const MlaPagedMetadataContext& c,
-                                                                 const MlaPagedCacheInputs& input)
+                                                                 const MlaPagedCacheInputs& input, uint64_t heads = 1,
+                                                                 uint64_t keyDim = 64, uint64_t valueDim = 512)
 {
     using Status = MlaMetadataReadStatus;
     const auto& p = input.layout;
-    if (p.batchSize != c.batch || p.pageSize != c.pageSize || p.logicalCapacity != c.logicalKvCapacity ||
+    if (!c.pageSize || p.batchSize != c.batch || p.pageSize != c.pageSize || p.logicalCapacity != c.logicalKvCapacity ||
         p.maxPages != c.logicalKvCapacity / c.pageSize || p.physicalPages > uint64_t(INT32_MAX) + 1) {
         return Status::ShapeMismatch;
     }
@@ -86,8 +91,8 @@ MLA_PAGED_INLINE MlaMetadataReadStatus CheckPagedCacheDescriptor(const MlaPagedM
     if (p.tableSpanElements != span || input.table.count < span) {
         return Status::InvalidPageTable;
     }
-    if (!ValidPagedCacheTensor(p.k, input.k, p.physicalPages, p.pageSize, 64) ||
-        !ValidPagedCacheTensor(p.v, input.v, p.physicalPages, p.pageSize, 512)) {
+    if (!ValidPagedCacheTensor(p.k, input.k, p.physicalPages, p.pageSize, keyDim, heads) ||
+        !ValidPagedCacheTensor(p.v, input.v, p.physicalPages, p.pageSize, valueDim, heads)) {
         return Status::InvalidBuffer;
     }
     return Status::Success;

@@ -33,7 +33,7 @@ def test_mla_supported_subset_and_rejections(entry, representation, layout, dtyp
             assert args[name].stride(-1) == 1
             assert not args[name].is_contiguous()
             assert args[name].storage_offset() > 0
-    if representation == "compressed" or layout in ("dense", "tnd"):
+    if representation == "compressed" or layout in ("dense", "tnd", "paged"):
         out, lse, *_ = _forward(entry, args)
         assert out.shape == (*args["q"].shape[:-1], args["v"].shape[-1]) and out.dtype == dtype
         assert (

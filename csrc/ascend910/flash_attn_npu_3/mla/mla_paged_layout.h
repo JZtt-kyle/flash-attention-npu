@@ -33,7 +33,7 @@ struct MlaPagedCacheLayout {
 // Callers separately validate Q/qv with BuildBsnd/BuildTndTensorLayout, dtype,
 // device and sequence geometry. Failure leaves output unchanged.
 MlaLayoutStatus BuildPagedCacheLayout(const MlaPageTableView& table, const MlaBsndTensorView& k,
-                                      const MlaBsndTensorView& v, MlaPagedCacheLayout& output);
+                                      const MlaBsndTensorView& v, MlaPagedCacheLayout& output, bool prefill = false);
 
 enum class MlaPagedStatus {
     Success,

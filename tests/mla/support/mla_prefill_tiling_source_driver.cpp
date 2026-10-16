@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iostream>
+#include <cstring>
 #define OP_LOGI(...) ((void)0)
 constexpr uint32_t S1_SIZE_16 = 16, MAX_SPLIT_SIZE = 8192, BYTE_BLOCK = 32;
 constexpr uint32_t S_INNER_SIZE_512 = 512, S_INNER_SIZE_1024 = 1024;
@@ -34,14 +35,18 @@ struct FiaTilingNonQuant {
     void CalcMBaseSize();
 };
 #include "generic_tiling.inc"
-int main(int argc, char**)
+int main(int argc, char** argv)
 {
     Info info;
-    if (argc > 1)
+    const bool paged = argc > 1 && std::strcmp(argv[1], "--paged") == 0;
+    if (argc > 1 && !paged)
         info.inputLayout = TilingKeyLayout::TND;
     FiaTilingNonQuant tiling{&info};
     uint32_t sk, mask;
     while (std::cin >> info.s1Size >> sk >> info.gSize >> mask) {
+        if (paged)
+            std::cin >> info.blockSize;
+        info.pageAttentionFlag = paged;
         info.attenMaskFlag = mask != 0;
         info.sparseMode = mask == 1 ? 3 : mask == 2 ? 4 : 0;
         tiling.CalcInnerSize(sk);

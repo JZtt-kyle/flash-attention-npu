@@ -79,7 +79,7 @@ def compare(c, result, record):
     b, sq, h, sk, hk = c["shape"]
     g = h // hk
     r = record.cpu().tolist()
-    base = 20 + 2 * b
+    base = c.get("metadata_prefix", 20) + 2 * b
     ends = list(
         zip(
             r[base + 4 : base + 4 + r[base + 3]],
