@@ -200,8 +200,8 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         "MLA: supported representation without qv requires Dq=192 and Dv=128",
     )
     check(
-        (varlen_q or not varlen_k) and not (paged_kv and varlen_q),
-        "MLA prefill forward is not implemented yet for BSND Q with TND KV or TND paged layouts",
+        varlen_q or not varlen_k,
+        "MLA prefill forward is not implemented yet for BSND Q with TND KV",
     )
     check(paged_kv or varlen_q or q.shape[0] == k.shape[0], "MLA: dense batch sizes must match")
     check(
@@ -522,7 +522,7 @@ def _check_mla_paged_inputs(
     sequence_words = 7 if num_splits != 1 else 5
     prefill = q.shape[-1] == 192
     if prefill:
-        prefix_words, sequence_words = 372, 2 + 2 * k.shape[-2]
+        prefix_words, sequence_words = 372, (8 if tnd else 2) + 2 * k.shape[-2]
     batch, page = q.shape[0], k.shape[1]
     if tnd:
         if max_seqlen_q is None:
@@ -566,7 +566,7 @@ def _check_mla_paged_inputs(
     if prefill:
         _mla_prefill_bsnd_budget(
             batch,
-            q.shape[1],
+            max_seqlen_q if tnd else q.shape[1],
             capacity,
             q.shape[-2],
             k.shape[-2],
@@ -574,6 +574,8 @@ def _check_mla_paged_inputs(
             window_left,
             window_right,
             causal,
+            total_q=q.shape[0] if tnd else None,
+            total_k=batch * capacity if tnd else None,
             page_size=page,
         )
     elif num_splits != 1:
@@ -594,7 +596,7 @@ def _check_mla_paged_inputs(
         raise RuntimeError(
             "MLA: page_table requires nonnegative row stride and contiguous last dimension"
         )
-    if seqused_q is not None and metadata is not None:
+    if seqused_q is not None and metadata is not None and not (prefill and tnd):
         raise RuntimeError("MLA: Q-used paged metadata cannot be explicitly reused")
     if cache_seqlens is not None:
         _check_mla_cache_lengths(cache_seqlens, batch, q.device)
@@ -1446,9 +1448,7 @@ def _mla_prefill_bsnd_budget(
         or not 0 <= splits <= 256
     ):
         raise RuntimeError("MLA: prefill BSND shape/split bounds exceeded")
-    if page_size and (
-        total_q is not None or not 16 <= page_size <= 1024 or page_size % 16 or sk % page_size
-    ):
+    if page_size and (not 16 <= page_size <= 1024 or page_size % 16 or sk % page_size):
         raise RuntimeError("MLA: prefill paged capacity/page size invalid")
     words = (
         ((372 if page_size else 368) + batch * (2 + 2 * kv_heads))
@@ -1618,8 +1618,23 @@ def _mla_prefill_forward(
     page_table=None,
 ):
     if page_table is not None:
-        if cu_q is not None or cu_k is not None:
-            raise RuntimeError("MLA prefill forward is not implemented yet for TND paged layouts")
+        if cu_q is not None:
+            return torch.ops.flash_attn_npu_3._mla_prefill_mixed_forward(
+                q,
+                k,
+                v,
+                cu_q,
+                max_q,
+                splits,
+                left,
+                right,
+                causal,
+                scale,
+                used_k,
+                used_q,
+                metadata,
+                page_table,
+            )
         return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_forward(
             q, k, v, splits, left, right, causal, scale, used_k, used_q, metadata, page_table
         )
@@ -1667,6 +1682,7 @@ def _mla_prefill_mixed_metadata_fake(
     window_right=-1,
     causal=False,
     seqused_q=None,
+    page_size=0,
 ):
     if qkv_dtype not in (torch.float16, torch.bfloat16):
         raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
@@ -1685,6 +1701,7 @@ def _mla_prefill_mixed_metadata_fake(
         causal,
         total_q=0,
         total_k=0,
+        page_size=page_size,
     )
     return cache_seqlens.new_empty((words,))
 
@@ -1704,16 +1721,35 @@ def _mla_prefill_mixed_forward_fake(
     cache_seqlens=None,
     seqused_q=None,
     scheduler_metadata=None,
+    page_table=None,
 ):
-    _check_mla_inputs(q, k, v, varlen_q=True)
+    _check_mla_inputs(q, k, v, varlen_q=True, paged_kv=page_table is not None)
     if q.shape[-1] != 192 or v.shape[-1] != 128:
         raise RuntimeError("MLA: prefill requires 192/128 tensors")
-    _check_mla_mixed_inputs(q, k, cu_seqlens_q, max_seqlen_q, cache_seqlens, None, seqused_q)
+    if page_table is not None:
+        _check_mla_paged_inputs(
+            q,
+            k,
+            page_table,
+            cache_seqlens,
+            scheduler_metadata,
+            seqused_q,
+            cu_seqlens_q,
+            max_seqlen_q,
+            window_left,
+            window_right,
+            causal,
+            num_splits,
+        )
+    else:
+        _check_mla_mixed_inputs(q, k, cu_seqlens_q, max_seqlen_q, cache_seqlens, None, seqused_q)
+    batch = cu_seqlens_q.numel() - 1
+    capacity_k = k.shape[1] * (page_table.shape[1] if page_table is not None else 1)
     _check_mla_dense_options(softmax_scale=softmax_scale, num_splits=num_splits, allow_split=True)
     words = _mla_prefill_bsnd_budget(
-        k.shape[0],
+        batch,
         max_seqlen_q,
-        k.shape[1],
+        capacity_k,
         q.shape[1],
         k.shape[2],
         num_splits,
@@ -1721,7 +1757,8 @@ def _mla_prefill_mixed_forward_fake(
         window_right,
         causal,
         total_q=q.shape[0],
-        total_k=k.shape[0] * k.shape[1],
+        total_k=batch * capacity_k,
+        page_size=k.shape[1] if page_table is not None else 0,
     )
     if scheduler_metadata is not None and (
         scheduler_metadata.dtype != torch.int32
@@ -4307,8 +4344,6 @@ def _get_scheduler_metadata_fake(
             prefill=headdim == 192,
         )
         if headdim == 192:
-            if page_size is not None and cu_seqlens_q is not None:
-                raise RuntimeError("MLA prefill metadata is not implemented yet for TND PA")
             if page_size is not None and page_size == 0:
                 raise RuntimeError("MLA: prefill page_size must be 16..1024 in multiples of 16")
             if cu_seqlens_q is not None:
@@ -4325,6 +4360,8 @@ def _get_scheduler_metadata_fake(
                     window_size_left,
                     window_size_right,
                     causal,
+                    None,
+                    page_size or 0,
                 )
             return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_metadata(
                 batch_size,
@@ -4540,8 +4577,6 @@ def get_scheduler_metadata(
             prefill=headdim == 192,
         )
         if headdim == 192:
-            if page_size is not None and cu_seqlens_q is not None:
-                raise RuntimeError("MLA prefill metadata is not implemented yet for TND PA")
             if page_size is not None and page_size == 0:
                 raise RuntimeError("MLA: prefill page_size must be 16..1024 in multiples of 16")
             if cu_seqlens_q is not None:
@@ -4558,6 +4593,8 @@ def get_scheduler_metadata(
                     window_size[0],
                     window_size[1],
                     causal,
+                    None,
+                    page_size or 0,
                 )
             return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_metadata(
                 batch_size,

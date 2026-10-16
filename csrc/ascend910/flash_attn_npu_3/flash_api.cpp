@@ -856,11 +856,11 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
         if (headdim == 192) {
             TORCH_CHECK(!page_size || *page_size != 0, "MLA: prefill page_size must be nonzero");
-            TORCH_CHECK(!page_size || !cu_seqlens_q, "MLA prefill metadata is not implemented yet for TND PA");
             if (cu_seqlens_q)
                 return flash_attn::mla::PrefillMixedMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q,
                                                                num_heads_kv, dtype, cache_seqlens, *cu_seqlens_q,
-                                                               num_splits, window_size_left, window_size_right, causal);
+                                                               num_splits, window_size_left, window_size_right, causal,
+                                                               std::nullopt, page_size.value_or(0));
             return flash_attn::mla::PrefillBsndMetadataOp(
                 batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, dtype, cache_seqlens, num_splits,
                 window_size_left, window_size_right, causal, page_size.value_or(0));

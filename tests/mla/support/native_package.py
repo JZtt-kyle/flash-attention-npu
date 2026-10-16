@@ -41,6 +41,9 @@ LAYOUT_KEYS = (
     105000000010200002,
     103000000030000003,
     104000000030000003,
+    # Generic TND Q / ND PA KV: query digit 3, KV digit 1, PA bit 2.
+    103000000010200003,
+    104000000010200003,
     # Generic BSND PA: query/KV layout digit 1, PA bit 2, BRC bit 4.
     # The generated +100000 variants set the native FD bit, independent of mask.
     103000000010200001,

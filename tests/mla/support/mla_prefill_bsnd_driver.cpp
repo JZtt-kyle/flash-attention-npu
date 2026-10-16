@@ -26,8 +26,9 @@ int main(int argc, char** argv)
     uint32_t value;
     while (std::cin >> c.batch >> c.sq >> c.sk >> c.heads >> c.kvHeads >> c.splits >> c.cores >> c.dtype >>
            c.usedFlags >> c.window.kind >> c.window.left >> c.window.right >> fault >> value) {
-        const bool paged = argc > 1 && std::strcmp(argv[1], "--paged") == 0;
-        c.tnd = argc > 1 && !paged ? (std::strcmp(argv[1], "--mixed") == 0 ? 2 : 1) : 0;
+        const bool pagedTnd = argc > 1 && std::strcmp(argv[1], "--paged-tnd") == 0;
+        const bool paged = pagedTnd || (argc > 1 && std::strcmp(argv[1], "--paged") == 0);
+        c.tnd = pagedTnd ? 2 : argc > 1 && !paged ? (std::strcmp(argv[1], "--mixed") == 0 ? 2 : 1) : 0;
         if (paged)
             std::cin >> c.pageSize;
         if (c.tnd)

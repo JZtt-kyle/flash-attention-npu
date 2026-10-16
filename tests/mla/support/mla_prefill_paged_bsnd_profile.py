@@ -8,7 +8,6 @@ import statistics
 import subprocess
 import time
 import torch
-from tests.mla.support.public_cases.prefill_paged_bsnd import make_case, metadata, invoke, compare
 from tests.mla.support.mla_prefill_paged_bsnd_cases import PERFORMANCE_CASES
 from tests.mla.support.mla_native_dispatch import sha256, e2e_applicable
 from tests.mla.support.mla_public_performance import SEGMENTS
@@ -19,9 +18,20 @@ from tests.mla.support.mla_prefill_bsnd_profile import sample_kernels
 from tests.mla.support.mla_prefill_paged_native import PrefillPagedCall
 
 
-def run(dtype, directory, dispatch=None, check=False):
+def run(dtype, directory, dispatch=None, check=False, tnd=False):
+    from tests.mla.support.public_cases import prefill_paged_bsnd, prefill_paged_tnd
+    from tests.mla.support.mla_prefill_paged_tnd_cases import PERFORMANCE_CASES as TND_CASES
+
+    helper = prefill_paged_tnd if tnd else prefill_paged_bsnd
+    make_case, metadata, invoke, compare = (
+        helper.make_case,
+        helper.metadata,
+        helper.invoke,
+        helper.compare,
+    )
+    selected = TND_CASES if tnd else PERFORMANCE_CASES
     directory.mkdir(parents=True, exist_ok=True)
-    specs = PERFORMANCE_CASES[:1] if check else PERFORMANCE_CASES
+    specs = selected[:1] if check else selected
     cases = [make_case(dtype, **{k: v for k, v in s.items() if k != "window"}) for s in specs]
     calls = [PrefillPagedCall(c) for c in cases]
     if dispatch is None:
@@ -184,5 +194,6 @@ if __name__ == "__main__":
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--dispatch", type=Path)
     p.add_argument("--check", action="store_true")
+    p.add_argument("--tnd", action="store_true")
     a = p.parse_args()
-    run(a.dtype, a.output, a.dispatch, a.check)
+    run(a.dtype, a.output, a.dispatch, a.check, a.tnd)

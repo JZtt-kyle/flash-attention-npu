@@ -5,7 +5,7 @@ namespace flash_attn::mla {
 at::Tensor PrefillMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, int64_t kvHeads,
                                   at::ScalarType dtype, const at::Tensor& lengths, const at::Tensor& cuQ,
                                   int64_t splits, int64_t left, int64_t right, bool causal,
-                                  const std::optional<at::Tensor>& usedQ = std::nullopt);
+                                  const std::optional<at::Tensor>& usedQ = std::nullopt, int64_t pageSize = 0);
 at::Tensor PrefillBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads,
                                  at::ScalarType dtype, const at::Tensor& lengths, int64_t splits, int64_t left,
                                  int64_t right, bool causal, int64_t pageSize = 0);

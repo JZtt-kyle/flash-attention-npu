@@ -38,8 +38,9 @@ struct FiaTilingNonQuant {
 int main(int argc, char** argv)
 {
     Info info;
-    const bool paged = argc > 1 && std::strcmp(argv[1], "--paged") == 0;
-    if (argc > 1 && !paged)
+    const bool pagedTnd = argc > 1 && std::strcmp(argv[1], "--paged-tnd") == 0;
+    const bool paged = pagedTnd || (argc > 1 && std::strcmp(argv[1], "--paged") == 0);
+    if (pagedTnd || (argc > 1 && !paged))
         info.inputLayout = TilingKeyLayout::TND;
     FiaTilingNonQuant tiling{&info};
     uint32_t sk, mask;

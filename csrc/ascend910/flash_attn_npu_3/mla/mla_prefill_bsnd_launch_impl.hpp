@@ -159,8 +159,14 @@ __global__ __aicore__ __mix__(1, 2) void MLA_PREFILL_ATTENTION(MlaPrefillBsndLau
             const uint64_t qStart = read(PrefillSequenceWord(c, b));
             const uint64_t kStart = read(PrefillSequenceWord(c, b) + 2);
             current.q += qStart * a.params.q.rowStride * 2;
-            current.k += (c.tnd == 1 ? kStart * a.params.k.rowStride : uint64_t(b) * a.params.k.batchStride) * 2;
-            current.v += (c.tnd == 1 ? kStart * a.params.v.rowStride : uint64_t(b) * a.params.v.batchStride) * 2;
+            if (c.pageSize) {
+                // The task's tensor batch is zero after rebasing Q. PA keeps
+                // its physical pools and selects only the logical table row.
+                current.cache.table.address += uint64_t(b) * a.cache.layout.tableRowStride * 4;
+            } else {
+                current.k += (c.tnd == 1 ? kStart * a.params.k.rowStride : uint64_t(b) * a.params.k.batchStride) * 2;
+                current.v += (c.tnd == 1 ? kStart * a.params.v.rowStride : uint64_t(b) * a.params.v.batchStride) * 2;
+            }
             current.out += qStart * c.heads * 128 * 2;
             current.lse += qStart * 4;
             current.params.batch = 1;

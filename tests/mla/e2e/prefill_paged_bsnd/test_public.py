@@ -2,7 +2,6 @@
 
 import contextlib
 import gc
-import inspect
 import json
 import os
 from pathlib import Path
@@ -13,7 +12,7 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.public_cases.prefill_paged_bsnd import make_case, metadata, invoke, compare
-from tests.mla.support.public_cases.contract import _forward
+from tests.mla.support.public_cases.contract import _forward, metadata_raw_args
 
 
 @pytest.mark.parametrize("dtype", ["fp16", "bf16"])
@@ -125,7 +124,7 @@ def test_default_and_integer_lengths(dtype):
 
 
 @pytest.mark.parametrize("entry", ["eager", "cpp", "fake"])
-@pytest.mark.parametrize("fault", ["zero", "unaligned", "capacity", "tnd", "length-dtype"])
+@pytest.mark.parametrize("fault", ["zero", "unaligned", "capacity", "prefix-dtype", "length-dtype"])
 def test_metadata_rejection(entry, fault):
     with FakeTensorMode() if entry == "fake" else contextlib.nullcontext():
         lengths = torch.zeros(2, dtype=torch.int32, device="npu")
@@ -144,15 +143,13 @@ def test_metadata_rejection(entry, fault):
             args["page_size"] = 0 if fault == "zero" else 15
         elif fault == "capacity":
             args["max_seqlen_k"] = 79
-        elif fault == "tnd":
-            args["cu_seqlens_q"] = torch.tensor([0, 7, 14], dtype=torch.int32, device="npu")
+        elif fault == "prefix-dtype":
+            args["cu_seqlens_q"] = torch.tensor([0, 7, 14], dtype=torch.int64, device="npu")
         else:
             args["cache_seqlens"] = lengths.long()
         with pytest.raises((RuntimeError, ValueError), match="MLA"):
             if entry == "cpp":
-                bound = inspect.signature(api._get_scheduler_metadata_fake).bind(**args)
-                bound.apply_defaults()
-                api.flash_attn_npu_3.get_scheduler_metadata(*bound.arguments.values())
+                api.flash_attn_npu_3.get_scheduler_metadata(*metadata_raw_args(args).values())
             else:
                 api.get_scheduler_metadata(**args)
 
@@ -191,7 +188,7 @@ def test_raw_entries(entry, splits):
         "kv-heads",
         "last-stride",
         "metadata-size",
-        "tnd-pa",
+        "prefix-dtype",
     ],
 )
 def test_static_rejection(entry, fault):
@@ -215,10 +212,10 @@ def test_static_rejection(entry, fault):
             args["k"] = torch.empty((*k.shape[:-1], 384), dtype=k.dtype, device=k.device)[..., ::2]
         elif fault == "metadata-size":
             args["scheduler_metadata"] = torch.empty(4, dtype=torch.int32, device="npu")
-        elif fault == "tnd-pa":
+        elif fault == "prefix-dtype":
             args.update(
                 q=q.flatten(0, 1),
-                cu_seqlens_q=torch.tensor([0, 3], dtype=torch.int32, device="npu"),
+                cu_seqlens_q=torch.tensor([0, 3], dtype=torch.int64, device="npu"),
                 max_seqlen_q=3,
             )
         with pytest.raises((RuntimeError, ValueError), match="MLA|FlashAttention"):

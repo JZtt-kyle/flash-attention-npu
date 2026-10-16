@@ -53,7 +53,7 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
     MlaPrefillBsndLayout l{};
     if (!PrefillBsndLayout(c, l) || words != l.words)
         return S::InvalidBuffer;
-    const uint32_t version = c.pageSize ? 30 : c.tnd == 2 ? 29 : c.tnd ? 28 : 27;
+    const uint32_t version = c.pageSize ? (c.tnd ? 31 : 30) : c.tnd == 2 ? 29 : c.tnd ? 28 : 27;
     const auto status = ReadMetadataHeader(PrefillHeaderView<Reader>{read}, words, l.words, version, version, c.dtype);
     if (status != S::Success)
         return status;
@@ -76,10 +76,10 @@ MLA_PREFILL_INLINE MlaMetadataReadStatus ReadPrefillBsndMetadata(const Reader& r
             return S::ShapeMismatch;
     if (c.workspaceBytes < l.bytes)
         return S::InvalidWorkspace;
-    if (c.pageSize && (read(20) != c.pageSize || read(21) || read(22) || read(23)))
+    if (c.pageSize && !c.tnd && (read(20) != c.pageSize || read(21) || read(22) || read(23)))
         return S::ShapeMismatch;
     if (c.tnd) {
-        if (read(20) != c.totalQ || read(21) != c.totalK || read(22) || read(23))
+        if (read(20) != c.totalQ || read(21) != (c.pageSize ? c.pageSize : c.totalK) || read(22) || read(23))
             return S::ShapeMismatch;
         MlaUsedMetadataContext geometry{};
         geometry.batch = c.batch;

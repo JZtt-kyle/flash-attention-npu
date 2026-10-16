@@ -15,10 +15,12 @@ constexpr uint32_t kMlaPrefillBsndVersion = 27;
 constexpr uint32_t kMlaPrefillTndVersion = 28;
 constexpr uint32_t kMlaPrefillMixedVersion = 29;
 constexpr uint32_t kMlaPrefillPagedBsndVersion = 30;
+constexpr uint32_t kMlaPrefillPagedTndVersion = 31;
 // v27 has 20 header words and B pairs of effective lengths; v28 has 24 header
 // words and B allocation/used spans. v29 shares those spans; v30 has a 24-word
 // header and B effective-length pairs. All retain the 346-word native partition
-// tail and B*Hkv+1 uint64 M prefixes, without device addresses.
+// tail and B*Hkv+1 uint64 M prefixes, without device addresses. v31 combines
+// v29 allocation spans with page size in header word 21 (no TND KV total).
 struct MlaPrefillBsndContext {
     uint32_t batch, sq, sk, heads, kvHeads, splits, dtype, cores, usedFlags;
     MlaWindowKernelParams window;
@@ -26,7 +28,7 @@ struct MlaPrefillBsndContext {
     // Layout: 0 = v27 BSND, 1 = v28 TND, 2 = v29 TND Q / BSND KV.
     // v29 retains v28 spans, but KV spans describe rectangular cache slots.
     uint32_t tnd = 0, totalQ = 0, totalK = 0;
-    // v30: BSND Q and independent 192/128 ND paged KV. No addresses in the record.
+    // v30/v31: BSND/TND Q and independent 192/128 ND paged KV.
     uint32_t pageSize = 0;
 };
 struct MlaPrefillBsndLayout {
@@ -48,7 +50,7 @@ MLA_PREFILL_INLINE uint32_t PrefillTailWord(const MlaPrefillBsndContext& c)
 MLA_PREFILL_INLINE bool PrefillBsndLayout(const MlaPrefillBsndContext& c, MlaPrefillBsndLayout& out)
 {
     if (!c.heads || !c.kvHeads || c.heads % c.kvHeads || c.splits > 256 || !c.cores || c.cores > 26 || c.tnd > 2 ||
-        (c.pageSize && (c.tnd || c.pageSize < 16 || c.pageSize > 1024 || c.pageSize % 16 || c.sk % c.pageSize)) ||
+        (c.pageSize && (c.tnd == 1 || c.pageSize < 16 || c.pageSize > 1024 || c.pageSize % 16 || c.sk % c.pageSize)) ||
         c.totalQ > INT32_MAX || c.totalK > INT32_MAX || (c.tnd && uint64_t(c.totalQ) * c.heads > kMlaMaxBatchRows) ||
         ((!c.tnd && c.totalQ) || (c.tnd != 1 && c.totalK)) || c.usedFlags > 3 || c.window.kind > 2 ||
         c.window.left < -1 || c.window.right < -1 || c.window.left > INT32_MAX || c.window.right > INT32_MAX ||

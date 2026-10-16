@@ -2175,7 +2175,7 @@ MlaPrefillBsndContext PrefillContext(int64_t batch, int64_t sq, int64_t sk, int6
                 "MLA: prefill BSND shape/split bounds exceeded");
     TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
     TORCH_CHECK(pageSize == 0 ||
-                    (!tnd && pageSize >= 16 && pageSize <= 1024 && pageSize % 16 == 0 && sk % pageSize == 0),
+                    (tnd != 1 && pageSize >= 16 && pageSize <= 1024 && pageSize % 16 == 0 && sk % pageSize == 0),
                 "MLA: prefill paged capacity/page size invalid");
     MlaWindow window{};
     TORCH_CHECK(NormalizeWindow({sq, sk, left, right, causal}, window) == MlaCausalStatus::Success,
@@ -2257,8 +2257,14 @@ std::vector<at::Tensor> PrefillBsndForward(const at::Tensor& q, const at::Tensor
     TORCH_CHECK(tnd || !usedQ || !supplied, "MLA: prefill Q-used with explicit metadata is not implemented yet");
     if (cuK)
         CheckTndInputs(q, k, *cuQ, *cuK, maxQ, maxK);
-    else if (tnd)
+    else if (tnd && !pageTable)
         CheckTndBsndForwardInputs(q, k, *cuQ, maxQ, usedK, std::nullopt);
+    else if (tnd) {
+        TORCH_CHECK(cuQ->dim() == 1 && cuQ->numel() >= 1, "MLA: cu_seqlens_q must have shape [batch_size + 1]");
+        CheckMetadataQueryPrefix(*cuQ, cuQ->numel() - 1, q.device());
+        TORCH_CHECK(q.size(0) <= INT32_MAX && uint64_t(q.size(0)) * q.size(1) <= kMlaMaxBatchRows,
+                    "MLA: compact TND shape bounds exceeded");
+    }
     const int64_t batch = tnd ? cuQ->numel() - 1 : q.size(0);
     CheckUsedInputs(q, batch, usedQ, usedK);
     MlaPagedCacheLayout paged{};
@@ -2436,13 +2442,14 @@ at::Tensor PrefillTndMetadataOp(const at::Tensor& q, const at::Tensor& k, const 
 at::Tensor PrefillMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, int64_t kvHeads,
                                   at::ScalarType dtype, const at::Tensor& lengths, const at::Tensor& cuQ,
                                   int64_t splits, int64_t left, int64_t right, bool causal,
-                                  const std::optional<at::Tensor>& usedQ)
+                                  const std::optional<at::Tensor>& usedQ, int64_t pageSize)
 {
     CheckTndBsndMetadataInputs(batch, maxQ, sk, heads, dtype, lengths, cuQ);
     CheckUsedInputs(lengths, batch, usedQ, lengths);
     const c10::OptionalDeviceGuard guard(device_of(lengths));
-    auto c = PrefillContext(batch, maxQ, sk, heads, kvHeads, dtype, splits, left, right, causal,
-                            2 | uint32_t(bool(usedQ)), CausalPlatform(lengths.device().index(), true), 2);
+    auto c =
+        PrefillContext(batch, maxQ, sk, heads, kvHeads, dtype, splits, left, right, causal, 2 | uint32_t(bool(usedQ)),
+                       CausalPlatform(lengths.device().index(), true), 2, 0, 0, pageSize);
     MlaPrefillBsndLayout l{};
     PrefillBsndLayout(c, l);
     auto metadata = at::empty({l.words}, lengths.options());
@@ -2464,10 +2471,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 PrefillMixedForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& cuQ,
                       int64_t maxQ, int64_t splits, int64_t left, int64_t right, bool causal,
                       std::optional<double> scale, const std::optional<at::Tensor>& usedK,
-                      const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& metadata)
+                      const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& metadata,
+                      const std::optional<at::Tensor>& pageTable)
 {
+    TORCH_CHECK(!scale || (std::isfinite(*scale) && std::abs(*scale) <= std::numeric_limits<float>::max()),
+                "MLA: softmax_scale must be finite in FP32");
     auto result = PrefillBsndForward(q, k, v, scale.value_or(1.0 / std::sqrt(192.0)), splits, left, right, causal,
-                                     usedQ, usedK, metadata, cuQ, std::nullopt, maxQ);
+                                     usedQ, usedK, metadata, cuQ, std::nullopt, maxQ, 0, pageTable);
     return {result[0], result[1], result[2], result[3]};
 }
 
@@ -2478,11 +2488,11 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
     m.def("_mla_prefill_mixed_forward(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, int max_seqlen_q, "
           "int num_splits=1, int window_left=-1, int window_right=-1, bool causal=False, "
           "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? seqused_q=None, "
-          "Tensor? scheduler_metadata=None) -> (Tensor, Tensor, Tensor, Tensor)");
+          "Tensor? scheduler_metadata=None, Tensor? page_table=None) -> (Tensor, Tensor, Tensor, Tensor)");
     m.def("_mla_prefill_mixed_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
           "int num_heads_kv, ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q, "
           "int num_splits=1, int window_left=-1, int window_right=-1, bool causal=False, "
-          "Tensor? seqused_q=None) -> Tensor");
+          "Tensor? seqused_q=None, int page_size=0) -> Tensor");
     m.def("_mla_prefill_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
           "int max_seqlen_q, int max_seqlen_k, int num_splits=1, int window_left=-1, int window_right=-1, "
           "bool causal=False, float? softmax_scale=None, Tensor? seqused_q=None, Tensor? seqused_k=None, "

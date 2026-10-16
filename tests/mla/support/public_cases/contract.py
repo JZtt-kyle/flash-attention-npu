@@ -64,3 +64,29 @@ def _forward(entry, args):
         bound.apply_defaults()
         return api.flash_attn_npu_3.fwd(*bound.arguments.values())
     return api._flash_attn_forward(**args)
+
+
+def metadata_raw_args(args):
+    """Materialize public defaults for the raw binding's required arguments."""
+    values = dict(
+        qkv_dtype=torch.bfloat16,
+        cu_seqlens_q=None,
+        cu_seqlens_k=None,
+        cu_seqlens_k_new=None,
+        seqused_q=None,
+        cache_leftpad=None,
+        page_size=None,
+        max_seqlen_k_new=0,
+        causal=False,
+        window_size_left=-1,
+        window_size_right=-1,
+        attention_chunk=0,
+        has_softcap=False,
+        num_splits=0,
+        pack_gqa=None,
+        sm_margin=0,
+        softcap=None,
+        softmax_scale=None,
+    )
+    values.update(args)
+    return inspect.signature(api._get_scheduler_metadata_fake).bind(**values).arguments

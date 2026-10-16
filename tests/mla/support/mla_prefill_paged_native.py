@@ -1,5 +1,6 @@
 """Pinned FIA PA adapter. All required view packing is inside each call."""
 
+import itertools
 import torch
 from tests.mla.support.mla_ref import normalize_fa3_window
 
@@ -7,6 +8,7 @@ from tests.mla.support.mla_ref import normalize_fa3_window
 class PrefillPagedCall:
     def __init__(self, c):
         self.c = c
+        self.tnd = c["t"]["q"].ndim == 3
         q = c["t"]["q"]
         b, sq, h, cap, hk = c["shape"]
         o = c["options"]
@@ -15,7 +17,7 @@ class PrefillPagedCall:
         )
         kind = 1 if left < 0 and right == 0 else 2 if left >= 0 or right >= 0 else 0
         self.kwargs = dict(
-            input_layout="BSND",
+            input_layout="TND" if self.tnd else "BSND",
             num_query_heads=h,
             num_key_value_heads=hk,
             block_size=c["page"],
@@ -26,6 +28,9 @@ class PrefillPagedCall:
             pre_tokens=2**31 - 1 if kind == 1 else cap - 1 if left < 0 else left,
             next_tokens=0 if kind == 1 else sq - 1 if right < 0 else right,
         )
+        if self.tnd:
+            assert c["qlens"] == c["q"]
+            self.kwargs["actual_seq_qlen"] = list(itertools.accumulate(c["q"]))
         if kind:
             self.kwargs["atten_mask"] = torch.ones(
                 (2048, 2048), dtype=torch.bool, device=q.device
@@ -41,12 +46,14 @@ class PrefillPagedCall:
         table = c["page_table"].contiguous()
         out = torch.empty((*q.shape[:-1], 128), dtype=q.dtype, device=q.device)
         lse = torch.empty(
-            (q.shape[0], q.shape[2], q.shape[1], 1), dtype=torch.float32, device=q.device
+            (*q.shape[:2], 1) if self.tnd else (q.shape[0], q.shape[2], q.shape[1], 1),
+            dtype=torch.float32,
+            device=q.device,
         )
         result = torch.ops.npu.npu_fused_infer_attention_score_v2.out(
             q, k, v, block_table=table, **self.kwargs, out=[out, lse]
         )
-        return result[0], result[1].squeeze(-1)
+        return result[0], result[1].squeeze(-1).T if self.tnd else result[1].squeeze(-1)
 
     def description(self):
         c = self.c
@@ -61,7 +68,7 @@ class PrefillPagedCall:
             },
             lengths=c["klens"],
             sparse_mode=self.kwargs["sparse_mode"],
-            layout="BSND/BnBsH",
+            layout="TND/BnBsH" if self.tnd else "BSND/BnBsH",
             packing="inside every call",
             representation="combined 192/128",
             split="native automatic",

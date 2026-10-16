@@ -27,7 +27,7 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
     auto* out = reinterpret_cast<uint32_t*>(a.output);
     std::fill(out, out + a.words, 0);
     out[0] = kMlaMetadataMagic;
-    out[1] = out[2] = c.pageSize   ? kMlaPrefillPagedBsndVersion
+    out[1] = out[2] = c.pageSize   ? (c.tnd ? kMlaPrefillPagedTndVersion : kMlaPrefillPagedBsndVersion)
                       : c.tnd == 2 ? kMlaPrefillMixedVersion
                       : c.tnd      ? kMlaPrefillTndVersion
                                    : kMlaPrefillBsndVersion;
@@ -90,7 +90,7 @@ bool BuildPrefillBsndMetadata(const MlaPrefillBsndMetadataArgs& a)
             result[21] = c.totalK;
         }
         if (c.pageSize)
-            result[20] = c.pageSize;
+            result[c.tnd ? 21 : 20] = c.pageSize;
         detail::BaseInfo base{};
         base.bSize = c.batch;
         base.n2Size = c.kvHeads;
