@@ -264,8 +264,7 @@ def test_concurrent_host_launches():
         "q_used_metadata",
         "split",
         "softcap",
-        "tnd",
-        "paged",
+        "page_size",
     ],
 )
 def test_rejections(entry, fault):
@@ -292,16 +291,14 @@ def test_rejections(entry, fault):
             args["num_splits"] = 257
         elif fault == "softcap":
             args["softcap"] = 0.5
-        elif fault == "tnd":
-            args["q"] = args["q"].flatten(0, 1)
-            args["cu_seqlens_q"] = torch.tensor([0, 7, 14], dtype=torch.int32, device="npu")
-            args["max_seqlen_q"] = 7
-        elif fault == "paged":
+        elif fault == "page_size":
+            # This cache has 65 tokens per page, outside the supported alignment.
             args["page_table"] = torch.zeros((2, 1), dtype=torch.int32, device="npu")
         with pytest.raises(RuntimeError):
             _forward(entry, args)
-        if fault == "paged":
-            with pytest.raises(RuntimeError, match="prefill forward is not implemented"):
+        if fault == "page_size":
+            # Real/fake validate page geometry at different boundaries.
+            with pytest.raises(RuntimeError):
                 api.flash_attn_with_kvcache(
                     c["t"]["q"], c["t"]["k"], c["t"]["v"], page_table=args["page_table"]
                 )

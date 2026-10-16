@@ -271,7 +271,7 @@ def test_streams_and_lifetime(dtype):
         "metadata",
         "grad",
         "softcap",
-        "paged",
+        "page_size",
         "last_stride",
     ],
 )
@@ -303,7 +303,8 @@ def test_rejections(entry, fault):
             args["v"].requires_grad_(True)
         elif fault == "softcap":
             args["softcap"] = 1
-        elif fault == "paged":
+        elif fault == "page_size":
+            # The 65-token cache axis is not a legal PA page size.
             args["page_table"] = torch.zeros((2, 1), dtype=torch.int32, device="npu")
         elif fault == "last_stride":
             args["q"] = torch.empty((10, 8, 384), dtype=args["q"].dtype, device="npu")[..., ::2]

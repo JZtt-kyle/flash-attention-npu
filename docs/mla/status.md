@@ -1,62 +1,63 @@
 # MLA 当前状态
 
-**本轮为专门文档修正，开发仍完成到 M13b；唯一下一开发步是 [M14 prefill 组合收尾](plan.md#唯一下一步-m14)。** 分支 `feat/mla-cann-migration`，接手提交 `4033fe9`，工作区干净。本轮只修改 design/plan/status，提交后停止，不推进 M14。
+**M14 prefill 组合验收已通过；唯一下一步是 [M15a softcap 独立数值闭环](plan.md#唯一下一步-m15a)。** 分支 `feat/mla-cann-migration`，接手提交 `07b462d`，接手工作区干净。本轮完成阶段工具、过期拒绝测试和文档收尾，提交一次后停止；未改生产 host/AICPU/Kernel、metadata、地址/发射、构建参数或 CATLASS。
 
 ## 当前能力与边界
 
-512+64 压缩 MLA 和 192/128 prefill 的五布局（BSND、紧凑 TND、TND Q + BSND cache、BSND PA、TND PA）均已接通公开前向，支持 FP16/BF16、三 mask、自动/1/显式 split、合法 stride、长度与空值语义；多 split 返回真实 FP32 accumulator。192/128 使用独立 K/V、GQA 与 v27–v31 共用生产路径。入口/协议映射见 [design 2.1](design.md#21-入口与记录选择)。
+512+64 压缩 MLA 与 192/128 独立 K/V prefill 均支持 FP16/BF16、五布局、三 mask、自动/1/显式 split、长度/空值、合法 stride 和真实 FP32 accumulator。M14 已完成 192/128 的阶段组合核对和公开性能汇总，覆盖映射见 [design 7.6](design.md#76-m14-prefill-阶段覆盖)。
 
-公开 kvcache/metadata 没有 Q-used 参数；192/128 内部 TND Q 路径支持 Q-used 与显式 metadata，内部 BSND Q-used 仍只支持隐式记录。PA 每次检查全部 live 页，包括 Q allocation/used 为零的样本。softcap、非默认调度选项仍明确拒绝；完整 graph replay 尚未验收，910C 未实机验证。M13b 的各布局验收不等于 M14 阶段收尾已完成。
+公开 kvcache/metadata 没有 Q-used 参数；192/128 内部 TND Q 路径支持 Q-used 与显式 metadata，内部 BSND Q-used 仍只支持隐式记录。PA 检查全部 live 页，包括 Q allocation/used 为零的样本。softcap、非默认调度仍明确拒绝，完整 graph replay 留待 M16，910C 未实机验证。接口与拒绝边界以 [design 2.2](design.md#22-后端选项与返回值) 为准。
 
-## 本轮文档核对
+本轮删除 BSND 专项中两项“合法 TND Q + BSND cache 必须拒绝”的过期用例；PA 拒绝明确为非法 65-token 页大小，TND 的 mixed 拒绝明确为 cache batch 不匹配。累计日常清单仍为 477 项，各 prefill 布局保留双 dtype × 三 mask × 三 split 模式的 18 项日常用例；公开专项从 618 调整为 616 项，没有截断其余覆盖。
 
-对照 Python/C++ real/fake 分派、v27–v31 生成器/消费者/launcher、setup 构建清单、日常清单及性能驱动，修正 Q-used 复用范围、prefill 共用构建说明及 FD 单列含义；合并重复契约与性能边界，压缩已完成步骤和开发流水。固定来源按 [design 第 1 节](design.md#1-范围与固定依据) 核对：读取 CANN 固定 Git 对象、FA3 本地固定副本（`flash_api.cpp` 哈希与 oracle 声明一致）及 CATLASS 固定提交，未改源仓或子模块。
+## 最近闭环证据
 
-离线核对结果在 `/tmp/mla-doc-review-20261016/`。`evidence-review.json` 使用统一驱动的 `reusable` / `matching_files` 与 native 包校验：下列 15 组原始证据及记录的源码文件、生产构建依赖/产物和 native 包内容均匹配，耗时 3.4 s。**这只是现有证据的文件校验，本轮未探测设备、加载扩展、重建或运行设备测试，也未运行 `--resume` 产生新的继承结果。** 单元与性能保留为上轮记录，不列为本轮通过；下一开发轮仍须核对环境、选择与实际加载身份后决定 E2E 是否可继承。
+证据根 `/tmp/mla-m14/`。统一驱动保留各 attempt 的 `command.json`、`cases.json`、`selection.json`、源码/构建身份、实际加载和原始证据；下表路径相对此根。
 
-本地链接/锚点、表格和固定 FA3 链接的本地源码映射核对通过；12 条 list/dry-run 命令通过，未运行设备收集或测试，见 `doc-checks.json`。`git diff --check` 及 `env PYTHONPATH=/tmp/mla-m10c8a/quality ci/code_quality.sh --staged` 通过，日志 `quality.log`；最终文字更新后复查见 `quality-final.log`。质量检查仅包含本轮三份 Markdown，其他语言检查按文件类型跳过。
-
-## 最近开发闭环：M13b
-
-代码基线 `4033fe9`。证据根 `/tmp/mla-m13b/`，以下路径均相对此根；原始命令、用例清单和选择记录在各 attempt 的 `command.json`、`cases.json`、`selection.json`，完整历史说明可用 `git show 4033fe9:docs/mla/status.md` 查询。
-
-| summary / attempt | 上轮结果与耗时 |
+| summary / attempt | 本轮有效结果与耗时 |
 | --- | --- |
-| `cpu-verified/summary.json` / `attempt-1792116210662129410` | `unit-prefill_paged_tnd` 126 passed / 23.3 s；`prefill-paged-tnd-sanitize` 126 passed / 73.3 s |
-| `native-tools/summary.json` / `attempt-1792116497426704640` | `prefill-paged-tnd-tools` 47 passed / 9.9 s；取代 CPU attempt 中较早的 46 项工具结果 |
-| `acceptance/summary.json` / `attempt-1792117094308361490` | TND PA 公开 132 passed / 40.6 s；日常 `e2e` 477 passed / 74.3 s；`ordinary` 516 passed / 33.2 s；native `prefill-paged-tnd-profile-check` 1 passed / 209.1 s |
-| 同一 `acceptance/summary.json` 的 `prefill-paged-tnd-check` | M13b 同一冻结实现内继承 8 项 E2E；原实跑位于 `attempt-1792116800721003950`，27.1 s |
-| `performance/summary.json` / `attempt-1792117588283847380` | BSND PA 公开 120 passed / 39.0 s；TND PA 隔离 Trap 60 passed / 799.3 s；五布局 profile 各 1 passed，耗时见下表 |
+| `tools/summary.json` / `attempt-1792123296910101620` | `prefill-stage-tools` 177 passed / 100.0 s；固定选择、原样本重算、FD 分类、缺失/损坏/身份冲突及成功/失败传播 |
+| `preflight/summary.json` / `attempt-1792122011399393820` | 五布局 native profile-check 各 1 passed；BSND/TND/混合/BSND PA/TND PA 分别 206.5/201.2/202.2/211.9/233.5 s |
+| `acceptance/summary.json` / `attempt-1792124216738362770` | 日常 E2E 477 passed / 73.7 s；TND 103 / 32.0 s、混合 118 / 36.1 s、BSND PA 120 / 36.9 s、TND PA 132 / 39.1 s 均 passed |
+| 同一 acceptance 的本轮继承 | ordinary 516 项，原实跑 `attempt-1792123167814029130` / 29.1 s；BSND 143 项，原实跑 `attempt-1792124101186119210` / 31.2 s。由同目录 `--resume` 校验身份和原始证据后继承 |
+| `performance/summary.json` / `attempt-1792124480297511050` | 五布局 profile 各 1 passed，60 配置全部实测；各组耗时及阶段结果见下表 |
 
-M13b 最终必跑组无失败或未运行项；未继承更早提交的 E2E。开发期 sanitizer 环境失败、依赖变化失效、native key 配方错误及公开夹具失败均已处理，按冻结实现重跑受影响组，旧失败不计通过；细节及日志保留在原证据目录和 Git。固定源三 mask × 单/多 split 的双 dtype 24 项 O/LSE 逐元素一致，双数学及真实 partial 检查通过。迁移侧实际访问 PA，固定源数值片段接受独立 CPU gather 的逻辑 K/V；原生 PA 另有固定包实际分派证据。
+最终正确性/回归合计 **1,609 项**，其中最终 attempt 实跑 950 项、继承本轮已实跑 E2E 659 项；未继承 M13b 的通过结果、历史单元或性能。五布局固定源专项共 60 个测试、120 项 O/LSE 检查，全部 `math=passed, source=equal`，无源精度限制项；FA3 空行/长度/真实 partial 另由公开专项检查。PA 源片段使用独立 CPU gather 的逻辑 K/V，迁移侧实际访问 PA，原生 PA 分派另有固定包证据。
 
-### 上轮公开性能
+本轮有效正确性组的 reference 共 1,204 次 cache hit，预检 10 次、正式性能 60 次，均无 miss/write；相同数学结果复用，待测实现实际执行。没有改变算法或 reference 策略，不重复额外最长成本检查，专项内已有成本用例仍完整运行。
 
-每布局固定 12 配置（含 dtype），6 个自动 split 配置参与平均；6 个 single/explicit 配置因原生 FD 策略不等价单列。各组 `public-profile/average.json` 及其原始样本保留全部配置/分段结果；五组均达到配置与入口/R 等权平均 ≤1 的门槛，但尚未形成 M14 阶段覆盖与汇总结论。
+开发期工具 synthetic varlen 夹具缺行，以及 BSND 的旧 TND 拒绝和 PA real/fake 错误文案断言均出现过失败；已修复并按最终实现重跑受影响组。早期失败 attempt 和日志保留，不计通过。所有本步必跑组已通过，无遗留失败或未运行项。未新增设备协议或数值路径，本轮未累计重跑历史模块单元/Trap；完整图执行、softcap/非默认调度和 910C 实机仍未验收。
 
-| 布局 | 平均 FA3/CANN | 配置退化 | 分段退化 | profile 秒 |
+## 阶段公开性能
+
+`stage-performance.json` 从绑定的完整 5×20 wall、5×10 kernel 原样本重算，校验固定输入、双 dtype、native 包/分派、共享源码、运行环境、单 CPU 亲和性及原始证据。每布局固定 12 配置，合计 60；30 个 automatic 配置参与平均，30 个 single/explicit 原生 FD 对照因分片策略不等价单列。完整单例/分段、metadata 生成、初始化/转换及原始样本保留在各组 `public-profile/`，不按耗时筛选。
+
+**阶段平均 FA3/CANN = 0.790252，达到配置与入口/R 等权平均 ≤1 的门槛。** 适用配置退化 0/30，分段退化 34；kernel-only 为 60/60 退化（含单列项），不将公开 E2E 达标写成 kernel 提速。固定 CPU 0、卡 6，R=1/4、预热及计时协议不变；必要 native packing 在逐次计时内。
+
+| 布局 | 平均 FA3/CANN | 适用 / 单列 | 分段退化 | profile 秒 |
 | --- | --- | --- | --- | --- |
-| BSND | 0.941425 | 0/6 | 14 | 274.0 |
-| TND | 0.734106 | 0/6 | 0 | 239.5 |
-| 混合 | 0.715828 | 0/6 | 0 | 245.4 |
-| BSND PA | 0.775169 | 0/6 | 6 | 247.8 |
-| TND PA | 0.718409 | 0/6 | 4 | 255.7 |
+| BSND | 0.944973 | 6 / 6 | 14 | 259.2 |
+| TND | 0.731534 | 6 / 6 | 0 | 242.3 |
+| 混合 | 0.726421 | 6 / 6 | 3 | 253.1 |
+| BSND PA | 0.772093 | 6 / 6 | 9 | 243.5 |
+| TND PA | 0.776240 | 6 / 6 | 8 | 248.9 |
 
-每布局 kernel-only 均为 12/12 退化（含单列项），不把公开平均达标写成 kernel 提速。上轮采样固定 CPU 0、卡 6，预热及 5×20 wall、5×10 kernel 协议不变；必要 native packing 在逐次计时内。最长成本与 reference 缓存统计保留在原 `cost-*.json`、`golden.tsv`，本轮未重跑。
+## 复现、环境与收尾
 
-### 复现与环境记录
-
-以下为 M13b 的组级复现入口，本轮仅核对命令；运行前按 [design 7.4](design.md#74-统一验收入口) dry-run/collect 并检查环境。`--resume` 只复用同目录中身份匹配的 E2E，性能与单元仍实跑。完整历史命令以 summary 及 attempt 为准。
+运行前按 [design 7.4](design.md#74-统一验收入口) dry-run/collect；原集合见 `collect-acceptance/`、修正后的 E2E/非分页专项见 `collect-corrected/`，工具与性能见 `collect-tools-final/`、`collect-performance/`。`--resume` 只继承同目录中身份及原始证据匹配的 E2E；性能与工具始终实跑。
 
 ```bash
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 export MLA_NATIVE_ROOT=/tmp/mla-m13b/native
-python3 -m tests.mla --suite unit-prefill_paged_tnd prefill-paged-tnd-sanitize --output /tmp/mla-m13b/cpu-verified
-python3 -m tests.mla --suite prefill-paged-tnd-tools --output /tmp/mla-m13b/native-tools
-python3 -m tests.mla --suite prefill-paged-tnd-check prefill-paged-tnd-public e2e ordinary prefill-paged-tnd-profile-check --resume --output /tmp/mla-m13b/acceptance
-python3 -m tests.mla --suite prefill-paged-bsnd-public prefill-paged-tnd-profile prefill-paged-bsnd-profile prefill-mixed-profile prefill-tnd-profile prefill-bsnd-profile prefill-paged-tnd-trap --output /tmp/mla-m13b/performance
+python3 -m tests.mla --suite prefill-stage-tools --output /tmp/mla-m14/tools
+python3 -m tests.mla --suite prefill-bsnd-profile-check prefill-tnd-profile-check prefill-mixed-profile-check prefill-paged-bsnd-profile-check prefill-paged-tnd-profile-check --output /tmp/mla-m14/preflight
+python3 -m tests.mla --suite e2e ordinary prefill-bsnd-public prefill-tnd-public prefill-mixed-public prefill-paged-bsnd-public prefill-paged-tnd-public --resume --output /tmp/mla-m14/acceptance
+python3 -m tests.mla --suite prefill-bsnd-profile prefill-tnd-profile prefill-mixed-profile prefill-paged-bsnd-profile prefill-paged-tnd-profile --prefill-stage-performance --output /tmp/mla-m14/performance
+python3 -m tests.mla.support.mla_prefill_stage_performance --evidence /tmp/mla-m14/performance/summary.json --output /tmp/mla-m14/stage-performance.json
 ```
 
-上轮实测环境：Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`；卡 6 Ascend910B3、20 AIC。本轮未重新探测。实际加载扩展记录为本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `b3e440a12d210894df945ae07b5ba74fc2b7068a3bd3f31465acb059eebc3ab6`；生产 manifest 在 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/prepare.json`，reference 缓存同属该工作目录。所有证据位于仓库外；`/tmp` 非持久存储，文件被清理后不能继续继承。
+接手 `takeover-evidence.json` 校验 M13b 15 组原始证据、生产产物与 native 包；本轮 runtime 与 M13b 的 Python/torch/torch_npu、芯片、扩展和加载库集合一致。环境为 Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`、CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`；卡 6 Ascend910B3。实际扩展为本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `b3e440a12d210894df945ae07b5ba74fc2b7068a3bd3f31465acb059eebc3ab6`；生产构建经 manifest 校验复用，未重建。
 
-本轮文档提交可用 `git log -1 -- docs/mla/status.md` 定位；开发历史从 Git 查询，不在本页累计。
+生产 manifest/reference 根为 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts/`，native 包为 `/tmp/mla-m13b/native`。所有日志和产物在仓库外；`/tmp` 非持久存储，文件缺失后不能继承。
+
+收尾 `evidence-final.json` 用统一驱动校验器复核 18 组原始证据、记录依赖、构建/实际加载库、native 包及阶段汇总身份，全部通过 / 6.1 s；`doc-checks.json` 的变更链接/锚点与表格检查通过。`git diff --check` 和 `env PYTHONPATH=/tmp/mla-m10c8a/quality ci/code_quality.sh --staged` 通过，质量日志为 `quality-closeout.log`。当前提交可用 `git log -1 -- docs/mla/status.md` 定位，历史开发证据从 Git 查询。

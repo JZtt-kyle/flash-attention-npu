@@ -30,6 +30,11 @@ from tests.mla.support.mla_validation_build import matching_files
 from tests.mla.support.mla_validation_dependencies import suite_sources
 from tests.mla.support.mla_validation_selection import INCREMENTAL_SUITES
 from tests.mla.support.mla_split_stage_cases import SPLIT_STAGE_POLICY, SPLIT_STAGE_SUITES
+from tests.mla.support.mla_prefill_stage_cases import (
+    PREFILL_STAGE_POLICY,
+    PREFILL_STAGE_SUITES,
+    stage_selection as prefill_stage_selection,
+)
 from tests.mla.support.mla_validation_policy import (
     DEFAULT_MAX_CASES,
     POLICY_VERSION,
@@ -83,6 +88,12 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "prefill-stage-tools": [
+        "tests/mla/unit/tools/test_mla_prefill_stage_performance.py",
+        "tests/mla/unit/tools/test_mla_validation.py",
+        "tests/mla/unit/tools/test_mla_validation_policy.py",
+        "tests/mla/unit/tools/test_organization.py",
+    ],
     "prefill-paged-tnd-tools": [
         "tests/mla/unit/tools/test_mla_prefill_paged_tnd_tools.py",
         "tests/mla/unit/tools/test_mla_prefill_bsnd_tools.py::test_prefill_profiler_boundaries",
@@ -1026,6 +1037,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "prefill-stage-tools",
     "prefill-paged-tnd-tools",
     "prefill-paged-bsnd-tools",
     "unit-prefill_paged_tnd",
@@ -1440,6 +1452,8 @@ def environment(args, directory, suite):
         "MLA_TND_PAGED_KVCACHE_DIR": "kvcache",
     }.items():
         env[variable] = str(directory / child)
+    if getattr(args, "prefill_stage_performance", False) and suite in PREFILL_STAGE_SUITES:
+        env["MLA_PREFILL_STAGE_PERFORMANCE"] = "1"
     if getattr(args, "split_stage_performance", False) and suite in SPLIT_STAGE_SUITES:
         env["MLA_SPLIT_STAGE_PERFORMANCE"] = "1"
         env["MLA_SPLIT_STAGE_SUITE"] = suite
@@ -1618,6 +1632,21 @@ def cache_stats(path):
 
 
 def run(args):
+    args.prefill_stage_performance = getattr(args, "prefill_stage_performance", False)
+    if args.prefill_stage_performance and (
+        any(
+            getattr(args, name, False)
+            for name in (
+                "split_stage_performance",
+                "window_stage_performance",
+                "causal_stage_performance",
+            )
+        )
+        or not args.suite
+        or not set(args.suite) <= set(PREFILL_STAGE_SUITES)
+    ):
+        raise ValueError("--prefill-stage-performance requires only M14 performance suites")
+    prefill_selection = prefill_stage_selection() if args.prefill_stage_performance else None
     args.split_stage_performance = getattr(args, "split_stage_performance", False)
     if args.split_stage_performance and (
         getattr(args, "window_stage_performance", False)
@@ -1656,6 +1685,9 @@ def run(args):
                     max_cases_per_suite=args.max_cases,
                     full_matrix=args.full_matrix,
                     selection_policy=POLICY_VERSION,
+                    prefill_stage_performance=args.prefill_stage_performance,
+                    prefill_stage_policy=PREFILL_STAGE_POLICY,
+                    prefill_stage_selection=prefill_selection,
                     split_stage_performance=args.split_stage_performance,
                     split_stage_policy=SPLIT_STAGE_POLICY,
                     window_stage_performance=args.window_stage_performance,
@@ -1721,6 +1753,9 @@ def run(args):
             max_cases_per_suite=args.max_cases,
             full_matrix=args.full_matrix,
             selection_policy=POLICY_VERSION,
+            prefill_stage_performance=args.prefill_stage_performance,
+            prefill_stage_policy=PREFILL_STAGE_POLICY,
+            prefill_stage_selection=prefill_selection,
             split_stage_performance=args.split_stage_performance,
             split_stage_policy=SPLIT_STAGE_POLICY,
             window_stage_performance=args.window_stage_performance,
@@ -1826,6 +1861,9 @@ def run(args):
                     case_limit=args.max_cases,
                     full_matrix=args.full_matrix,
                     selection_policy=POLICY_VERSION,
+                    prefill_stage_performance=args.prefill_stage_performance,
+                    prefill_stage_policy=PREFILL_STAGE_POLICY,
+                    prefill_stage_selection=prefill_selection,
                     split_stage_performance=args.split_stage_performance,
                     split_stage_policy=SPLIT_STAGE_POLICY,
                     window_stage_performance=args.window_stage_performance,
@@ -2007,6 +2045,11 @@ def main():
         "--split-stage-performance",
         action="store_true",
         help="Measure M10 five layouts and three split modes using 92 fixed configurations",
+    )
+    parser.add_argument(
+        "--prefill-stage-performance",
+        action="store_true",
+        help="Measure all 60 fixed prefill configurations; requires the five-layout aggregate",
     )
     limits = parser.add_mutually_exclusive_group()
     limits.add_argument(

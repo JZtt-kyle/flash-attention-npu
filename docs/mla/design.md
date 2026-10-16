@@ -1021,8 +1021,11 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | `--causal-stage-performance` | 五布局各至多 10 个输入，双 dtype 合计≤100；PA 按页大小分层，其余按 used/stride/长度分层，内容哈希选择 | [`mla_validation_policy.py`](../../tests/mla/support/mla_validation_policy.py) 选择；[`mla_causal_stage_performance.py`](../../tests/mla/support/mla_causal_stage_performance.py) 汇总五布局 |
 | `--window-stage-performance` | 相同上限/分层，从窗口各布局 `PERFORMANCE_CASES` 选取 | 同一汇总器 `--mask window`，额外匹配原始 window/causal 身份 |
 | `--split-stage-performance` | [`mla_split_stage_cases.py`](../../tests/mla/support/mla_split_stage_cases.py) 固定十五组：BSND 显式四输入、其余各三，双 dtype 共 92 配置 | [`mla_split_stage_performance.py`](../../tests/mla/support/mla_split_stage_performance.py) 汇总全部十五组；采样前检查各组存在适用原生分派 |
+| `--prefill-stage-performance` | [`mla_prefill_stage_cases.py`](../../tests/mla/support/mla_prefill_stage_cases.py) 引用五布局既有清单，每布局六输入、双 dtype 共 60 配置，全部选中 | [`mla_prefill_stage_performance.py`](../../tests/mla/support/mla_prefill_stage_performance.py) 校验固定选择、共享源码/环境、native 分派、绑定证据及完整 5×20 wall / 5×10 kernel 原始样本；按配置等权汇总五布局 |
 
 阶段选择只影响性能，不改变正确性集合，也不自动打开完整矩阵。汇总要求相同运行环境/共享源码、完整选中清单和哈希有效的原始证据；从每个入口/R 的原始耗时重新计算，先配置内等权，再全部适用配置等权。保留各布局、分片模式、单例/分段退化及排除项；组均值只作诊断，不能按组均值代替配置平均。缺失汇总、空适用集合或身份不匹配不能声明阶段通过。M10 的单片组保留窗口/长度/stride/页边界，显式与自动组覆盖三 mask 和长 KV；BSND 显式保留 used=512 的非 FD 代表及其余 FD 输入分类。
+
+M14 沿用每个布局的三种 mask、single/explicit/automatic 请求、GQA 与 KV 尾块/长序列。PA 保留页大小边界，TND PA 另保留独立 Q allocation 和 stride。固定选择在 dry-run 和采样前的 summary 中记录；`profile-check` 是廉价包/分派检查，不计阶段性能。汇总读取已有 `accuracy.json`、`dispatch.json`、`wall-samples.json`、`kernel-samples.json` 与 `profile.json`，不另建采样格式；single/explicit 的原生 FD 单列，automatic 的原生 FD 参与平均。使用 `python3 -m tests.mla.support.mla_prefill_stage_performance --evidence <性能目录>/summary.json --output <阶段结果>.json` 完成阶段门槛，五个 profile 组退出成功不能替代该汇总。
 
 源 host 把 decode Hq 限于 1..128，因此相应公开性能形状用 Sq 与 Hq 的乘积覆盖 S1G 边界；这不是 FA3 的 Hq 限制。更多头数由固定源 Kernel 与独立数学对照验收。整容量四组作同调度非 FD 组件对照，原生分派同路径的子集再作公开 E2E；`BSND_CASES` 的实际长度另行验收。公开全零实际长度同样计入对应路径的 E2E。
 
@@ -1140,3 +1143,19 @@ python3 -m tests.mla.support.native_package
 各专项同时维护 real/fake/compile、长度或内容/scale 更新、合法 metadata 复用、失败恢复、stream/内存生命周期及不支持参数的拒绝。单/显式/自动的空行和未用 accumulator 槽按各自已定义契约检查，不把未规定的 Q padding 值统一化。长 KV 和多块/多片代表保留在专项，日常只运行小输入；协议损坏 Trap 和固定源数值组件仍归原模块，在相关实现变化或回归定位时执行，不因阶段收尾累计历史单元。
 
 阶段性能按第 7 节的 92 配置清单执行，组合正确性按本节及累计日常清单执行；两者不能互相替代。192/128 prefill、softcap、非默认调度及完整 graph replay 不属于 M10 交付，910C 不在该阶段实机验收范围。
+
+### 7.6 M14 prefill 阶段覆盖
+
+阶段范围为 192/128 独立 K/V、FP16/BF16、五布局、GQA、三 mask 与自动/单/显式 split。沿用五个 `prefill_*` 模块的 `test_daily`、公开专项和固定源 `test_source.py`，不另展全组合；实际参数选择以 `cases.json` / `selection.json` 为准。`test_daily` 覆盖小输入 mask/split、长度、stride 和真实 accumulator，固定源逐元素对照覆盖三 mask 的单/多片；自动模式另有三 mask 双 dtype 原生分派与双数学精度检查。
+
+| 布局 / 公开专项 | 独立边界与入口 |
+| --- | --- |
+| [BSND](../../tests/mla/e2e/prefill_bsnd/test_public.py) | func/cache、KV None/整数/tensor、M/N 与 split=256 边界、全局空容量与零 used、内部 Q-used、窗口/scale/广播与 metadata 复用、并发 host 发射 |
+| [紧凑 TND](../../tests/mla/e2e/prefill_tnd/test_public.py) | varlen、双 allocation 前缀与 Q/K-used、声明 max 和真实分配、空段、紧凑地址预算、真实 partial、合法 stride/广播 |
+| [TND Q + BSND cache](../../tests/mla/e2e/prefill_mixed/test_public.py) | 紧凑 Q 与矩形 cache、长度三种形式、内部 Q-used 及记录复用、独立 stride、native packing 的完整调用成本 |
+| [BSND PA](../../tests/mla/e2e/prefill_paged_bsnd/test_public.py) | page=16/112/528/1024 代表、容量取整与尾页、页重排、独立 cache/table stride、Q-used、空容量和零 KV、内容/scale/页/视图复用 |
+| [TND PA](../../tests/mla/e2e/prefill_paged_tnd/test_public.py) | PA 边界叠加非均匀/空 Q allocation、Q-used 原位置、max 声明、全零 Q-used 与全部 live 页校验、公开 metadata 生成与复用 |
+
+各模块保留 real/fake/compile、静态拒绝、长度更新、stream/内存生命周期专项；共享拒绝契约继续覆盖 softcap、非默认调度、追加 cache 等未开放项。编译测试不等于完整图重放，后者留在 M16。设备 Trap 和调度/数值单元在布局步完成，协议或设备实现变化时再按影响范围实测，不因阶段汇总修改而重跑全部历史单元。
+
+阶段使用累计小输入 E2E、上述五布局公开专项、普通 FA3 回归及 7.1 的 60 配置公开性能。阶段结果与实测环境只在 status 保存；性能配置的 source/native 精度检查、kernel 退化或 FD 单列不能替代公开调用正确性，也不能写成所有单例提速。

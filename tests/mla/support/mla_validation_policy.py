@@ -200,5 +200,6 @@ def check_public_performance(result):
         os.environ.get("MLA_CAUSAL_STAGE_PERFORMANCE") != "1"
         and os.environ.get("MLA_WINDOW_STAGE_PERFORMANCE") != "1"
         and os.environ.get("MLA_SPLIT_STAGE_PERFORMANCE") != "1"
+        and os.environ.get("MLA_PREFILL_STAGE_PERFORMANCE") != "1"
     ):
         assert result["passed"], result["mean_ratio"]
