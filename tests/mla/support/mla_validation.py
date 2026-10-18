@@ -1098,6 +1098,25 @@ SUITES.update(
     }
 )
 SUITES.update(INCREMENTAL_SUITES)
+SUITES.update(
+    {
+        "int8-tools": [
+            "tests/mla/unit/int8/test_tools.py",
+            "tests/mla/unit/int8/test_layout.py",
+            "tests/mla/unit/tools/test_mla_native_dispatch.py",
+        ],
+        "int8-component-check": ["tests/mla/unit/int8/test_component.py"],
+        "int8-source-check": [
+            "tests/mla/unit/int8/test_source.py",
+            "tests/mla/unit/int8/test_source_boundaries.py",
+            "-s",
+        ],
+        "int8-profile-check": ["tests/mla/unit/int8/component_profile.py::test_profile_preflight"],
+        "int8-component-profile": [
+            "tests/mla/unit/int8/component_profile.py::test_component_performance"
+        ],
+    }
+)
 USED_SHARED_CPU = [relocated(path) for path in USED_SHARED_CPU]
 
 SUITES = {name: [relocated(arg) for arg in args] for name, args in SUITES.items()}
@@ -1106,6 +1125,8 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "int8-profile-check",
+    "int8-component-profile",
     "graph-profile",
     "graph-profile-check",
     "gqa-options-profile",
@@ -1173,6 +1194,12 @@ WINDOW_DEVICE_SUITES = {
     "window-bsnd-public",
 }
 STANDALONE_CHECK_SUITES = {
+    "int8-component-check",
+    "int8-tools",
+    "int8-source-check",
+    "int8-profile-check",
+    "int8-component-profile",
+    "unit-int8",
     "softcap-mask-tail-check",
     "softcap-check",
     "softcap-profile-check",
@@ -1204,6 +1231,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "int8-tools",
     "platform-tools",
     "unit-platform",
     "platform-sanitize",
@@ -1364,6 +1392,31 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
+    if suite.startswith("int8-") or suite == "unit-int8":
+        from tests.mla.paths import work_dir
+        from tests.mla.support.mla_int8_native import package_root
+        from tests.mla.support.mla_validation_build import files_identity
+
+        paths = [Path("/usr/bin/g++")]
+        if suite != "int8-tools":
+            paths += [
+                package_root() / "package.json",
+                Path(os.environ["ASCEND_HOME_PATH"]) / "bin/bisheng",
+            ]
+            package = package_root() / "package.json"
+            if package.is_file():
+                paths += [
+                    package_root() / p for p in json.loads(package.read_text()).get("files", {})
+                ]
+        if suite not in {"int8-tools", "int8-source-check"}:
+            paths += [Path(os.environ.get("MLA_INT8_SOURCE_LOG", "/nonexistent-int8-fixture"))]
+            manifest = work_dir() / "int8-probes/build-manifest.json"
+            paths.append(manifest)
+            if manifest.is_file():
+                info = json.loads(manifest.read_text())
+                paths += [Path(p) for p in info.get("dependencies", {})]
+                paths += [Path(v["path"]) for v in info.get("libraries", {}).values()]
+        return files_identity(paths)
     if suite in {"unit-platform", "platform-sanitize"}:
         from tests.mla.support.mla_platform_build import platform_identity
 
@@ -1617,6 +1670,8 @@ def environment(args, directory, suite):
             "MLA_FA3_SOURCE_ROOT",
             "MLA_WORK_DIR",
             "MLA_NATIVE_ROOT",
+            "MLA_INT8_NATIVE_ROOT",
+            "MLA_INT8_SOURCE_LOG",
             "MLA_NATIVE_DEPS",
         }:
             env.pop(key)
@@ -1728,6 +1783,33 @@ def environment(args, directory, suite):
     env["MLA_VALIDATION_MAX_CASES"] = str(getattr(args, "max_cases", DEFAULT_MAX_CASES))
     env["MLA_FULL_MATRIX"] = "1" if getattr(args, "full_matrix", False) else "0"
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
+    if suite in {
+        "int8-component-check",
+        "int8-source-check",
+        "int8-profile-check",
+        "int8-component-profile",
+        "unit-int8",
+    }:
+        # Collection never requires a native build. Execution verifies every
+        # artifact before importing torch_npu in the child process.
+        if not args.collect_only:
+            from tests.mla.support.mla_int8_native import native_vendor
+
+            vendor = native_vendor()
+            env["ASCEND_CUSTOM_OPP_PATH"] = str(vendor)
+            env["MLA_CANN_VENDOR"] = str(vendor)
+            env["LD_LIBRARY_PATH"] = (
+                str(vendor / "op_api/lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+            )
+            if suite == "int8-source-check":
+                env["ASCEND_GLOBAL_LOG_LEVEL"] = "0"
+                env["ASCEND_SLOG_PRINT_TO_STDOUT"] = "1"
+            else:
+                from tests.mla.support.mla_int8_build import build_probes
+
+                # Build before capturing suite dependencies, so first execution
+                # and reuse have the same evidence lifecycle.
+                save(directory / "probe-build.json", build_probes())
     if suite in {
         "prefill-check",
         "unit-prefill_attention",
@@ -2194,6 +2276,26 @@ def run(args):
                 result.update(status="collected" if cases else "failed", collected=len(cases))
             if result["returncode"] == 130:
                 result["status"] = "interrupted"
+            if (
+                suite == "int8-source-check"
+                and not args.collect_only
+                and result["status"] == "passed"
+            ):
+                try:
+                    from tests.mla.support.mla_int8_native import native_vendor
+                    from tests.mla.support.mla_int8_cases import SOURCE_CASES
+                    from tests.mla.support.mla_native_dispatch import parse_dispatch
+
+                    dispatch = parse_dispatch(
+                        directory / "output.log",
+                        "int8",
+                        len(SOURCE_CASES),
+                        native_vendor(),
+                        representation="int8",
+                    )
+                    save(directory / "native-dispatch.json", dispatch)
+                except (OSError, ValueError, KeyError, RuntimeError) as exc:
+                    result.update(status="failed", error=str(exc))
             if (
                 suite_sources(ROOT, SUITES[suite], sources(), headless=suite == "tools")
                 != group_sources

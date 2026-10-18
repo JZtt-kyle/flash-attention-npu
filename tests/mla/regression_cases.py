@@ -205,4 +205,8 @@ def daily_suites():
             "test_fake_and_compile",
         )
     ]
+    suites["int8"] = [
+        "tests/mla/e2e/int8/test_unconnected.py::test_public_int8_stays_rejected",
+        "tests/mla/e2e/int8/test_unconnected.py::test_compile_int8_stays_rejected",
+    ]
     return suites

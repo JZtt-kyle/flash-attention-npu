@@ -2,7 +2,9 @@
 
 namespace flash_attn::mla {
 
-MlaLayoutStatus BuildBsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTensorLayout& output)
+namespace {
+template <uint64_t elementBytes>
+MlaLayoutStatus BuildLayout(const MlaBsndTensorView& view, MlaBsndTensorLayout& output)
 {
     if (view.sizes[0] < 0 || view.sizes[1] < 0 || view.sizes[2] <= 0 ||
         (view.sizes[3] != 64 && view.sizes[3] != 128 && view.sizes[3] != 192 && view.sizes[3] != 512)) {
@@ -17,10 +19,9 @@ MlaLayoutStatus BuildBsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTens
 
     MlaBsndTensorLayout layout{uint64_t(view.strides[0]), uint64_t(view.strides[1]), uint64_t(view.strides[2]), 0};
     if (view.sizes[0] != 0 && view.sizes[1] != 0) {
-        // All input elements are FP16/BF16. Check each product/addition before
+        // Check each product/addition before
         // computing it; neither a signed intermediate nor the final byte span
         // may overflow. Storage offset is checked here, not sent to the device.
-        constexpr uint64_t elementBytes = 2;
         constexpr uint64_t maxElements = INT64_MAX / elementBytes;
         uint64_t span = view.sizes[3];
         for (uint32_t axis = 0; axis < 3; ++axis) {
@@ -42,6 +43,17 @@ MlaLayoutStatus BuildBsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTens
     }
     output = layout;
     return MlaLayoutStatus::Success;
+}
+} // namespace
+
+MlaLayoutStatus BuildBsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTensorLayout& output)
+{
+    return BuildLayout<2>(view, output);
+}
+
+MlaLayoutStatus BuildInt8BsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTensorLayout& output)
+{
+    return BuildLayout<1>(view, output);
 }
 
 } // namespace flash_attn::mla

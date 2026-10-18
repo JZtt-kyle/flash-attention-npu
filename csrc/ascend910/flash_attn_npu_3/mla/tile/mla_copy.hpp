@@ -105,7 +105,7 @@ __aicore__ inline void CopySingleMatrixNDToNZ(LocalTensor<InputT> dst, GlobalTen
         p.nValue = 1;
         p.srcDValue = cols;
         for (uint32_t row = 0; row < rows; ++row) {
-            DataCopy(dst[uint64_t(row) * 16], src[uint64_t(row) * stride], p);
+            DataCopy(dst[uint64_t(row) * (32 / sizeof(InputT))], src[uint64_t(row) * stride], p);
         }
     }
 }

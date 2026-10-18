@@ -1,16 +1,6 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**M17 非量化范围已收尾；用户于 2026-10-18 确认放开 INT8 契约、不迁外部 NZ，并授权拆分任务及准备无头开发。下一开发步为 M18。** 当前能力与证据见 [status](status.md)，新增契约见 [design 3.4](design.md#34-int8-压缩-mla-扩展)。这项授权覆盖 M18–M21，无需各步重复确认；尚未实现或未验收的能力不得写成已支持。M17 的图性能例外不适用于新 INT8 路径。
-
-## 本次准备：INT8 计划与无头入口
-
-本次仅更新契约、任务交接和无头控制脚本，完成一个提交后停止；不启动 INT8 实现。影响 `AGENTS.md`、本目录三份文档、`scripts/mla_codex_loop.py` 与所属工具测试。用户给定的 `/home/zhangqijia/repo/mla_codex_loop.py` 已转发到仓库内脚本，沿用该入口、登录、模型及自动审批配置。
-
-原 state 只记录轮次/会话和计数，不能表达已授权阶段结束，因此在 status 的唯一下一步增加一个机器可读注释；不新增任务清单文件或另一套验收记录。缺少标记的旧交接兼容原行为，格式错误/重复标记明确拒绝。
-
-必跑检查：无头工具的真实临时 Git 仓库/模拟 CLI 测试，覆盖恢复、失败、单提交、旧待办归档、文档轮及阶段完成停止；给定入口的 `--check` 和 `--dry-run --max-dev-runs 4`，确认未调用模型、未制造成功计数；文档范围/链接、`git diff --check` 和 `ci/code_quality.sh --staged`。新增停止条件需先补完成/待恢复/到期文档轮/错误标记用例。归档前核对旧轮次结果及当前提交，持有原循环锁，保留源码、计数和全部日志。无需设备探测或构建扩展；不把历史 M17 E2E 记作本次重跑或继承通过。
-
-完成条件已满足：INT8 分步及每步门槛已写入，旧 M16 待办已持锁归档，实际入口检查就绪；45 项工具测试和相关文档/质量检查通过，证据见 status。状态中唯一下一步为 M18，M21 完成后循环自动退出，不继续探索排除项。
+本页只记录实施顺序、产物和完成条件。**M17 非量化范围已收尾；用户于 2026-10-18 确认放开 INT8 契约、不迁外部 NZ，并授权拆分任务及准备无头开发。M18 数值组件已完成，唯一下一步为 M19。** 当前能力与证据见 [status](status.md)，新增契约见 [design 3.4](design.md#34-int8-压缩-mla-扩展)。这项授权覆盖 M18–M21，无需各步重复确认；尚未实现或未验收的能力不得写成已支持。M17 的图性能例外不适用于新 INT8 路径。
 
 ## INT8 后续步骤
 
@@ -18,21 +8,31 @@
 
 | 步骤 | 单次提交的产物 | 完成条件 |
 | --- | --- | --- |
-| M18 | INT8 独立数值组件、ND 读取适配及固定源对照 | 固定源和双数学精度、INT32/舍入/缩放/FD/地址边界、适用组件性能实测；公开入口继续拒绝 INT8 |
+| M18（已完成） | INT8 独立数值组件、ND 读取适配及固定源对照 | 固定源和双数学精度、INT32/舍入/缩放/FD/地址边界、适用组件性能实测；公开入口继续拒绝 INT8 |
 | M19 | BSND Q + ND PA INT8 完整公开前向 | host/AICPU/Kernel/metadata/real/fake/compile/图同轮接通，必要正确性、回归及公开性能通过 |
 | M20 | TND Q + ND PA INT8 完整公开前向 | 沿用 M18 数值组件和 M19 接入，完整 allocation/长度/scale 地址、公开图及性能验收 |
 | M21 | INT8 组合覆盖与用户示例收尾 | 两布局及拒绝边界、累计 E2E、性能矩阵、示例与文档核对完成；唯一下一步改为 `none` |
 
 ### M18：INT8 数值与 ND 适配
 
+已完成：INT8/BF16 数值组件、ND PA 读取、固定源和双数学对照、地址/舍入/空值/Trap、组件性能，以及共享改动的生产重建和累计回归。源语义与精度限制、组件性能差距及证据见 [status](status.md)，不把组件完成视为公开 INT8 已接通。
+
 独立风险：既有 FP16/BF16 组件不覆盖 INT8 QK/PV 的 INT32 累加、逐 token/head Q 反量化、softmax 后动态 P 量化及舍入、量化 FD 归并；源 NZ 到目标 ND 的读取也不能靠 dtype 实例化复用。因此只此一步先交付可实机调用的组件和固定源 probe，布局、mask、split 或记录版本不再各拆一轮。
 
 影响路径：`csrc/ascend910/flash_attn_npu_3/mla/{kernel,block,tile}/`、必要的现有数值/地址公共头；`tests/mla/support/` 的 fixed-source probe、数学 reference、native 包配方及身份依赖，新增 `tests/mla/unit/int8/`。保留源声明，CANN checkout 和 CATLASS 子模块只读。优先复用现有 PA/FD/调度组件，INT8 需要的区别按最小范围加入；生产前向和现有记录消费者不借此放开 dtype。
 
-必跑检查与选择依据（以下 INT8 组为本步应新增，当前尚不存在）：
+本轮执行细化（2026-10-18）：先在 `tests/mla/support/mla_int8_*` 和 `unit/int8/` 增加固定源 INT8 native 配方、ND/NZ 测试转换及原始输入夹具，沿用现有 native manifest/失败传播和统一驱动，不改旧非量化包。源有效性用具名用例核实 BSND/TND、Hq=1/2/4/8/16/32/64/128、Sq=1/2/4/16/32 及源实际上界、Sk=0/1/127/128/129/512/4097、sparse=0/3、直接/原生 FD；不机械展开形状轴，另保留 Hq=3、非法 Sq/mask、ND 源输入、scale dtype/shape/mode 的独立拒绝检查。源 host 与文档不一致时保存实际失败再确定迁移边界。数值组件随后增加 INT8 QK/RoPE/P 量化/PV/FD 的源 probe 与双数学，ND 页地址复用已有 PA 校验，新增首维间隔、页尾及乱序页用例。产物与数学缓存遵循 `MLA_WORK_DIR` 约定，实际路径由 status 记录。
+
+本轮先 `int8-tools int8-source-check` 的 dry-run/collect/实测，再做组件代表值和边界成本检查，固定实现后运行 `--unit int8` 与 `int8-profile-check int8-component-profile`。新增源 native 配方须确认实际 INT8/BF16 二进制及 key 后才能进入长测。只有统一驱动核对身份与原始证据有效的既有 E2E 才可继承；本步共享头和布局校验有变，已用默认累计 E2E 加 `ordinary graph-ordinary` 实测，不累计历史单元。完成条件仍为本节全部数值、地址和组件性能闭环后一次提交；准备或源探测失败不能当成 M18 完成。
+
+ND 实现复用 `mla_bsnd_layout`、`mla_paged_layout` 的地址描述与校验，增加 INT8 单字节存储入口；旧双字节入口及 ABI 保持。`tile/mla_copy.hpp` 的单行回退将 C0 从固定 16 改为 `32/sizeof(InputT)`，旧 FP16/BF16 结果不变。此影响需要本步 INT8 固定源地址差分、存储/溢出及 ASan/UBSan，并重建生产扩展、实测累计小输入 E2E 和普通 FA3；不能用旧扩展代替本次共享头的回归。新增 probe 直接回放固定 native 的原始 tiling，仅作为数值夹具；不新增生产 metadata 协议或手写一套 host 调度。
+
+源探测已确认 BSND/TND 每段 Q 上界均为 32，以及普通 FD 与 `FdBalanceFlag=1` 两种归并。本步同时补齐源快速 FD 遗漏的 LSE 写回，复用已归并的 FP32 sum/max 和原有输出同步；BSND FD 的 LSE 统一为 `[B,Hq,Sq]`，空行按 FA3 归一化为负无穷。源快速 FD 的 LSE 对照使用同一分区/真实 partial 上的固定源普通归并，须证明 partial 一致后才可引用。CANN 9 的 `InitOutput` 在空 KV 连续初始化 O/LSE 时复用 stack UB，目标补写回完成同步；固定源 O 与 LSE 分别比对，并保留源空值初始化缺陷证据。非有限 scale 和当次非法页由设备 Trap 拒绝，独立进程验证；公开 real/fake/compile 继续拒绝 INT8，日常边界清单归属 `int8`。性能沿用既有组件采样器，保存全部固定输入的 kernel/probe wall 与源 NZ 准备耗时；按 design 第 7 节，它是组件对照，不是 M19/M20 的公开 E2E 门槛。
+
+必跑检查与选择依据：
 
 - 先注册 `--unit int8`、`int8-tools`、`int8-source-check`、`int8-profile-check`、`int8-component-profile`；在实现前用例列出源可运行的 BSND/TND、Sq/Hq/Sk 边界、sparse 0/3 组合及拒绝项。源文档与 host 上界有差异时以固定版本实测为依据，不能默默缩小集合。
-- `python3 -m tests.mla --suite int8-tools int8-source-check --dry-run`，随后 `--collect-only` 和实际执行，验证原始 INT8/BF16/FP32 输入、源专用 NZ pack/unpack、真实 INT8 native 配方及其 hash/失败传播；禁止先完整采样再发现 native 只有 FP16/BF16。
+- `python3 -m tests.mla --suite int8-tools int8-source-check --dry-run`，随后 `--collect-only` 和实际执行，验证原始 INT8/BF16/FP32 输入、源专用 NZ pack/unpack、真实 INT8 native 配方及其 hash/失败传播、驱动中断/依赖变化失效及单元/性能不继承；禁止先完整采样再发现 native 只有 FP16/BF16。
 - `python3 -m tests.mla --unit int8`：910B 上 INT8 两次矩阵乘、BF16 RoPE/输出、FP32 scale、动态 P 量化及 FD 的源逐元素与 FP32/FP64 独立数学对照。保留源舍入、饱和、全零/极值、scale 零值与非法值处理、尾块、长序列、空行、非连续 ND 页和真实 partial。新增 CPU 地址/调度逻辑另含固定源差分、溢出与 ASan/UBSan。
 - 先跑代表值、最大内存及最长 reference 成本边界，固定实现后跑完整约定集合。`python3 -m tests.mla --suite int8-profile-check int8-component-profile` 实测适用组件性能；组件结果不称公开 E2E。ND 适配成本全部计入待测路径。
 - 原非量化相关 E2E 依赖未变且原始证据完整时可按统一驱动继承；共享头、构建配方或发射受影响则重跑对应 E2E/普通 FA3，核对实际加载扩展。不继承历史单元或性能。
@@ -43,7 +43,7 @@
 
 影响 Python 共享前向、C++ 注册/分派、host/AICPU、metadata 与 Kernel 启动、real/fake 输出，以及新增 `tests/mla/e2e/int8_bsnd/`、日常清单和公开 profile。复用 M18 完整算法、PA 安全检查及既有 metadata 生命周期；只有旧记录不能区分混合 dtype/量化模式或其安全边界时才扩协议，并写明原因。三个 INT8 scale 只在当次前向传递，不缓存到调度快照。
 
-新增 `int8-bsnd-check/source/boundaries/profile-check/profile`、`detail-int8_bsnd` 和 `--e2e int8_bsnd`。先 dry-run/collect 与工具/native 预检，再实测源与双数学、全部新行为、空值/stride/页表/长度/metadata 复用/生命周期/Trap；real/fake/compile 及真实固定/动态输入、长度和 scale 的图重放不可延后。验证不支持的选项明确拒绝，scale 更新确实改变结果。相关非量化 PA、图与普通 FA3 E2E 按依赖重跑或继承；源组件证据不替代公开调用。
+同步调整 M18 的 `e2e/int8` 拒绝边界，仅保留仍未接通的组合。新增 `int8-bsnd-check/source/boundaries/profile-check/profile`、`detail-int8_bsnd` 和 `--e2e int8_bsnd`。先 dry-run/collect 与工具/native 预检，再实测源与双数学、全部新行为、空值/stride/页表/长度/metadata 复用/生命周期/Trap；real/fake/compile 及真实固定/动态输入、长度和 scale 的图重放不可延后。验证不支持的选项明确拒绝，scale 更新确实改变结果。相关非量化 PA、图与普通 FA3 E2E 按依赖重跑或继承；源组件证据不替代公开调用。
 
 本步固定并版本管理公开性能输入，包含 eager 与 graph，按配置等权平均 ≤1 分别验收，保留全部退化和不可同义比较项；与 M20 合计不超过 100 配置。先 `int8-bsnd-profile-check`，再正式 `int8-bsnd-profile`，不得沿用 M17 图性能豁免。完成完整 BSND 可调用行为、文档和质量检查后一次提交，下一步 M20。
 

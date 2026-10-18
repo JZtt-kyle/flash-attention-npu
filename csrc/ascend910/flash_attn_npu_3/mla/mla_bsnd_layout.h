@@ -51,4 +51,8 @@ enum class MlaLayoutStatus {
 // Failure leaves output unchanged.
 MlaLayoutStatus BuildBsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTensorLayout& output);
 
+// INT8 content uses the same element-stride contract with one-byte storage.
+// Keep the existing two-byte entry and ABI for all accepted nonquant paths.
+MlaLayoutStatus BuildInt8BsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTensorLayout& output);
+
 } // namespace flash_attn::mla

@@ -35,6 +35,10 @@ struct MlaPagedCacheLayout {
 MlaLayoutStatus BuildPagedCacheLayout(const MlaPageTableView& table, const MlaBsndTensorView& k,
                                       const MlaBsndTensorView& v, MlaPagedCacheLayout& output, bool prefill = false);
 
+// BF16 RoPE K and INT8 shared content KV, page=128 and Hkv=1 only.
+MlaLayoutStatus BuildInt8PagedCacheLayout(const MlaPageTableView& table, const MlaBsndTensorView& k,
+                                          const MlaBsndTensorView& v, MlaPagedCacheLayout& output);
+
 enum class MlaPagedStatus {
     Success,
     InvalidBuffer,

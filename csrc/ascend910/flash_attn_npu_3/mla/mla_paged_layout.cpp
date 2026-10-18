@@ -75,9 +75,14 @@ bool ValidPage(const MlaPagedCacheLayout& layout, int32_t page)
 
 } // namespace
 
-MlaLayoutStatus BuildPagedCacheLayout(const MlaPageTableView& table, const MlaBsndTensorView& k,
-                                      const MlaBsndTensorView& v, MlaPagedCacheLayout& output, bool prefill)
+namespace {
+template <bool Int8>
+MlaLayoutStatus BuildCacheLayout(const MlaPageTableView& table, const MlaBsndTensorView& k, const MlaBsndTensorView& v,
+                                 MlaPagedCacheLayout& output, bool prefill)
 {
+    if (Int8 && (prefill || k.sizes[1] != 128)) {
+        return MlaLayoutStatus::InvalidShape;
+    }
     if (k.sizes[0] < 0 || uint64_t(k.sizes[0]) > uint64_t(INT32_MAX) + 1 || k.sizes[1] < 16 || k.sizes[1] > 1024 ||
         k.sizes[1] % 16 != 0 || (prefill ? k.sizes[2] <= 0 : k.sizes[2] != 1) || k.sizes[3] != (prefill ? 192 : 64) ||
         v.sizes[0] != k.sizes[0] || v.sizes[1] != k.sizes[1] || v.sizes[2] != k.sizes[2] ||
@@ -99,12 +104,25 @@ MlaLayoutStatus BuildPagedCacheLayout(const MlaPageTableView& table, const MlaBs
     if (status != MlaLayoutStatus::Success) {
         return status;
     }
-    status = BuildBsndTensorLayout(v, layout.v);
+    status = Int8 ? BuildInt8BsndTensorLayout(v, layout.v) : BuildBsndTensorLayout(v, layout.v);
     if (status != MlaLayoutStatus::Success) {
         return status;
     }
     output = layout;
     return MlaLayoutStatus::Success;
+}
+} // namespace
+
+MlaLayoutStatus BuildPagedCacheLayout(const MlaPageTableView& table, const MlaBsndTensorView& k,
+                                      const MlaBsndTensorView& v, MlaPagedCacheLayout& output, bool prefill)
+{
+    return BuildCacheLayout<false>(table, k, v, output, prefill);
+}
+
+MlaLayoutStatus BuildInt8PagedCacheLayout(const MlaPageTableView& table, const MlaBsndTensorView& k,
+                                          const MlaBsndTensorView& v, MlaPagedCacheLayout& output)
+{
+    return BuildCacheLayout<true>(table, k, v, output, false);
 }
 
 MlaPagedStatus ValidatePagedCachePages(const MlaPagedCacheLayout& layout, const int32_t* table, uint64_t tableElements,

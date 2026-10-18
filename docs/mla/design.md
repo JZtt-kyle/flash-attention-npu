@@ -170,7 +170,7 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 
 ### 3.4 INT8 压缩 MLA 扩展
 
-本节是用户已确认、待 M18–M21 实现的契约。第 2 节及 3.3 的 FP16/BF16 能力表仍只描述非量化路径，不能推断 INT8 同时开放五布局、全部窗口/softcap/split。固定 FA3 的 `mha_fwd` 要求 Q/K/V 同 dtype，qv 只接受 FP16/BF16；其 FP8 三个 descale 是 `[B,Hkv]`，不等价于源 INT8 的逐 token/head Q scale。本扩展保留 attention 的输入角色、标准 mask 和输出语义，显式增加必要的混合 dtype 和量化参数。
+本节是用户已确认的 M18–M21 契约；M18 已交付独立数值组件，公开接入仍待 M19/M20。第 2 节及 3.3 的 FP16/BF16 能力表仍只描述非量化路径，不能推断 INT8 同时开放五布局、全部窗口/softcap/split。固定 FA3 的 `mha_fwd` 要求 Q/K/V 同 dtype，qv 只接受 FP16/BF16；其 FP8 三个 descale 是 `[B,Hkv]`，不等价于源 INT8 的逐 token/head Q scale。本扩展保留 attention 的输入角色、标准 mask 和输出语义，显式增加必要的混合 dtype 和量化参数。
 
 源依据均取固定 `ca18aee...`，以下路径相对于 `attention/incre_flash_attention/`：
 
@@ -184,7 +184,7 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 | 公开入口 | 扩展 `flash_attn_with_kvcache` 及其 metadata 生成器；BSND/TND query，ND PA cache。非 PA 的 func/varlen 不随本次开放 |
 | 数据 | `q`（Q RoPE）和 `k_cache`（K RoPE）为 BF16；`qv` 和共享 `v_cache` 为 INT8；Q 末维 64/512，K/V cache 为 `[Np,128,1,64/512]`；O 为 BF16、LSE/真实 accumulator 为 FP32 |
 | scale 参数 | kvcache 增加仅关键字 `mla_q_scale`、`mla_k_scale`、`mla_v_scale`，均为同设备 FP32 tensor；Q shape 为 BSND `[B,Sq,Hq]` 或 TND `[Tq,Hq]`，K/V 各为 `[1]`。三者须同时提供，不静默复用 FA3 的 `q_descale/k_descale/v_descale`；不接 offset、postquant 或混合多种量化模式 |
-| scale 含义 | 源的 `dequantScaleQuery`、`keyAntiquantScale`、`valueAntiquantScale` 分别映射三个参数；同一 INT8 KV 存储用于 K/V，可各自使用源 K/V scale。概念 scores 为 `(INT32(qv·vᵀ) * q_scale * k_scale + q·kᵀ) * softmax_scale`，PV 按源动态 P 量化后乘 V scale；源的中间舍入仍须保留 |
+| scale 含义 | 源的 `dequantScaleQuery`、`keyAntiquantScale`、`valueAntiquantScale` 分别映射三个参数；同一 INT8 KV 存储用于 K/V，可各自使用源 K/V scale。独立反量化数学对照为 `(INT32(qv·vᵀ) * q_scale * k_scale + q·kᵀ) * softmax_scale`。固定源实测先合并内容与 RoPE 点积，再整体乘 `q_scale*k_scale*softmax_scale`，RoPE 也受 Q/K scale 影响；这是源语义差异，不能称为普通舍入误差。迁移按本节固定源优先级保留实际行为，同时单列与独立数学的差距。PV 按源动态 P 量化后乘 V scale，中间舍入顺序保留 |
 | metadata | `qkv_dtype=torch.int8` 在该压缩 PA 分支表示内容 dtype，RoPE 固定 BF16；scale 的值不进入调度快照。未接通时明确拒绝，旧 FP16/BF16 记录不能被误用为 INT8。先复用现有字段，只有不能表达混合 dtype 的安全边界时才扩记录 |
 | mask/长度/FD | 迁源可实测的无 mask、右下 causal 和原生自动 FD/不分割行为。源 INT8 的 Sq=1 sparse=0、多 Q sparse=3 及形状限制由 M18 对固定 host/kernel 实测锁定；FA3 等价归一化和空值按共同契约适配。不能从非量化推导所有 Q 长度或 mask 组合都支持 |
 | 其他选项 | 本阶段 `softcap=0`、无有限窗口、`num_splits=0/1`，不开放显式多 split；只接受与已迁源调度等价的默认有效 pack_gqa/sm_margin。未迁组合明确拒绝，不忽略参数；真实图重放、长度/scale 更新、复用和 fake/compile 属于两布局接入的必要验收 |
@@ -194,7 +194,17 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 
 验收沿用第 7 节的固定源逐元素与独立 FP32/FP64 数学对照、原数学阈值和源精度冲突优先级；数学 reference 从原始 INT8、scale、RoPE 及逻辑页独立反量化，不读取迁移调度或复制待测量化代码。纯量化 reference 可另定位误差，不能替代双数学检查。源物理 NZ 与目标 ND 的布局差异在结果中明确列出，源静态输入打包在准备阶段完成并单列耗时；任何目标必需转换均计入组件/公开性能，不藏入预热。源没有同义可调用输入时分别记录数学对照、probe 和 native 的适用范围。
 
-M19/M20 各自实测新增公开 eager 和 graph 性能，最多 100 个固定配置按既定等权平均 ≤1 验收，M21 沿用同一集合收尾。M17 接受的非量化图性能差距不能作为 INT8 的豁免；当前没有 INT8 通过证据。
+M18 的源边界夹具位于 [`mla_int8_cases.py`](../../tests/mla/support/mla_int8_cases.py) 和 [`test_source_boundaries.py`](../../tests/mla/unit/int8/test_source_boundaries.py)：Hq 为 1/2/4/8/16/32/64/128，BSND Sq 及 TND 单段最大 Q 为 32，33 明确拒绝；Q=1 无 mask、多 Q 右下 causal，包含实际零 KV、TND 零 Q 段和 causal 全空行。Sk=4097 是当前长序列代表值，不作为源长度上界。其他未验证组合不能由此自动开放。
+
+| 源组件与差异 | 本仓适配与独立验证 |
+| --- | --- |
+| `incre_flash_attention_preload_mla.h` 的任务流水线、量化向量流程 | [`kernel/mla_int8.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/kernel/mla_int8.hpp)、[`block/mla_int8_vector.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/block/mla_int8_vector.hpp) 保留数值顺序，只实例化本节 INT8/BF16 范围；先绑定长度再计算各核参数，修复源未绑定长度访问。测试 oracle 仅在调用源 `Init` 前预绑定长度，数值和遍历方法仍取固定源原文 |
+| `ifa_service_matmul_full_quant.h` 的内容/RoPE QK、量化 PV | [`block/mla_int8_cube.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/block/mla_int8_cube.hpp) 直接读 ND 页，复用现有页校验和 `mla_copy.hpp`；INT8 C0=32、BF16 C0=16，独立 64 位页/行/table stride，逐页检查物理页。NZ pack 只在源测试侧 |
+| 源普通 FD 的 BSND LSE 为 `[B,Sq,Hq]`，快速 FD 未写 LSE | 普通 FD 写回适配 `[B,Hq,Sq]`；TND 数值组件保留源 `[Tq,Hq]`，公开 `[Hq,Tq]` 的布局适配在 M20 接入；[`block/mla_int8_merge.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/block/mla_int8_merge.hpp) 复用快速归并的 FP32 sum/max 生成 LSE。快速 FD 的 LSE 另用固定源普通归并比较，前提是源/目标/普通归并输入的真实 partial 逐元素一致；不拿另一归并的 O 替代原生快速 FD 对照 |
+| 源空行 LSE 为正无穷；当前 CANN `InitOutput` 连续初始化 O/LSE 会复用尚未写完的 stack UB | 目标空行 LSE 归一为负无穷，并增加初始化完成同步；源 O 按默认 native 端点关闭 LSE 后对照，LSE 单独调用源，源空 KV 的 O 初始化缺陷另记证据，不冒充数学通过 |
+| `op_host/incre_flash_attention_tiling_mla.h` 的原始 tiling 与组件发射 | [`mla_int8_params.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_int8_params.h) 是数值调用描述，测试回放已校验 native 的原始 tiling，绑定输入夹具签名和包身份；它不是生产 metadata 或新公开协议。host/AICPU 与公开 real/fake/图接入留在 M19/M20 |
+
+M19/M20 各自实测新增公开 eager 和 graph 性能，最多 100 个固定配置按既定等权平均 ≤1 验收，M21 沿用同一集合收尾。M17 接受的非量化图性能差距不能作为 INT8 的豁免；M18 只提供组件证据，尚无 INT8 公开性能通过证据。
 
 ## 4. 功能边界
 
@@ -208,7 +218,7 @@ M19/M20 各自实测新增公开 eager 和 graph 性能，最多 100 个固定�
 | CANN 独立 512 维内容 K/V | FA3 qv 无等价表达，排除；见 3.1 |
 | tree mask / sparseMode=9、任意用户 mask、独立左上 causal 接口 | FA3 hopper 公共入口没有等价参数，排除；保留能用标准右下窗口表达的计算 |
 | 外部 NZ cache、CANN 布局字符串和特殊输出布局 | 不增加 CANN 专用公开参数；普通布局可由视图归一，NZ 外部格式按 FA3 不支持排除。内部是否使用分块布局由性能决定 |
-| INT8 全量化压缩 MLA | 用户已授权 M18–M21，按 3.4 迁移旧 IFA arch22 数值算法，公开 ND PA；尚未实现，不以 FP8 descale 冒充等价支持 |
+| INT8 全量化压缩 MLA | 用户已授权 M18–M21，按 3.4 迁移旧 IFA arch22 数值算法；M18 组件已完成，公开 ND PA 接入待 M19/M20，不以 FP8 descale 冒充等价支持 |
 | KV 伪量化、输出后量化、FP8、950 专用量化 MLA | 不在本次 INT8 范围；不能从 FIA 总签名或其他架构模板推断支持 |
 | PSE、公共前缀、TensorList、padding 参数、sink | 按 4.1 的 X05–X07 排除；TensorList/PSE/公共前缀/左 padding 不在所取源 MLA 能力内，源 prefill 可接受 sink，但固定 FA3 无等价参数。有效区末尾 padding 仍纳入实际长度验收 |
 | 新 KV 原地追加、内置 rotary、cache_leftpad、attention_chunk、FA3 额外维度/头数组合 | 不因 FA3 签名存在就扩为本次 CANN MLA 迁移任务；未实现组合明确报错，不允许忽略。若后来源能力盘点证明属于交集，补入计划 |
@@ -1136,6 +1146,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 192/128 BSND 公开 | [`mla_prefill_bsnd_cases.py`](../../tests/mla/support/mla_prefill_bsnd_cases.py) 的固定配置；先 `--suite prefill-bsnd-profile-check` 检查工具、native 包与廉价夹具，再运行 `--suite prefill-bsnd-profile`。复用既有 R=1/4、5 次预热、5×20 wall、5×10 Kernel；初始化和源布局转换成本单列，完整成本进入公开 E2E |
 | 192/128 TND / 混合公开 | [`mla_prefill_tnd_cases.py`](../../tests/mla/support/mla_prefill_tnd_cases.py)、[`mla_prefill_mixed_cases.py`](../../tests/mla/support/mla_prefill_mixed_cases.py)；分别先 `--suite prefill-tnd-profile-check` / `prefill-mixed-profile-check`，再运行对应 `*-profile`。采样次数沿用上一行；TND 计 varlen R=1/4，混合计隐式/生成/复用 R=1/4，native 转换边界见 [7.2](#72-参考工具与对照边界) |
 | 192/128 BSND/TND PA 公开 | [`mla_prefill_paged_bsnd_cases.py`](../../tests/mla/support/mla_prefill_paged_bsnd_cases.py)、[`mla_prefill_paged_tnd_cases.py`](../../tests/mla/support/mla_prefill_paged_tnd_cases.py)；分别以 `prefill-paged-bsnd-profile-check` / `prefill-paged-tnd-profile-check` 核对适用 native PA 包与解析，再执行对应 `*-profile`。三入口各 R=1/4，采样协议和原生 FD 分类保持不变 |
+| INT8 压缩数值组件 | [`mla_int8_profile.py`](../../tests/mla/support/mla_int8_profile.py) 的 `PERFORMANCE_CASES`：源 NZ 与目标 ND 同原生分区，含普通/快速 FD、mask、空值及 ND 行 stride；先 `int8-profile-check` 再 `int8-component-profile`，5 次预热、5×20 probe wall、5×10 Kernel，单列源 NZ pack 耗时，不称公开 E2E |
 | 512+64 基础与布局组件 | [`mla_profile_cases.py`](../../tests/mla/support/mla_profile_cases.py)、[`support/components/`](../../tests/mla/support/components/) 及所属单元中的固定清单；`mla_*_profile.py` 运行相应 probe。只在模块变化或定位时显式选择，不累计历史组件性能 |
 | 非 PA 公开基础/长度/stride | [`mla_forward_profile.py`](../../tests/mla/support/mla_forward_profile.py)、[`mla_varlen_profile.py`](../../tests/mla/support/mla_varlen_profile.py)、[`mla_mixed_profile.py`](../../tests/mla/support/mla_mixed_profile.py)；输入见驱动及 [`support/public_cases/`](../../tests/mla/support/public_cases/) |
 | PA / causal / window 公开 | `support/public_cases/` 与 `mla_window*_cases.py` 中的 `PERFORMANCE_CASES`；`--suite causal-*-profile` / `window-*-profile` 选择具体布局，完整名字以 [`--list`](#74-统一验收入口) 为准 |
@@ -1260,6 +1271,8 @@ python3 -m tests.mla.support.native_package
 ```
 
 构建自动使用上游声明的第三方依赖；可通过 `MLA_NATIVE_DEPS` 指向已下载的依赖缓存，`MLA_CANN_SOURCE_ROOT` 指向固定源仓，`MLA_NATIVE_ROOT` 指定原生包工作目录。已有包须通过当前配方、输入声明和完整内容校验，不能仅因目录存在就复用。来源校验读取固定 Git 对象并核对包内头文件，不要求只读 CANN 工作区的 HEAD 或未提交内容与构建版本相同。`native_inputs/*.json` 保留原固定源构建生成的 FP16/BF16 输入声明；编译 keys 覆盖原 dense、TND、BSND PA、TND PA 的已用组合，实际分派仍由独立证据核验。
+
+INT8 对照单独用 `python3 -m tests.mla.support.mla_int8_native` 构建，默认在 `MLA_WORK_DIR/int8-native`，可设 `MLA_INT8_NATIVE_ROOT`，不替换原非量化包。先执行 `--suite int8-tools int8-source-check`；源组成功后将 `MLA_INT8_SOURCE_LOG` 指向其原始 `output.log`，再执行 `--unit int8` 和显式组件性能。原始 tiling 绑定用例及输入生产者签名；包、输入或相关文件失效时须重新准备，不能从旧日志猜测调度。
 
 固定 FA3 的窗口 oracle 从 `MLA_FA3_SOURCE_ROOT/flash_api.cpp` 读取原文，默认目录为 `/tmp/mla-fa3-reference/d15f1531a460ba456f41b01a774f33ab2db8febf/`；[`mla_window_build.py`](../../tests/mla/support/mla_window_build.py) 校验固定 SHA256，不能用其他版本替换。官方源码链接见第 1 节。
 

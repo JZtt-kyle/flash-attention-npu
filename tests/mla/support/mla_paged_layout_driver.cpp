@@ -42,7 +42,11 @@ int main()
         ReadView(k);
         ReadView(v);
         MlaPagedCacheLayout layout{17, 17, 17, 17, 17, 17, 17, {17, 17, 17, 17}, {17, 17, 17, 17}};
+#ifdef MLA_INT8_LAYOUT
+        const auto status = BuildInt8PagedCacheLayout(table, k, v, layout);
+#else
         const auto status = BuildPagedCacheLayout(table, k, v, layout);
+#endif
         if (operation == 0) {
             std::cout << int(status) << ',' << layout.batchSize << ',' << layout.maxPages << ','
                       << layout.logicalCapacity << ',' << layout.physicalPages << ',' << layout.pageSize << ','

@@ -13,11 +13,11 @@ def sha256(path):
 
 
 def e2e_applicable(template, fd, *, representation="compressed", include_native_fd=False):
-    if representation not in ("compressed", "prefill"):
+    if representation not in ("compressed", "prefill", "int8"):
         raise ValueError("Unknown MLA representation")
-    return template in ((3, 4) if representation == "prefill" else (5,)) and (
-        include_native_fd or not fd
-    )
+    return template in (
+        (3, 4) if representation == "prefill" else (15,) if representation == "int8" else (5,)
+    ) and (include_native_fd or not fd)
 
 
 def parse_dispatch(log, dtype, count, vendor, *, representation="compressed"):
@@ -26,11 +26,12 @@ def parse_dispatch(log, dtype, count, vendor, *, representation="compressed"):
     configs = list(root.glob("config/ascend910b/**/fused_infer_attention_score.json"))
     if len(configs) != 1:
         raise RuntimeError("Expected one fixed CANN kernel configuration")
-    dtype_name = {"fp16": "float16", "bf16": "bfloat16"}[dtype]
+    dtype_name = {"fp16": "float16", "bf16": "bfloat16", "int8": "int8"}[dtype]
+    output_dtype = "bfloat16" if dtype == "int8" else dtype_name
     bins = [
         b
         for b in json.loads(configs[0].read_text())["binList"]
-        if b["inputs"][0]["dtype"] == dtype_name and b["outputs"][0]["dtype"] == dtype_name
+        if b["inputs"][0]["dtype"] == dtype_name and b["outputs"][0]["dtype"] == output_dtype
     ]
     if len(bins) != 1:
         raise RuntimeError("Expected one CANN binary for the requested dtype")
