@@ -19,7 +19,8 @@
 namespace flash_attn::mla::Block {
 using namespace AscendC;
 
-template <typename OutputT, bool WriteSingleAccumulator = false, bool IsTnd = false, uint32_t HeadDim = 512>
+template <typename OutputT, bool WriteSingleAccumulator = false, bool IsTnd = false, uint32_t HeadDim = 512,
+          bool GroupedOutput = HeadDim == 128>
 class MlaSplitKvMerge {
     static_assert(HeadDim == 512 || HeadDim == 128);
 
@@ -77,9 +78,9 @@ class MlaSplitKvMerge {
     {
         const uint64_t flat = uint64_t(params.rowStart) + row;
         if constexpr (IsTnd)
-            return (uint64_t(HeadDim == 128 ? params.kvHead : 0) * params.heads + flat % params.heads) * params.sq +
+            return (uint64_t(GroupedOutput ? params.kvHead : 0) * params.heads + flat % params.heads) * params.sq +
                    params.batchIndex + flat / params.heads;
-        if constexpr (HeadDim == 128)
+        if constexpr (GroupedOutput)
             return ((uint64_t(params.batchIndex) * params.kvHeads + params.kvHead) * params.heads +
                     flat % params.heads) *
                        params.sq +
@@ -199,7 +200,7 @@ class MlaSplitKvMerge {
                             ? 1
                             : Min(rows - row, params.heads - (params.rowStart + start + row) % params.heads);
                     const uint64_t offset = uint64_t(split) * params.batch * params.heads * params.sq *
-                                                (HeadDim == 128 ? params.kvHeads : 1) +
+                                                (GroupedOutput ? params.kvHeads : 1) +
                                             RowAddress(start + row);
                     DataCopyPad(accumulator[offset * HeadDim], current[row * HeadDim],
                                 DataCopyExtParams{uint16_t(count), HeadDim * 4, 0, count == 1 ? 0 : uint32_t(gap), 0});
@@ -234,7 +235,7 @@ class MlaSplitKvMerge {
         WaitFlag<HardEvent::V_MTE3>(0);
         const uint64_t outRow =
             uint64_t(params.batchIndex) * (IsTnd ? 1 : params.sq) * params.heads + params.rowStart + start;
-        if constexpr (HeadDim == 128) {
+        if constexpr (GroupedOutput) {
             for (uint32_t row = 0; row < rows; ++row) {
                 const uint64_t flat = uint64_t(params.rowStart) + start + row;
                 const uint64_t address =

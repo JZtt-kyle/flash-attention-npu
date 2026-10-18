@@ -25,4 +25,10 @@ struct MlaSplitKvKernelParams {
     uint64_t totalTasks;
     MlaSplitKvTask tasks[26];
 };
+// A validated GQA fragment uses the original allocation coordinates while
+// scheduling a subset of query heads. Other callers keep their span reader.
+struct MlaTaskLengths {
+    uint32_t queryStart, queryLength, kvLength;
+    uint64_t kvStart;
+};
 } // namespace flash_attn::mla

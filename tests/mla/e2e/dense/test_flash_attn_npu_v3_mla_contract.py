@@ -182,7 +182,9 @@ def test_mla_options_cannot_fall_through(entry, representation, option, dtype):
             if args[name] is not None:
                 args[name].requires_grad_(True)
     before = {name: t.detach().clone() for name, t in args.items() if isinstance(t, torch.Tensor)}
-    with pytest.raises(RuntimeError, match="forward is not implemented yet"):
+    with pytest.raises(
+        RuntimeError, match="metadata" if option == "schedule" else "forward is not implemented yet"
+    ):
         _forward(entry, args)
     if entry != "fake":
         for name, tensor in before.items():
@@ -264,7 +266,6 @@ def test_mla_metadata_auto_default_and_rejections(entry, dims, dtype, has_softca
         "rotary_interleaved",
         "attention_chunk",
         "num_splits",
-        "pack_gqa",
         "sm_margin",
     ],
 )
@@ -272,17 +273,24 @@ def test_each_unsupported_dense_option(entry, option, dtype):
     args = _inputs(dtype=dtype)
     if option in ("max_seqlen_q", "max_seqlen_k"):
         args[option] = 17
-    elif option in ("rotary_interleaved", "pack_gqa"):
+    elif option == "rotary_interleaved":
         args[option] = False
     elif option == "causal":
         args[option] = True
     elif option == "num_splits":
         args[option] = -1
-    elif option in ("attention_chunk", "sm_margin"):
+    elif option == "sm_margin":
+        args[option] = -1
+    elif option == "attention_chunk":
         args[option] = 1
     else:
         args[option] = torch.empty(1, device="npu")
-    with pytest.raises(RuntimeError, match="MLA compressed forward is not implemented yet"):
+    with pytest.raises(
+        RuntimeError,
+        match="sm_margin"
+        if option == "sm_margin"
+        else "MLA compressed forward is not implemented yet",
+    ):
         _forward(entry, args)
 
 

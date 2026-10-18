@@ -2,6 +2,18 @@
 #include <torch/extension.h>
 
 namespace flash_attn::mla {
+std::vector<at::Tensor> GqaForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                   const std::optional<at::Tensor>& qv, int64_t splits, int64_t left, int64_t right,
+                                   bool causal, std::optional<double> scale, const std::optional<at::Tensor>& usedQ,
+                                   const std::optional<at::Tensor>& usedK, const std::optional<at::Tensor>& metadata,
+                                   const std::optional<at::Tensor>& cuQ, const std::optional<at::Tensor>& cuK,
+                                   int64_t maxQ, int64_t maxK, const std::optional<at::Tensor>& pageTable,
+                                   double softcap, std::optional<bool> pack, int64_t margin);
+at::Tensor GqaMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads, int64_t valueDim,
+                         at::ScalarType dtype, const at::Tensor& lengths, const std::optional<at::Tensor>& cuQ,
+                         int64_t splits, int64_t left, int64_t right, bool causal, int64_t pageSize, bool hasSoftcap,
+                         std::optional<bool> pack, int64_t margin,
+                         const std::optional<at::Tensor>& usedQ = std::nullopt);
 at::Tensor PrefillMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, int64_t kvHeads,
                                   at::ScalarType dtype, const at::Tensor& lengths, const at::Tensor& cuQ,
                                   int64_t splits, int64_t left, int64_t right, bool causal,

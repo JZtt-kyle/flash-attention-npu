@@ -335,9 +335,9 @@ def test_static_boundaries_and_returns(dtype, fake):
         d = {n: t for n, t in _inputs(dtype=dtype).items() if n in ("q", "k", "v", "qv")}
         lengths = torch.tensor([2, 17], dtype=torch.int32, device="npu")
         for options in [
-            dict(num_splits=2),
-            dict(softcap=1),
-            dict(pack_gqa=True),
+            dict(num_splits=-1),
+            dict(softcap=-1),
+            dict(sm_margin=-1),
             dict(window_size=(-(2**63), 1)),
         ]:
             with pytest.raises(RuntimeError, match="MLA"):
@@ -361,20 +361,20 @@ def test_static_boundaries_and_returns(dtype, fake):
                 seqused_q=lengths,
                 scheduler_metadata=generate(d, lengths),
             )
-        # Unopened TND/mixed/PA windows reject before device execution.
         prefix = torch.tensor([0, 3, 6], dtype=torch.int32, device="npu")
-        with pytest.raises(RuntimeError, match="not implemented"):
-            api.flash_attn_with_kvcache(
-                d["q"].flatten(0, 1),
-                d["k"],
-                d["v"],
-                qv=d["qv"].flatten(0, 1),
-                cu_seqlens_q=prefix,
-                max_seqlen_q=3,
-                window_size=(2, 1),
-                num_splits=1,
-            )
-        with pytest.raises(RuntimeError, match="not implemented"):
+        mixed_out = api.flash_attn_with_kvcache(
+            d["q"].flatten(0, 1),
+            d["k"],
+            d["v"],
+            qv=d["qv"].flatten(0, 1),
+            cu_seqlens_q=prefix,
+            max_seqlen_q=3,
+            window_size=(2, 1),
+            num_splits=1,
+        )
+        assert mixed_out.shape == (6, d["q"].shape[-2], 512)
+        # The existing BSND fixture has 17 KV tokens: invalid as a PA page size.
+        with pytest.raises(RuntimeError, match="MLA.*page"):
             api.flash_attn_with_kvcache(
                 d["q"],
                 d["k"],
@@ -408,6 +408,7 @@ def test_static_boundaries_and_returns(dtype, fake):
         if not fake:
             torch.testing.assert_close(cache_out, cached(d, lengths, record)[0], rtol=0, atol=0)
             torch.testing.assert_close(func_out, cached(d)[0], rtol=0, atol=0)
+            torch.testing.assert_close(mixed_out, func_out.flatten(0, 1), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])

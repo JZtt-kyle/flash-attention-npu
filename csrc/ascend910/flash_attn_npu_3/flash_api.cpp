@@ -185,14 +185,20 @@ std::vector<at::Tensor> mha_fwd(
                         !rotary_sin_ && !seqlens_rotary_ && !q_descale_ && !k_descale_ && !v_descale_ &&
                         is_rotary_interleaved,
                     "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
-        TORCH_CHECK(
-            attention_chunk == 0 &&
-                (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 && (!cu_seqlens_k_ || cu_seqlens_q_))) &&
-                !pack_gqa_.has_value() && sm_margin == 0,
-            "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
+        TORCH_CHECK(attention_chunk == 0 && (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 &&
+                                                                 (!cu_seqlens_k_ || cu_seqlens_q_))),
+                    "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
         TORCH_CHECK(std::isfinite(softcap) && softcap >= 0, "MLA: softcap must be finite and non-negative in FP32");
         float scale = softmax_scale_.value_or(1.0f / std::sqrt(q_v_ ? 576.0f : 192.0f));
         TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
+        if (sm_margin != 0 || (pack_gqa_.has_value() && !*pack_gqa_ && q.size(-2) != k.size(-2))) {
+            TORCH_CHECK(!cu_seqlens_q_ || (max_seqlen_q_ && (!cu_seqlens_k_ || max_seqlen_k_)),
+                        "MLA: compact TND requires max_seqlen_q/k");
+            return flash_attn::mla::GqaForward(q, k, v, q_v_, num_splits, window_size_left, window_size_right,
+                                               is_causal, scale, seqused_q_, seqused_k_, scheduler_metadata_,
+                                               cu_seqlens_q_, cu_seqlens_k_, max_seqlen_q_.value_or(0),
+                                               max_seqlen_k_.value_or(0), page_table_, softcap, pack_gqa_, sm_margin);
+        }
         if (!q_v_) {
             TORCH_CHECK(!cu_seqlens_q_ || (max_seqlen_q_ && (!cu_seqlens_k_ || max_seqlen_k_)),
                         "MLA: compact TND requires max_seqlen_q/k");
@@ -850,11 +856,17 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
         TORCH_CHECK(headdim == 192 || num_heads_kv == 1,
                     "MLA scheduler metadata is not implemented yet outside the dense shape bounds");
         TORCH_CHECK(!cu_seqlens_k && !cu_seqlens_k_new && !seqused_q && !cache_leftpad && max_seqlen_k_new == 0 &&
-                        attention_chunk == 0 && (num_splits >= 0 && num_splits <= 256) && !pack_gqa.has_value() &&
-                        sm_margin == 0 && !softcap_ && !softmax_scale,
+                        attention_chunk == 0 && (num_splits >= 0 && num_splits <= 256) && !softcap_ && !softmax_scale,
                     "MLA scheduler metadata is not implemented yet for these length, mask, split, scheduling or "
                     "legacy numerical options");
         const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
+        if (sm_margin != 0 || (pack_gqa.has_value() && !*pack_gqa && num_heads_q != num_heads_kv)) {
+            TORCH_CHECK(!page_size || *page_size != 0, "MLA: page_size must be nonzero");
+            return flash_attn::mla::GqaMetadataOp(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv,
+                                                  headdim_v, dtype, cache_seqlens, cu_seqlens_q, num_splits,
+                                                  window_size_left, window_size_right, causal, page_size.value_or(0),
+                                                  has_softcap, pack_gqa, sm_margin);
+        }
         if (headdim == 192) {
             TORCH_CHECK(!page_size || *page_size != 0, "MLA: prefill page_size must be nonzero");
             if (cu_seqlens_q)

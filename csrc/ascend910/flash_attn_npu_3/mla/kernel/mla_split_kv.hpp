@@ -85,4 +85,19 @@ class MlaSplitKvPaged : private MlaTaskRing<InputT, /*HasKvLengths=*/true, IsTnd
 };
 template <typename InputT>
 using MlaSplitKvPagedBsnd = MlaSplitKvPaged<InputT>;
+
+// GQA changes validated head/length coordinates only. The existing partial
+// task ring, Cube/Vector arithmetic, PA Copy and event ordering are reused.
+template <typename InputT, bool IsTnd, bool Paged>
+class MlaGqaPartial : private MlaTaskRing<InputT, true, IsTnd, false, !Paged, true, Paged, false, true, true, true> {
+  public:
+    __aicore__ inline void RunFragment(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p,
+                                       const MlaTaskLengths& lengths, float scale, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv,
+                                       GM_ADDR kr, GM_ADDR workspace, TPipe* pipe, const MlaBsndInputLayouts& layouts,
+                                       bool kvIsTnd, const MlaPagedCacheInputs& cache, float softcap)
+    {
+        this->Run(s, scale, qc, qr, kv, kr, workspace, workspace, workspace, pipe, nullptr, s.sq, &layouts, kvIsTnd,
+                  reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout, p.window, &p, softcap, &lengths);
+    }
+};
 } // namespace flash_attn::mla::Kernel

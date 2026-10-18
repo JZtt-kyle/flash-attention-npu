@@ -129,8 +129,8 @@ def test_boundaries(dtype, fake):
                 with pytest.raises(RuntimeError, match="MLA|FlashAttention"):
                     call(dict(args, **{name: value}), entry)
         for option in (
-            dict(num_splits=2),
-            dict(pack_gqa=True),
+            dict(num_splits=-1),
+            dict(sm_margin=-1),
         ):
             with pytest.raises(RuntimeError, match="MLA"):
                 api.flash_attn_varlen_func(**args, causal=True, **option)

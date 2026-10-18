@@ -110,6 +110,22 @@ def cases(representation):
     if representation == "prefill":
         specs = [dict(s, shape=(*s["shape"], 2)) for s in specs]
         specs += [
+            dict(
+                id="compare-mask-tail32",
+                shape=(1, 1, 2, 33, 2),
+                m=512,
+                n=32,
+                splits=1,
+                pattern="saturation",
+            ),
+            dict(
+                id="compare-mask-tail480",
+                shape=(1, 17, 2, 513, 2),
+                m=512,
+                n=480,
+                splits=1,
+                pattern="saturation",
+            ),
             dict(id="wide-scratch", shape=(1, 1, 8, 8193, 1), m=32, n=8192, splits=2),
             dict(
                 id="cost-boundary",
@@ -121,7 +137,17 @@ def cases(representation):
             ),
         ]
     elif representation == "compressed":
-        specs += [dict(id="cost-boundary", shape=(1, 3, 128, 16384), m=256, n=512, splits=2)]
+        specs += [
+            dict(
+                id="compare-mask-tail32",
+                shape=(1, 1, 1, 33),
+                m=32,
+                n=32,
+                splits=1,
+                pattern="saturation",
+            ),
+            dict(id="cost-boundary", shape=(1, 3, 128, 16384), m=256, n=512, splits=2),
+        ]
     else:
         raise ValueError("Unknown MLA representation")
     return [dict(softcap=15, **s) if "softcap" not in s else s for s in specs]

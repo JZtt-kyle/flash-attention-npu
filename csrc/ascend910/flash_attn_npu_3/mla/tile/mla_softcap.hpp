@@ -35,7 +35,11 @@ __aicore__ inline void Softcap(AscendC::LocalTensor<float> scores, AscendC::Loca
         // Reuse tanh's now-dead temporary as the Select bit mask.
         AscendC::Mul(square, normalized, normalized, size);
         AscendC::PipeBarrier<PIPE_V>();
-        AscendC::CompareScalar(temporary, square, 0.015625f, AscendC::CMPMODE::LE, size);
+        // On 910B CompareScalar emits complete 64-float repeats only. Include
+        // the final repeat so a 32-lane tail does not retain Tanh scratch bits.
+        // The rounded read stays within square's 2048 elements; Select below
+        // consumes only the valid size lanes, never the unused padding bits.
+        AscendC::CompareScalar(temporary, square, 0.015625f, AscendC::CMPMODE::LE, (size + 63) / 64 * 64);
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::Mins(square, square, 0.015625f, size);
         AscendC::PipeBarrier<PIPE_V>();

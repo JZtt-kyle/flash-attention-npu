@@ -92,6 +92,35 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "softcap-mask-tail-check": [
+        "tests/mla/unit/softcap/test_attention.py::test_boundaries",
+        "-k",
+        "compare-mask-tail",
+    ],
+    "gqa-options-tools": ["tests/mla/unit/tools/test_mla_gqa_options_tools.py"],
+    "gqa-options-check": [
+        "tests/mla/e2e/gqa_options/test_public.py::test_representative",
+        "tests/mla/e2e/gqa_options/test_public.py::test_prefill_query_used_record",
+        "tests/mla/e2e/gqa_options/test_public.py::test_prefill_paged_tail_softcap",
+    ],
+    "gqa-options-tail-check": [
+        "tests/mla/e2e/gqa_options/test_public.py::test_prefill_paged_tail_softcap",
+    ],
+    "gqa-options-source": ["tests/mla/e2e/gqa_options/test_source.py"],
+    "gqa-options-boundaries": [
+        "tests/mla/e2e/dense/test_flash_attn_npu_v3_mla_contract.py::test_mla_options_cannot_fall_through",
+        "tests/mla/e2e/dense/test_flash_attn_npu_v3_mla_contract.py::test_each_unsupported_dense_option",
+        "tests/mla/e2e/causal_tnd/test_flash_attn_npu_v3_mla_causal_tnd_public.py::test_boundaries",
+        "tests/mla/e2e/window_bsnd/test_flash_attn_npu_v3_mla_window_public.py::test_static_boundaries_and_returns",
+    ],
+    "gqa-options-profile-check": ["tests/mla/e2e/gqa_options/public_profile.py"],
+    "gqa-options-profile": ["tests/mla/e2e/gqa_options/public_profile.py"],
+    "gqa-options-sanitize": ["tests/mla/unit/gqa_options/test_metadata.py"],
+    "gqa-options-cpu-check": [
+        "tests/mla/unit/gqa_options/test_metadata.py",
+        "-k",
+        "source_and_geometry or empty_capacity",
+    ],
     "gqa-schedule-check": [
         "tests/mla/unit/gqa_schedule/test_schedule.py",
         "-k",
@@ -1059,6 +1088,8 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "gqa-options-profile",
+    "gqa-options-profile-check",
     "softcap-paged-bsnd-profile",
     "softcap-paged-tnd-profile",
     "softcap-paged-bsnd-profile-check",
@@ -1121,6 +1152,7 @@ WINDOW_DEVICE_SUITES = {
     "window-bsnd-public",
 }
 STANDALONE_CHECK_SUITES = {
+    "softcap-mask-tail-check",
     "softcap-check",
     "softcap-profile-check",
     "softcap-profile",
@@ -1151,6 +1183,10 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "gqa-options-tools",
+    "unit-gqa_options",
+    "gqa-options-sanitize",
+    "gqa-options-cpu-check",
     "unit-gqa_schedule",
     "gqa-schedule-check",
     "gqa-schedule-sanitize",
@@ -1303,7 +1339,14 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
-    if suite in {"unit-gqa_schedule", "gqa-schedule-check", "gqa-schedule-sanitize"}:
+    if suite in {
+        "unit-gqa_schedule",
+        "gqa-schedule-check",
+        "gqa-schedule-sanitize",
+        "unit-gqa_options",
+        "gqa-options-sanitize",
+        "gqa-options-cpu-check",
+    }:
         from tests.mla.support.mla_split_kv_build import split_toolchain_identity
 
         return split_toolchain_identity(suite.endswith("sanitize"))
@@ -1568,6 +1611,9 @@ def environment(args, directory, suite):
         MLA_PAGED_METADATA_LIBRARY=str(args.artifacts / "producer/metadata.so"),
     )
     if suite in {
+        "unit-gqa_options",
+        "gqa-options-sanitize",
+        "gqa-options-cpu-check",
         "unit-gqa_schedule",
         "gqa-schedule-check",
         "gqa-schedule-sanitize",
@@ -1584,6 +1630,8 @@ def environment(args, directory, suite):
     }:
         env["MLA_SCHEDULE_ARTIFACT_DIR"] = str(directory / "schedule")
         env["MLA_SCHEDULE_SANITIZE"] = str(int(suite.endswith("sanitize")))
+    if suite in {"gqa-options-profile", "gqa-options-profile-check"}:
+        env["MLA_GQA_OPTIONS_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {"softcap-paged-bsnd-profile", "softcap-paged-bsnd-profile-check"}:
         env["MLA_SOFTCAP_PAGED_BSND_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {"softcap-paged-tnd-profile", "softcap-paged-tnd-profile-check"}:
@@ -2131,7 +2179,13 @@ def run(args):
                     )
             if (
                 suite
-                in {"softcap-check", "unit-softcap", "softcap-profile", "softcap-profile-check"}
+                in {
+                    "softcap-check",
+                    "softcap-mask-tail-check",
+                    "unit-softcap",
+                    "softcap-profile",
+                    "softcap-profile-check",
+                }
                 and not args.collect_only
                 and result["returncode"] == 0
             ):

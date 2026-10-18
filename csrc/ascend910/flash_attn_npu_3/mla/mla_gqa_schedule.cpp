@@ -1,6 +1,12 @@
 // Copyright (c) 2025 Huawei Technologies Co., Ltd.
 // CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
 // Local GQA coordinate adapter; source algorithms/provenance in mla_gqa_schedule.h.
+// This translation unit executes only on host/AICPU. Bisheng's ASC front end
+// also defines __NPU_ARCH__ for host-only files; keep reused scalar consumers
+// free of AICore annotations here.
+#ifdef __NPU_ARCH__
+#undef __NPU_ARCH__
+#endif
 #include "mla_gqa_schedule.h"
 #include "detail/cann_split_core.h"
 #include "mla_auto_split_bsnd_consumer.h"

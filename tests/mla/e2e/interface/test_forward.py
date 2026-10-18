@@ -134,8 +134,8 @@ def test_default_compile(layout):
     [
         ("attention_chunk", 1),
         ("num_splits", -1),
-        ("pack_gqa", False),
-        ("sm_margin", 1),
+        ("pack_gqa", "invalid"),
+        ("sm_margin", -1),
         ("q_descale", 1),
     ],
 )
@@ -144,7 +144,8 @@ def test_unsupported_option_names(layout, name, value, fake):
     with FakeTensorMode() if fake else nullcontext():
         args = inputs(layout, torch.float16)
         args[name] = value
-        with pytest.raises(RuntimeError, match=f"not implemented yet for {name}"):
+        match = name if name in ("pack_gqa", "sm_margin") else f"not implemented yet for {name}"
+        with pytest.raises(RuntimeError, match=match):
             public(layout, args)
 
 

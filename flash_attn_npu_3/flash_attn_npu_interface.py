@@ -266,6 +266,7 @@ def _check_mla_dense_options(
     allow_split=False,
     allow_softcap=False,
 ):
+    _check_mla_gqa_options(pack_gqa, sm_margin)
     if any(t is not None for t in optional_tensors):
         raise RuntimeError(
             "MLA compressed forward is not implemented yet for optional tensors or length/rotary options"
@@ -276,8 +277,6 @@ def _check_mla_dense_options(
         ("attention_chunk", attention_chunk != 0),
         ("softcap", softcap != 0.0 and not allow_softcap),
         ("num_splits", num_splits != 1 and not (allow_split and 0 <= num_splits <= 256)),
-        ("pack_gqa", pack_gqa is not None),
-        ("sm_margin", sm_margin != 0),
         ("rotary_interleaved", not rotary_interleaved),
     ):
         if unsupported:
@@ -1487,6 +1486,246 @@ def _mla_tnd_bsnd_forward_fake(
     )
 
 
+def _check_mla_gqa_options(pack, margin):
+    if pack is not None and not isinstance(pack, bool):
+        raise RuntimeError("MLA: pack_gqa must be None or bool")
+    # Fake checks the architecture envelope; real host checks this chip's count.
+    if not isinstance(margin, int) or not 0 <= margin < 26:
+        raise RuntimeError("MLA: sm_margin must leave at least one physical AIC")
+
+
+def _mla_gqa_active(heads, kv_heads, pack, margin):
+    return margin != 0 or (pack is False and heads != kv_heads)
+
+
+def _mla_gqa_budget(
+    batch,
+    sq,
+    sk,
+    heads,
+    kv_heads,
+    dim,
+    splits,
+    left,
+    right,
+    causal,
+    pack,
+    margin,
+    total_q=None,
+    total_k=None,
+    page=0,
+):
+    _check_mla_gqa_options(pack, margin)
+    if dim not in (128, 512) or kv_heads <= 0 or heads % kv_heads or (dim == 512 and kv_heads != 1):
+        raise RuntimeError("MLA: GQA representation is unsupported")
+    groups = heads if pack is False else kv_heads
+    _mla_prefill_bsnd_budget(
+        batch, sq, sk, heads, groups, splits, left, right, causal, total_q, total_k, page
+    )
+    words = 380 + batch * (8 + 2 * groups)
+    if not 0 <= batch <= 2**32 - 1 or words > 2**32 - 1:
+        raise RuntimeError("MLA: GQA metadata word count overflow")
+    group = heads // groups
+    n = (
+        (8192 if group < 5 else 4096 if group < 10 else 2048)
+        if sq <= 16 and total_q is None
+        else 512
+    )
+    if _normalize_mla_window(sq, sk, left, right, causal)[0]:
+        n = min(n, 1024)
+    if dim == 512:
+        n = 512
+    if page and n > page and n % page:
+        n = n // page * page
+    n = min(n, sk) or 32
+    aligned = (n + 31) // 32 * 32
+    m = (
+        256
+        if dim == 512
+        else (
+            512
+            if aligned <= 512
+            else 256
+            if aligned <= 1024
+            else 128
+            if aligned <= 2048
+            else 64
+            if aligned <= 4096
+            else 32
+        )
+    )
+    count = batch * groups * ((sq * group + m - 1) // m)
+    if total_q is not None:
+        count = min(count, (total_q * group // m + batch) * groups)
+    scratch = 26 * (12 * m * aligned + 16 * m * dim + 16 * m)
+    if scratch + count * (splits or 26) * m * (dim + 16) * 4 > 2**63 - 1:
+        raise RuntimeError("MLA: GQA workspace overflow")
+    return words
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_gqa_forward")
+def _mla_gqa_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    num_splits,
+    window_left,
+    window_right,
+    causal,
+    softmax_scale,
+    seqused_q,
+    seqused_k,
+    scheduler_metadata,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    max_seqlen_q,
+    max_seqlen_k,
+    page_table,
+    softcap,
+    pack_gqa,
+    sm_margin,
+):
+    tnd = cu_seqlens_q is not None
+    if not _check_mla_inputs(
+        q,
+        k,
+        v,
+        qv,
+        varlen_q=tnd,
+        varlen_k=cu_seqlens_k is not None,
+        paged_kv=page_table is not None,
+    ):
+        raise RuntimeError("MLA: GQA entry requires compressed 64/512 or prefill 192/128 tensors")
+    _check_mla_dense_options(
+        softmax_scale=softmax_scale,
+        num_splits=num_splits,
+        allow_split=True,
+        softcap=softcap,
+        allow_softcap=True,
+        pack_gqa=pack_gqa,
+        sm_margin=sm_margin,
+    )
+    if cu_seqlens_k is not None:
+        _check_mla_tnd_inputs(q, k, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k)
+    elif tnd and page_table is None:
+        _check_mla_mixed_inputs(q, k, cu_seqlens_q, max_seqlen_q, seqused_k, None, seqused_q)
+    batch = cu_seqlens_q.numel() - 1 if tnd else q.shape[0]
+    _check_mla_used(q, batch, seqused_q, seqused_k)
+    if page_table is not None:
+        _check_mla_paged_inputs(
+            q,
+            k,
+            page_table,
+            seqused_k,
+            None,
+            seqused_q,
+            cu_seqlens_q,
+            max_seqlen_q,
+            window_left,
+            window_right,
+            causal,
+            num_splits,
+            has_softcap=softcap > 0,
+        )
+    sq = max_seqlen_q if tnd else q.shape[1]
+    sk = (
+        max_seqlen_k
+        if cu_seqlens_k is not None
+        else k.shape[1] * (page_table.shape[1] if page_table is not None else 1)
+    )
+    words = _mla_gqa_budget(
+        batch,
+        sq,
+        sk,
+        q.shape[-2],
+        k.shape[-2],
+        v.shape[-1],
+        num_splits,
+        window_left,
+        window_right,
+        causal,
+        pack_gqa,
+        sm_margin,
+        q.shape[0] if tnd else None,
+        (k.shape[0] if cu_seqlens_k is not None else batch * sk) if tnd else None,
+        k.shape[1] if page_table is not None else 0,
+    )
+    if scheduler_metadata is not None:
+        if seqused_q is not None and (not tnd or (qv is not None and cu_seqlens_k is None)):
+            raise RuntimeError("MLA: Q-used with explicit metadata is not implemented yet")
+        if (
+            scheduler_metadata.dtype != torch.int32
+            or scheduler_metadata.device != q.device
+            or scheduler_metadata.shape != (words,)
+            or not scheduler_metadata.is_contiguous()
+        ):
+            raise RuntimeError(
+                "MLA: GQA scheduler_metadata must be same-device contiguous int32 with matching word count"
+            )
+    lse_shape = (q.shape[-2], q.shape[0]) if tnd else (batch, q.shape[-2], sq)
+    capacity = num_splits or 26
+    return (
+        q.new_empty((*q.shape[:-1], v.shape[-1])),
+        q.new_empty(lse_shape, dtype=torch.float32),
+        torch.empty(0, device=q.device)
+        if num_splits == 1
+        else q.new_empty((capacity, *lse_shape, v.shape[-1]), dtype=torch.float32),
+        torch.empty(0, device=q.device)
+        if num_splits == 1
+        else q.new_empty((capacity, *lse_shape), dtype=torch.float32),
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_gqa_metadata")
+def _mla_gqa_metadata_fake(
+    batch_size,
+    max_seqlen_q,
+    max_seqlen_k,
+    num_heads_q,
+    num_heads_kv,
+    headdim_v,
+    qkv_dtype,
+    cache_seqlens,
+    cu_seqlens_q,
+    num_splits,
+    window_left,
+    window_right,
+    causal,
+    page_size,
+    has_softcap,
+    pack_gqa,
+    sm_margin,
+    seqused_q=None,
+):
+    _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
+    if seqused_q is not None and (cu_seqlens_q is None or headdim_v != 128):
+        raise RuntimeError("MLA: Q-used metadata requires prefill TND Q/cache")
+    _check_mla_used(cache_seqlens, batch_size, seqused_q, None)
+    if cu_seqlens_q is not None:
+        _check_mla_metadata_query_prefix(cu_seqlens_q, batch_size, cache_seqlens.device)
+    if qkv_dtype not in (torch.float16, torch.bfloat16):
+        raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
+    words = _mla_gqa_budget(
+        batch_size,
+        max_seqlen_q,
+        max_seqlen_k,
+        num_heads_q,
+        num_heads_kv,
+        headdim_v,
+        num_splits,
+        window_left,
+        window_right,
+        causal,
+        pack_gqa,
+        sm_margin,
+        0 if cu_seqlens_q is not None else None,
+        0 if cu_seqlens_q is not None else None,
+        page_size,
+    )
+    return cache_seqlens.new_empty((words,))
+
+
 def _mla_prefill_bsnd_budget(
     batch,
     sq,
@@ -2162,7 +2401,9 @@ def _mla_forward(
                 k,
                 page_table,
                 None,
-                scheduler_metadata,
+                None
+                if _mla_gqa_active(q.shape[-2], k.shape[-2], pack_gqa, sm_margin)
+                else scheduler_metadata,
                 cu_seqlens_q=cu_seqlens_q,
                 max_seqlen_q=max_seqlen_q,
                 window_left=window_size[0],
@@ -2180,6 +2421,29 @@ def _mla_forward(
             dtype=torch.int32,
             device=k.device,
         )
+    if _mla_gqa_active(q.shape[-2], k.shape[-2], pack_gqa, sm_margin):
+        result = torch.ops.flash_attn_npu_3._mla_gqa_forward(
+            q,
+            k,
+            v,
+            qv,
+            num_splits,
+            *window_size,
+            causal,
+            softmax_scale,
+            seqused_q,
+            seqused_k,
+            scheduler_metadata,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q or 0,
+            max_seqlen_k or 0,
+            page_table,
+            softcap,
+            pack_gqa,
+            sm_margin,
+        )
+        return result if return_accumulators else result[:2]
     if qv is None:
         result = _mla_prefill_forward(
             q,
@@ -2385,6 +2649,29 @@ def _flash_attn_forward(
                 v_descale,
             ),
         )
+        if _mla_gqa_active(q.shape[-2], k.shape[-2], pack_gqa, sm_margin):
+            return torch.ops.flash_attn_npu_3._mla_gqa_forward(
+                q,
+                k,
+                v,
+                qv,
+                num_splits,
+                window_size_left,
+                window_size_right,
+                causal,
+                softmax_scale,
+                seqused_q,
+                seqused_k,
+                scheduler_metadata,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q or 0,
+                max_seqlen_k or 0,
+                page_table,
+                softcap,
+                pack_gqa,
+                sm_margin,
+            )
         if qv is None:
             return _mla_prefill_forward(
                 q,
@@ -2626,6 +2913,29 @@ def _flash_attn_forward_fake(
                 v_descale,
             ),
         )
+        if _mla_gqa_active(q.shape[-2], k.shape[-2], pack_gqa, sm_margin):
+            return torch.ops.flash_attn_npu_3._mla_gqa_forward(
+                q,
+                k,
+                v,
+                qv,
+                num_splits,
+                window_size_left,
+                window_size_right,
+                causal,
+                softmax_scale,
+                seqused_q,
+                seqused_k,
+                scheduler_metadata,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q or 0,
+                max_seqlen_k or 0,
+                page_table,
+                softcap,
+                pack_gqa,
+                sm_margin,
+            )
         if qv is None:
             return _mla_prefill_forward(
                 q,
@@ -4106,7 +4416,6 @@ def _check_mla_metadata_options(
         or attention_chunk != 0
         or (has_softcap and not allow_softcap)
         or (num_splits != 1 and not (allow_split and 0 <= num_splits <= 256))
-        or sm_margin != 0
     ):
         raise RuntimeError(
             "MLA scheduler metadata is not implemented yet for these length, mask, split, "
@@ -4474,7 +4783,6 @@ def _get_scheduler_metadata_fake(
                 cu_seqlens_k_new,
                 seqused_q,
                 cache_leftpad,
-                pack_gqa,
                 softcap,
                 softmax_scale,
             ),
@@ -4484,6 +4792,29 @@ def _get_scheduler_metadata_fake(
             prefill=headdim == 192,
             allow_softcap=True,
         )
+        _check_mla_gqa_options(pack_gqa, sm_margin)
+        if _mla_gqa_active(num_heads_q, num_heads_kv, pack_gqa, sm_margin):
+            if page_size is not None and page_size == 0:
+                raise RuntimeError("MLA: page_size must be nonzero")
+            return torch.ops.flash_attn_npu_3._mla_gqa_metadata(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                num_heads_kv,
+                headdim_v,
+                qkv_dtype,
+                cache_seqlens,
+                cu_seqlens_q,
+                num_splits,
+                window_size_left,
+                window_size_right,
+                causal,
+                page_size or 0,
+                has_softcap,
+                pack_gqa,
+                sm_margin,
+            )
         if headdim == 192:
             if page_size is not None and page_size == 0:
                 raise RuntimeError("MLA: prefill page_size must be 16..1024 in multiples of 16")
@@ -4700,7 +5031,6 @@ def get_scheduler_metadata(
             (
                 cu_seqlens_k_new,
                 cache_leftpad,
-                pack_gqa,
                 softcap,
                 softmax_scale,
             ),
@@ -4710,6 +5040,29 @@ def get_scheduler_metadata(
             prefill=headdim == 192,
             allow_softcap=True,
         )
+        _check_mla_gqa_options(pack_gqa, sm_margin)
+        if _mla_gqa_active(num_heads_q, num_heads_kv, pack_gqa, sm_margin):
+            if page_size is not None and page_size == 0:
+                raise RuntimeError("MLA: page_size must be nonzero")
+            return torch.ops.flash_attn_npu_3._mla_gqa_metadata(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads_q,
+                num_heads_kv,
+                headdim_v,
+                qkv_dtype,
+                cache_seqlens,
+                cu_seqlens_q,
+                num_splits,
+                window_size[0],
+                window_size[1],
+                causal,
+                page_size or 0,
+                has_softcap,
+                pack_gqa,
+                sm_margin,
+            )
         if headdim == 192:
             if page_size is not None and page_size == 0:
                 raise RuntimeError("MLA: prefill page_size must be 16..1024 in multiples of 16")

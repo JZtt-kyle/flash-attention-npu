@@ -20,7 +20,7 @@ from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_prefill_bsnd_profile_rows import partition_kernels
 
 
-def sample_kernels(call, specs, directory, dtype):
+def sample_kernels(call, specs, directory, dtype, *, partition=partition_kernels):
     import torch_npu
 
     profiler = torch_npu.profiler
@@ -62,7 +62,7 @@ def sample_kernels(call, specs, directory, dtype):
         assert row["Name"] == source["Op Name"] and row["Device_id"] == source["Device_id"]
         assert Decimal(row["Start Time(us)"]) == Decimal(source["Task Start Time(us)"])
         assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
-    samples = partition_kernels(rows, labels, specs, dtype)
+    samples = partition(rows, labels, specs, dtype)
     (directory / "kernel-samples.json").write_text(json.dumps(samples, indent=2) + "\n")
     return samples
 

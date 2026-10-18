@@ -1,4 +1,6 @@
 #include "mla_forward.h"
+#include "mla_gqa_launch.h"
+#include "mla_gqa_schedule.h"
 #include "mla_launch.h"
 #include "mla_prefill_bsnd_launch.h"
 #include "mla_schedule.h"
@@ -51,6 +53,7 @@
 #include <unordered_map>
 
 extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaGqaMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaPrefillBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args);
@@ -2280,6 +2283,237 @@ void RecordPrefill(const at::Tensor& tensor, const c10_npu::NPUStream& stream)
 }
 } // namespace
 
+namespace {
+MlaGqaContext GqaContext(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads, int64_t valueDim,
+                         at::ScalarType dtype, int64_t splits, int64_t left, int64_t right, bool causal, uint32_t flags,
+                         const MlaPlatformInfo& platform, uint32_t layout, int64_t totalQ, int64_t totalK,
+                         int64_t pageSize, bool hasSoftcap, std::optional<bool> pack, int64_t margin)
+{
+    TORCH_CHECK(FitsDenseShape(0, sq, heads, sk) && batch >= 0 && uint64_t(batch) <= UINT32_MAX && kvHeads > 0 &&
+                    heads % kvHeads == 0 && splits >= 0 && splits <= 256 && totalQ >= 0 && totalQ <= INT32_MAX &&
+                    totalK >= 0 && totalK <= INT32_MAX && pageSize >= 0 && pageSize <= 1024 &&
+                    (valueDim == 128 || valueDim == 512),
+                "MLA: GQA shape/split bounds exceeded");
+    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16, "MLA: qkv_dtype must be FP16 or BF16");
+    MlaGqaResources resources{};
+    TORCH_CHECK(ResolveGqaResources(heads, kvHeads, {pack ? int64_t(*pack) : -1, margin}, platform, resources) ==
+                    MlaScheduleStatus::Success,
+                "MLA: invalid pack_gqa or sm_margin; sm_margin must leave at least one physical AIC");
+    TORCH_CHECK(resources.platform.blockDims[resources.platform.aicNum - 1] == resources.platform.aicNum,
+                "MLA: unsupported GQA C1V2 blockDim mapping");
+    MlaWindow window{};
+    TORCH_CHECK(NormalizeWindow({sq, sk, left, right, causal}, window) == MlaCausalStatus::Success,
+                "MLA: GQA window bounds exceeded");
+    MlaGqaContext c{uint32_t(batch),
+                    uint32_t(sq),
+                    uint32_t(sk),
+                    uint32_t(heads),
+                    uint32_t(kvHeads),
+                    uint32_t(splits),
+                    uint32_t(dtype == at::kHalf ? MlaMetadataDtype::Fp16 : MlaMetadataDtype::Bf16),
+                    platform.aicNum,
+                    uint32_t(margin),
+                    uint32_t(resources.packed),
+                    layout,
+                    uint32_t(totalQ),
+                    uint32_t(totalK),
+                    uint32_t(pageSize),
+                    flags,
+                    uint32_t(valueDim),
+                    uint32_t(hasSoftcap),
+                    {uint32_t(window.kind), window.left, window.right}};
+    MlaGqaLayout l{};
+    TORCH_CHECK(GqaLayout(c, l), "MLA: GQA metadata/workspace/accumulator bounds exceeded");
+    TORCH_CHECK(l.bytes <= uint64_t(INT64_MAX) - platform.libApiWorkspaceBytes, "MLA: GQA workspace overflow");
+    // Reuse the accepted C1V2 resource check. Platform capacities exclude a
+    // runtime reserve, so nominal chip capacities are not valid lower bounds.
+    MlaSchedule resourceCheck{};
+    TORCH_CHECK(BuildDenseSchedule({1, 1, 1, 1}, platform, resourceCheck) == MlaScheduleStatus::Success,
+                "MLA: invalid GQA C1V2 resources");
+    c.workspaceBytes = l.bytes;
+    return c;
+}
+void CheckGqaRecord(const at::Tensor& record, c10::Device device, uint32_t words)
+{
+    TORCH_CHECK(record.scalar_type() == at::kInt && record.device() == device && record.dim() == 1 &&
+                    record.numel() == words && record.is_contiguous(),
+                "MLA: GQA scheduler_metadata must be same-device contiguous int32 with matching word count");
+}
+} // namespace
+
+at::Tensor GqaMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads, int64_t valueDim,
+                         at::ScalarType dtype, const at::Tensor& lengths, const std::optional<at::Tensor>& cuQ,
+                         int64_t splits, int64_t left, int64_t right, bool causal, int64_t pageSize, bool hasSoftcap,
+                         std::optional<bool> pack, int64_t margin, const std::optional<at::Tensor>& usedQ)
+{
+    CheckCacheLengths(lengths, batch, lengths.device());
+    TORCH_CHECK(!usedQ || (cuQ && valueDim == 128), "MLA: Q-used metadata requires prefill TND Q/cache");
+    CheckUsedInputs(lengths, batch, usedQ, std::nullopt);
+    if (cuQ)
+        CheckMetadataQueryPrefix(*cuQ, batch, lengths.device());
+    const c10::OptionalDeviceGuard guard(device_of(lengths));
+    const auto platform = CausalPlatform(lengths.device().index(), false);
+    const auto c = GqaContext(batch, sq, sk, heads, kvHeads, valueDim, dtype, splits, left, right, causal,
+                              2 | uint32_t(bool(usedQ)), platform, pageSize ? (cuQ ? 4 : 3) : (cuQ ? 2 : 0), 0, 0,
+                              pageSize, hasSoftcap, pack, margin);
+    MlaGqaLayout l{};
+    GqaLayout(c, l);
+    auto metadata = at::empty({l.words}, lengths.options());
+    MlaGqaMetadataArgs args{c,
+                            cuQ ? PrefillPointer(*cuQ) : 0,
+                            0,
+                            usedQ ? PrefillPointer(*usedQ) : 0,
+                            PrefillPointer(lengths),
+                            PrefillPointer(metadata),
+                            l.words,
+                            uint32_t(bool(cuQ))};
+    auto stream = c10_npu::getCurrentNPUStream();
+    RecordPrefill(metadata, stream);
+    RecordPrefill(lengths, stream);
+    if (usedQ)
+        RecordPrefill(*usedQ, stream);
+    if (cuQ)
+        RecordPrefill(*cuQ, stream);
+    RunCausalLaunch("ascendc_mla_gqa_metadata", [metadata, lengths, cuQ, usedQ, args, stream]() mutable {
+        ComputeMlaGqaMetadata<<<1, nullptr, stream.stream(false)>>>(&args, sizeof(args));
+        return 0;
+    });
+    return metadata;
+}
+
+std::vector<at::Tensor> GqaForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
+                                   const std::optional<at::Tensor>& qv, int64_t splits, int64_t left, int64_t right,
+                                   bool causal, std::optional<double> scaleOption,
+                                   const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& usedK,
+                                   const std::optional<at::Tensor>& supplied, const std::optional<at::Tensor>& cuQ,
+                                   const std::optional<at::Tensor>& cuK, int64_t maxQ, int64_t maxK,
+                                   const std::optional<at::Tensor>& pageTable, double softcap, std::optional<bool> pack,
+                                   int64_t margin)
+{
+    const bool tnd = bool(cuQ);
+    TORCH_CHECK(CheckForwardBoundary(q, k, v, qv, tnd, bool(cuK), bool(pageTable)),
+                "MLA: GQA entry requires compressed 64/512 or prefill 192/128 tensors");
+    const float scale = scaleOption.value_or(1.0 / std::sqrt(qv ? 576.0 : 192.0));
+    TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
+    TORCH_CHECK(std::isfinite(float(softcap)) && softcap >= 0 && (!softcap || float(softcap) > 0),
+                "MLA: softcap must be finite and non-negative in FP32");
+    TORCH_CHECK(!usedQ || !supplied || (tnd && (!qv || cuK)),
+                "MLA: Q-used with explicit metadata is not implemented yet");
+    if (cuK)
+        CheckTndInputs(q, k, *cuQ, *cuK, maxQ, maxK);
+    else if (tnd && !pageTable)
+        CheckTndBsndForwardInputs(q, k, *cuQ, maxQ, usedK, std::nullopt);
+    else if (tnd) {
+        TORCH_CHECK(cuQ->dim() == 1 && cuQ->numel() >= 1, "MLA: cu_seqlens_q must have shape [batch_size + 1]");
+        CheckMetadataQueryPrefix(*cuQ, cuQ->numel() - 1, q.device());
+    }
+    const int64_t batch = tnd ? cuQ->numel() - 1 : q.size(0);
+    CheckUsedInputs(q, batch, usedQ, usedK);
+    MlaPagedCacheLayout paged{};
+    if (pageTable) {
+        TORCH_CHECK(pageTable->dim() == 2 && pageTable->size(0) == batch && pageTable->scalar_type() == at::kInt &&
+                        pageTable->device() == q.device(),
+                    "MLA: page_table must be same-device int32[batch_size, max_pages]");
+        TORCH_CHECK(BuildPagedCacheLayout(PagedTensorView<MlaPageTableView>(*pageTable), PagedTensorView(k),
+                                          PagedTensorView(v), paged, !qv) == MlaLayoutStatus::Success,
+                    "MLA: paged cache exceeds shape, stride, storage or signed byte bounds");
+    }
+    const int64_t kvCapacity = pageTable ? int64_t(paged.logicalCapacity) : cuK ? maxK : k.size(1);
+    const c10::OptionalDeviceGuard guard(device_of(q));
+    const auto currentK = !cuK && supplied && !usedK
+                              ? std::optional<at::Tensor>(at::full({batch}, kvCapacity, q.options().dtype(at::kInt)))
+                              : usedK;
+    const auto platform = CausalPlatform(q.device().index(), false);
+    const auto c =
+        GqaContext(batch, tnd ? maxQ : q.size(1), kvCapacity, q.size(-2), k.size(-2), v.size(-1), q.scalar_type(),
+                   splits, left, right, causal, uint32_t(bool(usedQ)) | (uint32_t(bool(currentK)) << 1), platform,
+                   pageTable ? (tnd ? 4 : 3)
+                   : cuK     ? 1
+                   : tnd     ? 2
+                             : 0,
+                   tnd ? q.size(0) : 0, cuK ? k.size(0) : 0, pageTable ? k.size(1) : 0, softcap > 0, pack, margin);
+    MlaGqaLayout l{};
+    GqaLayout(c, l);
+    if (supplied)
+        CheckGqaRecord(*supplied, q.device(), l.words);
+    const int64_t b = c.batch, sq = c.sq, h = c.heads, dim = c.valueDim, capacity = splits ? splits : 26;
+    auto out = tnd ? at::empty({c.totalQ, h, dim}, q.options()) : at::empty({b, sq, h, dim}, q.options());
+    auto lse = tnd ? at::empty({h, c.totalQ}, q.options().dtype(at::kFloat))
+                   : at::empty({b, h, sq}, q.options().dtype(at::kFloat));
+    const auto emptyOptions = at::TensorOptions().device(q.device());
+    auto accum = splits == 1 ? at::empty({0}, emptyOptions)
+                 : tnd       ? at::empty({capacity, h, c.totalQ, dim}, q.options().dtype(at::kFloat))
+                             : at::empty({capacity, b, h, sq, dim}, q.options().dtype(at::kFloat));
+    auto accumLse = splits == 1 ? at::empty({0}, emptyOptions)
+                    : tnd       ? at::empty({capacity, h, c.totalQ}, q.options().dtype(at::kFloat))
+                                : at::empty({capacity, b, h, sq}, q.options().dtype(at::kFloat));
+    auto workspace = at::empty({int64_t(l.bytes + platform.libApiWorkspaceBytes)}, q.options().dtype(at::kByte));
+    auto metadata = supplied ? *supplied : at::empty({l.words}, q.options().dtype(at::kInt));
+    MlaGqaMetadataArgs args{c,
+                            cuQ ? PrefillPointer(*cuQ) : 0,
+                            cuK ? PrefillPointer(*cuK) : 0,
+                            usedQ ? PrefillPointer(*usedQ) : 0,
+                            currentK ? PrefillPointer(*currentK) : 0,
+                            PrefillPointer(metadata),
+                            l.words};
+    auto stream = c10_npu::getCurrentNPUStream();
+    for (const auto& tensor : {q, k, v, out, lse, accum, accumLse, workspace, metadata})
+        RecordPrefill(tensor, stream);
+    for (const auto& tensor : {qv, cuQ, cuK, usedQ, currentK, pageTable})
+        if (tensor)
+            RecordPrefill(*tensor, stream);
+    MlaGqaLaunchArgs a{};
+    a.stream = stream.stream(false);
+    uint32_t fftsLength = 0;
+    TORCH_CHECK(rtGetC2cCtrlAddr(&a.ffts, &fftsLength) == RT_ERROR_NONE, "MLA: FFTS address unavailable");
+    a.q = PrefillPointer(q);
+    a.qv = qv ? PrefillPointer(*qv) : 0;
+    a.k = PrefillPointer(k);
+    a.v = PrefillPointer(v);
+    a.out = PrefillPointer(out);
+    a.lse = PrefillPointer(lse);
+    a.accum = PrefillPointer(accum);
+    a.accumLse = PrefillPointer(accumLse);
+    a.workspace = PrefillPointer(workspace) + platform.libApiWorkspaceBytes;
+    a.metadata = PrefillPointer(metadata);
+    a.cuQuery = args.cuQuery;
+    a.cuKv = args.cuKv;
+    a.usedQuery = args.usedQuery;
+    a.usedKv = args.usedKv;
+    a.context = c;
+    a.inputs = {(tnd ? CheckTndTensorLayout(q) : CheckBsndTensorLayout(q)),
+                qv ? (tnd ? CheckTndTensorLayout(*qv) : CheckBsndTensorLayout(*qv)) : MlaBsndTensorLayout{},
+                (cuK ? CheckTndTensorLayout(k) : CheckBsndTensorLayout(k)),
+                (cuK ? CheckTndTensorLayout(v) : CheckBsndTensorLayout(v))};
+    if (pageTable)
+        a.cache = {paged, PagedTensorArray(*pageTable, paged.tableSpanElements),
+                   PagedTensorArray(k, paged.k.spanElements), PagedTensorArray(v, paged.v.spanElements)};
+    a.scale = scale;
+    a.softcap = softcap;
+    RunCausalLaunch("ascendc_mla_gqa", [a, args, supplied, q, qv, k, v, out, lse, accum, accumLse, workspace, metadata,
+                                        usedQ, currentK, cuQ, cuK, pageTable]() mutable {
+        if (!supplied)
+            ComputeMlaGqaMetadata<<<1, nullptr, a.stream>>>(&args, sizeof(args));
+        const auto error = q.scalar_type() == at::kHalf ? LaunchGqaFp16(a) : LaunchGqaBf16(a);
+        TORCH_CHECK(error == ACL_SUCCESS, "MLA: GQA BATCH_MODE launch failed (", error, ")");
+        return 0;
+    });
+    return {out, lse, accum, accumLse};
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+GqaForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const std::optional<at::Tensor>& qv,
+             int64_t splits, int64_t left, int64_t right, bool causal, std::optional<double> scale,
+             const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& usedK,
+             const std::optional<at::Tensor>& metadata, const std::optional<at::Tensor>& cuQ,
+             const std::optional<at::Tensor>& cuK, int64_t maxQ, int64_t maxK, const std::optional<at::Tensor>& pages,
+             double cap, std::optional<bool> pack, int64_t margin)
+{
+    const auto r = GqaForward(q, k, v, qv, splits, left, right, causal, scale, usedQ, usedK, metadata, cuQ, cuK, maxQ,
+                              maxK, pages, cap, pack, margin);
+    return {r[0], r[1], r[2], r[3]};
+}
+
 at::Tensor PrefillBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads,
                                  at::ScalarType dtype, const at::Tensor& lengths, int64_t splits, int64_t left,
                                  int64_t right, bool causal, int64_t pageSize, bool hasSoftcap)
@@ -2556,6 +2790,15 @@ PrefillMixedForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor
 
 TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 {
+    m.def("_mla_gqa_forward(Tensor q, Tensor k, Tensor v, Tensor? qv, int num_splits, int window_left, "
+          "int window_right, bool causal, float? softmax_scale, Tensor? seqused_q, Tensor? seqused_k, "
+          "Tensor? scheduler_metadata, Tensor? cu_seqlens_q, Tensor? cu_seqlens_k, int max_seqlen_q, "
+          "int max_seqlen_k, Tensor? page_table, float softcap, bool? pack_gqa, int sm_margin) -> "
+          "(Tensor, Tensor, Tensor, Tensor)");
+    m.def("_mla_gqa_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, int num_heads_kv, "
+          "int headdim_v, ScalarType qkv_dtype, Tensor cache_seqlens, Tensor? cu_seqlens_q, int num_splits, "
+          "int window_left, int window_right, bool causal, int page_size, bool has_softcap, bool? pack_gqa, "
+          "int sm_margin, Tensor? seqused_q=None) -> Tensor");
     m.def("_mla_prefill_mixed_forward(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, int max_seqlen_q, "
           "int num_splits=1, int window_left=-1, int window_right=-1, bool causal=False, "
           "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? seqused_q=None, "
@@ -2682,6 +2925,7 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
 {
+    m.impl("_mla_gqa_metadata", &flash_attn::mla::GqaMetadataOp);
     m.impl("_mla_prefill_bsnd_metadata", &flash_attn::mla::PrefillBsndMetadataOp);
     m.impl("_mla_split_bsnd_metadata", &flash_attn::mla::SplitBsndMetadataOp);
     m.impl("_mla_window_mixed_metadata", &flash_attn::mla::WindowMixedMetadataOp);
@@ -2697,6 +2941,8 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
 {
+    m.impl("_mla_gqa_metadata", torch::CppFunction::makeFallthrough());
+    m.impl("_mla_gqa_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_prefill_bsnd_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_split_bsnd_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_window_mixed_metadata", torch::CppFunction::makeFallthrough());
@@ -2712,6 +2958,7 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
 {
+    m.impl("_mla_gqa_forward", &flash_attn::mla::GqaForwardOp);
     m.impl("_mla_prefill_mixed_forward", &flash_attn::mla::PrefillMixedForwardOp);
     m.impl("_mla_prefill_mixed_metadata", &flash_attn::mla::PrefillMixedMetadataOp);
     m.impl("_mla_prefill_tnd_forward", &flash_attn::mla::PrefillTndForwardOp);

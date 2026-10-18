@@ -44,7 +44,7 @@ struct MlaGqaRow {
 // Owned CPU scheduling/coordinate protocol, not serialized device metadata.
 // S1G within a KV head (packed) or S1 within a query head (unpacked) is purely
 // logical: tensors keep their original allocation and independent strides.
-// The existing numerical kernels do not yet consume the unpacked protocol.
+// Production v47 maps these coordinates to existing partial/merge numerics.
 class MlaGqaSchedule {
   public:
     const MlaGqaResources& Resources() const

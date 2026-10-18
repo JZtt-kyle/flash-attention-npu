@@ -182,4 +182,14 @@ def daily_suites():
             "test_internal_query_used",
         )
     ]
+    suites["gqa_options"] = [
+        f"tests/mla/e2e/gqa_options/test_public.py::{name}"
+        for name in (
+            "test_daily",
+            "test_empty",
+            "test_fake",
+            "test_compile",
+            "test_prefill_paged_tail_softcap",
+        )
+    ]
     return suites

@@ -60,9 +60,10 @@ class MlaTaskRing {
                                bool kvIsTnd = IsTnd && !MixedKv, GM_ADDR pageTable = nullptr,
                                const MlaPagedCacheLayout* pagedLayout = nullptr,
                                MlaWindowKernelParams windowParams = {}, const MlaSplitKvKernelParams* partial = nullptr,
-                               float softcap = 0.0f)
+                               float softcap = 0.0f, const MlaTaskLengths* fragmentLengths = nullptr)
     {
         params = schedule;
+        taskLengths = fragmentLengths;
         if constexpr (IsWindow) {
             window = windowParams;
         }
@@ -161,6 +162,7 @@ class MlaTaskRing {
     uint32_t actualKvLength = 0, actualQueryLength = 0;
     uint32_t queryTokens = 0, queryStart = 0;
     uint64_t kvStart = 0;
+    const MlaTaskLengths* taskLengths = nullptr;
     uint32_t core, bStart, mStart, sStart, bEnd, mEnd, sEnd;
     uint32_t bn2IdxInCurCore = 0;
 
@@ -387,7 +389,12 @@ class MlaTaskRing {
             if (dispatch) {
                 if constexpr (HasKvLengths) {
                     if (b != previousBatch) {
-                        if constexpr (IsPaged) {
+                        if (taskLengths) {
+                            queryStart = taskLengths->queryStart;
+                            kvStart = taskLengths->kvStart;
+                            actualQueryLength = taskLengths->queryLength;
+                            actualKvLength = taskLengths->kvLength;
+                        } else if constexpr (IsPaged) {
                             const uint32_t start = kSpanWords * b;
                             if constexpr (IsTnd) {
                                 // v6 validates TND allocation starts within int32.
