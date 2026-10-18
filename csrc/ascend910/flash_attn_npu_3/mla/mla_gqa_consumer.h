@@ -32,15 +32,16 @@ struct GqaPartitionView {
     }
 };
 template <typename Reader, typename Arrays>
-MLA_GQA_INLINE MlaMetadataReadStatus ReadGqaMetadata(const Reader& read, uint32_t words, const MlaGqaContext& c,
-                                                     const Arrays& arrays, MlaAutoSplitBsndSchedule& output)
+MLA_GQA_INLINE MlaMetadataReadStatus ReadGqaMetadataWithLayout(const Reader& read, const MlaGqaContext& c,
+                                                               const MlaGqaLayout& l, const Arrays& arrays,
+                                                               MlaAutoSplitBsndSchedule& output)
 {
     using S = MlaMetadataReadStatus;
-    MlaGqaLayout l{};
-    if (!GqaLayout(c, l) || words != l.words)
-        return S::InvalidBuffer;
     if (read(5))
         return S::InvalidTiling;
+#if defined(__NPU_ARCH__)
+#pragma unroll
+#endif
     for (uint32_t i = 0; i < 32; ++i)
         if (read(i) != GqaHeader(c, l, i))
             return S::ShapeMismatch;
@@ -90,6 +91,24 @@ MLA_GQA_INLINE MlaMetadataReadStatus ReadGqaMetadata(const Reader& read, uint32_
         return S::InvalidPrefixes;
     output = schedule;
     return S::Success;
+}
+// Public reader validates the layout; the device loader has already done
+// exactly that check before validating buffer addresses and can reuse it.
+template <typename Reader, typename Arrays>
+MLA_GQA_INLINE MlaMetadataReadStatus ReadGqaMetadata(const Reader& read, uint32_t words, const MlaGqaContext& c,
+                                                     const Arrays& arrays, MlaAutoSplitBsndSchedule& output)
+{
+    MlaGqaLayout l{};
+    if (!GqaLayout(c, l) || words != l.words)
+        return MlaMetadataReadStatus::InvalidBuffer;
+    return ReadGqaMetadataWithLayout(read, c, l, arrays, output);
+}
+// Workspace capacity is an address stride, not the number of runnable slots.
+// Using it as the task stride pins every unsplit group to core zero whenever
+// capacity equals the launch width (the automatic-split default).
+MLA_GQA_INLINE uint32_t GqaTaskSlots(const MlaGqaContext& c, const MlaAutoSplitBsndSchedule& s)
+{
+    return c.splits ? c.splits : (s.maxSplits ? s.maxSplits : 1);
 }
 template <typename Reader>
 MLA_GQA_INLINE bool GqaTask(const Reader& read, const MlaGqaContext& c, const MlaGqaLayout& l,

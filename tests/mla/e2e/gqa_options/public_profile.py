@@ -7,7 +7,7 @@ import subprocess
 import sys
 from tests.mla.support.native_package import native_vendor
 from tests.mla.support.mla_native_dispatch import parse_dispatch
-from tests.mla.support.mla_gqa_options_profile_rows import PERFORMANCE, summarize, selected
+from tests.mla.support.mla_gqa_options_profile_rows import summarize, selected
 from tests.mla.support.mla_validation_policy import check_public_performance
 
 
@@ -16,6 +16,8 @@ def test_native_public_profile():
     root = Path(os.environ["MLA_VALIDATION_RESULT"]) / "public-profile"
     root.mkdir()
     check = os.environ.get("MLA_GQA_OPTIONS_PROFILE_CHECK") == "1"
+    schedule = os.environ.get("MLA_GQA_OPTIONS_SCHEDULE_PROFILE") == "1"
+    specs = selected(check, schedule=schedule)
     jobs = []
     for representation in ("compressed", "prefill"):
         for dtype in ("fp16", "bf16"):
@@ -43,21 +45,21 @@ def test_native_public_profile():
             ]
             if check:
                 cmd.append("--check")
+            if schedule:
+                cmd.append("--schedule")
             log = root / f"{representation}-{dtype}.dispatch.log"
             with log.open("w") as stream:
                 subprocess.run(
                     cmd, env=env, stdout=stream, stderr=subprocess.STDOUT, check=True, timeout=600
                 )
-            proof = parse_dispatch(
-                log, dtype, len(selected(check)), vendor, representation=representation
-            )
-            proof["specs"] = selected(check)
+            proof = parse_dispatch(log, dtype, len(specs), vendor, representation=representation)
+            proof["specs"] = specs
             path = root / f"{representation}-{dtype}.dispatch.json"
             path.write_text(json.dumps(proof, indent=2) + "\n")
             jobs.append((representation, dtype, directory, cmd, env, path))
     if check:
         return
-    # All 80 numerical/native fixtures must succeed before any full sampling.
+    # Every selected numerical/native fixture must succeed before sampling.
     reports = []
     for representation, dtype, directory, cmd, env, path in jobs:
         env.update(ASCEND_GLOBAL_LOG_LEVEL="3", ASCEND_SLOG_PRINT_TO_STDOUT="0")
@@ -76,6 +78,6 @@ def test_native_public_profile():
         finally:
             os.sched_setaffinity(0, affinity)
         reports.append(json.loads((directory / "profile.json").read_text()))
-    result = summarize(reports, PERFORMANCE)
+    result = summarize(reports, specs)
     (root / "average.json").write_text(json.dumps(result, indent=2) + "\n")
     check_public_performance(result)

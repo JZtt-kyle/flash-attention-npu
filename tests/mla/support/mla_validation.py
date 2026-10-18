@@ -92,6 +92,20 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "graph-tools": [
+        "tests/mla/unit/tools/test_mla_graph_tools.py",
+        "tests/mla/unit/tools/test_mla_validation.py",
+        "tests/mla/unit/tools/test_mla_validation_dependencies.py",
+        "tests/mla/unit/tools/test_mla_validation_policy.py",
+    ],
+    "graph-profile": ["tests/mla/e2e/graph/public_profile.py"],
+    "graph-profile-check": ["tests/mla/e2e/graph/public_profile.py"],
+    "graph-ordinary": ["tests/test_flash_attn_npu_v3_graph.py"],
+    "graph-check": [
+        "tests/mla/e2e/graph/test_capture.py::test_runtime_capture",
+        "tests/mla/e2e/graph/test_capture.py::test_mla_capture",
+        "tests/mla/e2e/graph/test_capture.py::test_func_capture",
+    ],
     "softcap-mask-tail-check": [
         "tests/mla/unit/softcap/test_attention.py::test_boundaries",
         "-k",
@@ -115,6 +129,7 @@ SUITES = {
     ],
     "gqa-options-profile-check": ["tests/mla/e2e/gqa_options/public_profile.py"],
     "gqa-options-profile": ["tests/mla/e2e/gqa_options/public_profile.py"],
+    "gqa-options-schedule-profile": ["tests/mla/e2e/gqa_options/public_profile.py"],
     "gqa-options-sanitize": ["tests/mla/unit/gqa_options/test_metadata.py"],
     "gqa-options-cpu-check": [
         "tests/mla/unit/gqa_options/test_metadata.py",
@@ -1088,7 +1103,10 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "graph-profile",
+    "graph-profile-check",
     "gqa-options-profile",
+    "gqa-options-schedule-profile",
     "gqa-options-profile-check",
     "softcap-paged-bsnd-profile",
     "softcap-paged-tnd-profile",
@@ -1183,6 +1201,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "graph-tools",
     "gqa-options-tools",
     "unit-gqa_options",
     "gqa-options-sanitize",
@@ -1630,8 +1649,15 @@ def environment(args, directory, suite):
     }:
         env["MLA_SCHEDULE_ARTIFACT_DIR"] = str(directory / "schedule")
         env["MLA_SCHEDULE_SANITIZE"] = str(int(suite.endswith("sanitize")))
-    if suite in {"gqa-options-profile", "gqa-options-profile-check"}:
+    if suite in {"graph-profile", "graph-profile-check"}:
+        env["MLA_GRAPH_PROFILE_CHECK"] = str(int(suite.endswith("check")))
+    if suite in {
+        "gqa-options-profile",
+        "gqa-options-profile-check",
+        "gqa-options-schedule-profile",
+    }:
         env["MLA_GQA_OPTIONS_PROFILE_CHECK"] = str(int(suite.endswith("check")))
+        env["MLA_GQA_OPTIONS_SCHEDULE_PROFILE"] = str(int(suite == "gqa-options-schedule-profile"))
     if suite in {"softcap-paged-bsnd-profile", "softcap-paged-bsnd-profile-check"}:
         env["MLA_SOFTCAP_PAGED_BSND_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {"softcap-paged-tnd-profile", "softcap-paged-tnd-profile-check"}:

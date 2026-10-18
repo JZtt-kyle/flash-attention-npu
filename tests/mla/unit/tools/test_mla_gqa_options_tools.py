@@ -9,6 +9,8 @@ import pytest
 from tests.mla.support import mla_validation as driver
 from tests.mla.support.mla_gqa_options_profile_rows import (
     PERFORMANCE,
+    SCHEDULE_PERFORMANCE,
+    selected,
     modes,
     summarize,
     partition_kernels,
@@ -27,6 +29,7 @@ from tests.mla.support.mla_gqa_options_profile_rows import (
         "gqa-options-source",
         "e2e",
         "gqa-options-profile",
+        "gqa-options-schedule-profile",
     ],
 )
 def test_failure_interruption_and_resume(tmp_path, monkeypatch, suite):
@@ -51,11 +54,20 @@ def test_ownership_and_matrix():
     assert not any("unit/gqa" in p for p in driver.SUITES["e2e"])
     assert len(PERFORMANCE) * 4 <= 100
     assert len({json.dumps(s, sort_keys=True) for s in PERFORMANCE}) == len(PERFORMANCE)
+    from tests.mla.support.mla_graph_profile_rows import PERFORMANCE as graph_inputs
+
+    assert 4 * (len(graph_inputs) + len(SCHEDULE_PERFORMANCE)) == 96
+    assert selected(False, schedule=True) == SCHEDULE_PERFORMANCE
+    assert selected(False) == PERFORMANCE
+    assert selected(True, schedule=True) == selected(True)
+    assert {s["layout"] for s in SCHEDULE_PERFORMANCE} == {s["layout"] for s in PERFORMANCE}
+    assert {s["id"] for s in SCHEDULE_PERFORMANCE} == {s["id"] for s in PERFORMANCE}
     for suite in (
         "unit-gqa_options",
         "gqa-options-sanitize",
         "gqa-options-tools",
         "gqa-options-profile-check",
+        "gqa-options-schedule-profile",
     ):
         env = driver.environment(
             argparse.Namespace(device="7", golden="cache", artifacts=Path("/tmp/gqa")),
@@ -63,6 +75,9 @@ def test_ownership_and_matrix():
             suite,
         )
         assert env["MLA_VALIDATION_NPU"] == str(int(suite not in driver.CPU_SUITES))
+        if suite == "gqa-options-schedule-profile":
+            assert env["MLA_GQA_OPTIONS_SCHEDULE_PROFILE"] == "1"
+            assert env["MLA_GQA_OPTIONS_PROFILE_CHECK"] == "0"
     assert (
         driver.environment(
             argparse.Namespace(device="7", golden="cache", artifacts=Path("/tmp/gqa")),
@@ -144,17 +159,16 @@ def test_profile_identity_failure(fault):
 
 @pytest.mark.parametrize("layout", ["bsnd", "tnd"])
 def test_kernel_phases(layout):
-    names = (["ComputeMlaGqaMetadata"] if layout == "tnd" else []) + [
-        "MlaGqaFp16" + s for s in ("Init", "Attention", "Merge")
-    ]
+    names = (["ComputeMlaGqaMetadata"] if layout == "tnd" else []) + ["MlaGqaFp16Attention"]
     rows = [
         dict(Name=n, Device_id="0", **{"Start Time(us)": str(i * 3), "Duration(us)": "1"})
         for i, n in enumerate(names)
     ]
     labels = [dict(case=0, name="fa3")]
     specs = [dict(layout=layout)]
-    assert partition_kernels(rows, labels, specs, "fp16")[0]["kernel_us"] == 2
-    for bad in (rows[:-1], rows + rows, rows[::-1]):
+    assert partition_kernels(rows, labels, specs, "fp16")[0]["kernel_us"] == 1
+    old_phase = dict(rows[0], Name="MlaGqaFp16Init")
+    for bad in (rows[:-1], rows + rows, [old_phase, *rows]):
         with pytest.raises(ValueError):
             partition_kernels(bad, labels, specs, "fp16")
 

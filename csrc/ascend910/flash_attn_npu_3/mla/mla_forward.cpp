@@ -39,6 +39,7 @@
 #include "tiling/platform/platform_ascendc.h"
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
+#include "torch_npu/csrc/core/npu/NPUGraphsUtils.h"
 #include "torch_npu/csrc/framework/OpCommand.h"
 #include "runtime/rt_ffts.h"
 #include <c10/core/DeviceGuard.h>
@@ -304,8 +305,10 @@ struct MetadataSubmission {
                 return;
             }
         }
-        TORCH_CHECK(aclrtRecordEvent(inputReady, current) == ACL_SUCCESS, "MLA: input event recording failed");
-        TORCH_CHECK(aclrtStreamWaitEvent(worker, inputReady) == ACL_SUCCESS, "MLA: input event wait failed");
+        if (inputReady != nullptr) {
+            TORCH_CHECK(aclrtRecordEvent(inputReady, current) == ACL_SUCCESS, "MLA: input event recording failed");
+            TORCH_CHECK(aclrtStreamWaitEvent(worker, inputReady) == ACL_SUCCESS, "MLA: input event wait failed");
+        }
         if constexpr (std::is_same_v<Args, MlaTndMetadataArgs>) {
             ComputeMlaTndMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
         } else if constexpr (std::is_same_v<Args, MlaTndBsndMetadataArgs>) {
@@ -319,8 +322,10 @@ struct MetadataSubmission {
         } else {
             ComputeMlaDenseMetadata<<<1, nullptr, worker>>>(&args, sizeof(args));
         }
-        TORCH_CHECK(aclrtRecordEvent(metadataDone, worker) == ACL_SUCCESS, "MLA: metadata event recording failed");
-        TORCH_CHECK(aclrtStreamWaitEvent(current, metadataDone) == ACL_SUCCESS, "MLA: metadata event wait failed");
+        if (metadataDone != nullptr) {
+            TORCH_CHECK(aclrtRecordEvent(metadataDone, worker) == ACL_SUCCESS, "MLA: metadata event recording failed");
+            TORCH_CHECK(aclrtStreamWaitEvent(current, metadataDone) == ACL_SUCCESS, "MLA: metadata event wait failed");
+        }
     }
 };
 
@@ -332,18 +337,24 @@ MetadataSubmission<Args> PrepareSubmission(const at::Tensor& metadata, const Arg
                                            const std::optional<at::Tensor>& usedKv = std::nullopt, bool causal = false)
 {
     auto stream = c10_npu::getCurrentNPUStream();
+    bool onCurrentStream = false;
     if constexpr (std::is_same_v<Args, MlaUsedMetadataArgs> || std::is_same_v<Args, MlaPagedMetadataArgs>) {
-        if (causal) {
-            c10_npu::NPUCachingAllocator::recordStream(metadata.storage().data_ptr(), stream);
-            for (const auto* input : {&lengths, &query, &usedQuery, &usedKv}) {
-                if (*input && (*input)->numel() != 0) {
-                    c10_npu::NPUCachingAllocator::recordStream((*input)->storage().data_ptr(), stream);
-                }
+        onCurrentStream = causal;
+    }
+    // The eager worker uses ordinary reusable events, which cannot be recorded
+    // during graph capture on 910B. Capture the same producer on the consumer
+    // stream so replay reads current device lengths and retains its allocations
+    // in the graph pool. No host length snapshot or graph-specific record exists.
+    // Metadata allocation has already initialized this device's context.
+    if (onCurrentStream || c10_npu::currentStreamCaptureStatusMayInitCtx() == c10_npu::CaptureStatus::Active) {
+        c10_npu::NPUCachingAllocator::recordStream(metadata.storage().data_ptr(), stream);
+        for (const auto* input : {&lengths, &query, &usedQuery, &usedKv}) {
+            if (*input && (*input)->numel() != 0) {
+                c10_npu::NPUCachingAllocator::recordStream((*input)->storage().data_ptr(), stream);
             }
-            return {
-                metadata, lengths, query,        usedQuery, usedKv, args, stream.stream(false), stream.stream(false),
-                nullptr,  nullptr, hasKvLengths, true};
         }
+        return {metadata, lengths, query,        usedQuery, usedKv, args, stream.stream(false), stream.stream(false),
+                nullptr,  nullptr, hasKvLengths, causal};
     }
     auto worker = c10_npu::getNPUStreamFromPool();
     // The two record/wait pairs are submitted together before these per-host-

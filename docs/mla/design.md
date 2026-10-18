@@ -117,7 +117,9 @@ func/varlen/内部前向的 `num_splits` 默认 1，kvcache/metadata 默认 0；
 
 accumulator 使用原 Q allocation 地址，不压紧 Q-used。自动容量 26 是后端资源上界，不代表物理 AIC 数或均匀 26 分片；实际每 M 的片数由固定 CANN 原生端点决定。Direct 的原始 FP32 O 写第 0 片，其余片和无贡献行初始化为 0/-inf。func/varlen 不公开 accumulator；不能把空 tensor 或最终低精度 O 转成 FP32 当作真实分片结果。
 
-完整 graph replay 尚未验收，不能由 fake/compile 或多流测试推断完成。生产平台检查 [`DensePlatform`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 当前只接受 `Ascend910B`，共享缓存平台查询也经此检查；910C 尚未开放，仍是迁移目标。910B C1V2 与容量限制属于本后端，不是官方 FA3 的通用限制。
+M16 图执行已通过正确性验收，本次按用户授权接受图性能例外，公开图性能仍未达标（见 [第 7 节](#7-验收口径)）。已实现边界为：两种表示、五布局以 `torch.npu.NPUGraph` / `torch.npu.graph` 捕获既有公开入口并重放，包含已开放的 mask、split、softcap 和 GQA 调度选项。捕获固定 tensor 的 shape、stride、存储地址及 Python 标量选项；这些条件改变时须重新捕获。输入内容及设备长度/前缀可原地更新，长度改变须在图内重生成 metadata，或在重放前按 stream 依赖原地更新图持有的外部记录；图外旧快照不会自动更新。真实重放、动态值、跨层/多 stream 和生命周期由 [图专项](../../tests/mla/e2e/graph/) 独立验收，fake/compile 不替代这些证据；当前性能验收结果与实测环境见 [status](status.md)。
+
+生产平台检查 [`DensePlatform`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 当前只接受 `Ascend910B`，共享缓存平台查询也经此检查；910C 尚未开放，仍是迁移目标。910B C1V2 与容量限制属于本后端，不是官方 FA3 的通用限制。
 
 ## 3. 两种 MLA 的接口映射
 
@@ -380,13 +382,13 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 
 ### 5.8 stream 与内存生命周期
 
-v1–v6 的生产或独立生成路径使用当前 stream / AICPU stream 的双事件依赖。v7–v47 在调用者当前 stream 顺序提交 AICPU 生成和 attention 消费：长度更新先于生成，生成的设备写屏障完成后才能执行消费。各 `Mla*MetadataArgs` 中的地址仅属于当次发射；对长度和记录登记实际使用的 allocator stream，并保留 tensor 生命周期。生成完成后记录不依赖原长度存储，但每次消费仍须与当次长度比较。
+v1–v6 的 eager 生产或独立生成路径使用当前 stream / AICPU stream 的双事件依赖；图捕获时改在当前 stream 执行同一 AICPU producer，跳过不能捕获的普通事件。捕获状态使用 torch_npu 导出的 `currentStreamCaptureStatusMayInitCtx` 查询，此时 metadata 分配已初始化上下文。v7–v47 已在调用者当前 stream 顺序提交 AICPU 生成和 attention 消费。两条图路径均保持长度更新先于生成、生成的设备写屏障先于消费，不增加协议、主机长度快照或设备同步。各 `Mla*MetadataArgs` 中的地址仅属于当次发射；对长度和记录登记实际使用的 allocator stream，并保留 tensor 生命周期。生成完成后记录不依赖原长度存储，但每次消费仍须与当次长度比较。
 
 上述当前 stream 路径发射前通过 `NPUStream::stream()` 排空 torch_npu 的 host 提交队列，保证此前排入的长度更新等任务已提交，再在调用线程使用现有 ASC 发射器；该操作不等待设备完成。设置 `ASCEND_LAUNCH_BLOCKING` 或 `TORCH_NPU_SANITIZER` 时保留 `RunOpApiV2` 调试路径。前向与独立生成均保留发射错误检查、profiler 标记和输入/输出生命周期；不依赖 torch_npu 未导出的私有发射符号。
 
 v5 的 `UsedForward` 持有两组分配前缀与两组可选 used，生成和 attention 使用同一组当次描述符，并在 worker/current stream 登记其非空 storage。B=0 的显式空 used 以零计数、非空地址表示存在：host 使用已持有 metadata 的地址作不读取的零跨度描述符，不将空 Tensor 的 null `data_ptr` 误当作缺省参数。
 
-跨 stream 复用由调用方建立正常 stream/event 依赖；前向对本次输入、长度和记录登记 stream。生成或消费期间不得改写长度/记录或共享可变 scratch。图内生成应在 replay 时重读设备长度，图外快照不会自动更新；fake/compile 与完整 graph replay 的验收层次见 [status](status.md)。新增协议须更新 version、kind 和 wordCount 校验，避免旧记录被新语义误读。
+跨 stream 复用由调用方建立正常 stream/event 依赖；前向对本次输入、长度和记录登记 stream。生成或消费期间不得改写长度/记录或共享可变 scratch。图内生成在每次 replay 时重读设备长度，图外快照不会自动更新，过期快照和非法前缀仍由设备消费者 Trap。图池保留捕获中的临时 metadata、输入副本与 workspace，公开返回 tensor 可在图销毁后继续持有；[生命周期专项](../../tests/mla/e2e/graph/test_lifecycle.py) 检查 allocator 复用、独立输出与跨图 stream 依赖，[Trap 专项](../../tests/mla/e2e/graph/test_trap.py) 在独立进程验证动态拒绝。新增协议须更新 version、kind 和 wordCount 校验，避免旧记录被新语义误读。
 
 ### 5.9 causal / window 记录
 
@@ -540,7 +542,7 @@ v44/v45/v46 分别沿用 v25/v26/v31 的字段、字数和原生调度，遵循 
 
 私有 `_mla_gqa_metadata` 的可选 `seqused_q` 仅用于 192/128 的 TND Q / BSND 或 PA KV，保留这些布局既有的内部 Q-used 记录复用能力；host 与 fake 校验长度描述，AICPU 保存实际 allocation/used，消费时重新核对，公开生成器不传入该参数。
 
-设备复用既有压缩 partial、prefill 和 FD merge 算法，只转换原输入 head/token 和输出/accumulator 坐标。init、attention、merge 均按剩余 C1V2 核数发射并逐阶段校验；auto 仍返回 26 个公开 accumulator 槽，内部 partial 容量使用剩余核数，single 返回空 accumulator。单元在 [`unit/gqa_options/`](../../tests/mla/unit/gqa_options/)，公开验收在 [`e2e/gqa_options/`](../../tests/mla/e2e/gqa_options/)；是否完成实机验收以 status 为准。
+设备复用既有压缩 partial、prefill 和 FD merge 算法，只转换原输入 head/token 和输出/accumulator 坐标。init、attention、merge 合为一次剩余 C1V2 核数发射，各核先完整校验，再初始化并执行 partial；全部 Vector（含零工作核）按固定源 FlashDecode 的同步顺序进入归并。auto 的任务枚举使用实际最大分片数，partial 地址仍使用容量步长；短 Q 归并只枚举可能有行的 tile。auto 仍返回 26 个公开 accumulator 槽，内部 partial 容量使用剩余核数，single 返回空 accumulator。单元在 [`unit/gqa_options/`](../../tests/mla/unit/gqa_options/)，公开验收在 [`e2e/gqa_options/`](../../tests/mla/e2e/gqa_options/)；是否完成实机验收以 status 为准。
 
 ## 6. 代码结构
 
@@ -1050,7 +1052,7 @@ CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射使用线�
 
 专用算子接收 None 或 tensor KV 长度，不接收整数。None 在当前流物化为逻辑容量 C；公开 kvcache 的整数先验证几何及 `0..C`，再按逻辑 B 物化。BSND 的 B 来自 Q batch，TND 的 Q 前缀元素数减一须与页表行数一致；Python 从前缀推导 B，C++ 静态计划从页表推导 B，分别检查另一侧。公开入口使用完整 Q 分配段；内部可传 `seqused_q`，存在时每次生成 v6（BSND/TND causal 为 v10/v11，BSND/TND window 为 v15/v16，BSND/TND 显式/自动 split 为 v23–v26），拒绝显式复用。其他选项和返回数量见 [2.2](#22-后端选项与返回值)。
 
-生成和发射遵循 [5.8](#58-stream-与内存生命周期)：持有输入、页表、前缀/长度、记录、输出和 workspace，单 split 无 mask 登记 current/worker stream 并用双 event 保证先生成后消费，causal/window 和 BSND/TND 显式/自动 split 在 current stream 顺序提交，split 额外持有 accumulator。共享 host 参数位于 [`mla_paged_inputs.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_inputs.h)。每个 Cube/Vector 在 TPipe 和 attention 之前运行对应 v6/v10/v11/v15/v16/v23–v26 消费者，再进入既有 Kernel / Block / Tile；不读回长度、不物化完整 cache、不调用 CANN attention。
+生成和发射遵循 [5.8](#58-stream-与内存生命周期)：持有输入、页表、前缀/长度、记录、输出和 workspace；单 split 无 mask 的 eager 路径登记 current/worker stream 并用双 event 保证先生成后消费，图捕获时在 current stream 顺序提交。causal/window 和 BSND/TND 显式/自动 split 均在 current stream 顺序提交，split 额外持有 accumulator。共享 host 参数位于 [`mla_paged_inputs.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_paged_inputs.h)。每个 Cube/Vector 在 TPipe 和 attention 之前运行对应 v6/v10/v11/v15/v16/v23–v26 消费者，再进入既有 Kernel / Block / Tile；不读回长度、不物化完整 cache、不调用 CANN attention。
 
 专用/通用 fake 校验几何、P/C、完整 storage、前缀/长度/记录外形，并返回与真实路径相同的 O/LSE，BSND/TND 显式/自动 split 另返回真实 shape 的 FP32 accumulator。公开 `torch.compile(..., fullgraph=True)` 保留真实算子边界，执行时重新核对 storage 和动态值；这不等于完整图重放验收。PA 有效零 KV 行（含合法 C=0/空池）为 `O=0、LSE=-inf`。单 split 和 BSND 显式 split 对未使用 Q 槽位不新增值承诺；自动 v24/v26 及 TND 显式 v25 的 init 初始化完整分配区为 0/-inf，见 6.2.12。生产与公开验收分别见 [BSND 生产](../../tests/mla/e2e/paged_bsnd/test_flash_attn_npu_v3_mla_paged_bsnd_production.py)、[TND 生产](../../tests/mla/e2e/paged_tnd/test_flash_attn_npu_v3_mla_paged_tnd_production.py)、[BSND 公开](../../tests/mla/e2e/paged_bsnd/test_flash_attn_npu_v3_mla_paged_public.py)、[TND 公开](../../tests/mla/e2e/paged_tnd/test_flash_attn_npu_v3_mla_paged_tnd_public.py)。
 
@@ -1084,6 +1086,12 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 分别报告 kernel 时间、无 metadata 调用 E2E、metadata 生成时间、复用前向 E2E 及上述完整调用段 E2E；图模式单列。接口适配导致的必要转换计入相应端到端成本，CANN 基线使用固定版本的原生正确分派。对于原 CANN 的原生 NZ 等不同布局优势，另列原生最佳路径结果并解释表示差异，转换成本单独明确。
 
+图模式捕获双方相同入口/R 的完整调用段，计时从 `graph.replay()` 至相同的完成同步；图中记录的 metadata 生成、转换和全部数值任务仍在对应段内。交替测 eager/图时，在计时开始前释放前一调用的结果，当前调用的输出分配仍包含在其自身计时内。一次性预热/捕获准备时间单列，不混入稳态重放；eager 与图模式分别按固定配置等权汇总并检查平均门槛，不能将两者合并稀释退化。图预检先验证每个 native 布局/表示/dtype 的廉价数值、实际捕获重放及代表 profiler 任务，再采完整固定集合。
+
+**M16 本次验收例外：** 2026-10-18 用户明确要求“图模式的性能先这样吧。先提交验收一次”，允许当前 M16 在图性能未达平均门槛时提交验收。图性能实测失败、退化明细及原始证据仍保留在 [status](status.md)；工具继续报告失败，默认 `mean_ratio <= 1.0` 不变。该例外不扩展到正确性、eager 或后续步骤，也不表示已达到源 CANN 等速。
+
+图内 Kernel 采样须能追溯到重放时的实际任务及调用身份。捕获准备与外层 Fill/MODEL_EXECUTE 保留于原始 trace，不能代替 attention/metadata/merge 时间；模型任务缺失、阶段缺失或身份混用均不能验收。图 Kernel 使用独立采样进程：全部 eager 发射族在 profiler 启动前初始化，首次图捕获位于 RECORD 阶段，以避免本机 CANN 的提前捕获及初始化临时流关联缺口。原始 `op_summary` 的 Model ID、阶段与任务身份必须完整，不能补写 ID 或用外层任务替代。完整重放 wall 在另一进程关闭 profiler 计时，仍包含外层执行成本，不按 profiler 任务筛选调整。实测环境与原始证据见 [status](status.md)。
+
 **覆盖：** 两种表示 × FP16/BF16 × dense/TND/PA × mask × 长短 KV × 单/多 query × 分组/尾块/stride；加 metadata 有无、重复使用、不同 scale、长度变更、split 自动/显式、graph replay。可采用代表性组合加针对性边界测试，不要求机械的全笛卡尔积，但每项源能力都要能追溯到用例或明确排除理由。
 
 **版本可追溯：** CANN 源码 commit 不代表当前已安装算子版本。实测前记录实际生效的 OPP/算子库路径、构建版本或文件哈希，确认其对应本次来源；记录本仓扩展的实际加载路径与构建版本。910C 需要实现与资源配置兼容，按需求不作 910C 实机验收承诺。
@@ -1104,6 +1112,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 五布局显式 / 自动 split 公开 | `support/mla_split*_cases.py` / `mla_auto_split*_cases.py` 的 `PERFORMANCE_CASES`；`--suite split-bsnd-profile`、`split-tnd-profile`、`split-mixed-profile`、`split-paged-bsnd-profile`、`split-paged-tnd-profile`，自动组加 `auto-` 前缀 |
 | softcap 组件 / 公开 | 组件使用 [`mla_softcap_cases.py`](../../tests/mla/support/mla_softcap_cases.py) 与 `softcap-profile-check` / `softcap-profile`；公开 BSND/TND/混合/BSND PA/TND PA 使用 [`support/public_cases/`](../../tests/mla/support/public_cases/) 中的 `softcap_*` 清单及 `softcap-bsnd-profile` / `softcap-tnd-profile` / `softcap-mixed-profile` / `softcap-paged-bsnd-profile` / `softcap-paged-tnd-profile`，采样前运行对应 `*-profile-check` |
 | GQA 调度选项公开 | [`mla_gqa_options_profile_rows.py`](../../tests/mla/support/mla_gqa_options_profile_rows.py) 固定五布局、两种表示与双 dtype 的选项 tuple；先 `gqa-options-profile-check` 核对 native 包和各布局夹具，再 `gqa-options-profile`。复用既有 native 适配、原始采样格式与 R=1/4，按配置内入口等权后汇总；正 cap 和 single/explicit 的原生 FD 对照单列 |
+| 图执行及受影响 eager 公开 | [`mla_graph_profile_rows.py`](../../tests/mla/support/mla_graph_profile_rows.py) 固定五布局、两种表示、双 dtype 的 legacy single 与 unpacked auto window；[`mla_graph_profile.py`](../../tests/mla/support/mla_graph_profile.py) 复用既有 native 调用和原始采样格式。先 `graph-profile-check`，再 `graph-profile`；分别保留 eager/图重放、一次性准备时间、metadata 生命周期各 R=1/4、kernel/转换分段及原生 FD 单列 |
 | 内部 Q-used 等无公开等价入口 | [`mla_bsnd_used_profile.py`](../../tests/mla/support/mla_bsnd_used_profile.py) 等只报告内部 wall、AICPU 与 Kernel；不得称公开 metadata E2E |
 
 `*` 表示名称族，不是可原样执行的 shell 参数。具体组到文件的映射在 [`mla_validation.py`](../../tests/mla/support/mla_validation.py)，日常正确性不会自动运行 profile。
@@ -1254,6 +1263,6 @@ python3 -m tests.mla.support.native_package
 | [BSND PA](../../tests/mla/e2e/prefill_paged_bsnd/test_public.py) | page=16/112/528/1024 代表、容量取整与尾页、页重排、独立 cache/table stride、Q-used、空容量和零 KV、内容/scale/页/视图复用 |
 | [TND PA](../../tests/mla/e2e/prefill_paged_tnd/test_public.py) | PA 边界叠加非均匀/空 Q allocation、Q-used 原位置、max 声明、全零 Q-used 与全部 live 页校验、公开 metadata 生成与复用 |
 
-各模块保留 real/fake/compile、静态拒绝、长度更新、stream/内存生命周期专项；共享拒绝测试按 2.2 覆盖非法调度选项和追加 cache 等未开放项，不能继续拒绝已接通的五布局 softcap 或合法 `pack_gqa` / `sm_margin`。编译测试不等于完整图重放，其实施顺序见 [plan](plan.md)。设备 Trap 和调度/数值单元在协议或设备实现变化时按影响范围实测，不因阶段汇总修改而重跑全部历史单元。
+各模块保留 real/fake/compile、静态拒绝、长度更新、stream/内存生命周期专项；共享拒绝测试按 2.2 覆盖非法调度选项和追加 cache 等未开放项，不能继续拒绝已接通的五布局 softcap 或合法 `pack_gqa` / `sm_margin`。完整图重放另由 [graph 专项](../../tests/mla/e2e/graph/) 覆盖，两种表示共用同一验收驱动，并在日常清单注册图内长度更新、旧 producer、空值及 fake/compile 节点。设备 Trap 和调度/数值单元在协议或设备实现变化时按影响范围实测，不因阶段汇总修改而重跑全部历史单元。
 
 阶段使用累计小输入 E2E、上述五布局公开专项、普通 FA3 回归及 7.1 的 60 配置公开性能。最近结果与实测环境在 status 保存，历史阶段记录从 Git 查询；性能配置的 source/native 精度检查、kernel 退化或 FD 单列不能替代公开调用正确性，也不能写成所有单例提速。

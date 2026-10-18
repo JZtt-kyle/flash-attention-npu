@@ -231,3 +231,70 @@ def test_empty_capacity_and_one_core(drivers, layout, dtype):
     assert build(drivers[0], c)["status"] == 0
     c.update(sq=0, totalq=0, uq=[0, 0, 0], cq=[0, 0, 0, 0] if layout in (1, 2, 4) else [])
     assert build(drivers[0], c)["status"] == 0
+
+
+@pytest.mark.parametrize("dim", [128, 512])
+@pytest.mark.parametrize("splits", [0, 1, 3, 19])
+@pytest.mark.parametrize("empty", [False, True])
+def test_runnable_slots_preserve_partials_and_distribute_heads(drivers, dim, splits, empty):
+    c = case(
+        dim=dim,
+        batch=2,
+        sq=3,
+        sk=4097,
+        cores=20,
+        margin=1,
+        splits=splits,
+        left=256,
+        right=2,
+        uq=[0, 0] if empty else [3, 1],
+        uk=[4097, 1057],
+    )
+    r = build(drivers[0], c)
+    assert r["status"] == 0
+    launch = drivers[0].evaluate([[3]])[0]
+    expected = set()
+    for group in range(r["groups"]):
+        for split in range(launch["capacity"]):
+            if drivers[0].evaluate([[2, group, split]])[0][0]:
+                expected.add((group, split))
+    actual = launch["tasks"]
+    assert {(group, split) for _, group, split, _ in actual} == expected
+    assert len(actual) == len(expected)
+    m = r["record"][25]
+    assert len({row for _, _, _, row in actual}) == len(actual)
+    assert all(row == (g * launch["capacity"] + s) * m for _, g, s, row in actual)
+    if empty:
+        assert not actual
+    elif splits == 0:
+        # This regression formerly sent all 16 unsplit head groups to core 0.
+        assert launch["slots"] == 1 < launch["capacity"]
+        assert len(actual) == 16
+        assert len({core for core, *_ in actual}) == 16
+
+
+@pytest.mark.parametrize("cores,kv,parts", [(20, 4097, 9), (17, 16384, 16)])
+def test_auto_split_slots_retain_all_source_fragments(drivers, cores, kv, parts):
+    c = case(
+        batch=1,
+        sq=1,
+        sk=kv,
+        heads=1,
+        kvheads=1,
+        cores=cores,
+        margin=1,
+        mask="none",
+        uq=[1],
+        uk=[kv],
+    )
+    r = build(drivers[0], c)
+    assert r["status"] == 0
+    launch = drivers[0].evaluate([[3]])[0]
+    assert launch["slots"] == parts <= launch["capacity"]
+    assert [(core, group, split) for core, group, split, _ in launch["tasks"]] == [
+        (split, 0, split) for split in range(parts)
+    ]
+    fragments = drivers[0].evaluate([[2, 0, split] for split in range(parts)])
+    assert fragments[0][6] == 0
+    assert fragments[-1][7] * r["record"][26] >= kv
+    assert all(a[7] == b[6] for a, b in zip(fragments, fragments[1:]))

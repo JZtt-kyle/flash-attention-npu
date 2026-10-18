@@ -116,6 +116,23 @@ int main()
             const bool ok = GqaTask(Reader{record}, c, l, schedule, group, split, t);
             std::cout << '[' << ok << ',' << t.batch << ',' << t.m << ',' << t.splitCount << ',' << t.rowBegin << ','
                       << t.rowEnd << ',' << t.s2Begin << ',' << t.s2End << "]\n";
+        } else if (mode == 3) {
+            const uint32_t slots = GqaTaskSlots(c, schedule);
+            std::cout << "{\"slots\":" << slots << ",\"capacity\":" << l.capacity << ",\"tasks\":[";
+            bool first = true;
+            for (uint32_t core = 0; core < l.cores; ++core) {
+                for (uint64_t i = core; i < schedule.groups * slots; i += l.cores) {
+                    const uint64_t group = i / slots;
+                    const uint32_t split = i % slots;
+                    MlaAutoSplitBsndTask t{};
+                    if (!GqaTask(Reader{record}, c, l, schedule, group, split, t))
+                        continue;
+                    std::cout << (first ? "" : ",") << '[' << core << ',' << group << ',' << split << ','
+                              << (group * l.capacity + split) * l.m << ']';
+                    first = false;
+                }
+            }
+            std::cout << "]}\n";
         } else
             return 2;
         if (!std::cin)

@@ -1,62 +1,63 @@
 # MLA 当前状态
 
-**M15g2 已完成两种表示、五布局的调度选项完整公开接入，必要正确性、回归和性能验收均通过。唯一下一步是 [M16 图执行](plan.md#唯一下一步-m16-图执行)；本轮提交后停止。** 接手基线为 `feat/mla-cann-migration` / `eebbdd4`，工作树原本干净；这是最近专门文档轮后的第四个成功开发轮。
+**M16 按用户明确授权接受本次图性能例外并提交验收。正确性、eager 和调度专项性能通过；图公开性能平均比 1.455079，仍记为未达标。** 分支 `feat/mla-cann-migration`，本步基线 `26145fa`（M15g2）。2026-10-18 用户要求“图模式的性能先这样吧。先提交验收一次”，本次保留性能失败及全部证据，不改变测试门槛。数值算法及 CANN/CATLASS 源码未改。本次作为最近专门文档轮后的第五个已接受开发轮，唯一下一步为 [专门文档修正轮](plan.md#唯一下一步-专门文档修正轮)；提交后立即停止，不在本次启动该轮。
 
-## 当前能力与边界
+## 当前实现
 
-`pack_gqa=None/True/False` 与合法 `sm_margin` 已接通 host、AICPU、Kernel、metadata 和公开 real/fake 入口，覆盖 compressed 512+64 / prefill 192/128、BSND、TND、TND Q + BSND cache、BSND Q + PA、TND Q + PA。v47 记录复用 M15g1 的坐标、分核和资源预算；unpacked 按独立 Q head 调度，margin 预留 AIC 与两倍 AIV。默认有效选项保留既有路径，三 mask、全部 split、softcap、真实 accumulator 与布局能力同时接入。契约见 [design 5.21](design.md#521-gqa-调度选项记录)。
+v47 自动任务过去用 partial 容量作调度步长，容量等于发射核数时，所有未拆分 head group 都落在核 0。现改用实际最大分片数枚举；原 partial 地址容量步长、源片段端点和显式 split 规则保持不变。新增 CPU 的任务集合/地址/核分布边界，及 BSND/TND 慢形状的固定源、双数学与日常 E2E。
 
-完整公开性能输入暴露了共享 softcap 的比较尾部错误，已修复并补齐双 dtype 的组件与公开 PA48 尾行回归；日常 E2E 累计 783 项。CANN 与 CATLASS 未修改，生产路径不转调 CANN。graph replay、910C 生产平台仍未开放。
+初始化、partial attention、FD merge 合为一次发射；各核先完整验证 metadata，再执行初始化和 attention，所有 Vector 核按源 FlashDecode 的 SyncAll 顺序进入归并。短 Q 不再枚举固定 M tile 中不可能有行的归并任务。设备 loader 复用已校验的 layout，并展开固定 32-word 头比较，消除重复准备。数值 Kernel/Block/Tile、公开返回与 accumulator、当次长度/页表校验及 Trap 保留。
 
-## 最近一次闭环证据
+图捕获时旧 metadata producer 使用当前流，eager 保留原辅助流；profiler 在独立进程内先完成 eager/AICPU 初始化、首次捕获放在 RECORD，保留原始 Model ID 与完整任务校验。wall 单独关闭 profiler 计时；R、预热、重复次数、精度和平均门槛不变。范围仍仅 MLA，两种表示中的分组调度命名不表示迁移普通 GQA。
 
-证据根为 `/tmp/mla-m15g2/`。下列均为本轮实际执行并通过的最终集合；源码/构建变化后旧 E2E 不继承，继承数为 **0**。`closing-evidence.log` 使用统一驱动已有校验复核当前依赖、用例清单、结果身份和全部原始证据哈希，并检查生产及数值源探针的构建/加载身份；不以历史中间结果替代本表。
+## 本轮证据与未通过项
 
-| summary 目录 | 必跑组 | 通过项 / 耗时 |
-| --- | --- | --- |
-| `tools-fixed-2/` | `gqa-options-tools` | 21 / 13.1 s |
-| `cpu-fixed/` | `unit-gqa_options`；`gqa-options-sanitize` | 109 / 37.3 s；109 / 116.5 s |
-| `component-fixed/` | `softcap-mask-tail-check`；`softcap-profile-check` | 6 / 318.4 s；8 / 40.6 s |
-| `device-fixed-check/` | `unit-softcap`；`gqa-options-check`；`gqa-options-source`；`gqa-options-profile-check` | 100 / 245.0 s；80 / 51.1 s；24 / 28.0 s；1 / 110.1 s |
-| `device-fixed-final/` | `detail-gqa_options`；`gqa-options-boundaries` | 364 / 412.9 s；100 / 20.9 s |
-| `device-fixed-final/` | 累计 `e2e`；普通 FA3 `ordinary` | 783 / 164.3 s；504 / 36.0 s |
-| `device-fixed-final/` | `softcap-profile`；`gqa-options-profile` | 8 / 113.2 s；1 / 1068.0 s |
+本轮证据根 `/tmp/mla-m16-schedule/`，生产源码冻结后通过格式和质量检查（`quality-frozen.log`）。正式重建后，扩展哈希与构建 manifest、实际加载一致。计时生命周期修正后再次通过质量检查（`quality-wall-lifetime.log`），`wall-dry-run.log` 与 `wall-collect/summary.json` 已核对命令和集合。最新正确性验收位于 `final/attempt-1792339158554700900`，相关组全部通过；统一身份未允许继承旧结果，全部实际重跑，继承 E2E 为 0。磁盘问题处理后，仅重跑受影响的图性能组，最终证据为 `private-profile/attempt-1792342031198773140`，完整采样成功，平均图性能门槛失败。
 
-对应 attempt 依次为 `1792312294537429420`、`1792312317715479660`、`1792312741648106790`、`1792313159349934560`、`1792313676509108600`。专项含真实/fake/compile、长度/stride/空值、复用/生命周期、24 项固定源和 20 项隔离 release Trap；native 夹具实际覆盖五布局、两种表示和双 dtype。固定源 O/LSE 逐元素一致，partial accumulator O 一致、LSE 满足 1e-6，双数学通过；本步没有新增源精度例外。
+本次收尾只同步用户授权的验收边界，生产、测试及构建代码未变。使用统一驱动已有校验核对 16 个通过组的源码/依赖、用例清单、实际加载与原始证据，并核对最终图组的失败结果及扩展身份（`commit-evidence-check.log`）；未重跑实机，不将核对记作新通过。对本步 30 个暂存文件执行 `ci/code_quality.sh --staged`，适用质量钩子全部通过（`quality-commit-staged.log`）；`git diff --check`、文档链接及更新后的下一步锚点核对通过。图性能按本次明确例外接受，失败结果不改写为通过。
 
-最终两次设备执行各用 1.3 s 校验构建，加载身份分别耗时 21.3 / 21.1 s；实际扩展为本仓 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `18078f0cb681b026257dda07358bc0f6c9a1f5674c016831e07a5b389fea5fb9`。`fix-acceptance-collect/` 与 `fix-selection-check.log` 核对最终集合：原日常 781 节点、原专项 362 节点完整保留，仅各增双 dtype 尾部用例；普通组仍为 504 项。
+| 证据 | 结果及适用范围 |
+| --- | --- |
+| `final-tools/attempt-1792334553417760170` | 当前生产实现的 CPU 30、sanitizer 119、调度工具 22 项全部通过；36.5/119.3/14.4 s；图工具由下行重跑替代 |
+| `wall-tools/attempt-1792338966969631670` | 图工具 170 项通过，110.4 s，含新增结果析构和失败传播回归 |
+| `collect/attempt-1792334533971256540`、`wall-collect/attempt-1792338890655943560` | 前后集合已核对；仅图工具新增 3 项，累计 E2E 仍为 871 项，性能仍为 40+56 配置 |
+| 最新 final 的 build/runtime | 正式构建复核复用 1.2 s，实际加载核验 24.4 s |
+| 最新 final 的 GQA 代表/固定源/接口边界 | 90/32/100 项通过，57.2/42.5/22.1 s |
+| 最新 final 的图代表/图性能预检 | 13/1 项通过，28.7/305.7 s；预检不等于平均性能通过 |
+| 最新 final 的调度专项/图专项 | 402/233 项通过，474.9/354.9 s，含生命周期和 Trap |
+| 最终 private-profile 的 compressed FP16 图 Kernel | BSND auto window：整段融合 Kernel 中位数 77.492 μs，native 27.141 μs；两者均保留原始任务记录 |
+| 最新 final 的累计 E2E/普通 FA3/普通图回归 | 871/504/2 项通过，218.7/30.2/23.5 s；旧 E2E 继承为 0 |
+| `final/attempt-1792335232667283470` 的调度性能 | 56 配置已测，适用 20 配置平均比 0.726879，通过，690.9 s；配置退化 0、分段退化 13，28 个 single/explicit 原生 FD 和 8 个正 softcap 按既有口径单列；其驱动和生产实现此后未变 |
+| 同一旧 final 的图性能 | 40 配置全部采样；旧驱动 eager 均值 0.784606、图均值 1.552423（失败）。前一 eager 结果释放污染图计时，wall 不作最终验收，保留原始 Kernel trace 用于定位 |
+| 最新 final 的图性能 | 290.5 s 后在首个图 Kernel 采样器失败；磁盘空间不足导致 CANN 原始记录缺失，未产生修正后均值，不记为通过 |
+| `wall-profile-initial/disk-probe` | 切换到临时内存目录后的真实预检通过：300 个图 Kernel 样本、1 份原始 op_summary，Model ID 与阶段严格校验通过 |
+| `wall-profile-initial/attempt-1792341404969637850` | 完整采样 48.3 s 后中止：实机容器的 `/dev/shm` 仅 64 MB，native 预检日志填满目录；未产生性能结果，原证据已校验归档 |
+| `private-storage-probe/sample/profiler-probe` | 独立 4 GB tmpfs 的真实 profiler 预检通过，97 个文件校验归档，原路径保持可访问 |
+| `private-profile/summary.json` | 构建/实际加载复核 1.3/22.3 s；40 配置全部适用、无排除，性能组 1189.5 s。eager 平均 0.799189，通过，配置/分段退化 6/33；图平均 1.455079，失败，配置/分段退化 40/204。851 个证据文件校验归档完毕 |
+| `wall-lifetime-red.log` / `wall-lifetime-green.log` | 新析构成本回归先复现模拟的 10 μs 调用被旧驱动计为 210 μs；修正后本测试及调用/同步失败传播共 3 项通过，14.61 s |
 
-数学缓存仍按内容复用：最终专项命中 455 次，E2E 命中 923 / 新增 94，普通组命中 1 / 新增 30，公开性能命中 76 / 新增 24。修复后的完整 softcap 单元命中 6 / 新增 98，独立尾部组命中 1 / 新增 5；GQA 代表命中 79 / 新增 1，固定源命中 24。待测实现均实际执行。
+图 wall 的前一结果现在在下一计时开始前释放，当前调用输出分配与同步仍在计时内；没有修改输入、入口/R、预热或采样次数，没有修补旧样本。生产扩展未变化；检查确认两轮的代表组源码依赖、构建 manifest 与 runtime identity 相同，但完整继承身份不同，因此保留驱动的保守判定并实际重跑。正确性以 `final/summary.json` 为准，最终图/eager 性能分别见 `private-profile/attempt-1792342031198773140/graph-profile/public-profile/{graph,eager}-average.json`。
 
-## 性能结果与适用范围
+磁盘普通可用空间为 0 时，root 仍可写保留空间，CANN profiler 却未输出原始记录。实机容器的 `/dev/shm` 仅 64 MB，与 sandbox 的挂载不同，小型探针可通过但完整预检日志会填满。旧证据已逐文件校验后归档至 `wall-profile-initial/`，原目录保留软链接。最终使用 `unshare -Ur -m` 创建任务私有的 4 GB tmpfs；环境包装器 `run_private_storage.py` 在退出时逐文件校验并归档至同一绝对路径，临时挂载已卸载。未修改全局挂载或文件系统设置，采样工具和口径仍在 `tests/mla/`。常规复现应选择有普通可用空间的输出文件系统；使用该包装器重跑时须选择新的输出目录。
 
-最终公开性能证据为 `device-fixed-final/attempt-1792313676509108600/gqa-options-profile/public-profile/`，保留四组 `accuracy.json`、逐项 `profile.json`、原始 wall/kernel 数据和汇总 `average.json`。固定 **80** 个配置全部完成正确性/native 预检后才开始计时；依据既有 design，40 个 single/explicit 原生 FD 配置和 20 个正 softcap 配置单列，适用平均的 20 个 cap=0 auto 配置平均耗时比为 **0.7392201795800999 ≤ 1**。配置均值退化 0 个，入口/R 分段退化 14 个；`implicit_1` 分段均值为 1.0242560589294685。全部结果保留，未按耗时筛选输入。
+同一慢形状的原三段 Init/Attention/Merge 合计约 424 μs；修正任务分配后约 173 μs，融合后约 86 μs，再消除重复准备后约 78 μs，最终复测 77.492 μs。定位 trace 的 Cube 矩阵计算约 2.287 μs（源 2.075 μs），Cube 标量处理约 41.383 μs（源 8.556 μs）；指标不能替代完整任务耗时。最终 TND auto 代表另有 41.381 μs 的 AICPU metadata 生成；prefill FP16 legacy TND 的 attention 为 43.901 μs、metadata+Init 合计 64.881 μs，源完整 Kernel 为 14.000 μs。完整图组的 R=4 开销尤其明显：TND public_4 平均比 2.039383，其他布局 implicit_4 平均比 1.911516。设备标量准备、metadata 生成和多次发射的冗余保留为后续优化方向，本次按用户要求停止图性能优化；不能宣称源 CANN 等速或公开图性能达标。
 
-组件性能 8 项也已实测：cap=0 partial kernel 比值范围 0.9377–1.0473，FD 为 1.7719–1.9792；正 cap 对无 cap 源仅作参考。组件单例结果不替代公开平均门槛。公开采样主要开销为每组约两分钟的 profiler 整理，未更改预热、重复次数、精度阈值或计时边界。
+未保留的实验如实记录：`cache-profile/` 的逐 word 小缓存无收益；`bulk-build*.log` 的错误地址空间转换编译失败；修正 GM 重载后的 `gm-copy-check.log` 第一项报 aicore exception（timeout or trap），已撤掉全部缓存实现及其专属用例。此前裸 pytest 的环境初始化 core 已移到 `unconfigured-parser.core.3`，未留在仓库。旧 sanitizer 曾受 sandbox 的 LSan/ptrace 限制失败，随后外部运行通过；最终仍对冻结版本实际重跑。
 
-## 本步失败、修正与未运行项
+上轮完整证据在 `/tmp/mla-m16-recovery/final/attempt-1792327001286361300/`：图专项 233、累计 E2E 861、普通 FA3 504、普通图 2 项通过；40 配置 eager 平均 0.900399，通过，图平均 2.732201，失败。生产源码已变，这些通过不能外推到当前实现，继承旧 E2E 为 0。当前性能集合固定为原图 40 配置加按调用覆盖预选的调度 56 配置，共 96，不按耗时选择输入；正 softcap 仍按 design 单列。
 
-`profile-final/summary.json`（attempt `1792310556058094930`）在 prefill FP16、BSND Q + PA48 KV、Q=17、KV=(1057,513)、Hq/Hkv=8/2、unpacked、margin=1、auto、causal、softcap=15 的双数学预检失败，O 最大误差 0.00390625，partial O/LSE 同时异常。原始张量为该 attempt 下 `gqa-options-profile/gqa-42e5f270a4c8c01b27f8.pt`；`profile-failure-tensors.log`、`tail-repro/`、`mask-tail-before/` 保留分析与独立复现。
+## 环境与复现
 
-根因是 910B `CompareScalar` 的 count 重载只处理完整 64 个 FP32 元素，32/480 元素调用漏写尾部 mask 并残留 Tanh scratch 位。比较范围现已在既有 scratch 内向上对齐到 64，Select 仍只使用有效元素；未更换算法或放宽阈值。新增 compressed 32、prefill 32/480 的双 dtype 组件用例和双 dtype 公开尾行用例；共享 Tile 改动后的必要组全部重跑，结果见上表。
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`，设备 7 是 Ascend910B3（20 AIC/40 AIV）。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`；只读 CANN checkout HEAD `2060a3db064c3352fec6262faed8a2decaf3a233`，构建使用固定 `ca18aee610729ca5270a44e2d84c751bc687fbf0` 的 archive。
 
-中间构建/夹具失败及设备锁拒绝目录保留，不作通过证据。特别是 `tail-component-check/` 在生产构建完成后因工具测试修改使准备身份失效，attempt 仍记为失败；驱动随后重新核对构建 manifest 并完成上述最终执行。`tools-fixed/` 的失败模拟探针 stub 已修正，`tools-fixed-2/` 全通过；`mask-tail-fixed/` 被设备锁拒绝、未运行。旧窗口/接口测试中已开放行为的拒绝断言、TND fake 长度及空 KV batch 夹具均已修正并由最终集合覆盖。
-
-未运行图重放、910C 实机与未选中的历史组件穷举；这些不在 M15g2 的必要集合。不能由本轮结果宣称全部历史单元或全量矩阵通过。
-
-## 复现与环境
-
-以下使用统一驱动；首次执行先加 `--dry-run`、`--collect-only` 核对命令和集合，再固定实现运行。设备收集同样需要 NPU 可见，sanitizer 需要允许 ptrace。输出目录改用新的名称可保留本次原始证据。
+生产扩展路径为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，当前 SHA256 为 `886937396456027a850608e240839d22a34f04427b775691597f9679e0bedfa4`，最终以统一驱动的 build/runtime manifest 核验。构建/数学缓存 `/tmp/flash-attention-npu-mla-46928a793876/mla-validation-artifacts`，native `/tmp/mla-m13b/native`。`run.py` 恢复已核验的构建 manifest 环境，避开会话中不能用于实机的 devlib 占位库；该脚本只是临时环境执行器，全部验收实现仍在 `tests/mla/`。
 
 ```bash
-export MLA_NATIVE_ROOT=/tmp/mla-m13b/native
-python3 -m tests.mla --device 7 --suite gqa-options-tools unit-gqa_options gqa-options-sanitize --output /tmp/mla-m15g2/reproduce-cpu
-python3 -m tests.mla --device 7 --suite softcap-mask-tail-check softcap-profile-check --output /tmp/mla-m15g2/reproduce-component
-python3 -m tests.mla --device 7 --suite unit-softcap gqa-options-check gqa-options-source gqa-options-profile-check --output /tmp/mla-m15g2/reproduce-check
-python3 -m tests.mla --device 7 --suite detail-gqa_options gqa-options-boundaries e2e ordinary softcap-profile gqa-options-profile --output /tmp/mla-m15g2/reproduce-final
-PYTHONPATH=/tmp/mla-m10c8a/quality ci/code_quality.sh --staged
+python3 /tmp/mla-m16-schedule/run.py python3 -m tests.mla --device 7 --suite gqa-options-cpu-check gqa-options-sanitize graph-tools gqa-options-tools --output /tmp/mla-m16-schedule/final-tools
+python3 /tmp/mla-m16-schedule/run.py python3 -m tests.mla --device 7 --suite gqa-options-check gqa-options-source gqa-options-boundaries graph-check graph-profile-check gqa-options-profile-check detail-gqa_options detail-graph e2e ordinary graph-ordinary gqa-options-schedule-profile graph-profile --output /tmp/mla-m16-schedule/final
+python3 /tmp/mla-m16-schedule/run.py python3 -m tests.mla --device 7 --suite graph-tools --output /tmp/mla-m16-schedule/wall-tools
+python3 /tmp/mla-m16-schedule/run.py python3 -m tests.mla --device 7 --suite graph-profile-check gqa-options-check gqa-options-source gqa-options-boundaries graph-check detail-gqa_options detail-graph e2e ordinary graph-ordinary graph-profile --resume --output /tmp/mla-m16-schedule/final
+unshare -Ur -m python3 /tmp/mla-m16-schedule/run_private_storage.py /tmp/mla-m16-schedule/private-profile python3 /tmp/mla-m16-schedule/run.py python3 -m tests.mla --device 7 --suite graph-profile --output /tmp/mla-m16-schedule/private-profile
 ```
 
-Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN `/usr/local/Ascend/cann-9.0.0-beta.2`；卡 7 Ascend910B3，20 AIC/40 AIV。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`，只读 CANN `/home/zhangqijia/repo/ops-transformer` 固定为 `ca18aee610729ca5270a44e2d84c751bc687fbf0`；FA3 参考位于 `/tmp/mla-fa3-reference/d15f1531a460ba456f41b01a774f33ab2db8febf/`。
-
-构建、源探针、数学缓存位于 `/tmp/flash-attention-npu-mla-46928a793876/`，native 包位于 `/tmp/mla-m13b/native`，验收结果位于 `/tmp/mla-m15g2/`；`build/` 只保留 `mla-codex-loop/`。本次影响的 24 处文档链接/锚点、`git diff --check` 和 46 个暂存文件的仓库质量检查均通过，日志为 `changed-doc-links.log`、`final-quality.log`；未绕过提交钩子。只提交本轮文件一次，成功后立即停止。
+本次仅对已完整实测的 M16 图性能差距接受用户明确例外，其余必要检查与证据保持原要求。不更改无头循环 pending/accepted 状态，不重启下一轮；910C 仍未开放。

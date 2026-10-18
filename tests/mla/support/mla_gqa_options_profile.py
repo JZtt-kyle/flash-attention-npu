@@ -73,9 +73,9 @@ def native_call(c):
     )
 
 
-def run(representation, dtype, directory, dispatch=None, check=False):
+def run(representation, dtype, directory, dispatch=None, check=False, schedule=False):
     directory.mkdir(parents=True, exist_ok=True)
-    specs = selected(check)
+    specs = selected(check, schedule=schedule)
     cases = [make_case(representation=representation, dtype=dtype, **s) for s in specs]
     calls = [native_call(c) for c in cases]
     records = [metadata(c, geometry=c["layout"] == "tnd") for c in cases]
@@ -222,5 +222,6 @@ if __name__ == "__main__":
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--dispatch", type=Path)
     p.add_argument("--check", action="store_true")
+    p.add_argument("--schedule", action="store_true")
     a = p.parse_args()
-    run(a.representation, a.dtype, a.output, a.dispatch, a.check)
+    run(a.representation, a.dtype, a.output, a.dispatch, a.check, a.schedule)

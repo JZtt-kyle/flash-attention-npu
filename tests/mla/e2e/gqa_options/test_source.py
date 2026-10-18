@@ -33,9 +33,12 @@ def source(request, tmp_path_factory):
         ("paged_bsnd", False, 1, 1, "causal"),
         ("paged_tnd", True, 1, 3, "window"),
         ("bsnd", True, 1, 1, "none"),
+        pytest.param("bsnd", False, 1, 0, "window", id="bsnd-auto-head-distribution"),
+        pytest.param("tnd", False, 1, 0, "window", id="tnd-auto-head-distribution"),
     ],
 )
 def test_fixed_source(source, layout, pack, margin, splits, mask):
+    distribution = layout in ("bsnd", "tnd") and not pack and splits == 0
     c = make_case(
         layout,
         source["representation"],
@@ -44,10 +47,11 @@ def test_fixed_source(source, layout, pack, margin, splits, mask):
         margin=margin,
         splits=splits,
         mask=mask,
-        q=(7, 3),
-        k=(1057, 65),
+        q=(3, 1) if distribution else (7, 3),
+        k=(4097, 1057) if distribution else (1057, 65),
         strided=True,
-        heads=4,
+        heads=8 if distribution else 4,
+        **(dict(window=(256, 2)) if distribution else {}),
     )
     record = metadata(c, geometry=layout == "tnd")
     actual = [x.cpu() for x in invoke(c, None if layout == "tnd" else record, entry="raw")]

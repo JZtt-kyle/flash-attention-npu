@@ -20,7 +20,9 @@ from tests.common.compare import assert_fa_close
 from tests.mla.support.mla_prefill_bsnd_profile_rows import partition_kernels
 
 
-def sample_kernels(call, specs, directory, dtype, *, partition=partition_kernels):
+def sample_kernels(
+    call, specs, directory, dtype, *, partition=partition_kernels, profiler_level=None
+):
     import torch_npu
 
     profiler = torch_npu.profiler
@@ -30,7 +32,9 @@ def sample_kernels(call, specs, directory, dtype, *, partition=partition_kernels
         schedule=profiler.schedule(wait=0, warmup=1, active=len(specs) * 5 * 10 * 2, repeat=1),
         on_trace_ready=profiler.tensorboard_trace_handler(str(directory / "profiler")),
         experimental_config=profiler._ExperimentalConfig(
-            profiler_level=profiler.ProfilerLevel.Level0,
+            profiler_level=profiler.ProfilerLevel.Level0
+            if profiler_level is None
+            else profiler_level,
             export_type=profiler.ExportType.Text,
             data_simplification=False,
         ),

@@ -50,6 +50,16 @@ CASES = [
         q=(17, 3),
         k=(513, 3),
     ),
+    dict(
+        id="unpacked-auto-head-distribution",
+        pack=False,
+        margin=1,
+        splits=0,
+        mask="window",
+        q=(3, 1),
+        k=(4097, 1057),
+        window=(256, 2),
+    ),
     dict(id="packed-single-window", pack=True, margin=1, splits=1, mask="window"),
     dict(
         id="packed-explicit-causal",
@@ -115,7 +125,12 @@ CASES = [
         page=16,
     ),
 ]
-DAILY = {"unpacked-explicit-window", "unpacked-auto-causal", "packed-single-window"}
+DAILY = {
+    "unpacked-explicit-window",
+    "unpacked-auto-causal",
+    "unpacked-auto-head-distribution",
+    "packed-single-window",
+}
 REPRESENTATIVE = DAILY | {
     "unpacked-softcap-auto",
     "long-kv",

@@ -12,8 +12,8 @@
 #include "kernel/mla_prefill.hpp"
 #include "block/mla_split_kv_merge.hpp"
 namespace flash_attn::mla {
-__aicore__ inline bool LoadGqa(const MlaGqaLaunchArgs& a, Kernel::MetadataReader& read, MlaGqaLayout& l,
-                               MlaAutoSplitBsndSchedule& s)
+using GqaReader = Kernel::MetadataReader;
+__aicore__ inline bool LoadGqa(const MlaGqaLaunchArgs& a, GqaReader& read, MlaGqaLayout& l, MlaAutoSplitBsndSchedule& s)
 {
     const auto& c = a.context;
     if (!GqaLayout(c, l) || !ValidUsedMetadataAddress(a.metadata, l.words) || AscendC::GetBlockNum() != l.cores ||
@@ -35,7 +35,7 @@ __aicore__ inline bool LoadGqa(const MlaGqaLaunchArgs& a, Kernel::MetadataReader
             arrays.data[i].data.SetGlobalBuffer((__gm__ uint32_t*)addresses[i]);
     }
     read.data.SetGlobalBuffer((__gm__ uint32_t*)a.metadata);
-    if (ReadGqaMetadata(read, l.words, c, arrays, s) != MlaMetadataReadStatus::Success) {
+    if (ReadGqaMetadataWithLayout(read, c, l, arrays, s) != MlaMetadataReadStatus::Success) {
         AscendC::Trap();
         return false;
     }
@@ -78,7 +78,7 @@ __aicore__ inline void GqaInitialize(uint64_t address, uint64_t count, T value)
 }
 template <bool IsTnd, bool Paged>
 __aicore__ inline void GqaCompressed(const MlaGqaLaunchArgs& a, const MlaGqaLayout& l, const MlaAutoSplitBsndTask& t,
-                                     const Kernel::MetadataReader& read, uint32_t core, uint64_t row)
+                                     const GqaReader& read, uint32_t core, uint64_t row)
 {
     const auto& c = a.context;
     const uint32_t b = t.batch / l.headGroups, head = (t.batch % l.headGroups) * l.g;
@@ -110,7 +110,7 @@ __aicore__ inline void GqaCompressed(const MlaGqaLaunchArgs& a, const MlaGqaLayo
 }
 template <bool Brc, bool Paged>
 __aicore__ inline void GqaPrefill(const MlaGqaLaunchArgs& a, const MlaGqaLayout& l, const MlaAutoSplitBsndTask& t,
-                                  const Kernel::MetadataReader& read, uint32_t core, uint64_t row)
+                                  const GqaReader& read, uint32_t core, uint64_t row)
 {
     const auto& c = a.context;
     const uint32_t b = t.batch / l.headGroups, head = (t.batch % l.headGroups) * l.g;
@@ -152,14 +152,9 @@ __aicore__ inline void GqaMerge(const MlaGqaLaunchArgs& a, const MlaGqaLayout& l
 } // namespace flash_attn::mla
 #endif
 namespace flash_attn::mla {
-__global__ __aicore__ __mix__(1, 2) void MLA_GQA_INIT(MlaGqaLaunchArgs a)
-{
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    Kernel::MetadataReader read;
-    MlaGqaLayout l{};
-    MlaAutoSplitBsndSchedule s{};
-    if (!LoadGqa(a, read, l, s))
-        return;
+__aicore__ inline void InitializeGqaOutputs(const MlaGqaLaunchArgs& a)
+{
     if ASCEND_IS_AIV {
         AscendC::TPipe pipe;
         const auto& c = a.context;
@@ -172,26 +167,22 @@ __global__ __aicore__ __mix__(1, 2) void MLA_GQA_INIT(MlaGqaLaunchArgs a)
             GqaInitialize<float>(a.accumLse, rows * capacity, -float(1.0 / 0.0));
         }
     }
-#endif
 }
-__global__ __aicore__ __mix__(1, 2) void MLA_GQA_ATTENTION(MlaGqaLaunchArgs a)
+__aicore__ inline void RunGqaAttention(const MlaGqaLaunchArgs& a, const GqaReader& read, const MlaGqaLayout& l,
+                                       const MlaAutoSplitBsndSchedule& s)
 {
-#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    Kernel::MetadataReader read;
-    MlaGqaLayout l{};
-    MlaAutoSplitBsndSchedule s{};
-    if (!LoadGqa(a, read, l, s) || GqaEmptyKv(a.context))
-        return;
-    AscendC::SetSyncBaseAddr(a.ffts);
     uint32_t core = AscendC::GetBlockIdx();
     if ASCEND_IS_AIV
         core /= AscendC::GetSubBlockNum();
     const auto& c = a.context;
-    for (uint64_t index = core; index < s.groups * l.capacity; index += l.cores) {
+    const uint32_t slots = GqaTaskSlots(c, s);
+    for (uint64_t index = core; index < s.groups * slots; index += l.cores) {
+        const uint64_t group = index / slots;
+        const uint32_t split = index % slots;
         MlaAutoSplitBsndTask t{};
-        if (!GqaTask(read, c, l, s, index / l.capacity, index % l.capacity, t))
+        if (!GqaTask(read, c, l, s, group, split, t))
             continue;
-        const uint64_t row = index * l.m;
+        const uint64_t row = (group * l.capacity + split) * l.m;
         if (c.valueDim == 512) {
             if (GqaTnd(c)) {
                 if (c.pageSize)
@@ -212,20 +203,18 @@ __global__ __aicore__ __mix__(1, 2) void MLA_GQA_ATTENTION(MlaGqaLaunchArgs a)
         else
             GqaPrefill<false, false>(a, l, t, read, core, row);
     }
-#endif
 }
-__global__ __aicore__ __mix__(1, 2) void MLA_GQA_MERGE(MlaGqaLaunchArgs a)
+__aicore__ inline void RunGqaMerge(const MlaGqaLaunchArgs& a, const GqaReader& read, const MlaGqaLayout& l,
+                                   const MlaAutoSplitBsndSchedule& s)
 {
-#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    Kernel::MetadataReader read;
-    MlaGqaLayout l{};
-    MlaAutoSplitBsndSchedule s{};
-    if (!LoadGqa(a, read, l, s) || GqaEmptyKv(a.context))
-        return;
     if ASCEND_IS_AIV {
         const auto& c = a.context;
         const uint32_t tile = 192 / l.capacity > 8 ? 8 : 192 / l.capacity ? 192 / l.capacity : 1;
-        const uint32_t tiles = (l.m + tile - 1) / tile;
+        // A short query cannot populate the remainder of the fixed M tile.
+        // Keep partial addresses unchanged while avoiding empty merge tasks.
+        const uint64_t rows = uint64_t(c.sq) * l.g;
+        const uint32_t rowBound = rows < l.m ? uint32_t(rows) : l.m;
+        const uint32_t tiles = (rowBound + tile - 1) / tile;
         for (uint64_t index = AscendC::GetBlockIdx(); index < s.groups * tiles; index += l.cores * 2) {
             const uint64_t group = index / tiles;
             const uint32_t begin = (index % tiles) * tile;
@@ -283,27 +272,36 @@ __global__ __aicore__ __mix__(1, 2) void MLA_GQA_MERGE(MlaGqaLaunchArgs a)
 #undef MLA_GQA_MERGE_DIM
         }
     }
+}
+#endif
+__global__ __aicore__ __mix__(1, 2) void MLA_GQA_ATTENTION(MlaGqaLaunchArgs a)
+{
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
+    GqaReader read;
+    MlaGqaLayout l{};
+    MlaAutoSplitBsndSchedule s{};
+    // Every core validates before initialization, events or synchronization.
+    if (!LoadGqa(a, read, l, s))
+        return;
+    AscendC::SetSyncBaseAddr(a.ffts);
+    InitializeGqaOutputs(a);
+    if (GqaEmptyKv(a.context))
+        return;
+    RunGqaAttention(a, read, l, s);
+    if ASCEND_IS_AIV {
+        // Match source FiaKernelNonQuantMla::FlashDecode: all vector cores
+        // join after partial writeback, including cores with no attention task.
+        // This also orders initialization before any final output is written.
+        AscendC::SyncAll();
+        RunGqaMerge(a, read, l, s);
+    }
 #endif
 }
 aclError MLA_GQA_LAUNCH(const MlaGqaLaunchArgs& a)
 {
     const uint32_t cores = a.context.physicalCores - a.context.margin;
-    {
-        MlaBatchLaunchScope launch;
-        MLA_GQA_INIT<<<cores, nullptr, a.stream>>>(a);
-        const auto error = launch.Result();
-        if (error != ACL_SUCCESS)
-            return error;
-    }
-    {
-        MlaBatchLaunchScope launch;
-        MLA_GQA_ATTENTION<<<cores, nullptr, a.stream>>>(a);
-        const auto error = launch.Result();
-        if (error != ACL_SUCCESS)
-            return error;
-    }
     MlaBatchLaunchScope launch;
-    MLA_GQA_MERGE<<<cores, nullptr, a.stream>>>(a);
+    MLA_GQA_ATTENTION<<<cores, nullptr, a.stream>>>(a);
     return launch.Result();
 }
 } // namespace flash_attn::mla

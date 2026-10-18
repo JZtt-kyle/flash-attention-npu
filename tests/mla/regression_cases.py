@@ -192,4 +192,14 @@ def daily_suites():
             "test_prefill_paged_tail_softcap",
         )
     ]
+    suites["graph"] = [
+        f"tests/mla/e2e/graph/test_capture.py::{name}"
+        for name in (
+            "test_daily",
+            "test_legacy_producers",
+            "test_func_capture",
+            "test_empty",
+            "test_fake_and_compile",
+        )
+    ]
     return suites

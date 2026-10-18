@@ -54,9 +54,23 @@ PERFORMANCE = [
 ]
 
 
-def selected(check):
+# M16 also measures 40 graph inputs. This complementary 56-input collection
+# covers every option on BSND/TND and explicit/unpacked + auto/packed calls on
+# the other layouts; graph inputs cover their auto/unpacked path. Selection is
+# by dispatch/phase coverage, independent of timing results.
+SCHEDULE_PERFORMANCE = [
+    s
+    for s in PERFORMANCE
+    if s["layout"] in ("bsnd", "tnd")
+    or s["id"] in ("unpacked-explicit-causal", "packed-auto-window")
+]
+
+
+def selected(check, *, schedule=False):
     # Cheap preflight covers every native physical layout and every split/mask.
-    return [s for i, s in enumerate(PERFORMANCE) if i % 4 == i // 4 % 3] if check else PERFORMANCE
+    if check:
+        return [s for i, s in enumerate(PERFORMANCE) if i % 4 == i // 4 % 3]
+    return SCHEDULE_PERFORMANCE if schedule else PERFORMANCE
 
 
 def modes(spec):
@@ -103,7 +117,7 @@ def partition_kernels(rows, labels, specs, dtype):
             pos += 1
             group.append(row)
             if (
-                (prefix + "Merge" in row["Name"])
+                (prefix + "Attention" in row["Name"])
                 if ours
                 else row["Name"].endswith("_FusedInferAttentionScore")
             ):
@@ -113,16 +127,12 @@ def partition_kernels(rows, labels, specs, dtype):
         if ours:
             expected = (
                 ["ComputeMlaGqaMetadata"] if specs[label["case"]]["layout"] == "tnd" else []
-            ) + [prefix + s for s in ("Init", "Attention", "Merge")]
+            ) + [prefix + "Attention"]
             if len(group) != len(expected) or not all(
                 n in r["Name"] for n, r in zip(expected, group)
             ):
-                raise ValueError("Incomplete GQA metadata/init/attention/merge phases")
-            kernels = [
-                r
-                for r in group
-                if prefix + "Attention" in r["Name"] or prefix + "Merge" in r["Name"]
-            ]
+                raise ValueError("Incomplete MLA metadata/fused attention phases")
+            kernels = [group[-1]]
         else:
             if any("MlaGqa" in r["Name"] or "ComputeMla" in r["Name"] for r in group):
                 raise ValueError("Foreign GQA task in native sample")
