@@ -155,7 +155,7 @@ def reference(c, record):
     g = h // hk
     prefill = c["representation"] == "prefill"
     r = record.cpu().tolist()
-    base = 24 + 8 * b if prefill else 410 + 8 * b
+    base = c.get("metadata_tail", 24 + 8 * b if prefill else 410 + 8 * b)
     ends = []
     if prefill or c["options"]["num_splits"] == 0:
         count = r[base + 3]
@@ -218,7 +218,7 @@ def reference(c, record):
             c, refs["accum_lse_" + precision].reshape(capacity, b, h, sq).permute(0, 2, 1, 3), 2
         )
         if not sum(c["k"]):
-            refs["lse_" + precision].fill_(torch.inf)
+            refs["lse_" + precision].fill_(-torch.inf if c.get("page") else torch.inf)
     return refs
 
 
@@ -249,7 +249,7 @@ def compare(c, result, record):
             assert actual[i].numel() == 0 and actual[i].dtype == torch.get_default_dtype()
             continue
         assert actual[i].shape == refs[name + "_high"].shape
-        if c["representation"] == "prefill" or c["options"]["num_splits"] == 0:
+        if c.get("page") or c["representation"] == "prefill" or c["options"]["num_splits"] == 0:
             assert_fa_close(
                 actual[i],
                 refs[name + "_high"],

@@ -26,14 +26,15 @@ int main(int argc, char** argv)
     uint32_t value;
     while (std::cin >> c.batch >> c.sq >> c.sk >> c.heads >> c.kvHeads >> c.splits >> c.cores >> c.dtype >>
            c.usedFlags >> c.window.kind >> c.window.left >> c.window.right >> fault >> value) {
+        const bool softcapPagedTnd = argc > 1 && std::strcmp(argv[1], "--softcap-paged-tnd") == 0;
         const bool softcapPaged = argc > 1 && std::strcmp(argv[1], "--softcap-paged") == 0;
         const bool softcapTnd = argc > 1 && std::strcmp(argv[1], "--softcap-tnd") == 0;
         const bool softcapMixed = argc > 1 && std::strcmp(argv[1], "--softcap-mixed") == 0;
-        const bool softcap =
-            softcapPaged || softcapTnd || softcapMixed || (argc > 1 && std::strcmp(argv[1], "--softcap") == 0);
+        const bool softcap = softcapPagedTnd || softcapPaged || softcapTnd || softcapMixed ||
+                             (argc > 1 && std::strcmp(argv[1], "--softcap") == 0);
         if (softcap)
             std::cin >> c.hasSoftcap;
-        const bool pagedTnd = argc > 1 && std::strcmp(argv[1], "--paged-tnd") == 0;
+        const bool pagedTnd = softcapPagedTnd || (argc > 1 && std::strcmp(argv[1], "--paged-tnd") == 0);
         const bool paged = softcapPaged || pagedTnd || (argc > 1 && std::strcmp(argv[1], "--paged") == 0);
         c.tnd = softcapMixed                     ? 2
                 : softcapTnd                     ? 1

@@ -6,7 +6,7 @@
 #include "mla_split_paged_bsnd_consumer.h"
 #include <algorithm>
 
-int main()
+int main(int argc, char** argv)
 {
     int command;
     while (std::cin >> command) {
@@ -19,6 +19,9 @@ int main()
         uint32_t value;
         uint64_t taskIndex;
         std::cin >> left >> right >> causal >> dtype >> mode >> mutation >> value >> taskIndex;
+        uint32_t hasSoftcap = 0;
+        if (argc > 1 && std::strcmp(argv[1], "--softcap") == 0)
+            std::cin >> hasSoftcap;
         Lengths lengths;
         lengths.Read();
         auto inputs = lengths.Inputs();
@@ -42,7 +45,7 @@ int main()
         }
         const bool built = BuildSplitPagedTndMetadata(producerShape, producerPlatform, dtype, destination,
                                                       mode == 17 ? words - 1 : words, inputs, window,
-                                                      mode == 25 ? 2 : r.splits, mode == 39);
+                                                      mode == 25 ? 2 : r.splits, mode == 39, hasSoftcap);
         const bool intact = record == initial;
         const uint32_t generated = record[5];
         const bool cleared = std::all_of(record.begin() + 8, record.end(), [](uint32_t v) { return v == 0; });
@@ -72,6 +75,7 @@ int main()
              r.platform.localMemory},
             {uint32_t(w.kind), w.left, w.right},
             uint32_t(r.splits)};
+        c.hasSoftcap = hasSoftcap;
         if (mode == 38) {
             // A self-consistent v6 C1V1 payload must still be rejected by the
             // v25 C1V2 contract; checking only header/context equality is insufficient.

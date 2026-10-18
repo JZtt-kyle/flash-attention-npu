@@ -39,11 +39,13 @@ MLA_SPLIT_PA_INLINE MlaMetadataReadStatus ReadSplitPagedTndMetadata(
     const auto& c = context.paged;
     if (c.batch > (UINT32_MAX - 414) / 7)
         return Status::InvalidBuffer;
-    auto status =
-        ReadMetadataHeader(read, words, 414 + 7 * c.batch, kMlaSplitPagedTndVersion, kMlaSplitPagedTndVersion, c.dtype);
+    if (context.hasSoftcap > 1)
+        return Status::ShapeMismatch;
+    const uint32_t version = context.hasSoftcap ? kMlaSoftcapSplitPagedTndVersion : kMlaSplitPagedTndVersion;
+    auto status = ReadMetadataHeader(read, words, 414 + 7 * c.batch, version, version, c.dtype);
     if (status != Status::Success)
         return status;
-    if (c.query.layout != 1 || context.splits < 2 || context.splits > 256)
+    if (c.query.layout != 1 || context.splits < (context.hasSoftcap ? 1 : 2) || context.splits > 256)
         return Status::ShapeMismatch;
     if (uint64_t(c.aivNum) != 2 * uint64_t(c.aicNum))
         return Status::PlatformMismatch;

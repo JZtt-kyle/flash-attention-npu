@@ -89,7 +89,10 @@ def partition_rows(rows, raw, labels, representation, dtype, spec, *, layout="mi
         return result
     automatic = spec["splits"] == 0
     prefix = f"mla_{'auto_' if automatic else ''}split_{layout}_"
-    stages = [prefix + s + "_" for s in (["init"] if automatic else []) + ["partial", "merge"]]
+    stages = [
+        prefix + s + "_"
+        for s in (["init"] if automatic or layout == "paged_tnd" else []) + ["partial", "merge"]
+    ]
     count = len(stages) + 1
     if len(raw) != len(labels) * count:
         raise ValueError("Unmatched mixed metadata/partial/merge phases")

@@ -5,7 +5,6 @@ import gc
 import pytest
 import torch
 from torch._subclasses.fake_tensor import FakeTensorMode
-from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.mla.support.public_cases.softcap_tnd import (
     CASES,
     DAILY,
@@ -187,17 +186,3 @@ def test_metadata_and_length_static_rejections(representation, fake):
             invalid = dict(c, lengths=dict(c["lengths"], **{name: bad}))
             with pytest.raises(RuntimeError):
                 invoke(invalid, entry="public")
-        with pytest.raises(RuntimeError, match="not implemented"):
-            api.get_scheduler_metadata(
-                3,
-                7,
-                64,
-                8,
-                2 if representation == "prefill" else 1,
-                192 if representation == "prefill" else 64,
-                torch.tensor([65, 7, 3], device="npu", dtype=torch.int32),
-                headdim_v=128 if representation == "prefill" else 512,
-                cu_seqlens_q=c["lengths"]["cu_seqlens_q"],
-                has_softcap=True,
-                page_size=16,
-            )

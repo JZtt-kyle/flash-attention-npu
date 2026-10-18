@@ -41,8 +41,11 @@ MLA_AUTO_PA_INLINE MlaMetadataReadStatus ReadAutoSplitPagedTndMetadata(
     const auto& c = context.paged;
     if (c.batch > (UINT32_MAX - kMlaAutoSplitPagedTndFixedWords) / 7)
         return Status::InvalidBuffer;
-    auto status = ReadMetadataHeader(read, words, kMlaAutoSplitPagedTndFixedWords + 7 * c.batch,
-                                     kMlaAutoSplitPagedTndVersion, kMlaAutoSplitPagedTndVersion, c.dtype);
+    if (context.hasSoftcap > 1)
+        return Status::ShapeMismatch;
+    const uint32_t version = context.hasSoftcap ? kMlaSoftcapAutoSplitPagedTndVersion : kMlaAutoSplitPagedTndVersion;
+    auto status =
+        ReadMetadataHeader(read, words, kMlaAutoSplitPagedTndFixedWords + 7 * c.batch, version, version, c.dtype);
     if (status != Status::Success)
         return status;
     if (c.query.layout != 1)

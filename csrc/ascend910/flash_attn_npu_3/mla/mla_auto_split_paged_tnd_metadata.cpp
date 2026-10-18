@@ -7,7 +7,7 @@
 namespace flash_attn::mla {
 bool BuildAutoSplitPagedTndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                                     uint32_t* output, uint32_t words, const MlaPagedInputs& inputs,
-                                    const MlaWindowConfig& window, bool queryTotalFromPrefix)
+                                    const MlaWindowConfig& window, bool queryTotalFromPrefix, uint32_t hasSoftcap)
 {
     uint32_t expected;
     if (!AutoSplitPagedTndMetadataWords(shape.batch, expected) || words != expected)
@@ -15,11 +15,14 @@ bool BuildAutoSplitPagedTndMetadata(const MlaPagedShape& shape, const MlaPlatfor
     struct Context {
         const MlaWindowConfig& window;
         bool fromPrefix;
+        uint32_t hasSoftcap;
         MlaAutoSplitPagedTndPlan plan;
-    } context{window, queryTotalFromPrefix, {}};
+    } context{window, queryTotalFromPrefix, hasSoftcap, {}};
     const auto builder = [](const MlaPagedShape& s, const MlaPlatformInfo& p, const MlaPagedInputs& in,
                             MlaPagedSchedule& schedule, const void* opaque) {
         auto& c = *const_cast<Context*>(static_cast<const Context*>(opaque));
+        if (c.hasSoftcap > 1)
+            return MlaScheduleStatus::InvalidSplit;
         auto platform = p;
         if (c.fromPrefix)
             platform.blockDims.fill(s.batch && s.query.totalTokens && s.logicalKvCapacity ? p.aicNum : 1);
@@ -35,7 +38,7 @@ bool BuildAutoSplitPagedTndMetadata(const MlaPagedShape& shape, const MlaPlatfor
     if (!BuildPagedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, queryTotalFromPrefix, builder,
                                         &context, words - base))
         return false;
-    output[1] = output[2] = kMlaAutoSplitPagedTndVersion;
+    output[1] = output[2] = hasSoftcap ? kMlaSoftcapAutoSplitPagedTndVersion : kMlaAutoSplitPagedTndVersion;
     if (output[5] != 0)
         return true;
     MlaWindow normalized{};

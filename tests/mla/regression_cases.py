@@ -171,4 +171,15 @@ def daily_suites():
             "test_public_metadata_and_length_forms",
         )
     ]
+    suites["softcap_paged_tnd"] = [
+        f"tests/mla/e2e/softcap_paged_tnd/test_public.py::{name}"
+        for name in (
+            "test_daily",
+            "test_empty",
+            "test_fake",
+            "test_compile",
+            "test_public_metadata_and_length_forms",
+            "test_internal_query_used",
+        )
+    ]
     return suites
