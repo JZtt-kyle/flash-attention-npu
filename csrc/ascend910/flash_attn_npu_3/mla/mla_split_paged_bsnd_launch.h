@@ -8,6 +8,7 @@ struct MlaSplitPagedBsndLaunchArgs {
     MlaPagedLaunchArgs paged;
     uint32_t splits;
     uint8_t *accum, *accumLse;
+    float softcap = 0.0f;
 };
 aclError LaunchSplitPagedBsndFp16(const MlaSplitPagedBsndLaunchArgs&);
 aclError LaunchSplitPagedBsndBf16(const MlaSplitPagedBsndLaunchArgs&);

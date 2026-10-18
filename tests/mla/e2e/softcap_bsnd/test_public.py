@@ -173,11 +173,12 @@ def test_metadata_static_rejections(representation, fake):
                 headdim_v=128 if representation == "prefill" else 512,
                 has_softcap=True,
                 page_size=16,
+                cu_seqlens_q=torch.tensor([0, 7, 14], dtype=torch.int32, device="npu"),
             )
 
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
-@pytest.mark.parametrize("layout", ["paged", "paged_tnd"])
+@pytest.mark.parametrize("layout", ["paged_tnd"])
 @pytest.mark.parametrize("fake", [False, True])
 def test_other_layouts_rejected(representation, layout, fake):
     from tests.mla.support.public_cases.contract import _inputs, _forward

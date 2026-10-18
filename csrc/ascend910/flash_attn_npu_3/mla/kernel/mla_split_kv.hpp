@@ -75,11 +75,12 @@ class MlaSplitKvPaged : private MlaTaskRing<InputT, /*HasKvLengths=*/true, IsTnd
     __aicore__ inline void operator()(const MlaDenseKernelSchedule& s, const MlaSplitKvKernelParams& p, float scale,
                                       GM_ADDR qc, GM_ADDR qr, const MlaPagedCacheInputs& cache, GM_ADDR workspace,
                                       TPipe* pipe, GM_ADDR spans, const MlaBsndInputLayouts& layouts,
-                                      uint32_t totalQ = 0)
+                                      uint32_t totalQ = 0, float softcap = 0.0f)
     {
         this->Run(s, scale, qc, qr, reinterpret_cast<GM_ADDR>(cache.v.address),
                   reinterpret_cast<GM_ADDR>(cache.k.address), workspace, workspace, workspace, pipe, spans, totalQ,
-                  &layouts, false, reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout, p.window, &p);
+                  &layouts, false, reinterpret_cast<GM_ADDR>(cache.table.address), &cache.layout, p.window, &p,
+                  softcap);
     }
 };
 template <typename InputT>

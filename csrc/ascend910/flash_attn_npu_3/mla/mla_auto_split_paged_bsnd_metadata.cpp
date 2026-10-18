@@ -7,10 +7,10 @@
 namespace flash_attn::mla {
 bool BuildAutoSplitPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                                      uint32_t* output, uint32_t words, const MlaPagedInputs& inputs,
-                                     const MlaWindowConfig& window)
+                                     const MlaWindowConfig& window, uint32_t hasSoftcap)
 {
     uint32_t expected;
-    if (!AutoSplitPagedBsndMetadataWords(shape.batch, expected) || words != expected)
+    if (hasSoftcap > 1 || !AutoSplitPagedBsndMetadataWords(shape.batch, expected) || words != expected)
         return false;
     struct Context {
         const MlaWindowConfig& window;
@@ -28,7 +28,7 @@ bool BuildAutoSplitPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatfo
     if (!BuildPagedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, false, builder, &context,
                                         words - base))
         return false;
-    output[1] = output[2] = kMlaAutoSplitPagedBsndVersion;
+    output[1] = output[2] = hasSoftcap ? kMlaSoftcapAutoSplitPagedBsndVersion : kMlaAutoSplitPagedBsndVersion;
     if (output[5] != 0)
         return true;
     MlaWindow normalized{};

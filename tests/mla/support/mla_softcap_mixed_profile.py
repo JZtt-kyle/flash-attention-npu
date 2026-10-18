@@ -67,7 +67,7 @@ MODES = ["metadata"] + [
 ]
 
 
-def partition_rows(rows, raw, labels, representation, dtype, spec):
+def partition_rows(rows, raw, labels, representation, dtype, spec, *, layout="mixed"):
     if representation == "prefill":
         count = 3 if spec["splits"] == 1 else 4
         if len(rows) != len(labels) * count:
@@ -88,7 +88,7 @@ def partition_rows(rows, raw, labels, representation, dtype, spec):
             result.append(sample)
         return result
     automatic = spec["splits"] == 0
-    prefix = "mla_auto_split_mixed_" if automatic else "mla_split_mixed_"
+    prefix = f"mla_{'auto_' if automatic else ''}split_{layout}_"
     stages = [prefix + s + "_" for s in (["init"] if automatic else []) + ["partial", "merge"]]
     count = len(stages) + 1
     if len(raw) != len(labels) * count:
@@ -98,7 +98,9 @@ def partition_rows(rows, raw, labels, representation, dtype, spec):
         group = raw[i * count : (i + 1) * count]
         merged = production_sample(
             group,
-            "ComputeMlaAutoSplitMixedMetadata" if automatic else "ComputeMlaSplitMixedMetadata",
+            ("ComputeMlaAutoSplit" if automatic else "ComputeMlaSplit")
+            + "".join(word.capitalize() for word in layout.split("_"))
+            + "Metadata",
             stages,
         )
         if not all(stage + dtype in row["Op Name"] for stage, row in zip(stages, group[1:])):
@@ -115,7 +117,7 @@ def partition_rows(rows, raw, labels, representation, dtype, spec):
     return result
 
 
-def kernel_samples(call, representation, dtype, spec, directory):
+def kernel_samples(call, representation, dtype, spec, directory, *, partition=partition_rows):
     import torch_npu
 
     profiler = torch_npu.profiler
@@ -152,12 +154,26 @@ def kernel_samples(call, representation, dtype, spec, directory):
         assert row["Name"] == source["Op Name"] and row["Device_id"] == source["Device_id"]
         assert Decimal(row["Start Time(us)"]) == Decimal(source["Task Start Time(us)"])
         assert float(row["Duration(us)"]) == float(source["Task Duration(us)"])
-    samples = partition_rows(rows, raw, labels, representation, dtype, spec)
+    samples = partition(rows, raw, labels, representation, dtype, spec)
     (directory / "kernel-samples.json").write_text(json.dumps(samples, indent=2) + "\n")
     return samples
 
 
-def profile(representation, dtype, directory, *, check=False):
+def profile(
+    representation,
+    dtype,
+    directory,
+    *,
+    check=False,
+    cases=PERFORMANCE,
+    make_case=make_case,
+    metadata=metadata,
+    invoke=invoke,
+    compare=compare,
+    partition=partition_rows,
+    layout="mixed cache",
+):
+    """Share the fixed wall/profiler protocol with the BSND PA adapter."""
     directory.mkdir(parents=True, exist_ok=False)
     assert torch.npu.device_count() == 1 and "910B" in torch.npu.get_device_name(0)
     affinity = os.sched_getaffinity(0)
@@ -167,7 +183,7 @@ def profile(representation, dtype, directory, *, check=False):
     )
     rows = []
     try:
-        for spec in PERFORMANCE:
+        for spec in cases:
             if spec["representation"] != representation:
                 continue
             c = make_case(dtype=dtype, **spec)
@@ -203,7 +219,12 @@ def profile(representation, dtype, directory, *, check=False):
             if check:
                 # Preflight exercises every fixed input and profiler phase parser.
                 kernels = kernel_samples(
-                    lambda: call("implicit_1", 15), representation, dtype, spec, subdir
+                    lambda: call("implicit_1", 15),
+                    representation,
+                    dtype,
+                    spec,
+                    subdir,
+                    partition=partition,
                 )
                 rows.append(dict(spec=spec, kernel_samples=len(kernels)))
                 continue
@@ -229,7 +250,12 @@ def profile(representation, dtype, directory, *, check=False):
             del result
             (subdir / "wall-samples.json").write_text(json.dumps(samples, indent=2) + "\n")
             kernels = kernel_samples(
-                lambda: call("implicit_1", 15), representation, dtype, spec, subdir
+                lambda: call("implicit_1", 15),
+                representation,
+                dtype,
+                spec,
+                subdir,
+                partition=partition,
             )
             segments = {}
             for mode in MODES:
@@ -252,7 +278,7 @@ def profile(representation, dtype, directory, *, check=False):
                 )
             )
         report = dict(
-            scope="Complete public mixed cache implicit/generate/reuse calls at R=1/4; profiler reports implicit metadata and kernels separately. cap=0 is a migrated overhead reference with different semantics, never an equivalent CANN softcap baseline or acceptance ratio.",
+            scope=f"Complete public {layout} implicit/generate/reuse calls at R=1/4; profiler reports implicit metadata and kernels separately. cap=0 is a migrated overhead reference with different semantics, never an equivalent CANN softcap baseline or acceptance ratio.",
             status="fixtures-passed" if check else "sampled",
             representation=representation,
             dtype=dtype,

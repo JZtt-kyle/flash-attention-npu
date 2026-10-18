@@ -4,7 +4,7 @@
 #include "mla_auto_split_paged_bsnd_consumer.h"
 #include <algorithm>
 
-int main()
+int main(int argc, char** argv)
 {
     int command;
     while (std::cin >> command) {
@@ -27,6 +27,9 @@ int main()
         uint32_t splitIndex, rowIndex, mergeHead, mergePart;
         std::cin >> left >> right >> causal >> dtype >> mode >> mutation >> value >> taskIndex >> splitIndex >>
             rowIndex >> mergeHead >> mergePart;
+        uint32_t hasSoftcap = 0;
+        if (argc > 1 && std::strcmp(argv[1], "--softcap") == 0)
+            std::cin >> hasSoftcap;
         Lengths lengths;
         lengths.Read();
         auto inputs = lengths.Inputs();
@@ -42,7 +45,7 @@ int main()
                             : mode == 19 ? reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(record.data()) + 1)
                                          : record.data();
         const bool built = BuildAutoSplitPagedBsndMetadata(shape, r.platform, dtype, destination,
-                                                           mode == 17 ? words - 1 : words, inputs, window);
+                                                           mode == 17 ? words - 1 : words, inputs, window, hasSoftcap);
         const bool intact = record == initial;
         uint32_t generated = record[5];
         const bool cleared = std::all_of(record.begin() + 8, record.end(), [](uint32_t v) { return v == 0; });
@@ -98,7 +101,8 @@ int main()
              budgetStatus == MlaScheduleStatus::Success ? budget.userBytes : uint64_t(INT64_MAX),
              active ? r.platform.libApiWorkspaceBytes : 0,
              r.platform.localMemory},
-            {uint32_t(w.kind), w.left, w.right}};
+            {uint32_t(w.kind), w.left, w.right},
+            hasSoftcap};
         // Bound the virtual buffers without allocating O(B*C) or physical KV.
         const uint64_t page = shape.pageSize > 0 ? shape.pageSize : 16;
         const uint64_t columns = shape.logicalKvCapacity > 0 ? shape.logicalKvCapacity / page : 0;

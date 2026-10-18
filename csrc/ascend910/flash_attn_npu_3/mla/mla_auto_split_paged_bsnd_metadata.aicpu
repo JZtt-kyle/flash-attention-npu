@@ -20,7 +20,7 @@ __global__ __aicpu__ uint32_t ComputeMlaAutoSplitPagedBsndMetadata(void* args)
     const auto& a = *static_cast<const MlaAutoSplitPagedBsndMetadataArgs*>(args);
     const auto& in = a.input;
     const bool ok = BuildAutoSplitPagedBsndMetadata(in.shape, in.platform, in.dtype,
-        reinterpret_cast<uint32_t*>(in.outputAddr), in.outputWords, PagedMetadataInputs(in), a.window);
+        reinterpret_cast<uint32_t*>(in.outputAddr), in.outputWords, PagedMetadataInputs(in), a.window, a.hasSoftcap);
     AscendC::DataStoreBarrier();
     return ok ? 0 : 1;
 }

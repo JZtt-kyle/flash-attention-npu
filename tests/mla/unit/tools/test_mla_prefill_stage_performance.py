@@ -30,6 +30,8 @@ from tests.mla.support.mla_public_performance import (
 from tests.mla.support.mla_validation_policy import check_public_performance
 from tests.mla.unit.tools.test_mla_validation_policy import reports, varlen_reports
 
+PA_SUITES = ["prefill-paged-bsnd-profile", "prefill-paged-tnd-profile"]
+
 
 def save(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,8 +209,27 @@ def test_raw_medians_replace_saved_rounding(tmp_path):
     assert result["results"][3]["fa3"]["median_e2e_us"] == 60.0
 
 
+def test_selected_groups_keep_raw_evidence_and_regressions(tmp_path):
+    path = stage_evidence(tmp_path, slow=1.2)
+    summary = json.loads(path.read_text())
+    summary["groups"] = {s: summary["groups"][s] for s in PA_SUITES}
+    save(path, summary)
+    result = load_evidence([path], PA_SUITES)
+    assert result["passed"] and result["mean_ratio"] == pytest.approx(0.9)
+    assert result["scope"] == "selected-groups" and result["selected_suites"] == PA_SUITES
+    assert result["measured_cases"] == 24 and result["applicable_cases"] == 12
+    assert result["excluded_cases"] == 12 and result["regressed_cases"] == 6
+    assert result["kernel_regressed_cases"] == 24
+    with pytest.raises(ValueError, match="required"):
+        load_evidence([path])
+    for suites in ([], [PA_SUITES[0]] * 2, ["unknown"]):
+        with pytest.raises(ValueError, match="distinct known"):
+            load_evidence([path], suites)
+
+
 @pytest.mark.parametrize("slow,code", [(0.6, 0), (3.0, 1)])
-def test_cli_success_and_failure(tmp_path, slow, code):
+@pytest.mark.parametrize("subset", [False, True])
+def test_cli_success_and_failure(tmp_path, slow, code, subset):
     path = stage_evidence(tmp_path, slow=slow)
     output = tmp_path / "stage.json"
     result = subprocess.run(
@@ -220,7 +241,8 @@ def test_cli_success_and_failure(tmp_path, slow, code):
             str(path),
             "--output",
             str(output),
-        ],
+        ]
+        + (["--suite", *PA_SUITES] if subset else []),
         capture_output=True,
     )
     assert result.returncode == code, result.stderr.decode()
@@ -260,7 +282,8 @@ def test_cli_success_and_failure(tmp_path, slow, code):
         "empty",
     ],
 )
-def test_incomplete_or_changed_evidence_rejected(tmp_path, fault):
+@pytest.mark.parametrize("subset", [False, True])
+def test_incomplete_or_changed_evidence_rejected(tmp_path, fault, subset):
     path = stage_evidence(tmp_path)
     summary = json.loads(path.read_text())
     suite = "prefill-paged-tnd-profile"
@@ -271,7 +294,7 @@ def test_incomplete_or_changed_evidence_rejected(tmp_path, fault):
         del summary["groups"][suite]
     elif fault == "duplicate":
         with pytest.raises(ValueError, match="Duplicate"):
-            load_evidence([path, path])
+            load_evidence([path, path], PA_SUITES if subset else None)
         return
     elif fault == "failed":
         record["status"] = "failed"
@@ -346,7 +369,7 @@ def test_incomplete_or_changed_evidence_rejected(tmp_path, fault):
         record["evidence"][str(file)] = sha256(file)
     save(path, summary)
     with pytest.raises(ValueError):
-        load_evidence([path])
+        load_evidence([path], PA_SUITES if subset else None)
 
 
 def test_different_runtime_across_summaries_rejected(tmp_path):

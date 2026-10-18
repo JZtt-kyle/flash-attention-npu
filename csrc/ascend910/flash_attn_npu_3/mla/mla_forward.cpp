@@ -266,17 +266,17 @@ struct MetadataSubmission {
                     MlaAutoSplitPagedTndMetadataArgs autoArgs{args, *window, queryTotalFromPrefix};
                     ComputeMlaAutoSplitPagedTndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
                 } else {
-                    MlaAutoSplitPagedBsndMetadataArgs autoArgs{args, *window};
+                    MlaAutoSplitPagedBsndMetadataArgs autoArgs{args, *window, uint32_t(hasSoftcap)};
                     ComputeMlaAutoSplitPagedBsndMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
                 }
                 return;
             }
-            if (splits > 1) {
+            if (splits > 1 || hasSoftcap) {
                 if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
                     MlaSplitPagedTndMetadataArgs splitArgs{args, *window, splits, queryTotalFromPrefix};
                     ComputeMlaSplitPagedTndMetadata<<<1, nullptr, current>>>(&splitArgs, sizeof(splitArgs));
                 } else {
-                    MlaSplitPagedBsndMetadataArgs splitArgs{args, *window, splits};
+                    MlaSplitPagedBsndMetadataArgs splitArgs{args, *window, splits, uint32_t(hasSoftcap)};
                     ComputeMlaSplitPagedBsndMetadata<<<1, nullptr, current>>>(&splitArgs, sizeof(splitArgs));
                 }
                 return;
@@ -692,11 +692,12 @@ at::Tensor SplitMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t
 
 at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_t heads, int64_t pageSize,
                            at::ScalarType dtype, const at::Tensor& cacheSeqlens, const std::optional<at::Tensor>& cuQ,
-                           bool causal, int64_t windowLeft, int64_t windowRight, int64_t splits)
+                           bool causal, int64_t windowLeft, int64_t windowRight, int64_t splits, bool hasSoftcap)
 {
     auto words = CheckPagedMetadataInputs(batch, maxQ, capacity, heads, pageSize, dtype, cacheSeqlens, cuQ);
     TORCH_CHECK(splits >= 0 && splits <= 256, "MLA: paged num_splits must be in [0,256]");
-    const bool isSplit = splits != 1;
+    TORCH_CHECK(!hasSoftcap || !cuQ, "MLA: TND PA softcap is not implemented yet");
+    const bool isSplit = splits != 1 || hasSoftcap;
     const bool isWindow = windowLeft != -1 || windowRight != -1;
     MlaWindowConfig config{maxQ, capacity, windowLeft, windowRight, causal};
     if (isWindow || isSplit) {
@@ -745,6 +746,7 @@ at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_
     if (isWindow || isSplit) {
         submission.window = config;
         submission.splits = splits;
+        submission.hasSoftcap = hasSoftcap;
         submission.queryTotalFromPrefix = bool(cuQ);
     }
     auto enqueue = [submission]() mutable -> int {
@@ -764,17 +766,18 @@ at::Tensor PagedMetadataOp(int64_t batch, int64_t maxQ, int64_t capacity, int64_
 }
 
 namespace {
-std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
-                                     const at::Tensor& qv, const at::Tensor& pageTable, float scale,
-                                     const std::optional<at::Tensor>& cacheSeqlens,
-                                     const std::optional<at::Tensor>& usedQuery,
-                                     const std::optional<at::Tensor>& schedulerMetadata,
-                                     const std::optional<at::Tensor>& cuQ, int64_t maxQ, bool causal = false,
-                                     int64_t windowLeft = -1, int64_t windowRight = -1, int64_t splits = 1)
+std::vector<at::Tensor>
+PagedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
+             const at::Tensor& pageTable, float scale, const std::optional<at::Tensor>& cacheSeqlens,
+             const std::optional<at::Tensor>& usedQuery, const std::optional<at::Tensor>& schedulerMetadata,
+             const std::optional<at::Tensor>& cuQ, int64_t maxQ, bool causal = false, int64_t windowLeft = -1,
+             int64_t windowRight = -1, int64_t splits = 1, float softcap = 0.0f)
 {
     const bool tnd = cuQ.has_value();
     TORCH_CHECK(splits >= 0 && splits <= 256, "MLA: paged num_splits must be in [0,256]");
-    const bool isSplit = splits != 1;
+    TORCH_CHECK(std::isfinite(softcap) && softcap >= 0, "MLA: softcap must be finite and non-negative in FP32");
+    TORCH_CHECK(softcap == 0 || !tnd, "MLA: TND PA softcap is not implemented yet");
+    const bool isSplit = splits != 1 || softcap > 0;
     const bool isWindow = windowLeft != -1 || windowRight != -1;
     TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
                 "MLA: inputs must have FP16 or BF16 dtype");
@@ -944,6 +947,7 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
         if (isWindow || isSplit) {
             producer->window = config;
             producer->splits = splits;
+            producer->hasSoftcap = softcap > 0;
         }
     }
     auto stream = c10_npu::getCurrentNPUStream();
@@ -979,13 +983,13 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
     a.isWindow = isWindow;
     a.window = window;
     auto enqueue = [a, producer, tnd, q, k, v, qv, pageTable, lengths, cuQ, usedQuery, metadata, out, lse, workspace,
-                    isSplit, splits, accum, accumLse]() mutable -> int {
+                    isSplit, splits, accum, accumLse, softcap]() mutable -> int {
         if (producer) {
             producer->Enqueue();
         }
         if (isSplit) {
             const MlaSplitPagedBsndLaunchArgs splitArgs{a, uint32_t(splits), static_cast<uint8_t*>(accum.data_ptr()),
-                                                        static_cast<uint8_t*>(accumLse.data_ptr())};
+                                                        static_cast<uint8_t*>(accumLse.data_ptr()), softcap};
             const auto error =
                 tnd ? (splits == 0 ? (q.scalar_type() == at::kBFloat16 ? LaunchAutoSplitPagedTndBf16(splitArgs)
                                                                        : LaunchAutoSplitPagedTndFp16(splitArgs))
@@ -1012,6 +1016,10 @@ std::vector<at::Tensor> PagedForward(const at::Tensor& q, const at::Tensor& k, c
     } else {
         at_npu::native::OpCommand::RunOpApiV2(tnd ? "ascendc_mla_paged_tnd" : "ascendc_mla_paged_bsnd", enqueue);
     }
+    if (splits == 1 && softcap > 0) {
+        accum = at::empty({0}, at::TensorOptions().device(q.device()));
+        accumLse = at::empty({0}, at::TensorOptions().device(q.device()));
+    }
     return {out, lse, accum, accumLse};
 }
 } // namespace
@@ -1021,23 +1029,28 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
                                          const std::optional<at::Tensor>& cacheSeqlens,
                                          const std::optional<at::Tensor>& usedQuery,
                                          const std::optional<at::Tensor>& schedulerMetadata, bool causal,
-                                         int64_t windowLeft, int64_t windowRight, int64_t splits)
+                                         int64_t windowLeft, int64_t windowRight, int64_t splits, float softcap)
 {
     return PagedForward(q, k, v, qv, pageTable, scale, cacheSeqlens, usedQuery, schedulerMetadata, std::nullopt, 0,
-                        causal, windowLeft, windowRight, splits);
+                        causal, windowLeft, windowRight, splits, softcap);
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 SplitPagedBsndForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
                         const at::Tensor& pageTable, int64_t splits, int64_t windowLeft, int64_t windowRight,
                         bool causal, std::optional<double> scale, const std::optional<at::Tensor>& lengths,
-                        const std::optional<at::Tensor>& used, const std::optional<at::Tensor>& metadata)
+                        const std::optional<at::Tensor>& used, const std::optional<at::Tensor>& metadata,
+                        double softcap)
 {
-    TORCH_CHECK(splits == 0 || (splits >= 2 && splits <= 256), "MLA: paged split requires num_splits=0 or [2,256]");
+    TORCH_CHECK(std::isfinite(softcap) && softcap >= 0 && std::isfinite(float(softcap)) &&
+                    (softcap == 0 || float(softcap) > 0),
+                "MLA: softcap must be finite and non-negative in FP32");
+    TORCH_CHECK(splits == 0 || (splits >= (softcap > 0 ? 1 : 2) && splits <= 256),
+                "MLA: paged split requires num_splits=0 or [2,256], or 1 with softcap");
     TORCH_CHECK(!scale || (std::isfinite(*scale) && std::abs(*scale) <= std::numeric_limits<float>::max()),
                 "MLA: softmax_scale must be finite in FP32");
     auto r = PagedBsndForward(q, k, v, qv, pageTable, scale ? float(*scale) : 1.0f / std::sqrt(576.0f), lengths, used,
-                              metadata, causal, windowLeft, windowRight, splits);
+                              metadata, causal, windowLeft, windowRight, splits, softcap);
     return {r[0], r[1], r[2], r[3]};
 }
 
@@ -2294,7 +2307,7 @@ PrefillBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v
                    int64_t maxK, const std::optional<at::Tensor>& pageTable, float softcap)
 {
     TORCH_CHECK(std::isfinite(softcap) && softcap >= 0, "MLA: softcap must be finite and non-negative in FP32");
-    TORCH_CHECK(softcap == 0 || !pageTable, "MLA: softcap is only implemented for non-paged layouts");
+    TORCH_CHECK(softcap == 0 || !pageTable || !cuQ, "MLA: TND PA softcap is not implemented yet");
     const bool tnd = bool(cuQ);
     CheckForwardBoundary(q, k, v, std::nullopt, tnd, bool(cuK), bool(pageTable));
     TORCH_CHECK(q.size(-1) == 192 && v.size(-1) == 128, "MLA: prefill requires 192/128 tensors");
@@ -2570,7 +2583,8 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
           "Tensor? scheduler_metadata=None) -> (Tensor, Tensor, Tensor, Tensor)");
     m.def("_mla_split_paged_bsnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor page_table, int num_splits, "
           "int window_left=-1, int window_right=-1, bool causal=False, float? softmax_scale=None, "
-          "Tensor? cache_seqlens=None, Tensor? seqused_q=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor, "
+          "Tensor? cache_seqlens=None, Tensor? seqused_q=None, Tensor? scheduler_metadata=None, float softcap=0.) -> "
+          "(Tensor, Tensor, "
           "Tensor, Tensor)");
     m.def("_mla_split_mixed_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, int max_seqlen_q, "
           "int num_splits, int window_left=-1, int window_right=-1, bool causal=False, float? softmax_scale=None, "
@@ -2638,7 +2652,7 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
           "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q) -> Tensor");
     m.def("_mla_paged_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, int page_size, "
           "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor? cu_seqlens_q, bool causal=False, "
-          "int window_left=-1, int window_right=-1, int num_splits=1) -> Tensor");
+          "int window_left=-1, int window_right=-1, int num_splits=1, bool has_softcap=False) -> Tensor");
     m.def("_mla_dense_forward(Tensor q, Tensor k, Tensor v, Tensor qv, float? softmax_scale=None, "
           "Tensor? cache_seqlens=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor)");
     m.def("_mla_paged_bsnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor page_table, "

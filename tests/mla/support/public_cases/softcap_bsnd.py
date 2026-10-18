@@ -122,7 +122,7 @@ def compare(c, result, record):
     r = record.cpu().tolist()
     prefill = c["representation"] == "prefill"
     m, n = r[13:15] if prefill else r[15:17]
-    base = 20 + 2 * b if prefill else 410 + 8 * b
+    base = c.get("metadata_tail", 20 + 2 * b if prefill else 410 + 8 * b)
     ends = []
     if prefill or c["options"]["num_splits"] == 0:
         count = r[base + 3]
@@ -156,6 +156,10 @@ def compare(c, result, record):
         num_splits=o["num_splits"],
         softcap=o["softcap"],
     )
+    if c.get("page") and sk == 0:
+        refs = dict(refs)
+        for precision in ("high", "low"):
+            refs["lse_" + precision] = refs["lse_" + precision].clone().fill_(-torch.inf)
     dv = 128 if prefill else 512
     for precision in ("high", "low"):
         refs["out_" + precision] = (

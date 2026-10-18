@@ -7,7 +7,7 @@
 namespace flash_attn::mla {
 bool BuildSplitPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                                  uint32_t* output, uint32_t words, const MlaPagedInputs& inputs,
-                                 const MlaWindowConfig& window, int64_t splits)
+                                 const MlaWindowConfig& window, int64_t splits, uint32_t hasSoftcap)
 {
     uint32_t expected;
     if (!SplitPagedBsndMetadataWords(shape.batch, expected) || words != expected)
@@ -15,11 +15,14 @@ bool BuildSplitPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatformIn
     struct Context {
         const MlaWindowConfig& window;
         int64_t splits;
+        uint32_t hasSoftcap;
         MlaSplitPagedBsndPlan plan;
-    } context{window, splits, {}};
+    } context{window, splits, hasSoftcap, {}};
     const auto builder = [](const MlaPagedShape& s, const MlaPlatformInfo& p, const MlaPagedInputs& in,
                             MlaPagedSchedule& schedule, const void* opaque) {
         auto& c = *const_cast<Context*>(static_cast<const Context*>(opaque));
+        if (c.hasSoftcap > 1 || c.splits < (c.hasSoftcap ? 1 : 2) || c.splits > 256)
+            return MlaScheduleStatus::InvalidSplit;
         const auto status = BuildSplitPagedBsndPlan(s, p, in, c.window, c.splits, c.plan);
         if (status == MlaScheduleStatus::Success)
             schedule = std::move(c.plan.paged);
@@ -29,7 +32,7 @@ bool BuildSplitPagedBsndMetadata(const MlaPagedShape& shape, const MlaPlatformIn
     if (!BuildPagedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, false, builder, &context,
                                         words - base))
         return false;
-    output[1] = output[2] = kMlaSplitPagedBsndVersion;
+    output[1] = output[2] = hasSoftcap ? kMlaSoftcapSplitPagedBsndVersion : kMlaSplitPagedBsndVersion;
     if (output[5] == 0) {
         MlaWindow normalized{};
         NormalizeWindow(window, normalized);

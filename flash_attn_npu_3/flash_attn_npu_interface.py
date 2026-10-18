@@ -521,13 +521,24 @@ def _check_mla_paged_inputs(
     window_right=-1,
     causal=False,
     num_splits=1,
+    has_softcap=False,
 ):
     # Mirror both paged plans and PagedForward's descriptor storage checks.
     # Physical pages and total TND tokens are independent of logical batch.
     tnd = cu_seqlens_q is not None
+    if has_softcap and tnd:
+        raise RuntimeError("MLA: TND PA softcap is not implemented yet")
     is_window = (window_left, window_right) != (-1, -1)
-    prefix_words = 756 if num_splits == 0 else 414 if num_splits != 1 else 411 if is_window else 408
-    sequence_words = 7 if num_splits != 1 else 5
+    prefix_words = (
+        756
+        if num_splits == 0
+        else 414
+        if (num_splits != 1 or has_softcap)
+        else 411
+        if is_window
+        else 408
+    )
+    sequence_words = 7 if (num_splits != 1 or has_softcap) else 5
     prefill = q.shape[-1] == 192
     if prefill:
         prefix_words, sequence_words = 372, (8 if tnd else 2) + 2 * k.shape[-2]
@@ -586,7 +597,7 @@ def _check_mla_paged_inputs(
             total_k=batch * capacity if tnd else None,
             page_size=page,
         )
-    elif num_splits != 1:
+    elif num_splits != 1 or has_softcap:
         _check_mla_paged_split_budget(
             batch,
             max_seqlen_q if tnd else q.shape[1],
@@ -595,8 +606,9 @@ def _check_mla_paged_inputs(
             page,
             num_splits,
             total_q=q.shape[0] if tnd else None,
+            has_softcap=has_softcap,
         )
-    if is_window or num_splits != 1:
+    if is_window or (num_splits != 1 or has_softcap):
         _normalize_mla_window(
             max_seqlen_q if tnd else q.shape[1], capacity, window_left, window_right, causal
         )
@@ -721,8 +733,10 @@ def _mla_paged_tnd_forward_fake(
     )
 
 
-def _check_mla_paged_split_budget(batch, sq, heads, capacity, page, splits, total_q=None):
-    if splits != 0 and not 2 <= splits <= 256:
+def _check_mla_paged_split_budget(
+    batch, sq, heads, capacity, page, splits, total_q=None, has_softcap=False
+):
+    if splits != 0 and not (1 if has_softcap else 2) <= splits <= 256:
         raise RuntimeError("MLA: paged split requires num_splits=0 or [2,256]")
     fixed = 756 if splits == 0 else 414
     count = 26 if splits == 0 else splits
@@ -764,9 +778,10 @@ def _mla_split_paged_bsnd_forward_fake(
     cache_seqlens=None,
     seqused_q=None,
     scheduler_metadata=None,
+    softcap=0.0,
 ):
     _check_mla_inputs(q, k, v, qv, paged_kv=True)
-    _check_mla_dense_options(softmax_scale=softmax_scale)
+    _check_mla_dense_options(softmax_scale=softmax_scale, softcap=softcap, allow_softcap=True)
     _check_mla_paged_inputs(
         q,
         k,
@@ -778,17 +793,28 @@ def _mla_split_paged_bsnd_forward_fake(
         window_right=window_right,
         causal=causal,
         num_splits=num_splits,
+        has_softcap=softcap > 0,
     )
     _check_mla_paged_split_budget(
-        q.shape[0], q.shape[1], q.shape[2], page_table.shape[1] * k.shape[1], k.shape[1], num_splits
+        q.shape[0],
+        q.shape[1],
+        q.shape[2],
+        page_table.shape[1] * k.shape[1],
+        k.shape[1],
+        num_splits,
+        has_softcap=softcap > 0,
     )
     b, sq, h = q.shape[:3]
     count = 26 if num_splits == 0 else num_splits
     return (
         q.new_empty((b, sq, h, 512)),
         q.new_empty((b, h, sq), dtype=torch.float32),
-        q.new_empty((count, b, h, sq, 512), dtype=torch.float32),
-        q.new_empty((count, b, h, sq), dtype=torch.float32),
+        torch.empty((0,), device=q.device)
+        if num_splits == 1
+        else q.new_empty((count, b, h, sq, 512), dtype=torch.float32),
+        torch.empty((0,), device=q.device)
+        if num_splits == 1
+        else q.new_empty((count, b, h, sq), dtype=torch.float32),
     )
 
 
@@ -1541,8 +1567,6 @@ def _mla_prefill_bsnd_metadata_fake(
     page_size=0,
     has_softcap=False,
 ):
-    if has_softcap and page_size:
-        raise RuntimeError("MLA: softcap is only implemented for non-paged layouts")
     words = _mla_prefill_bsnd_budget(
         batch_size,
         max_seqlen_q,
@@ -1585,7 +1609,7 @@ def _mla_prefill_bsnd_forward_fake(
         num_splits=num_splits,
         allow_split=True,
         softcap=softcap,
-        allow_softcap=page_table is None,
+        allow_softcap=True,
     )
     _check_mla_used(q, q.shape[0], seqused_q, cache_seqlens)
     if page_table is not None:
@@ -1658,8 +1682,8 @@ def _mla_prefill_forward(
     page_table=None,
     softcap=0.0,
 ):
-    if softcap != 0 and page_table is not None:
-        raise RuntimeError("MLA: softcap is only implemented for non-paged layouts")
+    if softcap != 0 and page_table is not None and cu_q is not None:
+        raise RuntimeError("MLA: TND PA softcap is not implemented yet")
     if page_table is not None:
         if cu_q is not None:
             return torch.ops.flash_attn_npu_3._mla_prefill_mixed_forward(
@@ -1679,7 +1703,19 @@ def _mla_prefill_forward(
                 page_table,
             )
         return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_forward(
-            q, k, v, splits, left, right, causal, scale, used_k, used_q, metadata, page_table
+            q,
+            k,
+            v,
+            splits,
+            left,
+            right,
+            causal,
+            scale,
+            used_k,
+            used_q,
+            metadata,
+            page_table,
+            softcap,
         )
     if cu_q is not None and cu_k is not None:
         _check_mla_tnd_inputs(q, k, cu_q, cu_k, max_q, max_k)
@@ -1743,7 +1779,7 @@ def _mla_prefill_mixed_metadata_fake(
     has_softcap=False,
 ):
     if has_softcap and page_size:
-        raise RuntimeError("MLA: softcap is only implemented for non-paged layouts")
+        raise RuntimeError("MLA: TND PA softcap is not implemented yet")
     if qkv_dtype not in (torch.float16, torch.bfloat16):
         raise RuntimeError("MLA: qkv_dtype must be FP16 or BF16")
     _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
@@ -1983,8 +2019,8 @@ def _mla_split_forward(
     softcap=0.0,
 ):
     """Select the existing split operator; its registered fake uses the same route."""
-    if softcap != 0 and page_table is not None:
-        raise RuntimeError("MLA: softcap is only implemented for non-paged layouts")
+    if softcap != 0 and page_table is not None and cu_seqlens_q is not None:
+        raise RuntimeError("MLA: TND PA softcap is not implemented yet")
     ops = torch.ops.flash_attn_npu_3
     options = dict(
         num_splits=num_splits,
@@ -2017,6 +2053,7 @@ def _mla_split_forward(
             qv,
             page_table,
             cache_seqlens=seqused_k,
+            softcap=softcap,
             **options,
         )
     if cu_seqlens_q is not None:
@@ -2095,7 +2132,7 @@ def _mla_forward(
         allow_split=True,
         attention_chunk=attention_chunk,
         softcap=softcap,
-        allow_softcap=page_table is None,
+        allow_softcap=page_table is None or cu_seqlens_q is None,
         pack_gqa=pack_gqa,
         sm_margin=sm_margin,
         rotary_interleaved=rotary_interleaved,
@@ -2131,6 +2168,7 @@ def _mla_forward(
                 window_right=window_size[1],
                 causal=causal,
                 num_splits=num_splits,
+                has_softcap=softcap > 0,
             )
         capacity = k.shape[1] * (page_table.shape[1] if page_table is not None else 1)
         if not 0 <= seqused_k <= capacity:
@@ -2323,7 +2361,7 @@ def _flash_attn_forward(
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
-            allow_softcap=page_table is None,
+            allow_softcap=page_table is None or cu_seqlens_q is None,
             num_splits=num_splits,
             allow_split=cu_seqlens_k is None or cu_seqlens_q is not None,
             pack_gqa=pack_gqa,
@@ -2564,7 +2602,7 @@ def _flash_attn_forward_fake(
             window_size=(window_size_left, window_size_right),
             attention_chunk=attention_chunk,
             softcap=softcap,
-            allow_softcap=page_table is None,
+            allow_softcap=page_table is None or cu_seqlens_q is None,
             num_splits=num_splits,
             allow_split=cu_seqlens_k is None or cu_seqlens_q is not None,
             pack_gqa=pack_gqa,
@@ -3726,7 +3764,8 @@ def flash_attn_with_kvcache(
     NPU MLA supports compressed 64/512 inputs with qv and independent 192/128
     prefill inputs with qv=None. Both use read-only BSND or ND paged caches with
     BSND/TND queries, causal/window masks and num_splits=0..256. Nonpaged layouts
-    accept nonnegative finite softcap; paged layouts require softcap=0.
+    and BSND paged layouts accept nonnegative finite softcap; TND paged
+    layouts require softcap=0.
     Automatic requests return 26 FP32
     accumulator slots; the native partition determines the actual splits per M
     block and unused slots are 0/-inf. Contracts are in docs/mla/design.md;
@@ -4238,18 +4277,35 @@ def _mla_paged_metadata_fake(
     window_left=-1,
     window_right=-1,
     num_splits=1,
+    has_softcap=False,
 ):
+    if has_softcap and cu_seqlens_q is not None:
+        raise RuntimeError("MLA: TND PA softcap is not implemented yet")
     is_window = (window_left, window_right) != (-1, -1)
-    prefix_words = 756 if num_splits == 0 else 414 if num_splits != 1 else 411 if is_window else 408
-    sequence_words = 7 if num_splits != 1 else 5
-    if num_splits != 1:
+    prefix_words = (
+        756
+        if num_splits == 0
+        else 414
+        if (num_splits != 1 or has_softcap)
+        else 411
+        if is_window
+        else 408
+    )
+    sequence_words = 7 if (num_splits != 1 or has_softcap) else 5
+    if num_splits != 1 or has_softcap:
         if cu_seqlens_q is not None:
             if num_splits != 0 and not 2 <= num_splits <= 256:
                 raise RuntimeError("MLA: TND paged split requires num_splits=0 or [2,256]")
             # The total allocation is device data; AICPU checks its budget.
         else:
             _check_mla_paged_split_budget(
-                batch_size, max_seqlen_q, num_heads_q, max_seqlen_k, page_size, num_splits
+                batch_size,
+                max_seqlen_q,
+                num_heads_q,
+                max_seqlen_k,
+                page_size,
+                num_splits,
+                has_softcap=has_softcap,
             )
     if not 0 <= batch_size <= (2**32 - 1 - prefix_words) // sequence_words:
         raise RuntimeError("MLA: paged metadata word count overflow")
@@ -4268,7 +4324,7 @@ def _mla_paged_metadata_fake(
     _check_mla_cache_lengths(cache_seqlens, batch_size, cache_seqlens.device)
     if cu_seqlens_q is not None:
         _check_mla_metadata_query_prefix(cu_seqlens_q, batch_size, cache_seqlens.device)
-    if is_window or num_splits != 1:
+    if is_window or (num_splits != 1 or has_softcap):
         _normalize_mla_window(max_seqlen_q, max_seqlen_k, window_left, window_right, causal)
     return torch.empty(
         (prefix_words + sequence_words * batch_size,),
@@ -4428,7 +4484,7 @@ def _get_scheduler_metadata_fake(
             allow_window=True,
             allow_split=True,
             prefill=headdim == 192,
-            allow_softcap=page_size is None,
+            allow_softcap=page_size is None or cu_seqlens_q is None,
         )
         if headdim == 192:
             if page_size is not None and page_size == 0:
@@ -4481,6 +4537,7 @@ def _get_scheduler_metadata_fake(
                     window_size_left,
                     window_size_right,
                     num_splits,
+                    has_softcap=has_softcap,
                 )
             if cu_seqlens_q is not None:
                 return _mla_split_mixed_metadata_fake(
@@ -4610,7 +4667,8 @@ def get_scheduler_metadata(
     with one KV head, or independent prefill headdim=192/headdim_v=128 with
     GQA. Both accept BSND/TND queries, nonpaged or ND paged caches, all masks
     and num_splits=0..256. The default num_splits=0 selects automatic splitting.
-    Nonpaged layouts accept has_softcap=True; paged layouts require False.
+    Nonpaged and BSND paged layouts accept has_softcap=True; TND paged
+    layouts require False.
     Record versions and sizes are specified in docs/mla/design.md, sections 2.1 and 5.
 
     cache_seqlens must be a same-device contiguous int32 tensor of shape
@@ -4653,7 +4711,7 @@ def get_scheduler_metadata(
             allow_window=True,
             allow_split=True,
             prefill=headdim == 192,
-            allow_softcap=page_size is None,
+            allow_softcap=page_size is None or cu_seqlens_q is None,
         )
         if headdim == 192:
             if page_size is not None and page_size == 0:
@@ -4706,6 +4764,7 @@ def get_scheduler_metadata(
                     window_size[0],
                     window_size[1],
                     num_splits,
+                    has_softcap=has_softcap,
                 )
             if cu_seqlens_q is not None:
                 return torch.ops.flash_attn_npu_3._mla_split_mixed_metadata(

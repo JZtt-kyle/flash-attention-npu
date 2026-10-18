@@ -1,4 +1,4 @@
-"""Recompute M14's five-layout gate from bound, complete raw timing samples."""
+"""Recompute M14's full stage or selected groups from bound raw timing samples."""
 
 import argparse
 from collections import defaultdict
@@ -22,6 +22,7 @@ from tests.mla.support.mla_public_performance import (
 )
 from tests.mla.support.mla_validation import digest, reusable
 from tests.mla.support.mla_validation_build import matching_files
+from tests.mla.support.mla_validation_policy import PUBLIC_MAX_CASES
 
 
 def sample_medians(samples, expected, iterations, *, repeats=False, value="e2e_us"):
@@ -131,7 +132,14 @@ def recompute_report(layout, specs, report, wall, kernels, proof):
     return report
 
 
-def load_evidence(paths):
+def load_evidence(paths, suites=None):
+    required = list(PREFILL_STAGE_SUITES) if suites is None else list(suites)
+    if (
+        not required
+        or len(set(required)) != len(required)
+        or not set(required) <= set(PREFILL_STAGE_SUITES)
+    ):
+        raise ValueError("Expected distinct known M14 performance suites")
     selected = stage_selection()
     layouts, evidence, sources, native_artifacts = {}, [], {}, {}
     runtime = sampling = None
@@ -149,6 +157,8 @@ def load_evidence(paths):
             raise ValueError("Stage runtime identities differ or are missing")
         runtime = current
         for suite, (layout, _) in PREFILL_STAGE_SUITES.items():
+            if suite not in required:
+                continue
             record = summary["groups"].get(suite)
             if record is None or record.get("status") == "not_run":
                 continue
@@ -241,7 +251,37 @@ def load_evidence(paths):
                     directory=str(directory),
                 )
             )
-    result = summarize_stage(layouts)
+    if set(layouts) != {PREFILL_STAGE_SUITES[s][0] for s in required}:
+        raise ValueError("All requested M14 groups are required")
+    if suites is None:
+        result = summarize_stage(layouts)
+    else:
+        cases = [dict(c, layout=name) for name, r in layouts.items() for c in r["cases"]]
+        excluded = [dict(c, layout=name) for name, r in layouts.items() for c in r["excluded"]]
+        measured = len(cases) + len(excluded)
+        if not cases or not 0 < measured <= PUBLIC_MAX_CASES:
+            raise ValueError("Invalid selected configuration count")
+        mean = statistics.fmean(c["mean_ratio"] for c in cases)
+        result = dict(
+            scope="selected-groups",
+            selected_suites=required,
+            passed=mean <= 1,
+            threshold=1.0,
+            mean_ratio=mean,
+            max_configurations=PUBLIC_MAX_CASES,
+            weighting="equal input/dtype weight; equal entry/R weight within each input",
+            measured_cases=measured,
+            applicable_cases=len(cases),
+            excluded_cases=len(excluded),
+            regressed_cases=sum(c["mean_ratio"] > 1 for c in cases),
+            regressed_segments=sum(r["regressed_segments"] for r in layouts.values()),
+            layouts={
+                name: {k: v for k, v in r.items() if k not in {"cases", "excluded"}}
+                for name, r in layouts.items()
+            },
+            cases=cases,
+            excluded=excluded,
+        )
     segments = defaultdict(list)
     for case in result["cases"]:
         ratios = case["ratios"]
@@ -267,9 +307,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path, action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--suite",
+        nargs="+",
+        choices=PREFILL_STAGE_SUITES,
+        help="Explicit regression groups; omit to require the complete M14 stage",
+    )
     args = parser.parse_args()
     try:
-        result = load_evidence(args.evidence)
+        result = load_evidence(args.evidence, args.suite)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         result = dict(passed=False, error=str(exc))
     args.output.parent.mkdir(parents=True, exist_ok=True)

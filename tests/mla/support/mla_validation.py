@@ -65,6 +65,7 @@ SPLIT_KV_MERGE = "tests/mla/unit/split_kv_merge/test_merge.py"
 SPLIT_KV_MERGE_SUITES = {
     "softcap-tnd-source",
     "softcap-mixed-source",
+    "softcap-paged-bsnd-source",
     "unit-auto_split_paged_tnd",
     "unit-auto_split_paged_bsnd",
     "unit-split_paged_bsnd",
@@ -90,6 +91,24 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "softcap-paged-bsnd-tools": [
+        "tests/mla/unit/tools/test_mla_softcap_paged_bsnd_tools.py",
+        "tests/mla/unit/tools/test_mla_softcap_mixed_tools.py",
+        "tests/mla/unit/tools/test_organization.py",
+    ],
+    "softcap-paged-bsnd-profile-check": ["tests/mla/e2e/softcap_paged_bsnd/public_profile.py"],
+    "softcap-paged-bsnd-profile": ["tests/mla/e2e/softcap_paged_bsnd/public_profile.py"],
+    "softcap-paged-bsnd-sanitize": ["tests/mla/unit/softcap_paged_bsnd/test_metadata.py"],
+    "softcap-paged-bsnd-check": [
+        "tests/mla/e2e/softcap_paged_bsnd/test_public.py",
+        "-k",
+        "representative or metadata_and_length_forms",
+    ],
+    "softcap-paged-bsnd-source": [
+        "tests/mla/unit/split_paged_bsnd/test_source.py",
+        "tests/mla/unit/auto_split_paged_bsnd/test_source.py",
+        "tests/mla/e2e/prefill_paged_bsnd/test_source.py",
+    ],
     "softcap-mixed-tools": [
         "tests/mla/unit/tools/test_mla_softcap_mixed_tools.py",
         "tests/mla/unit/tools/test_organization.py",
@@ -1009,6 +1028,8 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "softcap-paged-bsnd-profile",
+    "softcap-paged-bsnd-profile-check",
     "softcap-tnd-profile",
     "softcap-mixed-profile",
     "softcap-tnd-profile-check",
@@ -1097,6 +1118,9 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "softcap-paged-bsnd-tools",
+    "unit-softcap_paged_bsnd",
+    "softcap-paged-bsnd-sanitize",
     "softcap-tnd-tools",
     "softcap-mixed-tools",
     "unit-softcap_tnd",
@@ -1242,6 +1266,8 @@ def suite_dependencies(suite):
     if suite in {
         "unit-softcap_tnd",
         "unit-softcap_mixed",
+        "unit-softcap_paged_bsnd",
+        "softcap-paged-bsnd-sanitize",
         "softcap-tnd-sanitize",
         "softcap-mixed-sanitize",
         "unit-softcap_bsnd",
@@ -1500,11 +1526,15 @@ def environment(args, directory, suite):
         "softcap-bsnd-sanitize",
         "unit-softcap_tnd",
         "unit-softcap_mixed",
+        "unit-softcap_paged_bsnd",
+        "softcap-paged-bsnd-sanitize",
         "softcap-tnd-sanitize",
         "softcap-mixed-sanitize",
     }:
         env["MLA_SCHEDULE_ARTIFACT_DIR"] = str(directory / "schedule")
         env["MLA_SCHEDULE_SANITIZE"] = str(int(suite.endswith("sanitize")))
+    if suite in {"softcap-paged-bsnd-profile", "softcap-paged-bsnd-profile-check"}:
+        env["MLA_SOFTCAP_PAGED_BSND_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {"softcap-mixed-profile", "softcap-mixed-profile-check"}:
         env["MLA_SOFTCAP_MIXED_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {"softcap-tnd-profile", "softcap-tnd-profile-check"}:

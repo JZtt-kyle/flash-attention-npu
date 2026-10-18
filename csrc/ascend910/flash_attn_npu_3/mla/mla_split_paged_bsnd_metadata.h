@@ -9,10 +9,13 @@
 
 namespace flash_attn::mla {
 constexpr uint32_t kMlaSplitPagedBsndVersion = 23;
+// Same record fields; bind the enabled feature, never the positive cap value.
+constexpr uint32_t kMlaSoftcapSplitPagedBsndVersion = 41;
 struct MlaSplitPagedBsndContext {
     MlaPagedMetadataContext paged;
     MlaWindowKernelParams window;
     uint32_t splits;
+    uint32_t hasSoftcap = 0;
 };
 // v6 logical PA snapshot, window(kind,left,right), S, B+1 uint64 M prefixes.
 // Does not bind page IDs, physical cache, addresses, strides or scale.
@@ -27,9 +30,11 @@ struct MlaSplitPagedBsndMetadataArgs {
     MlaPagedMetadataArgs input;
     MlaWindowConfig window;
     int64_t splits;
+    uint32_t hasSoftcap = 0;
 };
 // False leaves output untouched (unsafe descriptor/overlap); true writes a
 // complete record, including a zero-payload failure record. No device reads.
 bool BuildSplitPagedBsndMetadata(const MlaPagedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
-                                 uint32_t words, const MlaPagedInputs&, const MlaWindowConfig&, int64_t splits);
+                                 uint32_t words, const MlaPagedInputs&, const MlaWindowConfig&, int64_t splits,
+                                 uint32_t hasSoftcap = 0);
 } // namespace flash_attn::mla

@@ -4,7 +4,7 @@
 #include "mla_split_paged_bsnd_consumer.h"
 #include <algorithm>
 
-int main()
+int main(int argc, char** argv)
 {
     int command;
     while (std::cin >> command) {
@@ -17,6 +17,9 @@ int main()
         uint32_t value;
         uint64_t taskIndex;
         std::cin >> left >> right >> causal >> dtype >> mode >> mutation >> value >> taskIndex;
+        uint32_t hasSoftcap = 0;
+        if (argc > 1 && std::strcmp(argv[1], "--softcap") == 0)
+            std::cin >> hasSoftcap;
         Lengths lengths;
         lengths.Read();
         auto inputs = lengths.Inputs();
@@ -33,7 +36,7 @@ int main()
                                          : record.data();
         const bool built =
             BuildSplitPagedBsndMetadata(shape, r.platform, dtype, destination, mode == 17 ? words - 1 : words, inputs,
-                                        window, mode == 25 ? 2 : r.splits);
+                                        window, mode == 25 ? 2 : r.splits, hasSoftcap);
         const bool intact = record == initial;
         const uint32_t generated = record[5];
         const bool cleared = std::all_of(record.begin() + 8, record.end(), [](uint32_t v) { return v == 0; });
@@ -62,7 +65,8 @@ int main()
              active ? r.platform.libApiWorkspaceBytes : 0,
              r.platform.localMemory},
             {uint32_t(w.kind), w.left, w.right},
-            uint32_t(r.splits)};
+            uint32_t(r.splits),
+            hasSoftcap};
         // Bound the virtual buffers without allocating O(B*C) or physical KV.
         const uint64_t page = shape.pageSize > 0 ? shape.pageSize : 16;
         const uint64_t columns = shape.logicalKvCapacity > 0 ? shape.logicalKvCapacity / page : 0;
