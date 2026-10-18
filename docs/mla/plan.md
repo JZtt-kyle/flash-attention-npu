@@ -1,28 +1,67 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**M17 全范围收尾已完成，M16 后的专门文档核对合入同一提交；没有下一开发步。** 当前能力与实测证据见 [status](status.md)，契约与验收口径见 [design](design.md)。本轮图性能仍失败，按完整实测后用户对 M17 的明确授权接受为已知限制，默认性能门槛不变。
+本页只记录实施顺序、产物和完成条件。**M17 非量化范围已收尾；用户于 2026-10-18 确认放开 INT8 契约、不迁外部 NZ，并授权拆分任务及准备无头开发。下一开发步为 M18。** 当前能力与证据见 [status](status.md)，新增契约见 [design 3.4](design.md#34-int8-压缩-mla-扩展)。这项授权覆盖 M18–M21，无需各步重复确认；尚未实现或未验收的能力不得写成已支持。M17 的图性能例外不适用于新 INT8 路径。
+
+## 本次准备：INT8 计划与无头入口
+
+本次仅更新契约、任务交接和无头控制脚本，完成一个提交后停止；不启动 INT8 实现。影响 `AGENTS.md`、本目录三份文档、`scripts/mla_codex_loop.py` 与所属工具测试。用户给定的 `/home/zhangqijia/repo/mla_codex_loop.py` 已转发到仓库内脚本，沿用该入口、登录、模型及自动审批配置。
+
+原 state 只记录轮次/会话和计数，不能表达已授权阶段结束，因此在 status 的唯一下一步增加一个机器可读注释；不新增任务清单文件或另一套验收记录。缺少标记的旧交接兼容原行为，格式错误/重复标记明确拒绝。
+
+必跑检查：无头工具的真实临时 Git 仓库/模拟 CLI 测试，覆盖恢复、失败、单提交、旧待办归档、文档轮及阶段完成停止；给定入口的 `--check` 和 `--dry-run --max-dev-runs 4`，确认未调用模型、未制造成功计数；文档范围/链接、`git diff --check` 和 `ci/code_quality.sh --staged`。新增停止条件需先补完成/待恢复/到期文档轮/错误标记用例。归档前核对旧轮次结果及当前提交，持有原循环锁，保留源码、计数和全部日志。无需设备探测或构建扩展；不把历史 M17 E2E 记作本次重跑或继承通过。
+
+完成条件已满足：INT8 分步及每步门槛已写入，旧 M16 待办已持锁归档，实际入口检查就绪；45 项工具测试和相关文档/质量检查通过，证据见 status。状态中唯一下一步为 M18，M21 完成后循环自动退出，不继续探索排除项。
+
+## INT8 后续步骤
+
+只迁移 512+64 共享压缩 KV 的 INT8 前向，RoPE/输出为 BF16，公开缓存为 ND PA、页大小 128，query 为 BSND/TND。固定源旧 IFA 的 INT8 算法依赖 NZ PA，迁移时改为读取 ND 并在片上完成矩阵所需布局；不交付外部 NZ 格式、每次全 cache 转换或转调 CANN 的生产路径。无 mask/右下 causal、原生 FD 等实际组合先按 M18 固定源实测锁定；不把非量化的所有布局、窗口、softcap 或显式 split 自动复制成 INT8 需求。
+
+| 步骤 | 单次提交的产物 | 完成条件 |
+| --- | --- | --- |
+| M18 | INT8 独立数值组件、ND 读取适配及固定源对照 | 固定源和双数学精度、INT32/舍入/缩放/FD/地址边界、适用组件性能实测；公开入口继续拒绝 INT8 |
+| M19 | BSND Q + ND PA INT8 完整公开前向 | host/AICPU/Kernel/metadata/real/fake/compile/图同轮接通，必要正确性、回归及公开性能通过 |
+| M20 | TND Q + ND PA INT8 完整公开前向 | 沿用 M18 数值组件和 M19 接入，完整 allocation/长度/scale 地址、公开图及性能验收 |
+| M21 | INT8 组合覆盖与用户示例收尾 | 两布局及拒绝边界、累计 E2E、性能矩阵、示例与文档核对完成；唯一下一步改为 `none` |
+
+### M18：INT8 数值与 ND 适配
+
+独立风险：既有 FP16/BF16 组件不覆盖 INT8 QK/PV 的 INT32 累加、逐 token/head Q 反量化、softmax 后动态 P 量化及舍入、量化 FD 归并；源 NZ 到目标 ND 的读取也不能靠 dtype 实例化复用。因此只此一步先交付可实机调用的组件和固定源 probe，布局、mask、split 或记录版本不再各拆一轮。
+
+影响路径：`csrc/ascend910/flash_attn_npu_3/mla/{kernel,block,tile}/`、必要的现有数值/地址公共头；`tests/mla/support/` 的 fixed-source probe、数学 reference、native 包配方及身份依赖，新增 `tests/mla/unit/int8/`。保留源声明，CANN checkout 和 CATLASS 子模块只读。优先复用现有 PA/FD/调度组件，INT8 需要的区别按最小范围加入；生产前向和现有记录消费者不借此放开 dtype。
+
+必跑检查与选择依据（以下 INT8 组为本步应新增，当前尚不存在）：
+
+- 先注册 `--unit int8`、`int8-tools`、`int8-source-check`、`int8-profile-check`、`int8-component-profile`；在实现前用例列出源可运行的 BSND/TND、Sq/Hq/Sk 边界、sparse 0/3 组合及拒绝项。源文档与 host 上界有差异时以固定版本实测为依据，不能默默缩小集合。
+- `python3 -m tests.mla --suite int8-tools int8-source-check --dry-run`，随后 `--collect-only` 和实际执行，验证原始 INT8/BF16/FP32 输入、源专用 NZ pack/unpack、真实 INT8 native 配方及其 hash/失败传播；禁止先完整采样再发现 native 只有 FP16/BF16。
+- `python3 -m tests.mla --unit int8`：910B 上 INT8 两次矩阵乘、BF16 RoPE/输出、FP32 scale、动态 P 量化及 FD 的源逐元素与 FP32/FP64 独立数学对照。保留源舍入、饱和、全零/极值、scale 零值与非法值处理、尾块、长序列、空行、非连续 ND 页和真实 partial。新增 CPU 地址/调度逻辑另含固定源差分、溢出与 ASan/UBSan。
+- 先跑代表值、最大内存及最长 reference 成本边界，固定实现后跑完整约定集合。`python3 -m tests.mla --suite int8-profile-check int8-component-profile` 实测适用组件性能；组件结果不称公开 E2E。ND 适配成本全部计入待测路径。
+- 原非量化相关 E2E 依赖未变且原始证据完整时可按统一驱动继承；共享头、构建配方或发射受影响则重跑对应 E2E/普通 FA3，核对实际加载扩展。不继承历史单元或性能。
+
+完成条件：上述独立组件可调用、源有效组合和必要差异有证据，量化算法和 ND 地址风险闭环；未知、失败或源精度限制如实记录。更新 design 的实际 shape/组合及源适配表、plan 和 status 后单次提交，下一步 M19。数值未闭环不得先接公开入口。
+
+### M19：BSND 公开 INT8
+
+影响 Python 共享前向、C++ 注册/分派、host/AICPU、metadata 与 Kernel 启动、real/fake 输出，以及新增 `tests/mla/e2e/int8_bsnd/`、日常清单和公开 profile。复用 M18 完整算法、PA 安全检查及既有 metadata 生命周期；只有旧记录不能区分混合 dtype/量化模式或其安全边界时才扩协议，并写明原因。三个 INT8 scale 只在当次前向传递，不缓存到调度快照。
+
+新增 `int8-bsnd-check/source/boundaries/profile-check/profile`、`detail-int8_bsnd` 和 `--e2e int8_bsnd`。先 dry-run/collect 与工具/native 预检，再实测源与双数学、全部新行为、空值/stride/页表/长度/metadata 复用/生命周期/Trap；real/fake/compile 及真实固定/动态输入、长度和 scale 的图重放不可延后。验证不支持的选项明确拒绝，scale 更新确实改变结果。相关非量化 PA、图与普通 FA3 E2E 按依赖重跑或继承；源组件证据不替代公开调用。
+
+本步固定并版本管理公开性能输入，包含 eager 与 graph，按配置等权平均 ≤1 分别验收，保留全部退化和不可同义比较项；与 M20 合计不超过 100 配置。先 `int8-bsnd-profile-check`，再正式 `int8-bsnd-profile`，不得沿用 M17 图性能豁免。完成完整 BSND 可调用行为、文档和质量检查后一次提交，下一步 M20。
+
+### M20：TND 公开 INT8
+
+同一提交完成 TND Q 的 host/AICPU/metadata/Kernel/real/fake 接入、`tests/mla/e2e/int8_tnd/`、日常清单及性能；保留原 allocation 地址，Q scale 使用 `[T,Hq]`，不能把分配前缀、实际长度和压紧后的源索引混用。复用 M18 数值组件与 M19 PA/量化参数协议，不因布局另拆数值或协议轮。
+
+新增并按 M19 顺序运行 `int8-tnd-check/source/boundaries/profile-check/profile`、`detail-int8_tnd`、`--e2e int8_tnd`。覆盖非均匀/零长度、分配间隙 poison、scale 行/head stride、ND 页尾/乱序/越界、metadata 复用及 Trap、真实/fake/compile/动态图、跨层与 stream 生命周期。TND 公共生成器沿用 FA3 可表达的完整 Q 分配段，不凭空添加 Q-used 参数。BSND INT8、相关非量化和普通 FA3 E2E 按依赖继承或重跑，新数值/地址及公开 eager/graph 性能本步实测。通过后一次提交，下一步 M21。
+
+### M21：INT8 收尾
+
+按 M18 冻结的源有效组合与 M19/M20 开放边界核对两布局覆盖；补独立覆盖缺口，不自动穷举所有轴。实测 INT8 两布局专项、累计日常 E2E、相关普通 FA3 与图回归，复核实际加载、来源/版权和 910B/C 配置兼容；910C 未实测如实标记。沿用 M19/M20 固定输入重跑阶段 eager/graph 性能，最多 100 配置且平均门槛不变，所有单例、分段、布局转换成本与失败保留。
+
+添加可运行 INT8 BSND/TND 示例及对应 E2E，中英文 README 和 design 的公开接口/拒绝项/验收映射同步；status 保存唯一当前结果和证据路径。必要检查通过才单次提交；将 status 的 `mla-loop-next` 标记设为 `none`，无头脚本正常结束。性能失败或环境受限时保留同一待办和失败结果，不能为了自动运行而提交或跳过。
 
 ## M17 全范围收尾
 
-2026-10-18 用户确认“完成 M17 全范围收尾，合并本次文档核对”。M16 后应做的专门文档核对合入本步，仅交付一个提交；不重启无头循环。
-
-影响路径：`mla_forward.cpp::DensePlatform` 补齐 CANN `Ascend910_93`（910C）名称准入，沿用平台查询、C1V2、核数上界、内存与 blockDim 校验，不修改数值核、metadata 协议或 CATLASS。新增平台 CPU 检查，直接编译生产查询函数并使用安装 CANN 的 B/C 平台配置验证核数、存储与普通/全核发射；覆盖非目标芯片、空名称及错误资源拒绝。统一驱动注册该组，沿用已有依赖/证据格式。README 中英文同步两种表示、五布局、softcap、调度、图及拒绝边界，并添加可运行示例与其 E2E 验证。
-
-必跑检查与选择依据：
-
-- 先 `--dry-run`、`--collect-only` 核对下列集合；平台 CPU/ASan/UBSan、所属工具和示例静态检查先行。新用例只补平台兼容、示例调用及最终覆盖映射缺口。
-- 正式构建并核对实际加载；`gqa-options-check gqa-options-source gqa-options-boundaries graph-check` 验证代表调用、固定源与双数学、拒绝与捕获。数值算法和 reference 策略未改，不重复历史最长 reference 成本检查。
-- 冻结实现后执行 `e2e detail-gqa_options detail-graph ordinary graph-ordinary`，覆盖两种表示、五布局、三 mask、全部 split、softcap/调度组合、fake/compile、长度/stride/复用/生命周期与 Trap。核对 design 7.5/7.6 与实际节点的映射，缺失组合补入所属 E2E。
-- 原固定性能集合 `graph-profile`（40 配置）与 `gqa-options-schedule-profile`（56 配置），合计 96，不按结果重新选样。先执行 `graph-profile-check gqa-options-profile-check` 确认 native 配方、全部廉价夹具及真实 profiler；eager、图与调度分别按原入口/R 和平均门槛汇总。图若仍失败须保留结论；M16 的单次例外不能自动写为 M17 通过。
-- 收尾执行本次文档契约/链接核对、`git diff --check`、`ci/code_quality.sh --staged`，只暂存本步文件。
-
-证据继承约定：M16 的完整 E2E 与性能用作历史基线，生产源码改变后由统一驱动判定，本步不预记继承通过；单元和性能实际执行。构建与数学缓存仅在内容身份有效时复用。证据根 `/tmp/mla-m17/`，环境使用已核验的 `/tmp/mla-m16-schedule/run.py`，实机仍为设备 7 的 910B3。910C 只作实现与资源配置兼容检查，不宣称已实测。
-
-完成条件：上述必要检查和最终覆盖核对完成，公开示例可调用，三份文档职责清楚；失败、未运行和已接受限制分别记录。性能未达标时先完成其余收尾，再以具体结果处理验收边界，不改默认门槛或隐藏失败。
-
-完成结论：约定检查与文档核对全部执行，正确性、eager 和调度性能通过；图性能实测失败，用户在看到本轮结果后确认“接受已知限制并提交”，按 design 第 7 节作为 M17 已知限制收尾。实际结果、耗时和原始证据位置统一保留在 status。
-
-M17 是已确认迁移范围的最后一个里程碑；完成后没有自动启动的下一开发步，不把第 4 节排除项或图性能继续优化加入本次收尾。
+非量化范围已完成于 `ebdf3eb`，M16 后的专门文档核对合入同次提交。910B 正确性、eager 和调度性能通过；图平均比 1.484216023946693 未达到 ≤1，用户在完整实测后明确接受该次限制。详细结果和复现命令见 `git show ebdf3eb:docs/mla/status.md`，阶段覆盖见 [design 7.7](design.md#77-全范围收尾映射)。本次新增 INT8 授权不改变历史失败结论，也不重启 M16 待办。
 
 ## 已完成步骤
 
@@ -46,7 +85,7 @@ M17 是已确认迁移范围的最后一个里程碑；完成后没有自动启�
 | M17 | 910B/C 平台资源兼容与 CPU/ASan/UBSan 检查、双 dtype 可运行用户示例、全范围正确性与固定性能集合收尾；同步中英文 README、覆盖映射及三份文档，图性能差距按本轮明确授权保留为已知限制 |
 | 工具整理、R1、R2 | 统一验收与缓存/证据管理、模块归属与共享 helper、共用前向分派、文档轮和无头交接；原 R3 的内核可读性核对合入 R2 |
 
-组合验收映射见 [512+64](design.md#75-51264-组合覆盖)、[192/128](design.md#76-192128-组合覆盖) 和 [全范围收尾](design.md#77-全范围收尾映射)。M14、M15a–d 五轮开发后的专门文档轮已完成，不计开发轮数。M15e、M15f、M15g1、M15g2、M16 是其后的五个已接受开发轮；本次按用户确认将随后文档核对合入 M17，不单独提交文档轮或重启无头循环。
+组合验收映射见 [512+64](design.md#75-51264-组合覆盖)、[192/128](design.md#76-192128-组合覆盖) 和 [全范围收尾](design.md#77-全范围收尾映射)。M14、M15a–d 五轮开发后的专门文档轮已完成，不计开发轮数。M15e、M15f、M15g1、M15g2、M16 是其后的五个已接受开发轮；当时按用户确认将随后文档核对合入 M17；本次无头循环仅继续新授权的 M18–M21。
 
 ```bash
 git log --oneline -- docs/mla/status.md

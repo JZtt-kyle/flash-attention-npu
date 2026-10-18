@@ -16,7 +16,7 @@
 
 ## 1. 范围与固定依据
 
-迁移集合是 **910B/C 上 CANN FIA 已有 MLA 前向能力，与官方 FA3 可表达能力的交集**，再加接入所必需的 metadata、softcap、调度选项与图执行适配，具体取舍见第 4 节。接口冲突按 FA3 调整；不搬迁普通 MHA/GQA、量化大框架、950 专用模板或反向算子。MLA prefill 中使用 GQA 的分组语义仍在范围内。
+迁移集合是 **910B/C 上 CANN FIA 已有 MLA 前向能力，与官方 FA3 可表达能力的交集**，再加接入所必需的 metadata、softcap、调度选项与图执行适配。2026-10-18 用户另行确认迁移 INT8、不迁外部 NZ，允许 [3.4](#34-int8-压缩-mla-扩展) 所列的 dtype/scale 扩展；这是本仓 NPU 扩展，不宣称固定官方 FA3 原生支持 INT8 qv。其余接口冲突按 FA3 调整；不搬迁普通 MHA/GQA、量化大框架、950 专用模板或反向算子。MLA prefill 中使用 GQA 的分组语义仍在范围内。
 
 **迁移原则：保留固定 CANN 实现的行为，只做 CATLASS 风格的结构重构和必要的 FA3 接入。** 以源实现的验证积累为基础，保持数值路径与设备流水，具体边界见第 6 节。
 
@@ -168,6 +168,34 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 | 返回值 | 按入口对齐：dense/varlen 的可选 LSE 返回二元组；固定版本 kvcache 开启 `return_softmax_lse` 实际返回 O、LSE 及两个 accumulator，共四项，不能只按旧 docstring 实现 |
 | split | `num_splits=0` 自动、1 不分割、>1 请求分割，固定官方实现上限为 256；核数限制属于实现资源策略，不能把普通 FA 后端的 PA+TND、至多核数限制误称为 FA3 或 MLA 的限制 |
 
+### 3.4 INT8 压缩 MLA 扩展
+
+本节是用户已确认、待 M18–M21 实现的契约。第 2 节及 3.3 的 FP16/BF16 能力表仍只描述非量化路径，不能推断 INT8 同时开放五布局、全部窗口/softcap/split。固定 FA3 的 `mha_fwd` 要求 Q/K/V 同 dtype，qv 只接受 FP16/BF16；其 FP8 三个 descale 是 `[B,Hkv]`，不等价于源 INT8 的逐 token/head Q scale。本扩展保留 attention 的输入角色、标准 mask 和输出语义，显式增加必要的混合 dtype 和量化参数。
+
+源依据均取固定 `ca18aee...`，以下路径相对于 `attention/incre_flash_attention/`：
+
+- `op_host/incre_flash_attention_tiling.cpp::ProcessQuant`、`CheckQkvQuantParams4FullQuant`、`CheckQuantizationFlags`：INT8 内容 Q/KV、BF16 RoPE、FP32 三 scale，Q mode=3、KV mode=0，NZ PA；`incre_flash_attention_tiling_check_mla_gqa.h::CheckMlaMisc` 限 NZ 页大小为 128。
+- `op_kernel/incre_flash_attention_arch22.h` 的 INT8 Q/KV + BF16 output 分支实例化 BSND/BSH 与 TND、普通/FD、`LAYOUT::NZ`。它是 910B/C 所用 arch22 的旧 IFA 路径，不能只检查新 `fia_tiling_nonquant_mla.cpp` 或 950 模板。
+- `op_kernel/arch22/incre_flash_attention_preload_mla.h`、`ifa_service_matmul_full_quant.h` 及 `service_vector_flashdecode_mla.h`：INT32 内容点积、BF16 RoPE 点积、QK 反量化、softmax 后动态 P 量化、PV 反量化及 FD 归并。P 的缩放、FP32→FP16→INT8 和 `CAST_RINT` 等顺序须按源迁移，不能用全浮点 attention 替代后声称量化完成。
+
+| 项目 | 目标契约 |
+| --- | --- |
+| 表示 | 仅共享 512 维压缩 KV + 64 维 RoPE，Hkv=1；不迁独立 512 维内容 K/V 或 192/128 INT8 |
+| 公开入口 | 扩展 `flash_attn_with_kvcache` 及其 metadata 生成器；BSND/TND query，ND PA cache。非 PA 的 func/varlen 不随本次开放 |
+| 数据 | `q`（Q RoPE）和 `k_cache`（K RoPE）为 BF16；`qv` 和共享 `v_cache` 为 INT8；Q 末维 64/512，K/V cache 为 `[Np,128,1,64/512]`；O 为 BF16、LSE/真实 accumulator 为 FP32 |
+| scale 参数 | kvcache 增加仅关键字 `mla_q_scale`、`mla_k_scale`、`mla_v_scale`，均为同设备 FP32 tensor；Q shape 为 BSND `[B,Sq,Hq]` 或 TND `[Tq,Hq]`，K/V 各为 `[1]`。三者须同时提供，不静默复用 FA3 的 `q_descale/k_descale/v_descale`；不接 offset、postquant 或混合多种量化模式 |
+| scale 含义 | 源的 `dequantScaleQuery`、`keyAntiquantScale`、`valueAntiquantScale` 分别映射三个参数；同一 INT8 KV 存储用于 K/V，可各自使用源 K/V scale。概念 scores 为 `(INT32(qv·vᵀ) * q_scale * k_scale + q·kᵀ) * softmax_scale`，PV 按源动态 P 量化后乘 V scale；源的中间舍入仍须保留 |
+| metadata | `qkv_dtype=torch.int8` 在该压缩 PA 分支表示内容 dtype，RoPE 固定 BF16；scale 的值不进入调度快照。未接通时明确拒绝，旧 FP16/BF16 记录不能被误用为 INT8。先复用现有字段，只有不能表达混合 dtype 的安全边界时才扩记录 |
+| mask/长度/FD | 迁源可实测的无 mask、右下 causal 和原生自动 FD/不分割行为。源 INT8 的 Sq=1 sparse=0、多 Q sparse=3 及形状限制由 M18 对固定 host/kernel 实测锁定；FA3 等价归一化和空值按共同契约适配。不能从非量化推导所有 Q 长度或 mask 组合都支持 |
+| 其他选项 | 本阶段 `softcap=0`、无有限窗口、`num_splits=0/1`，不开放显式多 split；只接受与已迁源调度等价的默认有效 pack_gqa/sm_margin。未迁组合明确拒绝，不忽略参数；真实图重放、长度/scale 更新、复用和 fake/compile 属于两布局接入的必要验收 |
+| ND 与 NZ | 不新增外部 NZ cache 参数或用户转换步骤。生产 Kernel 直接消费 ND 页，必要片上分块排布计入实际执行。固定源测试适配器才将同一逻辑 ND 数据打包成源要求的 NZ；源生产调用不能作为目标 fallback。禁止每次隐式重排整个 cache 来冒充 ND 直接接入 |
+
+最小代表验收：QINT01 为 BSND 单/多 query、非均匀 KV、尾页、无 mask/causal 及直接/原生 FD；QINT02 为 TND 非均匀 query、零长度、allocation 间隙与逐 token/head scale 地址；QINT03 为 INT8 极值、源舍入边界、动态 P、零 scale/零输入、真实 partial、ND stride/页安全、非法 dtype/scale/选项拒绝。实际合法 Sq/Hq/Sk 边界先由 M18 锁定并登记源命令，未验证的上界不作承诺。
+
+验收沿用第 7 节的固定源逐元素与独立 FP32/FP64 数学对照、原数学阈值和源精度冲突优先级；数学 reference 从原始 INT8、scale、RoPE 及逻辑页独立反量化，不读取迁移调度或复制待测量化代码。纯量化 reference 可另定位误差，不能替代双数学检查。源物理 NZ 与目标 ND 的布局差异在结果中明确列出，源静态输入打包在准备阶段完成并单列耗时；任何目标必需转换均计入组件/公开性能，不藏入预热。源没有同义可调用输入时分别记录数学对照、probe 和 native 的适用范围。
+
+M19/M20 各自实测新增公开 eager 和 graph 性能，最多 100 个固定配置按既定等权平均 ≤1 验收，M21 沿用同一集合收尾。M17 接受的非量化图性能差距不能作为 INT8 的豁免；当前没有 INT8 通过证据。
+
 ## 4. 功能边界
 
 | 能力 | 处理与验收 |
@@ -180,7 +208,8 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 | CANN 独立 512 维内容 K/V | FA3 qv 无等价表达，排除；见 3.1 |
 | tree mask / sparseMode=9、任意用户 mask、独立左上 causal 接口 | FA3 hopper 公共入口没有等价参数，排除；保留能用标准右下窗口表达的计算 |
 | 外部 NZ cache、CANN 布局字符串和特殊输出布局 | 不增加 CANN 专用公开参数；普通布局可由视图归一，NZ 外部格式按 FA3 不支持排除。内部是否使用分块布局由性能决定 |
-| INT8 全量化、伪量化、后量化、CANN 专用量化因子 | 不迁移；不以 FA3 的 FP8 descale 冒充等价支持；950 的量化 MLA 不在芯片范围内 |
+| INT8 全量化压缩 MLA | 用户已授权 M18–M21，按 3.4 迁移旧 IFA arch22 数值算法，公开 ND PA；尚未实现，不以 FP8 descale 冒充等价支持 |
+| KV 伪量化、输出后量化、FP8、950 专用量化 MLA | 不在本次 INT8 范围；不能从 FIA 总签名或其他架构模板推断支持 |
 | PSE、公共前缀、TensorList、padding 参数、sink | 按 4.1 的 X05–X07 排除；TensorList/PSE/公共前缀/左 padding 不在所取源 MLA 能力内，源 prefill 可接受 sink，但固定 FA3 无等价参数。有效区末尾 padding 仍纳入实际长度验收 |
 | 新 KV 原地追加、内置 rotary、cache_leftpad、attention_chunk、FA3 额外维度/头数组合 | 不因 FA3 签名存在就扩为本次 CANN MLA 迁移任务；未实现组合明确报错，不允许忽略。若后来源能力盘点证明属于交集，补入计划 |
 | softcap、pack_gqa、sm_margin | 数学或调度参数不能默默丢弃；MLA 适配分别实现其有效语义，硬件调度方式可不同，资源不足清楚报错 |
@@ -209,7 +238,8 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 | 独立 512 维内容 K/V | 源 PA stride 测试的独立 golden K/V；FA3 `mha_fwd` 的 qv 维度校验 | 排除 X01：FA3 qv 的内容点积必须使用输出 V；不能替换源 V 来掩盖差异 |
 | tree、任意 mask、独立左上 causal | MLA `IsCapable` 支持 sparse 9，`CheckFeatureSparseMode` 限制；FA3 公共入口只提供 causal/window | 排除 X02：无等价公开参数；可表达的标准窗口计算仍纳入 MS01..MS03 |
 | 外部 NZ cache | `CheckFeatureLayout` / `CheckFeatureHeadDim` 的 NZ 分支与源 PA 测试 | 排除 X03：FA3 无外部 NZ 协议；ND PA 必迁，CANN 原生 NZ 性能可另列 |
-| 全量化、伪量化、后量化和量化因子 | MLA `IsCapable` 的输入/输出 dtype 校验；`CheckParaExistenceMlaNoquant`；其他 arch/量化模板 | 排除 X04：超出此次非量化 910B/C 范围，不用 FP8 descale 替代 |
+| INT8 全量化、逐 token/head Q scale、标量 K/V scale | `../incre_flash_attention/op_host/incre_flash_attention_tiling.cpp::ProcessQuant` / `CheckQkvQuantParams4FullQuant`，`../incre_flash_attention/op_kernel/incre_flash_attention_arch22.h` 的 INT8/BF16 实例及其 `arch22/incre_flash_attention_preload_mla.h`；详见 3.4 | 纳入 M18–M21；QINT01–QINT03。原非量化模板的 dtype 拒绝不能作为整个 arch22 无量化的证据 |
+| KV 伪量化、后量化及其余量化模式 | `../incre_flash_attention/op_host/incre_flash_attention_tiling_check_mla_gqa.h::CheckMlaMisc` / `CheckDefaultMisc`；其他架构模板不得混入 | X04 只保留本行排除项；M17 当时未迁的 INT8 已另行授权，不再整体列为排除 |
 | TensorList | `CheckFeatureTensorList` 拒绝任何非 NO_ROPE 模式；专用 MLA `IsCapable` 也拒绝 | 排除 X05：不属于此次 MLA 源能力 |
 | PSE、公共前缀、query/KV padding 参数 | split 由 `CheckParaExistenceMlaNoquant` 拒绝；combined 由 `CheckFeaturePSE` / `CheckFeatureGqaPrefix` / `CheckFeatureLeftPadding` 拒绝非 NO_ROPE | 排除 X06：不因 FIA 总签名存在就迁移；实际长度与有效区末尾 padding 仍纳入 U01 |
 | learnable sink | 专用 MLA `IsCapable` 拒绝；通用路径 `CheckFeatureLearnableSink` 可接受每 query head 的 BF16 sink | 排除 X07：固定 FA3 hopper 无 sink 参数，不能宣称所有 CANN MLA 都不支持 |
@@ -217,7 +247,7 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 
 ### 4.2 代表用例与参考实现边界
 
-所有数值用例使用 FP16 和 BF16。`D` 表示共享 512+64，`P` 表示 192/128；除 D 的 Hkv=1 外，头数写为 Hq/Hkv。未特别标注时无 mask、默认 scale，两个表示均校验 O/LSE。下表覆盖已接通和待接通功能的目标验收输入，**不是已运行 NPU 测试列表**；无意义或源拒绝的交叉组合须记录原因，不以 skip 冒充覆盖。
+本节非量化用例使用 FP16 和 BF16；INT8 用例另见 3.4。`D` 表示共享 512+64，`P` 表示 192/128；除 D 的 Hkv=1 外，头数写为 Hq/Hkv。未特别标注时无 mask、默认 scale，两个表示均校验 O/LSE。下表覆盖已接通和待接通功能的目标验收输入，**不是已运行 NPU 测试列表**；无意义或源拒绝的交叉组合须记录原因，不以 skip 冒充覆盖。
 
 | ID | 代表输入 / 交叉条件 | 验收重点 |
 | --- | --- | --- |

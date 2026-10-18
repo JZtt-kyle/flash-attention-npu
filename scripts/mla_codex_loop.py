@@ -12,7 +12,7 @@
 
 新轮次使用 codex exec；未完成轮次使用 codex exec resume <明确的 ID>。
 沿用登录和模型配置，--approve-for-me 使用自动审批及 workspace-write 沙箱。
-需要支持该参数的 Codex CLI（已核对 0.162.1）。
+需要支持该参数的 Codex CLI（已核对 0.163.0）。
 计数、未完成轮次、会话 ID 和日志保存在目标仓库 build/mla-codex-loop/。
 网络错误或中断后重新运行本脚本即可恢复，失败轮不会计数或自动另开对话。
 正常结束但没有提交的开发轮记为 blocked；先解决原因，再用 --retry-blocked 明确恢复。
@@ -26,6 +26,9 @@
 旧计数已超期时补做一次；未完成轮次优先恢复，失败不推进计数。
 --review-docs 显式运行一次文档核验后退出；--check 不启动模型或修改状态。
 --retire-pending 仅归档待办轮次并退出，不计成功、不删除源码/日志或开启开发。
+status.md 可用 <!-- mla-loop-next: M18 --> 标记唯一下一步；完成时改为 none。
+none 时先处理待恢复轮次及已到期文档轮，然后正常退出，不创建空开发轮。
+旧交接没有该标记时保留按次数运行的行为；标记格式错误或重复时停止。
 
 Codex 非交互接口：https://learn.chatgpt.com/docs/non-interactive-mode
 """
@@ -73,6 +76,8 @@ DEV_PROMPT = (
     "build/ 只保留 mla-codex-loop 无头日志和状态；其他产物放仓库外 MLA_WORK_DIR。不要把旧无 mask 测试"
     "当成新增能力验收。文档随本步更新，阶段结束或契约改变时按影响范围核对。"
     "循环会在每五轮成功开发后另开专门的文档修正优化轮。"
+    "若 status 有 mla-loop-next 标记，随本步更新其唯一下一步；只有已授权范围全部验收完成才设为 none。"
+    "没有已授权的下一步时停止，不自行扩大范围或制造空提交。"
     "验收无法完成时如实更新交接并停止，不能提交为已闭环。"
 )
 DOC_PROMPT = (
@@ -80,6 +85,7 @@ DOC_PROMPT = (
     "先读 AGENTS.md、docs/mla/status.md 和 plan.md，再核对 design.md 与相关代码、固定来源及验收证据。"
     "修正过期或矛盾的能力描述、步骤状态、命令、路径和链接；合并重复内容，压缩已完成步骤的历史细节，"
     "保持 design/plan/status 的契约、计划、当前交接三种职责及唯一下一步，历史从 Git 查询。"
+    "保留 status 的 mla-loop-next 标记，并核对它与正文的下一步一致。"
     "用户最新约定优先；证据缺失、失败和未运行如实标记，不把文档陈述当作实现或验收依据。"
     "保留既有未提交工作，只修改本轮文档；不推进功能，不探测设备、重建扩展或重跑无关设备矩阵。"
     "完成一致性、链接和适用质量检查后至多提交一次并停止；无需修改时说明核对范围与结果。"
@@ -520,18 +526,37 @@ def doc_review_due(state):
     return state["development_runs"] - state["reviewed_runs"] >= DOC_REVIEW_INTERVAL
 
 
+def next_step(repo):
+    """只读交接中的结束信号；不从模型最终回答猜测任务是否完成。"""
+    status = repo / "docs/mla/status.md"
+    if not status.exists():
+        return None
+    content = status.read_text(encoding="utf-8")
+    markers = re.findall(r"<!--\s*mla-loop-next\b", content)
+    if not markers:
+        return None  # Compatible with handoffs written before this marker existed.
+    matches = re.findall(r"^<!-- mla-loop-next: ([A-Za-z][A-Za-z0-9_-]*) -->$", content, re.M)
+    if len(matches) != 1 or len(markers) != 1:
+        raise RuntimeError("status.md 的 mla-loop-next 标记格式错误或重复，请核对唯一下一步")
+    return matches[0]
+
+
 def run_loop(args, codex, path, state):
     completed = 0
     limit = args.max_dev_runs or (5 if args.dry_run else 0)
     while True:
         pending = state["pending"]
         validate_start(args.repo, pending)
+        step = next_step(args.repo)
         if pending and args.review_docs and pending["kind"] != "documentation":
             raise RuntimeError("还有未完成开发轮次，不能插入文档核验")
         if pending:
             kind = pending["kind"]
         elif args.review_docs or doc_review_due(state):
             kind = "documentation"
+        elif step == "none":
+            print("已授权范围已完成，无下一开发步；保留计数和日志，正常退出。", flush=True)
+            return
         elif limit and completed >= limit:
             return
         else:
@@ -673,6 +698,7 @@ def main():
         if not codex:
             raise RuntimeError("PATH 中找不到 codex；请安装 Codex CLI 并完成 codex login")
         cli = check_cli(codex)
+        step = next_step(args.repo)
         if args.check:
             print(
                 json.dumps(
@@ -681,8 +707,11 @@ def main():
                             "blocked"
                             if state["pending"]
                             and blocked_result(path.parent / state["pending"]["run_dir"])
+                            else "complete"
+                            if not state["pending"] and step == "none" and not doc_review_due(state)
                             else "ready"
                         ),
+                        next_step=step,
                         repo=str(args.repo),
                         head=git(args.repo, "rev-parse", "HEAD"),
                         pending=state["pending"],

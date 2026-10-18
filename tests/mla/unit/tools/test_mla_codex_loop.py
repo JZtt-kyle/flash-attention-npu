@@ -430,3 +430,102 @@ def test_invalid_review_origin_is_rejected(setup_loop):
     loop.save_state(path, state)
     with pytest.raises(ValueError, match="未完成轮次格式错误"):
         loop.read_state(path, args.repo)
+
+
+def write_next_step(args, state, value):
+    status = args.repo / "docs/mla/status.md"
+    status.parent.mkdir(parents=True, exist_ok=True)
+    status.write_text(value)
+    loop.git(args.repo, "add", "docs/mla/status.md")
+    loop.git(args.repo, "commit", "-qm", "handoff")
+    if state["pending"]:
+        state["pending"]["head_before"] = loop.git(args.repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("dry_run", (False, True))
+def test_completed_scope_exits_without_cli_or_state_changes(setup_loop, capsys, dry_run):
+    args, _, state, path = setup_loop
+    state["pending"] = None
+    args.dry_run, args.max_dev_runs = dry_run, 0
+    write_next_step(args, state, "<!-- mla-loop-next: none -->\n")
+    loop.save_state(path, state)
+    snapshot = path.read_bytes()
+    loop.run_loop(args, "/missing-cli", path, state)
+    assert "无下一开发步" in capsys.readouterr().out
+    assert path.read_bytes() == snapshot and state["development_runs"] == 0
+    assert not (args.repo.parent / "calls.jsonl").exists()
+
+
+@pytest.mark.parametrize("pending", (False, True))
+def test_completion_still_finishes_pending_round_and_due_review(setup_loop, monkeypatch, pending):
+    args, cli, state, path = setup_loop
+    if not pending:
+        state["pending"] = None
+    state["development_runs"] = 5
+    args.max_dev_runs = 0
+    write_next_step(args, state, "<!-- mla-loop-next: none -->\n")
+    monkeypatch.setenv("MLA_LOOP_TEST_MODE", "cycle")
+    loop.run_loop(args, cli, path, state)
+    expected = (["development"] if pending else []) + ["documentation"]
+    assert [call["kind"] for call in calls(args)] == expected
+    assert state["pending"] is None
+    assert state["development_runs"] == state["reviewed_runs"] == 5 + int(pending)
+
+
+def test_scope_completion_is_reread_after_final_commit(setup_loop, monkeypatch):
+    args, cli, state, path = setup_loop
+    args.max_dev_runs = 0
+    write_next_step(args, state, "<!-- mla-loop-next: M21 -->\n")
+    # The fake developer closes the scope in its sole commit, as the real prompt requires.
+    executable = loop.Path(cli)
+    code = executable.read_text().replace(
+        'subprocess.run(["git", "add", str(target)], check=True)',
+        'pathlib.Path("docs/mla/status.md").write_text("<!-- mla-loop-next: none -->\\n")\n'
+        '    subprocess.run(["git", "add", str(target), "docs/mla/status.md"], check=True)',
+    )
+    executable.write_text(code)
+    monkeypatch.setenv("MLA_LOOP_TEST_MODE", "commit")
+    loop.run_loop(args, cli, path, state)
+    assert state["development_runs"] == 1 and state["pending"] is None
+    assert len(calls(args)) == 1
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        "<!-- mla-loop-next: -->\n",
+        "<!-- mla-loop-next: M18 -->\n<!-- mla-loop-next: none -->\n",
+        "<!-- mla-loop-next: none --> trailing\n",
+    ),
+)
+def test_invalid_scope_marker_rejected_before_cli(setup_loop, content):
+    args, _, state, path = setup_loop
+    write_next_step(args, state, content)
+    snapshot = path.read_bytes()
+    with pytest.raises(RuntimeError, match="标记格式错误或重复"):
+        loop.run_loop(args, "/missing-cli", path, state)
+    assert path.read_bytes() == snapshot
+    assert not (args.repo.parent / "calls.jsonl").exists()
+
+
+@pytest.mark.parametrize("step,expected", (("M18", "ready"), ("none", "complete")))
+def test_check_reports_scope_without_starting_model(
+    setup_loop, monkeypatch, capsys, step, expected
+):
+    args, cli, state, path = setup_loop
+    state["pending"] = None
+    write_next_step(
+        args, state, f"<!-- mla-loop-next: {step} -->\n下一步由 `mla-loop-next` 表示。\n"
+    )
+    for name in ("AGENTS.md", "docs/mla/plan.md"):
+        (args.repo / name).write_text("fixture\n")
+    loop.save_state(path, state)
+    snapshot = path.read_bytes()
+    monkeypatch.setattr(sys, "argv", ["mla_codex_loop.py", "--repo", str(args.repo), "--check"])
+    monkeypatch.setattr(loop.shutil, "which", lambda name: cli)
+    monkeypatch.setattr(loop, "check_cli", lambda executable: {"version": "fake"})
+    assert loop.main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == expected and report["next_step"] == step
+    assert path.read_bytes() == snapshot
+    assert not (args.repo.parent / "calls.jsonl").exists()
