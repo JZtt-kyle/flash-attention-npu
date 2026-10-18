@@ -191,7 +191,7 @@ def test_metadata_and_length_static_rejections(representation, fake):
             api.get_scheduler_metadata(
                 3,
                 7,
-                65,
+                64,
                 8,
                 2 if representation == "prefill" else 1,
                 192 if representation == "prefill" else 64,
@@ -199,4 +199,5 @@ def test_metadata_and_length_static_rejections(representation, fake):
                 headdim_v=128 if representation == "prefill" else 512,
                 cu_seqlens_q=c["lengths"]["cu_seqlens_q"],
                 has_softcap=True,
+                page_size=16,
             )

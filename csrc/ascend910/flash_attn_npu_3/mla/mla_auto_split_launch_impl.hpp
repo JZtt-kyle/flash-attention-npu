@@ -49,7 +49,9 @@ __aicore__ inline bool LoadAutoSplit(GM_ADDR metadata, const AutoContext& c, con
                                                 : kMlaAutoSplitBsndVersion;
     constexpr bool kvIsTnd = MLA_AUTO_TND && !MLA_AUTO_MIXED;
     if (ReadAutoSplitMetadata<MLA_AUTO_TND, version, kvIsTnd,
-                              kvIsTnd ? kMlaSoftcapAutoSplitTndVersion : kMlaSoftcapAutoSplitBsndVersion>(
+                              MLA_AUTO_MIXED ? kMlaSoftcapAutoSplitMixedVersion
+                              : kvIsTnd      ? kMlaSoftcapAutoSplitTndVersion
+                                             : kMlaSoftcapAutoSplitBsndVersion>(
             read, kMlaAutoSplitFixedWords + 10 * c.used.batch, c, inputs, arrays, s) !=
         MlaMetadataReadStatus::Success) {
         AscendC::Trap();
@@ -256,9 +258,7 @@ aclError MLA_AUTO_LAUNCH(const AutoLaunchArgs& args)
 {
     const auto& a = args.used;
     AutoContext c{a.context, a.window};
-#if !MLA_AUTO_MIXED
     c.hasSoftcap = a.softcap > 0;
-#endif
     {
         MlaBatchLaunchScope launch;
         MLA_AUTO_INIT<<<a.context.blockDim, nullptr, a.stream>>>(a.metadata, c, a.inputs, a.output, a.lse, args.accum,

@@ -6,7 +6,7 @@
 #include <vector>
 #include <cstring>
 using namespace flash_attn::mla;
-int main()
+int main(int argc, char** argv)
 {
     int64_t b, tq, tk, q, k, h, s, left, right;
     int causal, dtype, uq, uk, mut;
@@ -14,6 +14,9 @@ int main()
     int mode;
     while (std::cin >> b >> tq >> tk >> q >> k >> h >> s >> left >> right >> causal >> dtype >> uq >> uk >> mut >>
            value >> mode) {
+        uint32_t hasSoftcap = 0;
+        if (argc > 1 && std::strcmp(argv[1], "--softcap") == 0)
+            std::cin >> hasSoftcap;
         if (b < 0 || b > 300000)
             return 2;
         std::vector<int32_t> cq(b + 1), ck(b + 1), qs(b), ks(b);
@@ -50,7 +53,7 @@ int main()
         if (mode == 25)
             producerShape.query.totalTokens = 0;
         const bool built = BuildSplitMixedMetadata(producerShape, p, dtype, destination, mode == 17 ? words - 1 : words,
-                                                   in, window, mode == 21 ? 2 : s, mode == 25);
+                                                   in, window, mode == 21 ? 2 : s, mode == 25, hasSoftcap);
         const bool intact = data.front() == 0xdeadbeef;
         const uint32_t generated = data[5];
         if (mode == 21)
@@ -69,7 +72,8 @@ int main()
                                 axis(0, tk, k), 26, 52, uint32_t(nonempty ? 26 : 1), nonempty ? uint64_t(INT64_MAX) : 0,
                                 0, p.localMemory},
                                {uint32_t(w.kind), w.left, w.right},
-                               uint32_t(s)};
+                               uint32_t(s),
+                               hasSoftcap};
         if (mode == 2)
             c.used.workspaceBytes = 1;
         if (mode == 3 && b)

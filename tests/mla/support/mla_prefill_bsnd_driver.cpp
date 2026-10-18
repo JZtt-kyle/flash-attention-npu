@@ -27,12 +27,14 @@ int main(int argc, char** argv)
     while (std::cin >> c.batch >> c.sq >> c.sk >> c.heads >> c.kvHeads >> c.splits >> c.cores >> c.dtype >>
            c.usedFlags >> c.window.kind >> c.window.left >> c.window.right >> fault >> value) {
         const bool softcapTnd = argc > 1 && std::strcmp(argv[1], "--softcap-tnd") == 0;
-        const bool softcap = softcapTnd || (argc > 1 && std::strcmp(argv[1], "--softcap") == 0);
+        const bool softcapMixed = argc > 1 && std::strcmp(argv[1], "--softcap-mixed") == 0;
+        const bool softcap = softcapTnd || softcapMixed || (argc > 1 && std::strcmp(argv[1], "--softcap") == 0);
         if (softcap)
             std::cin >> c.hasSoftcap;
         const bool pagedTnd = argc > 1 && std::strcmp(argv[1], "--paged-tnd") == 0;
         const bool paged = pagedTnd || (argc > 1 && std::strcmp(argv[1], "--paged") == 0);
-        c.tnd = softcapTnd                       ? 1
+        c.tnd = softcapMixed                     ? 2
+                : softcapTnd                     ? 1
                 : pagedTnd                       ? 2
                 : argc > 1 && !paged && !softcap ? (std::strcmp(argv[1], "--mixed") == 0 ? 2 : 1)
                                                  : 0;

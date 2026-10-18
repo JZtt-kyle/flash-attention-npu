@@ -5,7 +5,8 @@ namespace flash_attn::mla {
 at::Tensor PrefillMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, int64_t kvHeads,
                                   at::ScalarType dtype, const at::Tensor& lengths, const at::Tensor& cuQ,
                                   int64_t splits, int64_t left, int64_t right, bool causal,
-                                  const std::optional<at::Tensor>& usedQ = std::nullopt, int64_t pageSize = 0);
+                                  const std::optional<at::Tensor>& usedQ = std::nullopt, int64_t pageSize = 0,
+                                  bool hasSoftcap = false);
 at::Tensor PrefillBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads,
                                  at::ScalarType dtype, const at::Tensor& lengths, int64_t splits, int64_t left,
                                  int64_t right, bool causal, int64_t pageSize = 0, bool hasSoftcap = false);
@@ -54,10 +55,10 @@ std::vector<at::Tensor> SplitMixedForward(const at::Tensor& q, const at::Tensor&
                                           int64_t windowLeft, int64_t windowRight, bool causal, int64_t splits,
                                           const std::optional<at::Tensor>& cacheSeqlens,
                                           const std::optional<at::Tensor>& usedQuery,
-                                          const std::optional<at::Tensor>& schedulerMetadata);
+                                          const std::optional<at::Tensor>& schedulerMetadata, float softcap = 0.0f);
 at::Tensor SplitMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,
                                 const at::Tensor& cacheSeqlens, const at::Tensor& cuQ, int64_t windowLeft,
-                                int64_t windowRight, bool causal, int64_t splits);
+                                int64_t windowRight, bool causal, int64_t splits, bool hasSoftcap = false);
 std::vector<at::Tensor> WindowMixedForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                            const at::Tensor& qv, const at::Tensor& cuQ, int64_t maxQ, float scale,
                                            int64_t windowLeft, int64_t windowRight, bool causal,

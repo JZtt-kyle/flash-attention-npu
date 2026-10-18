@@ -21,7 +21,8 @@ MLA_AUTO_MIXED_INLINE MlaMetadataReadStatus ReadAutoSplitMixedMetadata(const Rea
                                                                        const Arrays& arrays,
                                                                        MlaAutoSplitMixedKernelSchedule& output)
 {
-    return ReadAutoSplitMetadata<true, kMlaAutoSplitMixedVersion, false>(read, words, context, inputs, arrays, output);
+    return ReadAutoSplitMetadata<true, kMlaAutoSplitMixedVersion, false, kMlaSoftcapAutoSplitMixedVersion>(
+        read, words, context, inputs, arrays, output);
 }
 // Queries require successful validation and unchanged record/context. Shared
 // compact-Q queries load both 64-bit origins verbatim; the KV stride is supplied

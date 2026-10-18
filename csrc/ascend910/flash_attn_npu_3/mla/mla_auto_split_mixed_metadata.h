@@ -7,6 +7,7 @@
 
 namespace flash_attn::mla {
 constexpr uint32_t kMlaAutoSplitMixedVersion = 22;
+constexpr uint32_t kMlaSoftcapAutoSplitMixedVersion = 39;
 // Same tail schema as v18, distinct identity and mixed allocation geometry.
 inline bool AutoSplitMixedMetadataWords(int64_t batch, uint32_t& words)
 {
@@ -18,13 +19,15 @@ inline bool AutoSplitMixedMetadataWords(int64_t batch, uint32_t& words)
 struct MlaAutoSplitMixedContext {
     MlaUsedMetadataContext used;
     MlaWindowKernelParams window;
+    uint32_t hasSoftcap = 0;
 };
 struct MlaAutoSplitMixedMetadataArgs {
     MlaUsedMetadataArgs input;
     MlaWindowConfig window;
     bool queryTotalFromPrefix = false;
+    uint32_t hasSoftcap = 0;
 };
 bool BuildAutoSplitMixedMetadata(const MlaUsedShape&, const MlaPlatformInfo&, uint32_t dtype, uint32_t* output,
                                  uint32_t words, const MlaUsedInputs&, const MlaWindowConfig&,
-                                 bool queryTotalFromPrefix = false);
+                                 bool queryTotalFromPrefix = false, uint32_t hasSoftcap = 0);
 } // namespace flash_attn::mla

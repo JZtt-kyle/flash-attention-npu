@@ -196,7 +196,7 @@ struct MetadataSubmission {
             if (splits == 0) {
                 if (args.shape.query.layout == MlaSequenceLayout::Tnd &&
                     args.shape.kv.layout == MlaSequenceLayout::Bsnd) {
-                    MlaAutoSplitMixedMetadataArgs autoArgs{args, *window, queryTotalFromPrefix};
+                    MlaAutoSplitMixedMetadataArgs autoArgs{args, *window, queryTotalFromPrefix, uint32_t(hasSoftcap)};
                     ComputeMlaAutoSplitMixedMetadata<<<1, nullptr, current>>>(&autoArgs, sizeof(autoArgs));
                 } else if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
                     MlaAutoSplitTndMetadataArgs autoArgs{args, *window, uint32_t(hasSoftcap)};
@@ -210,7 +210,8 @@ struct MetadataSubmission {
             if (splits > 1 || hasSoftcap) {
                 if (args.shape.query.layout == MlaSequenceLayout::Tnd &&
                     args.shape.kv.layout == MlaSequenceLayout::Bsnd) {
-                    MlaSplitMixedMetadataArgs splitArgs{args, *window, splits, queryTotalFromPrefix};
+                    MlaSplitMixedMetadataArgs splitArgs{args, *window, splits, queryTotalFromPrefix,
+                                                        uint32_t(hasSoftcap)};
                     ComputeMlaSplitMixedMetadata<<<1, nullptr, current>>>(&splitArgs, sizeof(splitArgs));
                 } else if (args.shape.query.layout == MlaSequenceLayout::Tnd) {
                     MlaSplitTndMetadataArgs splitArgs{args, *window, splits, uint32_t(hasSoftcap)};
@@ -652,9 +653,10 @@ at::Tensor WindowMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_
 
 at::Tensor SplitMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,
                                 const at::Tensor& cacheSeqlens, const at::Tensor& cuQ, int64_t windowLeft,
-                                int64_t windowRight, bool causal, int64_t splits)
+                                int64_t windowRight, bool causal, int64_t splits, bool hasSoftcap)
 {
-    TORCH_CHECK(splits == 0 || (splits >= 2 && splits <= 256), "MLA: mixed split requires num_splits=0 or [2,256]");
+    TORCH_CHECK(splits == 0 || (splits >= (hasSoftcap ? 1 : 2) && splits <= 256),
+                "MLA: mixed split requires 0 or [2,256], or 1 with softcap");
     CheckTndBsndMetadataInputs(batch, maxQ, sk, heads, dtype, cacheSeqlens, cuQ);
     CheckUsedInputs(cacheSeqlens, batch, std::nullopt, cacheSeqlens);
     uint32_t words;
@@ -680,6 +682,7 @@ at::Tensor SplitMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t
     producer.queryTotalFromPrefix = true;
     producer.window = config;
     producer.splits = splits;
+    producer.hasSoftcap = hasSoftcap;
     RunCausalLaunch("ascendc_mla_split_mixed_metadata", [producer]() mutable -> int {
         producer.Enqueue();
         return 0;
@@ -1647,9 +1650,11 @@ std::vector<at::Tensor> SplitMixedForward(const at::Tensor& q, const at::Tensor&
                                           int64_t windowLeft, int64_t windowRight, bool causal, int64_t splits,
                                           const std::optional<at::Tensor>& cacheSeqlens,
                                           const std::optional<at::Tensor>& usedQuery,
-                                          const std::optional<at::Tensor>& schedulerMetadata)
+                                          const std::optional<at::Tensor>& schedulerMetadata, float softcap)
 {
-    TORCH_CHECK(splits == 0 || (splits >= 2 && splits <= 256), "MLA: mixed split requires num_splits=0 or [2,256]");
+    TORCH_CHECK(splits == 0 || (splits >= (softcap > 0 ? 1 : 2) && splits <= 256),
+                "MLA: mixed split requires 0 or [2,256], or 1 with softcap");
+    TORCH_CHECK(std::isfinite(softcap) && softcap >= 0, "MLA: softcap must be finite and non-negative in FP32");
     CheckForwardBoundary(q, k, v, qv, true, false, false);
     TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
     CheckTndBsndForwardInputs(q, k, cuQ, maxQ, cacheSeqlens, std::nullopt);
@@ -1674,22 +1679,30 @@ std::vector<at::Tensor> SplitMixedForward(const at::Tensor& q, const at::Tensor&
     if (schedulerMetadata && !lengths) {
         lengths = at::full({batch}, sk, q.options().dtype(at::kInt));
     }
-    return UsedForward(
+    auto result = UsedForward(
         q, k, v, qv,
         {batch, heads, {MlaSequenceLayout::Tnd, q.size(0), maxQ}, {MlaSequenceLayout::Bsnd, batch * sk, sk}}, cuQ,
-        std::nullopt, usedQuery, lengths, scale, false, schedulerMetadata, config, splits);
+        std::nullopt, usedQuery, lengths, scale, false, schedulerMetadata, config, splits, softcap);
+    if (splits == 1) {
+        result[2] = at::empty({0}, at::TensorOptions().device(q.device()));
+        result[3] = at::empty({0}, at::TensorOptions().device(q.device()));
+    }
+    return result;
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 SplitMixedForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
                     const at::Tensor& cuQ, int64_t maxQ, int64_t splits, int64_t left, int64_t right, bool causal,
                     std::optional<double> scale, const std::optional<at::Tensor>& lengths,
-                    const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& metadata)
+                    const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& metadata, double softcap)
 {
     TORCH_CHECK(!scale || (std::isfinite(*scale) && std::abs(*scale) <= std::numeric_limits<float>::max()),
                 "MLA: softmax_scale must be finite in FP32");
+    TORCH_CHECK(std::isfinite(softcap) && softcap >= 0 && std::isfinite(float(softcap)) &&
+                    (softcap == 0 || float(softcap) > 0),
+                "MLA: softcap must be finite and non-negative in FP32");
     auto r = SplitMixedForward(q, k, v, qv, cuQ, maxQ, scale ? float(*scale) : 1.0f / std::sqrt(576.0f), left, right,
-                               causal, splits, lengths, usedQ, metadata);
+                               causal, splits, lengths, usedQ, metadata, float(softcap));
     return {r[0], r[1], r[2], r[3]};
 }
 
@@ -2281,8 +2294,7 @@ PrefillBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v
                    int64_t maxK, const std::optional<at::Tensor>& pageTable, float softcap)
 {
     TORCH_CHECK(std::isfinite(softcap) && softcap >= 0, "MLA: softcap must be finite and non-negative in FP32");
-    TORCH_CHECK(softcap == 0 || (!pageTable && bool(cuQ) == bool(cuK)),
-                "MLA: softcap is only implemented for non-paged BSND or TND Q/KV");
+    TORCH_CHECK(softcap == 0 || !pageTable, "MLA: softcap is only implemented for non-paged layouts");
     const bool tnd = bool(cuQ);
     CheckForwardBoundary(q, k, v, std::nullopt, tnd, bool(cuK), bool(pageTable));
     TORCH_CHECK(q.size(-1) == 192 && v.size(-1) == 128, "MLA: prefill requires 192/128 tensors");
@@ -2482,14 +2494,14 @@ at::Tensor PrefillTndMetadataOp(const at::Tensor& q, const at::Tensor& k, const 
 at::Tensor PrefillMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, int64_t kvHeads,
                                   at::ScalarType dtype, const at::Tensor& lengths, const at::Tensor& cuQ,
                                   int64_t splits, int64_t left, int64_t right, bool causal,
-                                  const std::optional<at::Tensor>& usedQ, int64_t pageSize)
+                                  const std::optional<at::Tensor>& usedQ, int64_t pageSize, bool hasSoftcap)
 {
     CheckTndBsndMetadataInputs(batch, maxQ, sk, heads, dtype, lengths, cuQ);
     CheckUsedInputs(lengths, batch, usedQ, lengths);
     const c10::OptionalDeviceGuard guard(device_of(lengths));
     auto c =
         PrefillContext(batch, maxQ, sk, heads, kvHeads, dtype, splits, left, right, causal, 2 | uint32_t(bool(usedQ)),
-                       CausalPlatform(lengths.device().index(), true), 2, 0, 0, pageSize);
+                       CausalPlatform(lengths.device().index(), true), 2, 0, 0, pageSize, hasSoftcap);
     MlaPrefillBsndLayout l{};
     PrefillBsndLayout(c, l);
     auto metadata = at::empty({l.words}, lengths.options());
@@ -2512,12 +2524,15 @@ PrefillMixedForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor
                       int64_t maxQ, int64_t splits, int64_t left, int64_t right, bool causal,
                       std::optional<double> scale, const std::optional<at::Tensor>& usedK,
                       const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& metadata,
-                      const std::optional<at::Tensor>& pageTable)
+                      const std::optional<at::Tensor>& pageTable, double softcap)
 {
     TORCH_CHECK(!scale || (std::isfinite(*scale) && std::abs(*scale) <= std::numeric_limits<float>::max()),
                 "MLA: softmax_scale must be finite in FP32");
+    TORCH_CHECK(std::isfinite(softcap) && softcap >= 0 && std::isfinite(float(softcap)) &&
+                    (softcap == 0 || float(softcap) > 0),
+                "MLA: softcap must be finite and non-negative in FP32");
     auto result = PrefillBsndForward(q, k, v, scale.value_or(1.0 / std::sqrt(192.0)), splits, left, right, causal,
-                                     usedQ, usedK, metadata, cuQ, std::nullopt, maxQ, 0, pageTable);
+                                     usedQ, usedK, metadata, cuQ, std::nullopt, maxQ, 0, pageTable, float(softcap));
     return {result[0], result[1], result[2], result[3]};
 }
 
@@ -2528,11 +2543,12 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
     m.def("_mla_prefill_mixed_forward(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, int max_seqlen_q, "
           "int num_splits=1, int window_left=-1, int window_right=-1, bool causal=False, "
           "float? softmax_scale=None, Tensor? cache_seqlens=None, Tensor? seqused_q=None, "
-          "Tensor? scheduler_metadata=None, Tensor? page_table=None) -> (Tensor, Tensor, Tensor, Tensor)");
+          "Tensor? scheduler_metadata=None, Tensor? page_table=None, float softcap=0.) -> (Tensor, Tensor, Tensor, "
+          "Tensor)");
     m.def("_mla_prefill_mixed_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
           "int num_heads_kv, ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q, "
           "int num_splits=1, int window_left=-1, int window_right=-1, bool causal=False, "
-          "Tensor? seqused_q=None, int page_size=0) -> Tensor");
+          "Tensor? seqused_q=None, int page_size=0, bool has_softcap=False) -> Tensor");
     m.def("_mla_prefill_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
           "int max_seqlen_q, int max_seqlen_k, int num_splits=1, int window_left=-1, int window_right=-1, "
           "bool causal=False, float? softmax_scale=None, Tensor? seqused_q=None, Tensor? seqused_k=None, "
@@ -2558,11 +2574,12 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
           "Tensor, Tensor)");
     m.def("_mla_split_mixed_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, int max_seqlen_q, "
           "int num_splits, int window_left=-1, int window_right=-1, bool causal=False, float? softmax_scale=None, "
-          "Tensor? cache_seqlens=None, Tensor? seqused_q=None, Tensor? scheduler_metadata=None) -> (Tensor, Tensor, "
+          "Tensor? cache_seqlens=None, Tensor? seqused_q=None, Tensor? scheduler_metadata=None, float softcap=0.) -> "
+          "(Tensor, Tensor, "
           "Tensor, Tensor)");
     m.def("_mla_split_mixed_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, "
           "ScalarType qkv_dtype, Tensor cache_seqlens, Tensor cu_seqlens_q, int window_left, int window_right, bool "
-          "causal, int num_splits) -> Tensor");
+          "causal, int num_splits, bool has_softcap=False) -> Tensor");
     m.def("_mla_split_tnd_forward(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
           "int max_seqlen_q, int max_seqlen_k, int num_splits, int window_left=-1, int window_right=-1, bool "
           "causal=False, "

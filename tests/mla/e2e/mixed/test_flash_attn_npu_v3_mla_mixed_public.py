@@ -246,7 +246,6 @@ def test_static_rejections(entry, dtype, fault, match):
         "max_k",
         "split0",
         "split2",
-        "softcap",
         "pack",
         "margin",
         "chunk",
@@ -284,7 +283,6 @@ def test_unconnected_options(entry, fault):
             args["k_new"] = args["k"][:, :1]
         else:
             key, value = {
-                "softcap": ("softcap", 1.0),
                 "pack": ("pack_gqa", False),
                 "margin": ("sm_margin", 1),
                 "chunk": ("attention_chunk", 1),

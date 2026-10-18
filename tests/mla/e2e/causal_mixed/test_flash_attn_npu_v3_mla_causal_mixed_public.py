@@ -160,7 +160,6 @@ def test_boundaries(dtype, fake):
                 )
         for opts in (
             dict(num_splits=2),
-            dict(softcap=1.0),
             dict(pack_gqa=True),
         ):
             p = dict(args)

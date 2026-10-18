@@ -24,11 +24,14 @@ MLA_SPLIT_INLINE MlaMetadataReadStatus ReadSplitMixedMetadata(const Reader& read
     const auto& c = context.used;
     if (c.batch > (UINT32_MAX - 416) / 10)
         return Status::InvalidBuffer;
-    auto status =
-        ReadMetadataHeader(read, words, 416 + 10 * c.batch, kMlaSplitMixedVersion, kMlaSplitMixedVersion, c.dtype);
+    if (context.hasSoftcap > 1)
+        return Status::ShapeMismatch;
+    const uint32_t version = context.hasSoftcap ? kMlaSoftcapSplitMixedVersion : kMlaSplitMixedVersion;
+    auto status = ReadMetadataHeader(read, words, 416 + 10 * c.batch, version, version, c.dtype);
     if (status != Status::Success)
         return status;
-    if (c.query.layout != 1 || c.kv.layout != 0 || context.splits < 2 || context.splits > 256)
+    if (c.query.layout != 1 || c.kv.layout != 0 || context.splits < (context.hasSoftcap ? 1 : 2) ||
+        context.splits > 256)
         return Status::ShapeMismatch;
     const uint32_t base = kMlaUsedMetadataPrefixWords + kMlaUsedMetadataSequenceWords * c.batch;
     const auto& w = context.window;

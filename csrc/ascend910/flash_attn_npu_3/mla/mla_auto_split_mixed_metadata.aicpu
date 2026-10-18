@@ -18,7 +18,7 @@ __global__ __aicpu__ uint32_t ComputeMlaAutoSplitMixedMetadata(void* args)
     const auto& a = *static_cast<const MlaAutoSplitMixedMetadataArgs*>(args);
     const auto& in = a.input;
     if (!BuildAutoSplitMixedMetadata(in.shape, in.platform, in.dtype, reinterpret_cast<uint32_t*>(in.outputAddr),
-                                   in.outputWords, UsedMetadataInputs(in), a.window, a.queryTotalFromPrefix)) return 1;
+                                   in.outputWords, UsedMetadataInputs(in), a.window, a.queryTotalFromPrefix, a.hasSoftcap)) return 1;
     AscendC::DataStoreBarrier();
     return 0;
 }

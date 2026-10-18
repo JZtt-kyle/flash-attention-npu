@@ -212,7 +212,6 @@ def test_internal_length_options_still_rejected(dtype, kind, extra):
         ("num_splits", 0),
         ("num_splits", 2),
         ("attention_chunk", 1),
-        ("has_softcap", True),
         ("pack_gqa", False),
         ("sm_margin", 1),
         ("page_size", 17),

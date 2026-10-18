@@ -15,7 +15,7 @@ void Emit(const T& a)
         first = false;
     }
 }
-int main()
+int main(int argc, char** argv)
 {
     std::vector<uint32_t> data;
     std::vector<int32_t> qs, ks, cq;
@@ -60,6 +60,9 @@ int main()
             uint32_t dtype, uq, uk, causal, mode;
             std::cin >> b >> q >> k >> h >> cores >> ratio >> dtype >> uq >> uk >> left >> right >> causal >> mode >>
                 tq >> tk;
+            uint32_t hasSoftcap = 0;
+            if (argc > 1 && std::strcmp(argv[1], "--softcap") == 0)
+                std::cin >> hasSoftcap;
             if (b < 0 || b > 300000)
                 return 2;
             cq.resize(b + 1);
@@ -106,8 +109,8 @@ int main()
             auto producerShape = shape;
             if (mode == 10)
                 producerShape.query.totalTokens = 0;
-            const bool built =
-                BuildAutoSplitMixedMetadata(producerShape, platform, dtype, data.data(), words, in, window, mode == 10);
+            const bool built = BuildAutoSplitMixedMetadata(producerShape, platform, dtype, data.data(), words, in,
+                                                           window, mode == 10, hasSoftcap);
             const uint32_t generated = data[5];
             MlaWindow w{};
             NormalizeWindow(window, w);
@@ -119,7 +122,7 @@ int main()
                 const uint32_t base = kMlaUsedMetadataPrefixWords + 8 * b;
                 if (!BuildUsedMetadata(shape, platform, dtype, data.data(), base, in) || data[5] || !uk)
                     return 3;
-                data[1] = data[2] = 22;
+                data[1] = data[2] = hasSoftcap ? kMlaSoftcapAutoSplitMixedVersion : kMlaAutoSplitMixedVersion;
                 data[3] = words;
                 data[base] = uint32_t(w.kind);
                 data[base + 1] = uint32_t(w.left);
@@ -157,7 +160,8 @@ int main()
                   nonempty ? uint64_t(INT64_MAX) : 0,
                   0,
                   platform.localMemory},
-                 {uint32_t(w.kind), w.left, w.right}};
+                 {uint32_t(w.kind), w.left, w.right},
+                 hasSoftcap};
             inputs = {arr(in.cuQuery), arr(in.cuKv), arr(in.usedQuery), arr(in.usedKv)};
             std::cout << "{\"built\":" << built << ",\"generated\":" << generated
                       << ",\"intact\":" << (data.front() == 0xdeadbeef) << ',';

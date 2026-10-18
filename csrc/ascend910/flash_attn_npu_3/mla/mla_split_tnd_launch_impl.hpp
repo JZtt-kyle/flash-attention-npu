@@ -170,9 +170,7 @@ aclError MLA_SPLIT_LAUNCH(const MLA_SPLIT_ARGS& args)
 {
     const auto& a = args.used;
     MLA_SPLIT_CONTEXT c{a.context, a.window, args.splits};
-#if !defined(MLA_SPLIT_MIXED)
     c.hasSoftcap = a.softcap > 0;
-#endif
     {
         MlaBatchLaunchScope launch;
         MLA_SPLIT_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(

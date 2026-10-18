@@ -177,18 +177,13 @@ def test_metadata_static_rejections(representation, fake):
 
 
 @pytest.mark.parametrize("representation", ["compressed", "prefill"])
-@pytest.mark.parametrize("layout", ["mixed", "paged", "paged_tnd"])
+@pytest.mark.parametrize("layout", ["paged", "paged_tnd"])
 @pytest.mark.parametrize("fake", [False, True])
 def test_other_layouts_rejected(representation, layout, fake):
     from tests.mla.support.public_cases.contract import _inputs, _forward
 
     with FakeTensorMode() if fake else contextlib.nullcontext():
-        args = _inputs(representation, "tnd" if layout == "mixed" else layout)
-        if layout == "mixed":
-            dense = _inputs(representation)
-            args.update(k=dense["k"], v=dense["v"])
-            args.pop("cu_seqlens_k")
-            args.pop("max_seqlen_k")
+        args = _inputs(representation, layout)
         args["softcap"] = 15
         with pytest.raises(RuntimeError, match="softcap"):
             _forward("raw", args)

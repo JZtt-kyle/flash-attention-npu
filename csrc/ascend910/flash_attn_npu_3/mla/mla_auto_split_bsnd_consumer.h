@@ -330,7 +330,7 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitMetadata(const Reader& read, 
     if (c.batch > (UINT32_MAX - kMlaAutoSplitFixedWords) / 10)
         return Status::InvalidBuffer;
     uint32_t version = Version;
-    if constexpr (Version == kMlaAutoSplitBsndVersion || (IsTnd && IsKvTnd)) {
+    if constexpr (Version == kMlaAutoSplitBsndVersion || IsTnd) {
         if (context.hasSoftcap > 1)
             return Status::ShapeMismatch;
         if (context.hasSoftcap)

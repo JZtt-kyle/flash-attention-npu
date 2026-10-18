@@ -6,19 +6,20 @@
 namespace flash_attn::mla {
 bool BuildAutoSplitMixedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& platform, uint32_t dtype,
                                  uint32_t* output, uint32_t words, const MlaUsedInputs& inputs,
-                                 const MlaWindowConfig& window, bool queryTotalFromPrefix)
+                                 const MlaWindowConfig& window, bool queryTotalFromPrefix, uint32_t hasSoftcap)
 {
     uint32_t expected;
     if (!AutoSplitMixedMetadataWords(shape.batch, expected) || words != expected)
         return false;
     struct Context {
         const MlaWindowConfig& window;
+        uint32_t hasSoftcap;
         MlaAutoSplitMixedPlan plan;
-    } context{window, {}};
+    } context{window, hasSoftcap, {}};
     const auto builder = [](const MlaUsedShape& s, const MlaPlatformInfo& p, const MlaUsedInputs& in,
                             MlaUsedSchedule& schedule, const void* opaque) {
         auto& c = *const_cast<Context*>(static_cast<const Context*>(opaque));
-        if (s.query.layout != MlaSequenceLayout::Tnd || s.kv.layout != MlaSequenceLayout::Bsnd)
+        if (s.query.layout != MlaSequenceLayout::Tnd || s.kv.layout != MlaSequenceLayout::Bsnd || c.hasSoftcap > 1)
             return MlaScheduleStatus::UnsupportedShape;
         // The CPU base scheduler also models C1V1, but the reused device
         // schema/consumer is C1V2. Reject before publishing an unusable record.
@@ -45,7 +46,7 @@ bool BuildAutoSplitMixedMetadata(const MlaUsedShape& shape, const MlaPlatformInf
     if (!BuildUsedMetadataWithSchedule(shape, platform, dtype, output, words, inputs, builder, &context,
                                        queryTotalFromPrefix, words - base))
         return false;
-    output[1] = output[2] = kMlaAutoSplitMixedVersion;
+    output[1] = output[2] = hasSoftcap ? kMlaSoftcapAutoSplitMixedVersion : kMlaAutoSplitMixedVersion;
     if (output[5] != 0)
         return true;
     MlaWindow normalized{};
