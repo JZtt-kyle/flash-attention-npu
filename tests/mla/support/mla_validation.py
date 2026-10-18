@@ -92,6 +92,18 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "gqa-schedule-check": [
+        "tests/mla/unit/gqa_schedule/test_schedule.py",
+        "-k",
+        "pinned_native or fixed_fa3 or snapshot or ceildiv",
+    ],
+    "gqa-schedule-sanitize": ["tests/mla/unit/gqa_schedule/test_schedule.py"],
+    "gqa-schedule-tools": [
+        "tests/mla/unit/tools/test_mla_gqa_schedule_tools.py",
+        "tests/mla/unit/tools/test_organization.py",
+        "tests/mla/unit/tools/test_mla_validation.py::test_evidence_missing_changed_failed_or_different_identity_cannot_resume",
+        "tests/mla/unit/tools/test_mla_validation.py::test_dependency_content_change_invalidates_even_with_same_mtime",
+    ],
     "softcap-paged-tnd-tools": [
         "tests/mla/unit/tools/test_mla_softcap_paged_tnd_tools.py",
         "tests/mla/unit/tools/test_mla_softcap_mixed_tools.py",
@@ -1139,6 +1151,10 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "unit-gqa_schedule",
+    "gqa-schedule-check",
+    "gqa-schedule-sanitize",
+    "gqa-schedule-tools",
     "softcap-paged-bsnd-tools",
     "softcap-paged-tnd-tools",
     "unit-softcap_paged_bsnd",
@@ -1287,6 +1303,10 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
+    if suite in {"unit-gqa_schedule", "gqa-schedule-check", "gqa-schedule-sanitize"}:
+        from tests.mla.support.mla_split_kv_build import split_toolchain_identity
+
+        return split_toolchain_identity(suite.endswith("sanitize"))
     if suite in {
         "unit-softcap_tnd",
         "unit-softcap_mixed",
@@ -1548,6 +1568,9 @@ def environment(args, directory, suite):
         MLA_PAGED_METADATA_LIBRARY=str(args.artifacts / "producer/metadata.so"),
     )
     if suite in {
+        "unit-gqa_schedule",
+        "gqa-schedule-check",
+        "gqa-schedule-sanitize",
         "unit-softcap_bsnd",
         "softcap-bsnd-sanitize",
         "unit-softcap_tnd",

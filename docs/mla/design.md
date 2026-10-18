@@ -715,6 +715,16 @@ partial 跨波复用物理核 scratch，持久槽不复用。自动 Direct 使�
 
 固定 CANN 原生自动 FD 与 FA3 显式均匀分片策略不同。公开性能的 single/explicit 组继续单列原生 FD，automatic 组将原生 FD 与非 FD 都纳入适用平均；不能把组件 FD 数值通过或原生时延替换成另一策略的公开同路径验收。输入与适用规则必须在采样前固定，详见 [第 7 节](#7-验收口径)。
 
+#### 6.2.13 独立 GQA 调度坐标与资源预算
+
+[`mla_gqa_schedule.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_gqa_schedule.h) 的 `BuildGqaSchedule` 是独立 CPU 组件，尚未进入生产 metadata/AICPU/Kernel 调用链；第 2 节的公开调度选项拒绝边界仍然有效。它解决原 S1G 记录不能区分独立 query head 与 KV head 的坐标问题，不引入新的序列化版本或数值算法。
+
+固定 FA3 `flash_api.cpp` 显式选择 `pack_gqa`，并从物理 SM 数扣除 `sm_margin`。910B 组件将后者映射为预留 AIC 与两倍 AIV，要求 `0 <= sm_margin < physical_AIC`、物理 C1V2 及剩余核数对应的非零 blockDim 映射；保留 local-memory/libAPI 描述，不由该组件声称数值 kernel 资源可用。None 保留 CANN 的打包默认，True 每 KV head 调度 G 个 query head，False 每 query head 单独调度，G=1 归一为未打包。
+
+长度复用 `ParseUsedLengths` 的 owned allocation/used 快照。打包时虚拟头轴为 Hkv、每 query 有 G 行，未打包时虚拟头轴为 Hq、每 query 有 1 行；两者都保留原 tensor 的 Q token、KV head 与 allocation 起点。M 前缀按 `(batch,headGroup)` 保存，`Task` 复用既有 mask-dependent 显式 split 或固定 CANN `SplitCore` 的原生端点交集，`Row` 返回原 O/LSE 和 FP32 accumulator 的字节偏移。自动容量仍为 26，与剩余核数和实际原生片数区分；single 不产生 accumulator。空 KV/全遮罩保留初始化任务，零 Q 不产生任务。
+
+组件接受压缩 512+64（Hkv=1）及 192/128 的五布局逻辑长度；PA 只使用矩形逻辑 KV spans，物理页号、页表与独立输入 stride 仍由现有组件验证。M/N 是调用方选定的逻辑块（M=32/64/128/256/512，N=1..8192），不自动选择新的数值块。构建前检查源 uint32 ceil-div/总 tile、虚拟头轴及公开 accumulator 的字段/字节边界；所有失败不修改旧计划或查询输出。单元在 [`unit/gqa_schedule`](../../tests/mla/unit/gqa_schedule/) 独占，固定源对照、独立行枚举与 sanitizer 不能替代后续公开入口的真实设备验收。
+
 ### 6.3 长度与布局调度
 
 [`BuildDenseSchedule`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_schedule.cpp) 处理整容量 BSND；以下入口复用同一 `detail/cann_split_core.*`，由 host/CPU 驱动与相应 AICPU 生成器编译同一源码。长度先完整校验，再数值转换为固定源格式；分配起点与 used 分别处理。记录格式见 [第 5 节](#5-metadata-设计)。

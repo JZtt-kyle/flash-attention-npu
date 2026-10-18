@@ -1,15 +1,21 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**M15f 的完整公开接入与必要实机验收已完成；唯一下一步是 M15g：共享调度选项 `pack_gqa` / `sm_margin` 的完整公开接入。** 当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
+本页只记录实施顺序、产物和完成条件。**M15g1 的独立 GQA 调度坐标与资源预算组件已完成；唯一下一步是 M15g2：五布局调度选项的完整公开接入。** 当前能力与最近证据见 [status](status.md)，契约与验收口径见 [design](design.md)。
 
-## 唯一下一步 M15g 调度选项
+## 唯一下一步 M15g2 调度选项完整公开接入
 
 为已开放的五种布局、两种表示实现有效的 `pack_gqa` / `sm_margin` 语义。依据固定 FA3 接口和现有 CANN 调度确定参数到打包、分核及资源预算的映射，完整接通 host/AICPU、metadata、消费者、Kernel 发射和公开 real/fake 入口；三 mask 与全部 split 随调用链验收。
 
-- 产物与影响路径：核对共享平台/分核、显式与自动 split、prefill、公开 Python/C++ 和 metadata 复用身份。保留既有 allocation/used、stride、分页安全和生命周期边界；参数必须影响约定行为，不能忽略后放行。实现前在本节补齐实际文件、固定来源对应语义与 design 契约变更。
+- 产物与影响路径：接入 `mla_gqa_schedule` 的坐标与资源语义，修改 `mla_forward.{h,cpp}`、`flash_api.cpp`、公开 Python real/fake 分派及适用 metadata/consumer/launcher、Kernel/Block/Tile。核对共享平台/分核、显式与自动 split、prefill、metadata 复用身份与实际写回。保留既有 allocation/used、stride、分页安全和生命周期边界；参数必须影响约定行为，不能忽略后放行。实现前在本节补齐实际文件、固定来源对应语义与 design 契约变更。
 - 必跑验收：新增非默认选项的公开 E2E，覆盖默认值、有效组合、资源上下界、记录复用/拒绝、real/fake/compile 和适用 Trap；按依赖选择本模块 CPU 差分/边界/sanitizer、受影响设备双数学/固定源、累计小输入 E2E 及普通 FA3 回归。实现前列出具体用例、统一驱动组和命令，先 dry-run/collect-only、工具/native 包及代表检查，再固定实现运行最终集合。
 - 性能与证据：采样前固定合计≤100 配置，覆盖新调度语义及受影响公开路径，沿用 R=1/4、计时边界和配置内等权平均。仅在驱动确认来源、依赖及原始证据完整有效时继承 E2E；单元和性能实际执行，数学 reference 按内容复用。最近闭环来源与复现命令见 status。
 - 完成条件：完整调用、有效参数语义、资源安全、精度/固定源、复用/拒绝和适用平均公开性能通过，相关已开放能力无回归；更新文档、通过质量检查后提交一次即停。若发现新的数值算法或共享协议有独立未覆盖风险，先在 plan 写明风险、独立产物及完成条件，再调整步骤。
+
+### M15g1 的拆分依据与已交付边界
+
+固定 FA3 的未打包分支以 Hq 为调度头轴；现有 S1G 记录只能表达 Hkv 头轴及组内 G 行，不能表达独立 query head 到原 KV head、Q allocation、O/LSE/accumulator 的不同映射。直接把 G 改成 1 会错读 Q、错写输出或合并不同 head。这是既有 mask/split 组件没有覆盖的共享坐标协议风险，因此允许先完成独立组件；并非因为增加开关或协议版本而拆步。
+
+M15g1 已交付 `mla_gqa_schedule.{h,cpp}` 的有效 pack、C1V2 剩余资源、源端点/显式片段和原 allocation 行地址查询，复用既有长度解析、SplitCore 与片段算法。固定源差分、独立地址/覆盖/资源边界、sanitizer、工具及累计 E2E/普通 FA3 回归完成；证据和命令只保存在 status。组件契约见 [design 6.2.13](design.md#6213-独立-gqa-调度坐标与资源预算)。尚未序列化或进入生产；M15g2 将五布局的 host/AICPU、metadata、消费者、Kernel 发射及公开 real/fake/compile 与三 mask、全部 split 一次接通，不按层或开关再拆轮。
 
 ## 后续里程碑：M15–M17
 
@@ -17,7 +23,7 @@
 
 | 里程碑 | 剩余产物与边界 | 完成条件 |
 | --- | --- | --- |
-| M15：softcap/调度选项 | M15g：pack_gqa、sm_margin 的有效语义与完整公开接入 | 有效数学/调度语义、资源校验及适用 E2E，不能忽略参数 |
+| M15：softcap/调度选项 | M15g2：pack_gqa、sm_margin 的完整公开接入 | 有效数学/调度语义、资源校验及适用 E2E，不能忽略参数 |
 | M16：图执行 | 固定输入重放与图内长度更新/metadata 重生成分别闭环 | eager/图一致、跨层复用、多 stream 与 fake/真实输出一致 |
 | M17：全范围收尾 | 核对并补齐 910B/C 实现与资源兼容，再冻结能力、按覆盖矩阵验收并补用户示例 | 必迁组合、精度/平均公开 E2E/普通 FA3 回归；解决当前仅接受 910B 的生产平台限制，实机仍用 910B；README 调用与边界 |
 
@@ -37,9 +43,10 @@
 | M15b–d | 两种表示的非 PA BSND、TND Q/KV、TND Q + BSND cache 正 softcap，v32–v40；完整公开入口、三 mask、全部 split、复用/Trap 与适用公开性能 |
 | M15e | 两种表示的 BSND Q + ND PA KV 正 softcap，v41/v42/v43；完整公开入口、三 mask、全部 split、分页安全、复用/Trap 与适用公开性能 |
 | M15f | 两种表示的 TND Q + ND PA KV 正 softcap，v44/v45/v46；完整公开入口、三 mask、全部 split、allocation/used、分页安全、复用/Trap 与适用公开性能 |
+| M15g1 | 独立 packed/unpacked GQA 坐标、C1V2 剩余资源、源分核/显式片段及原 allocation O/LSE/accumulator 地址；仅 CPU 组件，公开接入留 M15g2 |
 | 工具整理、R1、R2 | 统一验收与缓存/证据管理、模块归属与共享 helper、共用前向分派、文档轮和无头交接；原 R3 的内核可读性核对合入 R2 |
 
-组合验收映射见 [512+64](design.md#75-51264-组合覆盖) 和 [192/128](design.md#76-192128-组合覆盖)。M14、M15a–d 五轮开发后的专门文档轮已完成，不计开发轮数；该轮只修 Markdown 与公开 docstring，核对固定来源、原始证据和质量，未推进功能。M15e、M15f 是该文档轮之后的第一、第二个开发轮。
+组合验收映射见 [512+64](design.md#75-51264-组合覆盖) 和 [192/128](design.md#76-192128-组合覆盖)。M14、M15a–d 五轮开发后的专门文档轮已完成，不计开发轮数；该轮只修 Markdown 与公开 docstring，核对固定来源、原始证据和质量，未推进功能。M15e、M15f、M15g1 是该文档轮之后的第一、第二、第三个开发轮。
 
 ```bash
 git log --oneline -- docs/mla/status.md
