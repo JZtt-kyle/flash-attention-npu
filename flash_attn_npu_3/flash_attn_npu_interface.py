@@ -3502,7 +3502,9 @@ def flash_attn_func(
 
     For compressed MLA, q/k contain 64-dimensional RoPE components, qv is
     512-dimensional query content, and v is shared content K/V with one head.
-    Current MLA options and limits are documented in docs/mla/status.md.
+    Prefill MLA uses q/k dimensions 192 and independent v dimension 128 with qv=None.
+    Both representations support nonnegative finite softcap and num_splits=0..256.
+    MLA contracts are in docs/mla/design.md; current acceptance is in docs/mla/status.md.
 
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
@@ -3623,12 +3625,12 @@ def flash_attn_varlen_func(
     return_attn_probs=True returns (out, lse), with FP32 lse shaped (nheads, total_q).
 
     Prefill MLA uses q/k dimensions 192 and independent v dimension 128 with qv=None;
-    its internal v28 record supports the same allocation/used, mask and split options.
-    Compressed MLA uses q/k dimensions 64 and qv/v dimensions 512. Metadata
-    is generated internally on every call (v20 for automatic num_splits=0,
-    v19 for explicit num_splits=2..256; v13 for nondefault windows, v8 for right-down causal; otherwise
-    v3 without used lengths, v5 with either used array). There is no explicit metadata or page-table parameter;
-    paged MLA uses flash_attn_with_kvcache. See docs/mla/status.md for limits.
+    compressed MLA uses q/k dimensions 64 and qv/v dimensions 512 with one KV head.
+    Both support allocation/used lengths, causal/window masks, num_splits=0..256
+    and nonnegative finite softcap. Metadata is generated internally on every call;
+    record selection is documented in docs/mla/design.md, section 2.1.
+    There is no explicit metadata or page-table parameter; paged MLA uses
+    flash_attn_with_kvcache. Current acceptance is in docs/mla/status.md.
     """
     if q.device.type == "npu" and (qv is not None or q.shape[-1] != v.shape[-1]):
         out, lse = _mla_forward(
@@ -3721,12 +3723,14 @@ def flash_attn_with_kvcache(
     return_softmax_lse=False,
 ):
     """
-    NPU compressed MLA supports read-only BSND or ND paged caches with BSND/TND
-    queries, including right-down causal and window masks. Nonpaged BSND/TND queries
-    support automatic num_splits=0, single split 1, and explicit splits 2..256.
-    BSND/TND paged MLA caches also support num_splits=0..256. Automatic requests return 26 FP32
+    NPU MLA supports compressed 64/512 inputs with qv and independent 192/128
+    prefill inputs with qv=None. Both use read-only BSND or ND paged caches with
+    BSND/TND queries, causal/window masks and num_splits=0..256. Nonpaged layouts
+    accept nonnegative finite softcap; paged layouts require softcap=0.
+    Automatic requests return 26 FP32
     accumulator slots; the native partition determines the actual splits per M
-    block and unused slots are 0/-inf. Current limits are in docs/mla/status.md.
+    block and unused slots are 0/-inf. Contracts are in docs/mla/design.md;
+    current acceptance is in docs/mla/status.md.
     Generic FA3 append and rotary options below remain unsupported for MLA.
 
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
@@ -3745,7 +3749,7 @@ def flash_attn_with_kvcache(
     If not causal and not local, the query @q will be rotated by rotary_cos and rotary_sin at
     indices cache_seqlens only (i.e. we consider all tokens in @q to be at position cache_seqlens).
 
-    See tests/test_flash_attn.py::test_flash_attn_kvcache for examples of how to use this function.
+    MLA cache examples are in tests/mla/e2e/dense/test_flash_attn_npu_v3_mla_kvcache.py.
 
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
@@ -3819,14 +3823,13 @@ def flash_attn_with_kvcache(
             returned by get_scheduler_metadata unchanged (do not clone/copy it).
             softmax_scale and the numerical softcap value come from this forward
             call and may change when reusing metadata with the same has_softcap.
-            MLA uses int32 v2 records for unmasked BSND queries, v7 for causal BSND,
-            v4/v9 for unmasked/causal TND queries with a BSND cache, v6 for unmasked paged
-            caches, or v10/v11 for causal paged caches with BSND/TND queries.
+            MLA uses int32 records selected by representation, layout, mask, split
+            and softcap activation; see docs/mla/design.md, sections 2.1 and 5.
             The device checks current lengths, TND query prefixes and all used pages.
-            MLA records may be cloned or passed as contiguous
-            offset views; scale is supplied to forward and is not fixed by the record.
+            MLA records may be cloned or passed as contiguous offset views;
+            scale and positive softcap values may change without regenerating a
+            record, but changing softcap activation or lengths requires regeneration.
             Reuse skips AICPU generation; host workspace budgeting still runs.
-            Current MLA options and limits are documented in docs/mla/status.md.
         return_softmax_lse: bool. Whether to return the logsumexp of the attention scores.
 
     Return:
@@ -4603,42 +4606,29 @@ def get_scheduler_metadata(
     Its legacy ``softcap`` and ``softmax_scale`` arguments are keyword-only; a
     positive legacy softcap enables softcapping even when has_softcap is omitted.
     ``has_softcap=True`` requires a positive legacy softcap for this protocol.
-    MLA supports 64/512 compressed inputs and 192/128 nonpaged prefill, with
-    matching qkv_dtype. Prefill accepts GQA, all masks and num_splits=0..256.
-    BSND returns v27 (368 + 2*B + 2*B*Hkv int32 words); TND Q with BSND cache
-    returns v29 (372 + 8*B + 2*B*Hkv words). Compact TND Q/KV uses the varlen
-    entry's internal v28 generator. PA prefill remains unsupported.
-    The following v1-v26 descriptions concern 64/512.
-    Nonpaged and paged BSND/TND queries accept num_splits=0..256.
+    MLA uses device int32 records for compressed headdim=64/headdim_v=512
+    with one KV head, or independent prefill headdim=192/headdim_v=128 with
+    GQA. Both accept BSND/TND queries, nonpaged or ND paged caches, all masks
+    and num_splits=0..256. The default num_splits=0 selects automatic splitting.
+    Nonpaged layouts accept has_softcap=True; paged layouts require False.
+    Record versions and sizes are specified in docs/mla/design.md, sections 2.1 and 5.
+
     cache_seqlens must be a same-device contiguous int32 tensor of shape
     (batch_size,); None/integer lengths are kvcache conveniences only.
-    Without page_size or cu_seqlens_q, automatic num_splits=0 returns a v18
-    int32 record with 758 + 10 * batch_size words; explicit splits 2..256 use
-    v17 with 416 + 10 * batch_size words. Both bind the normalized window and
-    current lengths. For num_splits=1 it returns an int32 BSND-cache record:
-    v2 for unmasked attention or v7 for right-down causal. Causal records contain
-    410 + 8 * batch_size words and cannot be reused by an unmasked forward.
-    With cu_seqlens_q and no page_size it generates a TND-query/BSND-cache record:
-    v22 (758 + 10 * batch_size words) for automatic split, v21 (416 + 10 * batch_size
-    words) for explicit splits, or v4/v9 for unmasked/causal single split;
-    max_seqlen_q is a per-query-segment bound, max_seqlen_k is cache capacity.
-    Read-only flash_attn_with_kvcache accepts the matching v4/v9 record with TND queries
-    and a BSND cache; the current query prefixes and KV lengths must match.
-    With page_size it generates v6 for unmasked BSND/TND queries or v10 for causal
-    BSND queries. Both contain 408 + 5 * batch_size words and are not interchangeable.
-    page_size must be a
-    multiple of 16 in [16, 1024], and max_seqlen_k is logical capacity, divisible
-    by page_size and at most 16384. No page table or physical cache is inspected.
-    Paged automatic split uses v24 for BSND queries or v26 for TND queries,
-    both with 756 + 7 * batch_size words. Explicit splits use v23/v25,
-    respectively, with 414 + 7 * batch_size words.
-    Read-only MLA paged kvcache accepts the matching v6/v10 record; TND also
-    requires cu_seqlens_q and max_seqlen_q at forward. The record does not bind
-    a page table or physical cache; each forward validates current lengths,
-    query prefixes and all used pages. Regenerate after lengths or prefixes change.
-    There is no Q-used parameter here; public varlen accepts seqused_q/k and
-    generates its own metadata internally. Scale is supplied only to forward;
-    legacy numerical keywords are not supported. Length values are checked on device.
+    With cu_seqlens_q, queries use TND allocation segments and max_seqlen_q
+    bounds each segment; otherwise it is the BSND query capacity. Without
+    page_size, max_seqlen_k is BSND cache capacity. With page_size, it is logical
+    capacity, divisible by page_size and at most 16384; page_size must be a
+    multiple of 16 in [16, 1024]. This generator does not inspect a page table
+    or physical cache. Forward validates current lengths, query prefixes and
+    all used pages on device, including when reusing a record.
+
+    Records bind shape, lengths, dtype, normalized mask, split, platform and
+    softcap activation, but not scale, positive cap values, addresses or strides.
+    Regenerate after lengths, prefixes or other bound conditions change.
+    MLA rejects legacy numerical softcap/softmax_scale keywords; supply their
+    values to forward. There is no Q-used or KV allocation-prefix parameter here;
+    compact TND Q/KV uses flash_attn_varlen_func and generates metadata internally.
     """
     if headdim_v is None:
         headdim_v = headdim
