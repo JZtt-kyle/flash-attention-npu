@@ -117,9 +117,9 @@ func/varlen/内部前向的 `num_splits` 默认 1，kvcache/metadata 默认 0；
 
 accumulator 使用原 Q allocation 地址，不压紧 Q-used。自动容量 26 是后端资源上界，不代表物理 AIC 数或均匀 26 分片；实际每 M 的片数由固定 CANN 原生端点决定。Direct 的原始 FP32 O 写第 0 片，其余片和无贡献行初始化为 0/-inf。func/varlen 不公开 accumulator；不能把空 tensor 或最终低精度 O 转成 FP32 当作真实分片结果。
 
-M16 图执行已通过正确性验收，本次按用户授权接受图性能例外，公开图性能仍未达标（见 [第 7 节](#7-验收口径)）。已实现边界为：两种表示、五布局以 `torch.npu.NPUGraph` / `torch.npu.graph` 捕获既有公开入口并重放，包含已开放的 mask、split、softcap 和 GQA 调度选项。捕获固定 tensor 的 shape、stride、存储地址及 Python 标量选项；这些条件改变时须重新捕获。输入内容及设备长度/前缀可原地更新，长度改变须在图内重生成 metadata，或在重放前按 stream 依赖原地更新图持有的外部记录；图外旧快照不会自动更新。真实重放、动态值、跨层/多 stream 和生命周期由 [图专项](../../tests/mla/e2e/graph/) 独立验收，fake/compile 不替代这些证据；当前性能验收结果与实测环境见 [status](status.md)。
+两种表示、五布局以 `torch.npu.NPUGraph` / `torch.npu.graph` 捕获既有公开入口并重放，包含已开放的 mask、split、softcap 和 GQA 调度选项。捕获固定 tensor 的 shape、stride、存储地址及 Python 标量选项；这些条件改变时须重新捕获。输入内容及设备长度/前缀可原地更新，长度改变须在图内重生成 metadata，或在重放前按 stream 依赖原地更新图持有的外部记录；图外旧快照不会自动更新。真实重放、动态值、跨层/多 stream 和生命周期由 [图专项](../../tests/mla/e2e/graph/) 独立验收，fake/compile 不替代这些证据；当前性能验收结果与实测环境见 [status](status.md)。
 
-生产平台检查 [`DensePlatform`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 当前只接受 `Ascend910B`，共享缓存平台查询也经此检查；910C 尚未开放，仍是迁移目标。910B C1V2 与容量限制属于本后端，不是官方 FA3 的通用限制。
+生产平台检查 [`DensePlatform`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_forward.cpp) 接受 CANN 的 `Ascend910B*` 和 `Ascend910_93*`（910C）名称，二者均编译为 2201 后端；共享缓存平台查询也经此检查。实际核数、local memory、libAPI workspace 与 blockDim 仍从 CANN 查询，要求 `0 < AIC <= 26`、C1V2 及数值组件所需资源。旧 `Ascend910B` 同名平台若不是 C1V2 仍拒绝。平台配置检查见 [`unit/platform`](../../tests/mla/unit/platform/)，不能据此声称 910C 实机已验收。这些资源限制属于本后端，不是官方 FA3 的通用限制。
 
 ## 3. 两种 MLA 的接口映射
 
@@ -736,7 +736,7 @@ partial 跨波复用物理核 scratch，持久槽不复用。自动 Direct 使�
 
 [`mla_gqa_schedule.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_gqa_schedule.h) 的 `BuildGqaSchedule` 是独立 CPU 组件，生产 [v47](#521-gqa-调度选项记录) 的 host/AICPU 复用该组件。它解决原 S1G 记录不能区分独立 query head 与 KV head 的坐标问题，不引入新的数值算法。
 
-固定 FA3 `flash_api.cpp` 显式选择 `pack_gqa`，并从物理 SM 数扣除 `sm_margin`。910B 将后者映射为预留 AIC 与两倍 AIV，要求 `0 <= sm_margin < physical_AIC`、物理 C1V2 及剩余核数对应的非零 blockDim 映射；生产 host 另核对沿用数值组件的 local-memory/libAPI 资源。None 保留 CANN 的打包默认，True 每 KV head 调度 G 个 query head，False 每 query head 单独调度，G=1 归一为未打包。fake 只校验架构最多 26 AIC 的静态包络，真实调用按当前芯片核数再次检查。
+固定 FA3 `flash_api.cpp` 显式选择 `pack_gqa`，并从物理 SM 数扣除 `sm_margin`。910B/C 后端将后者映射为预留 AIC 与两倍 AIV，要求 `0 <= sm_margin < physical_AIC`、物理 C1V2 及剩余核数对应的非零 blockDim 映射；生产 host 另核对沿用数值组件的 local-memory/libAPI 资源。None 保留 CANN 的打包默认，True 每 KV head 调度 G 个 query head，False 每 query head 单独调度，G=1 归一为未打包。fake 只校验架构最多 26 AIC 的静态包络，真实调用按当前芯片核数再次检查。
 
 长度复用 `ParseUsedLengths` 的 owned allocation/used 快照。打包时虚拟头轴为 Hkv、每 query 有 G 行，未打包时虚拟头轴为 Hq、每 query 有 1 行；两者都保留原 tensor 的 Q token、KV head 与 allocation 起点。M 前缀按 `(batch,headGroup)` 保存，`Task` 复用既有 mask-dependent 显式 split 或固定 CANN `SplitCore` 的原生端点交集，`Row` 返回原 O/LSE 和 FP32 accumulator 的字节偏移。自动容量仍为 26，与剩余核数和实际原生片数区分；single 不产生 accumulator。空 KV/全遮罩保留初始化任务，零 Q 不产生任务。
 
@@ -1088,7 +1088,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 图模式捕获双方相同入口/R 的完整调用段，计时从 `graph.replay()` 至相同的完成同步；图中记录的 metadata 生成、转换和全部数值任务仍在对应段内。交替测 eager/图时，在计时开始前释放前一调用的结果，当前调用的输出分配仍包含在其自身计时内。一次性预热/捕获准备时间单列，不混入稳态重放；eager 与图模式分别按固定配置等权汇总并检查平均门槛，不能将两者合并稀释退化。图预检先验证每个 native 布局/表示/dtype 的廉价数值、实际捕获重放及代表 profiler 任务，再采完整固定集合。
 
-**M16 本次验收例外：** 2026-10-18 用户明确要求“图模式的性能先这样吧。先提交验收一次”，允许当前 M16 在图性能未达平均门槛时提交验收。图性能实测失败、退化明细及原始证据仍保留在 [status](status.md)；工具继续报告失败，默认 `mean_ratio <= 1.0` 不变。该例外不扩展到正确性、eager 或后续步骤，也不表示已达到源 CANN 等速。
+**M17 收尾验收例外：** 2026-10-18 完整实测与文档/质量检查完成后，用户明确确认“接受已知限制并提交”，允许 M17 在图性能未达平均门槛时完成收尾提交。图性能实测失败、退化明细及原始证据仍保留在 [status](status.md)；工具继续报告失败，默认 `mean_ratio <= 1.0` 不变。该例外只适用于本次 M17，不扩展到正确性、eager 或后续改动，也不表示已达到源 CANN 等速。此前 M16 的单次授权及证据由 Git 保留。
 
 图内 Kernel 采样须能追溯到重放时的实际任务及调用身份。捕获准备与外层 Fill/MODEL_EXECUTE 保留于原始 trace，不能代替 attention/metadata/merge 时间；模型任务缺失、阶段缺失或身份混用均不能验收。图 Kernel 使用独立采样进程：全部 eager 发射族在 profiler 启动前初始化，首次图捕获位于 RECORD 阶段，以避免本机 CANN 的提前捕获及初始化临时流关联缺口。原始 `op_summary` 的 Model ID、阶段与任务身份必须完整，不能补写 ID 或用外层任务替代。完整重放 wall 在另一进程关闭 profiler 计时，仍包含外层执行成本，不按 profiler 任务筛选调整。实测环境与原始证据见 [status](status.md)。
 
@@ -1265,4 +1265,20 @@ python3 -m tests.mla.support.native_package
 
 各模块保留 real/fake/compile、静态拒绝、长度更新、stream/内存生命周期专项；共享拒绝测试按 2.2 覆盖非法调度选项和追加 cache 等未开放项，不能继续拒绝已接通的五布局 softcap 或合法 `pack_gqa` / `sm_margin`。完整图重放另由 [graph 专项](../../tests/mla/e2e/graph/) 覆盖，两种表示共用同一验收驱动，并在日常清单注册图内长度更新、旧 producer、空值及 fake/compile 节点。设备 Trap 和调度/数值单元在协议或设备实现变化时按影响范围实测，不因阶段汇总修改而重跑全部历史单元。
 
-阶段使用累计小输入 E2E、上述五布局公开专项、普通 FA3 回归及 7.1 的 60 配置公开性能。最近结果与实测环境在 status 保存，历史阶段记录从 Git 查询；性能配置的 source/native 精度检查、kernel 退化或 FD 单列不能替代公开调用正确性，也不能写成所有单例提速。
+M14 阶段使用累计小输入 E2E、上述五布局公开专项、普通 FA3 回归及 7.1 的 60 配置公开性能。最近结果与实测环境在 status 保存，历史阶段记录从 Git 查询；性能配置的 source/native 精度检查、kernel 退化或 FD 单列不能替代公开调用正确性，也不能写成所有单例提速。
+
+### 7.7 全范围收尾映射
+
+最终冻结版本以累计 `e2e` 为正确性主线，cap=0 组合沿用 7.5/7.6；下表补齐后续能力及平台、用户调用的追踪关系。每组使用已经约定的代表/两两/具名 tuple 集合，实际节点由 `cases.json` 与 `selection.json` 保存，不自动展开全笛卡尔积。
+
+| 范围 | 入口与覆盖依据 |
+| --- | --- |
+| 两种表示、双 dtype、五布局、三 mask、单/显式/自动 split | [`regression_cases.py`](../../tests/mla/regression_cases.py) 的布局、十个压缩 split 模块和五个 `prefill_*` 模块；同时覆盖 allocation/used、空值、stride、metadata 复用、真实 accumulator 与代表 fake/compile |
+| 五布局正 softcap | 同一清单的五个 `softcap_*` 模块，双表示/dtype 的 `test_daily`、空值、fake/compile；PA 另覆盖公开 metadata 与长度形式 |
+| pack_gqa/sm_margin 与其他选项组合 | [`gqa_options`](../../tests/mla/e2e/gqa_options/)：日常 E2E，`gqa-options-source` 固定源逐元素对照，以及 `detail-gqa_options` 的接口/资源/长度/复用/生命周期/Trap；softcap 无同义源的精度仍按双数学 reference |
+| 固定/动态 graph replay | [`graph`](../../tests/mla/e2e/graph/)：日常入口，`detail-graph` 的双表示、五布局、mask/split/softcap/调度组合、跨层/stream、动态长度和过期记录 Trap；普通图另跑 `graph-ordinary` |
+| 910B/C 平台兼容 | [`unit/platform`](../../tests/mla/unit/platform/) 编译实际生产查询函数，使用 CANN B/C 配置检查核数、可用内存、blockDim 和调度预算，并拒绝非目标名称及非法资源；`platform-sanitize` 检查 ASan/UBSan。仍只在 910B 做设备数值验收 |
+| 用户示例与普通 FA3 | [`mla_examples.py`](../../tests/mla/support/mla_examples.py) 的三种公开入口、metadata 复用和动态图由 [`interface/test_examples.py`](../../tests/mla/e2e/interface/test_examples.py) 双 dtype 实测并纳入日常；普通 FA3 用 `ordinary` |
+| 最终公开性能 | 沿用图 40 配置与调度 56 配置，共 96：先 `graph-profile-check gqa-options-profile-check`，再 `graph-profile gqa-options-schedule-profile`。双方完整调用段、R、采样、适用性和平均规则均按第 7 节；eager 与图独立报告，正 softcap 和不同原生 FD 策略单列 |
+
+全范围收尾不扩张第 4 节排除项，也不把平台配置检查记作 910C 实机通过。性能失败及已授权的例外须在当次 status 中分别说明，不能由正确性或普通回归通过推断性能达标。

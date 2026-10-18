@@ -103,8 +103,10 @@ void RunCausalLaunch(const char* name, const std::function<int()>& launch)
 MlaPlatformInfo DensePlatform(bool fullLaunch = false)
 {
     const char* soc = aclrtGetSocName();
-    TORCH_CHECK(soc && std::strncmp(soc, "Ascend910B", 10) == 0,
-                "MLA compressed forward is not implemented yet on devices other than 910B");
+    // CANN names the 910C family Ascend910_93; both families use the 2201
+    // kernels. Keep resource validation below for each actual device/partition.
+    TORCH_CHECK(soc && (std::strncmp(soc, "Ascend910B", 10) == 0 || std::strncmp(soc, "Ascend910_93", 12) == 0),
+                "MLA forward requires an Ascend 910B/C device");
     auto* platform = platform_ascendc::PlatformAscendCManager::GetInstance();
     TORCH_CHECK(platform, "MLA: platform information is unavailable");
     MlaPlatformInfo p{};

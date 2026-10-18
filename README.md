@@ -385,7 +385,7 @@ def flash_attn_varlen_func(
 
 ### FlashAttention v3
 
-#### Compressed MLA on Ascend 910B/C
+#### MLA on Ascend 910B/C
 
 The three v3 entry points accept compressed MLA with `q/k` head dimension 64,
 `qv/v` head dimension 512 and one KV head. `q` and `k` contain the RoPE components;
@@ -393,19 +393,34 @@ The three v3 entry points accept compressed MLA with `q/k` head dimension 64,
 `(q @ k.T + qv @ v.T) * softmax_scale`; the default scale is `1 / sqrt(576)`.
 The output has dimension 512. MLA is forward-only and rejects tensors requiring gradients.
 
+Expanded MLA prefill is also supported: concatenate the 128-dimensional content
+and 64-dimensional RoPE components into `q/k` with head dimension 192, pass an
+independent `v` with head dimension 128, and leave `qv=None`. Its default scale is
+`1 / sqrt(192)`; `Hq` must be divisible by `Hkv`. The representation selects the
+implementation, including when the query has more than one token.
+
 Use `flash_attn_func` for BSND, `flash_attn_varlen_func` for packed TND, and
 `flash_attn_with_kvcache` for read-only dense or paged caches with BSND/TND queries.
 The cache entry rejects KV appends, rotary inputs and cache remapping. FP16/BF16,
 causal and window masks are supported. `num_splits` defaults to 1 for func/varlen
 and 0 (automatic) for cache. All five layouts accept 0..256, including paged TND.
-`softcap=0`, `attention_chunk=0`, `pack_gqa=None`, `sm_margin=0` and
-`rotary_interleaved=True` are required; 192/128 prefill remains unsupported.
+Both representations support all five layouts: BSND/BSND, TND/TND, TND/BSND,
+BSND/ND paged KV, and TND/ND paged KV. Nonnegative finite `softcap` is supported;
+zero disables it. `pack_gqa=None/True/False` selects default/packed/unpacked
+scheduling, and `sm_margin` reserves AIC cores with `0 <= sm_margin < physical_AIC`.
+`attention_chunk=0` and `rotary_interleaved=True` are required. Quantization,
+arbitrary masks, external NZ caches, KV appends and backward are outside this MLA scope.
+
+The backend uses CANN's 910B and `Ascend910_93` (910C) platform resources, with
+C1V2 and memory checks. Device validation runs on 910B; 910C compatibility is
+checked against CANN platform configurations without a 910C hardware claim.
 See the [MLA contract](docs/mla/design.md#2-fa3-入口与后端边界) for layout, page-size,
 length and empty-output rules, and [status](docs/mla/status.md) for validation limits.
 The general attention constraints below apply to ordinary attention; MLA uses this contract.
 
 ```python
 import torch
+import torch_npu
 from flash_attn_npu_3 import flash_attn_func
 
 q = torch.randn(1, 2, 4, 64, device="npu", dtype=torch.float16)
@@ -420,6 +435,29 @@ assert out.shape == (1, 2, 4, 512) and lse.shape == (1, 4, 2)
 `return_softmax_lse=True` returns `(out, lse, out_accum, lse_accum)`; the last two
 are empty for a single split and contain FP32 partial results for split execution.
 Without these flags, each entry returns only `out`.
+
+`get_scheduler_metadata` accepts contiguous device int32 KV lengths. Records bind
+geometry, lengths, dtype, mask, split and scheduling options; regenerate them when
+those change. They can be reused across layers with matching conditions. ND pages
+are `[num_pages, page_size, Hkv, D]`; page size must be a multiple of 16 in
+`[16, 1024]`, with logical capacity at most 16384. The page table is int32.
+
+Graph capture/replay supports both representations and all five layouts. Keep
+tensor shapes, strides, storage addresses and scalar options fixed. To change
+device lengths during replay, regenerate metadata inside the graph or update the
+captured external record with correct stream dependencies. An old record does
+not update itself. Graph correctness and graph performance are separate: the
+latest graph measurement still exceeds the default performance target; see
+[current evidence and limitations](docs/mla/status.md).
+
+The [runnable examples](tests/mla/support/mla_examples.py) demonstrate compressed
+dense attention, prefill varlen, paged metadata reuse, and graph replay with
+changing lengths. Run them from this checkout after building v3:
+
+```bash
+python3 -m tests.mla.support.mla_examples --device 0 --dtype fp16
+python3 -m tests.mla.support.mla_examples --device 0 --dtype bf16
+```
 
 #### flash_attn_with_kvcache
 

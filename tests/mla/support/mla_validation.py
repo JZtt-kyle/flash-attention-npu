@@ -92,6 +92,9 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
+    "examples-check": ["tests/mla/e2e/interface/test_examples.py"],
+    "platform-tools": ["tests/mla/unit/tools/test_mla_platform_tools.py"],
+    "platform-sanitize": ["tests/mla/unit/platform/test_platform.py"],
     "graph-tools": [
         "tests/mla/unit/tools/test_mla_graph_tools.py",
         "tests/mla/unit/tools/test_mla_validation.py",
@@ -1201,6 +1204,9 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "platform-tools",
+    "unit-platform",
+    "platform-sanitize",
     "graph-tools",
     "gqa-options-tools",
     "unit-gqa_options",
@@ -1358,6 +1364,10 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
+    if suite in {"unit-platform", "platform-sanitize"}:
+        from tests.mla.support.mla_platform_build import platform_identity
+
+        return platform_identity(suite.endswith("sanitize"))
     if suite in {
         "unit-gqa_schedule",
         "gqa-schedule-check",
@@ -1621,6 +1631,7 @@ def environment(args, directory, suite):
         PYTEST_DISABLE_PLUGIN_AUTOLOAD="1",
         MLA_VALIDATION_RESULT=str(directory),
         MLA_VALIDATION_NPU="0" if suite in CPU_SUITES else "1",
+        MLA_PLATFORM_SANITIZE=str(int(suite == "platform-sanitize")),
         GOLDEN_CACHE_MODE="off" if args.golden == "off" else "cache",
         GOLDEN_CACHE_REFRESH="1" if args.golden == "refresh" else "0",
         GOLDEN_CACHE_DIR=str(args.artifacts / "golden"),

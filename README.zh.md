@@ -376,24 +376,35 @@ def flash_attn_varlen_func(
 
 ### FlashAttention v3
 
-#### Ascend 910B/C 的压缩 MLA
+#### Ascend 910B/C 的 MLA
 
 三个 v3 入口均可传入压缩 MLA：`q/k` 的头维度为 64，`qv/v` 为 512，KV 头数为 1。
 `q/k` 表示已经形成的 RoPE 分量，`qv` 是 query 内容，`v` 是共享的内容 K/V。
 分数为 `(q @ k.T + qv @ v.T) * softmax_scale`，默认 scale 为 `1 / sqrt(576)`，
 输出末维为 512。MLA 仅支持前向，会拒绝需要梯度的输入。
 
+同时支持展开的 MLA prefill：把 128 维内容和 64 维 RoPE 拼为末维 192 的 `q/k`，
+传入独立的 128 维 `v`，保持 `qv=None`。默认 scale 为 `1 / sqrt(192)`，
+`Hq` 必须能被 `Hkv` 整除。实现按输入表示选择，压缩表示也支持多 query token。
+
 BSND 使用 `flash_attn_func`，紧凑 TND 使用 `flash_attn_varlen_func`；
 `flash_attn_with_kvcache` 接收 BSND/TND query 及只读的普通或分页 cache，
 拒绝追加 KV、rotary 输入及 cache 重映射。支持 FP16/BF16、causal 和 window。
 func/varlen 的 `num_splits` 默认 1，cache 默认 0（自动）；五种布局均接受 0..256，包含分页 TND。
-要求 `softcap=0`、`attention_chunk=0`、`pack_gqa=None`、`sm_margin=0`、
-`rotary_interleaved=True`；192/128 prefill 尚未接通。
+两种表示均支持 BSND/BSND、TND/TND、TND/BSND、BSND/ND 分页 KV、TND/ND 分页 KV
+五种布局。支持非负有限 `softcap`，零值关闭；`pack_gqa=None/True/False` 分别选择
+默认、打包、不打包的调度，`sm_margin` 预留 AIC 核，范围为 `0 <= sm_margin < physical_AIC`。
+要求 `attention_chunk=0`、`rotary_interleaved=True`。量化、任意 mask、外部 NZ cache、
+追加 KV 和反向不在本次 MLA 范围内。
+
+后端使用 CANN 的 910B 和 `Ascend910_93`（910C）平台资源，并检查 C1V2 与内存容量。
+实机验收使用 910B；910C 核对 CANN 平台配置兼容，不宣称已完成 910C 实机验收。
 布局、页大小、长度和空值规则见 [MLA 契约](docs/mla/design.md#2-fa3-入口与后端边界)，
 实测边界见 [status](docs/mla/status.md)。下文通用约束用于普通 attention，MLA 以此契约为准。
 
 ```python
 import torch
+import torch_npu
 from flash_attn_npu_3 import flash_attn_func
 
 q = torch.randn(1, 2, 4, 64, device="npu", dtype=torch.float16)
@@ -407,6 +418,24 @@ assert out.shape == (1, 2, 4, 512) and lse.shape == (1, 4, 2)
 func/varlen 的 `return_attn_probs=True` 返回 `(out, lse)`；cache 的
 `return_softmax_lse=True` 返回 `(out, lse, out_accum, lse_accum)`，后两项在单 split
 时为空，在 split 执行时是真实的 FP32 分片结果。不开启返回开关时均只返回 `out`。
+
+`get_scheduler_metadata` 接收连续的设备 int32 KV 长度。记录绑定几何、长度、dtype、
+mask、split 和调度选项；这些条件变化后须重新生成，匹配条件的多层可以复用。
+ND 分页 cache 为 `[num_pages, page_size, Hkv, D]`，页大小是 `[16, 1024]` 内的 16 倍数，
+逻辑容量不超过 16384，页表为 int32。
+
+两种表示的五种布局均支持图捕获和重放。捕获后保持 tensor 的 shape、stride、存储地址
+及标量选项不变。重放期间修改设备长度时，应在图内重新生成 metadata，或按正确的 stream
+依赖更新图持有的外部记录；旧记录不会自行更新。图正确性与图性能分别验收，最新图性能
+实测仍超过默认门槛，见 [当前证据与限制](docs/mla/status.md)。
+
+[可运行示例](tests/mla/support/mla_examples.py) 演示压缩 dense、prefill varlen、分页
+metadata 跨调用复用，以及长度变化时的图重放。构建 v3 后在本仓运行：
+
+```bash
+python3 -m tests.mla.support.mla_examples --device 0 --dtype fp16
+python3 -m tests.mla.support.mla_examples --device 0 --dtype bf16
+```
 
 #### flash_attn_with_kvcache
 

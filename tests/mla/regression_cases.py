@@ -109,7 +109,10 @@ def daily_suites():
         f"{paged_tnd_split}::{name}"
         for name in ("test_daily", "test_empty", "test_fake", "test_compile")
     ]
-    suites["interface"] = ["tests/mla/e2e/interface/test_forward.py"]
+    suites["interface"] = [
+        "tests/mla/e2e/interface/test_forward.py",
+        "tests/mla/e2e/interface/test_examples.py::test_examples",
+    ]
     suites["prefill_bsnd"] = [
         f"tests/mla/e2e/prefill_bsnd/test_public.py::{name}"
         for name in ("test_daily", "test_empty", "test_fake", "test_compile")
