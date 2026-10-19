@@ -2,8 +2,7 @@
 // caller constructs TPipe/events, writes outputs/workspace or synchronizes.
 #pragma once
 #include "mla_metadata.hpp"
-#include "../mla_paged_metadata_consumer.h"
-
+#include "../metadata/mla_paged_consumer.h"
 namespace flash_attn::mla::Kernel {
 struct PagedMetadataReaders {
     MetadataReader data[3];

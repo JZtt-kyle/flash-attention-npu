@@ -1,6 +1,0 @@
-#define MLA_PREFILL_TYPE bfloat16_t
-#define MLA_PREFILL_INIT MlaPrefillTndBf16Init
-#define MLA_PREFILL_ATTENTION MlaPrefillBsndBf16Attention
-#define MLA_PREFILL_MERGE MlaPrefillBsndBf16Merge
-#define MLA_PREFILL_LAUNCH LaunchPrefillBsndBf16
-#include "mla_prefill_bsnd_launch_impl.hpp"

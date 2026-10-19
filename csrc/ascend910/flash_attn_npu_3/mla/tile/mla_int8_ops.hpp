@@ -17,7 +17,6 @@
 #include "lib/matmul_intf.h"
 #include "lib/matrix/matmul/tiling.h"
 #include "../mla_int8_params.h"
-
 namespace flash_attn::mla::Int8 {
 using namespace AscendC;
 using AscendC::AIC;

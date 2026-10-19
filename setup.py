@@ -390,27 +390,9 @@ class BishengBuildExt(build_ext):
             return []
         sources = [os.path.join(src_dir, "fa_metadata.aicpu")]
         if ext_name == "flash_attn_npu_3.flash_attn_npu_3":
-            sources.append(os.path.join(src_dir, "mla", "mla_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_int8_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_gqa_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_prefill_bsnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_bsnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_tnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_tnd_bsnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_used_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_split_bsnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_split_tnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_split_mixed_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_auto_split_bsnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_auto_split_tnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_auto_split_mixed_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_causal_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_window_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_paged_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_split_paged_bsnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_split_paged_tnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_auto_split_paged_bsnd_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "mla_auto_split_paged_tnd_metadata.aicpu"))
+            # Keep the independent FIA and quantized IFA scheduler binaries separate.
+            sources.append(os.path.join(src_dir, "mla", "metadata", "mla_metadata.aicpu"))
+            sources.append(os.path.join(src_dir, "mla", "metadata", "mla_int8.aicpu"))
         return [self._build_aicpu_object(ext_fullpath, src) for src in sources]
 
     def _build_aicpu_object(self, ext_fullpath, aicpu_src):
@@ -672,59 +654,28 @@ src_ascend910_v3 = glob.glob(
 src_ascend910_v3 += glob.glob(
     os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3", "autogen", "*.cpp"), recursive=True
 )
+# MLA numerical instantiations are generated with the ordinary v3 dispatch.
+# These are host adapters/schedulers plus the mixed-dtype INT8 implementation.
 src_ascend910_v3 += [
     os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3/mla", name)
     for name in (
         "mla_forward.cpp",
-        "mla_dispatch_int8.cpp",
-        "mla_dispatch_fp16_prefill_bsnd.cpp",
-        "mla_dispatch_fp16_gqa.cpp",
-        "mla_dispatch_bf16_gqa.cpp",
-        "mla_gqa_schedule.cpp",
-        "mla_dispatch_bf16_prefill_bsnd.cpp",
-        "mla_split_kv.cpp",
-        "mla_split_kv_plan.cpp",
-        "mla_split_tnd_plan.cpp",
-        "mla_split_mixed_plan.cpp",
-        "mla_split_paged_bsnd_plan.cpp",
-        "mla_split_paged_tnd_plan.cpp",
-        "mla_dispatch_fp16_split_paged_tnd.cpp",
-        "mla_dispatch_bf16_split_paged_tnd.cpp",
-        "mla_dispatch_fp16_split_paged_bsnd.cpp",
-        "mla_dispatch_bf16_split_paged_bsnd.cpp",
-        "mla_dispatch_fp16_split_mixed.cpp",
-        "mla_dispatch_bf16_split_mixed.cpp",
-        "mla_dispatch_fp16_split_tnd.cpp",
-        "mla_dispatch_bf16_split_tnd.cpp",
-        "mla_auto_split_paged_tnd_plan.cpp",
-        "mla_dispatch_fp16_auto_split_paged_tnd.cpp",
-        "mla_dispatch_bf16_auto_split_paged_tnd.cpp",
-        "mla_auto_split_paged_bsnd_plan.cpp",
-        "mla_dispatch_fp16_auto_split_paged_bsnd.cpp",
-        "mla_dispatch_bf16_auto_split_paged_bsnd.cpp",
-        "mla_auto_split_kv_plan.cpp",
-        "mla_auto_split_tnd_plan.cpp",
-        "mla_auto_split_mixed_plan.cpp",
-        "mla_dispatch_fp16_auto_split_mixed.cpp",
-        "mla_dispatch_bf16_auto_split_mixed.cpp",
-        "mla_dispatch_fp16_auto_split_tnd.cpp",
-        "mla_dispatch_bf16_auto_split_tnd.cpp",
-        "mla_dispatch_fp16_auto_split_bsnd.cpp",
-        "mla_dispatch_bf16_auto_split_bsnd.cpp",
-        "mla_dispatch_fp16_split_bsnd.cpp",
-        "mla_dispatch_bf16_split_bsnd.cpp",
-        "mla_bsnd_layout.cpp",
-        "mla_tnd_layout.cpp",
-        "mla_paged_layout.cpp",
-        "mla_paged_plan.cpp",
-        "mla_launch.cpp",
-        "mla_schedule.cpp",
-        "mla_tnd_schedule.cpp",
-        "mla_causal.cpp",
-        "mla_window.cpp",
+        "device/mla_dispatch_int8.cpp",
+        "tiling/mla_gqa_schedule.cpp",
+        "tiling/mla_split_kv.cpp",
+        "tiling/mla_split_plan.cpp",
+        "tiling/mla_auto_split_plan.cpp",
+        "mla_layout.cpp",
+        "tiling/mla_paged_plan.cpp",
+        "device/mla_launch.cpp",
+        "tiling/mla_schedule.cpp",
+        "tiling/mla_sequence.cpp",
+        "tiling/mla_causal.cpp",
+        "tiling/mla_window.cpp",
         "detail/cann_split_core.cpp",
     )
 ]
+
 src_ascend950_v3 = glob.glob(
     os.path.join(this_dir, "csrc/ascend950/flash_attn_npu_3", "flash_api.cpp"), recursive=True
 )

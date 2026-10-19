@@ -13,11 +13,10 @@
 // and fia_block_vec_nonquant_mla.h. See ../LICENSE.cann.
 #pragma once
 #include "mla_dense.hpp"
-#include "../mla_paged_inputs.h"
-
+#include "../metadata/mla_paged.h"
 namespace flash_attn::mla::Kernel {
 // Independent contiguous BSND partial attention. The caller validates the
-// M10a fragments and native workspace budget. One fragment per physical AIC;
+// Split-KV fragments and native workspace budget. One fragment per physical AIC;
 // no reduction, public accumulator, metadata or production dispatch here.
 template <typename InputT>
 class MlaSplitKvBsnd : private MlaTaskRing<InputT, /*HasKvLengths=*/true, /*IsTnd=*/false, /*MixedKv=*/false,

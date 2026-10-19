@@ -14,8 +14,7 @@
 #pragma once
 #include "../tile/mla_int8_ops.hpp"
 #include "../tile/mla_copy.hpp"
-#include "../mla_paged_layout.h"
-
+#include "../mla_layout.h"
 namespace flash_attn::mla::Int8 {
 template <typename IFAT>
 class MlaInt8Cube {

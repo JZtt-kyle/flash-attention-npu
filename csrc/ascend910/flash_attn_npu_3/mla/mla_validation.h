@@ -1,14 +1,9 @@
 #pragma once
 
 #include <torch/extension.h>
-#include "mla_bsnd_metadata.h"
-#include "mla_tnd_metadata.h"
-#include "mla_tnd_bsnd_metadata.h"
-#include "mla_used_metadata.h"
-#include "mla_paged_metadata.h"
-#include "mla_bsnd_layout.h"
-#include "mla_tnd_layout.h"
-
+#include "metadata/mla_sequence.h"
+#include "metadata/mla_paged.h"
+#include "mla_layout.h"
 // Host-only boundary for the two representations in docs/mla/design.md.
 // Contract: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
 // hopper/flash_api.cpp::mha_fwd. No CANN kernel or scheduling code is used here.

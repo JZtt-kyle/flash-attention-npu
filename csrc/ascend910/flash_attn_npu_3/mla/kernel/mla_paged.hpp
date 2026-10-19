@@ -5,7 +5,6 @@
 #pragma once
 #include "mla_dense.hpp"
 #include "mla_paged_metadata.hpp"
-
 namespace flash_attn::mla::Kernel {
 template <typename InputT, bool IsTnd, bool IsCausal = false, bool IsWindow = false>
 class MlaPaged : private MlaTaskRing<InputT, /*HasKvLengths=*/true, IsTnd, /*MixedKv=*/false, /*HasUsed=*/false,

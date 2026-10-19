@@ -13,7 +13,6 @@
 // Only INT8 content / BF16 RoPE and output, Hkv=1, 512+64, ND PA.
 #pragma once
 #include "../block/mla_int8_vector.hpp"
-
 namespace flash_attn::mla::Int8 {
 template <typename IFAT>
 class MlaInt8Kernel : public MlaInt8Vector<IFAT> {

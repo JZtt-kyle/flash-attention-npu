@@ -1,9 +1,8 @@
 // Device-only adapter for v2 BSND records. Every Cube/Vector validates before
-// attention event allocation, barriers or output/workspace writes (M06b3).
+// attention event allocation, barriers or output/workspace writes .
 #pragma once
 #include "mla_metadata.hpp"
-#include "../mla_bsnd_metadata_consumer.h"
-
+#include "../metadata/mla_sequence_consumer.h"
 namespace flash_attn::mla::Kernel {
 template <typename InputT>
 __aicore__ inline MlaMetadataReadStatus

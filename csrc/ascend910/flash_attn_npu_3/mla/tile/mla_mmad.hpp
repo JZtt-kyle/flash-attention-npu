@@ -19,7 +19,6 @@
 #include "catlass/gemm/tile/tile_mmad.hpp"
 #include "catlass/layout/layout.hpp"
 #include "mla_copy.hpp"
-
 namespace flash_attn::mla::Tile {
 using namespace AscendC;
 

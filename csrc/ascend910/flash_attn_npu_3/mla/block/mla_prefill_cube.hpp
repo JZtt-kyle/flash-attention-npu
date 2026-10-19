@@ -14,8 +14,8 @@
 // Q/V reuse, L0 transfers and cross-core events. Inputs use independent FA3
 // strides; source split/combined RoPE both map to the full 192-wide row.
 #pragma once
-#include "../mla_prefill_params.h"
-#include "../mla_paged_inputs.h"
+#include "../mla_params.h"
+#include "../metadata/mla_paged.h"
 #include "../tile/mla_paged_copy.hpp"
 #include "../tile/mla_prefill_cube_ops.hpp"
 namespace flash_attn::mla::Block {

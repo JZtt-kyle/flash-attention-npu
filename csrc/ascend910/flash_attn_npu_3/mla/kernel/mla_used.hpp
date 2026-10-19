@@ -3,8 +3,7 @@
 // FA3 physical allocation from the source task lengths; used never repacks Q/KV.
 #pragma once
 #include "mla_dense.hpp"
-#include "../mla_used_metadata_consumer.h"
-
+#include "../metadata/mla_sequence_consumer.h"
 namespace flash_attn::mla::Kernel {
 template <typename InputT, bool IsTnd, bool HasStrides = false, bool IsCausal = false, bool IsWindow = false>
 class MlaUsed : private MlaTaskRing<InputT, /*HasKvLengths=*/true, IsTnd, /*MixedKv=*/false, /*HasUsed=*/true,

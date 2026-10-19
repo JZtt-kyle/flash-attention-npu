@@ -16,10 +16,8 @@
 // QK/PV retain the source loops, seven L1 slots and synchronization protocol.
 // This is a component, not a forward entry point; its caller validates bounds.
 #pragma once
-
 #include "../tile/mla_mmad.hpp"
 #include "../tile/mla_paged_copy.hpp"
-
 namespace flash_attn::mla::Block {
 using namespace AscendC;
 using Tile::Align;

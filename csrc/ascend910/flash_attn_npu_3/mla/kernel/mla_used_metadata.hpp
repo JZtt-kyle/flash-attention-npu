@@ -2,8 +2,7 @@
 // constructs TPipe/events, writes outputs/workspace or synchronizes.
 #pragma once
 #include "mla_metadata.hpp"
-#include "../mla_used_metadata_consumer.h"
-
+#include "../metadata/mla_sequence_consumer.h"
 namespace flash_attn::mla::Kernel {
 struct UsedMetadataReaders {
     MetadataReader data[4];

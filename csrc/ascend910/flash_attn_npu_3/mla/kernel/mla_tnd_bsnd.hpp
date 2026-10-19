@@ -4,8 +4,7 @@
 // the validated v4 snapshot supplies compact Q starts and 64-bit b*Sk KV starts.
 #pragma once
 #include "mla_dense.hpp"
-#include "../mla_tnd_bsnd_metadata_consumer.h"
-
+#include "../metadata/mla_sequence_consumer.h"
 namespace flash_attn::mla::Kernel {
 template <typename InputT, bool HasStrides = false>
 class MlaTndBsnd : private MlaNonPaged<InputT, true, true, true, false, HasStrides> {

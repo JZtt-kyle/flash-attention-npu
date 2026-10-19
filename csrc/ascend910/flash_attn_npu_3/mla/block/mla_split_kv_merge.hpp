@@ -14,8 +14,7 @@
 #pragma once
 #include "catlass/catlass.hpp"
 #include "../tile/mla_fd_ops.hpp"
-#include "../mla_split_kv_merge_params.h"
-
+#include "../mla_params.h"
 namespace flash_attn::mla::Block {
 using namespace AscendC;
 

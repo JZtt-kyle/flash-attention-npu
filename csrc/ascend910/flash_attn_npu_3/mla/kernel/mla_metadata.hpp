@@ -2,8 +2,7 @@
 // attention Kernel allocates events, initializes LSE or touches its workspace.
 #pragma once
 #include "kernel_operator.h"
-#include "../mla_metadata_consumer.h"
-
+#include "../metadata/mla_consumer.h"
 namespace flash_attn::mla::Kernel {
 struct MetadataReader {
     AscendC::GlobalTensor<uint32_t> data;

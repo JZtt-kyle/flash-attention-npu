@@ -19,10 +19,8 @@
 // the paired QK coordinates describe the same rows and may select different D.
 // Events and L1 buffer lifetime remain the Block caller's responsibility.
 #pragma once
-
 #include "mla_copy.hpp"
-#include "../mla_paged_layout.h"
-
+#include "../mla_layout.h"
 namespace flash_attn::mla::Tile {
 
 template <typename InputT>

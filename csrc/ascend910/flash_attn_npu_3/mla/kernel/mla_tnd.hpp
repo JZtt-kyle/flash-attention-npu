@@ -4,8 +4,7 @@
 // the validated v3 snapshot replaces the source int64 cumulative arrays.
 #pragma once
 #include "mla_dense.hpp"
-#include "../mla_tnd_metadata_consumer.h"
-
+#include "../metadata/mla_sequence_consumer.h"
 namespace flash_attn::mla::Kernel {
 template <typename InputT, bool HasStrides = false>
 class MlaTnd : private MlaNonPaged<InputT, true, true, false, false, HasStrides> {

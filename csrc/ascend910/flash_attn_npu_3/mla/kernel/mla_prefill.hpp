@@ -9,7 +9,6 @@
 // The caller validates tasks, independent input layouts and allocation sizes.
 #pragma once
 #include "../block/mla_prefill_vector.hpp"
-
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 template <typename InputT, bool Brc, bool Partial, bool Paged = false>

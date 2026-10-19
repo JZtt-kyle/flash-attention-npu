@@ -13,7 +13,6 @@
 // Only INT8 content / BF16 RoPE and output, Hkv=1, 512+64, ND PA.
 #pragma once
 #include "../tile/mla_int8_ops.hpp"
-
 namespace flash_attn::mla::Int8 {
 namespace AttentionCommonFlashDecode {
 constexpr SoftmaxConfig FIA_SOFTMAX_FLASHV2_CFG = {false};

@@ -31,11 +31,8 @@
 // Source GetTaskDealMode skips zero-KV tasks; initialization is independent of
 // compute endpoints. FA3 requires -inf (source +inf) LSE for these empty rows.
 #pragma once
-#include "../mla_dense_params.h"
-#include "../mla_window_params.h"
-#include "../mla_split_kv_params.h"
+#include "../mla_params.h"
 #include "../block/mla_vector.hpp"
-
 namespace flash_attn::mla::Kernel {
 using namespace AscendC;
 
@@ -475,7 +472,7 @@ class MlaDense : private MlaNonPaged<InputT, HasKvLengths, false, false, false, 
     }
 };
 // Independent causal component: contiguous BSND, complete Q allocation,
-// validated uint32[B] effective KV lengths and a whole-M M08a partition.
+// validated uint32[B] effective KV lengths and a whole-M causal partition.
 // This wrapper is not referenced by production metadata or dispatch.
 template <typename InputT>
 class MlaCausalBsnd
@@ -490,7 +487,7 @@ class MlaCausalBsnd
     }
 };
 // Validated contiguous BSND, uint32[B] KV lengths, normalized window and the
-// M09a complete-M partition. No public or production caller in this step.
+// Windowed complete-M partition.
 template <typename InputT>
 class MlaWindowBsnd
     : private MlaTaskRing<InputT, /*HasKvLengths=*/true, /*IsTnd=*/false, /*MixedKv=*/false, /*HasUsed=*/false,

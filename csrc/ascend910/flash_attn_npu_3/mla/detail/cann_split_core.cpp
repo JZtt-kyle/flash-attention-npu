@@ -18,7 +18,6 @@
  * \file split_core.cpp
  * \brief
  */
-
 #include "cann_split_core.h"
 #include <cstdio>
 #include <math.h>

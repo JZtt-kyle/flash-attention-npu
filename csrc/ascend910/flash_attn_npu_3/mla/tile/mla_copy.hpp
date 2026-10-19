@@ -17,8 +17,7 @@
 // read-only overlap. Keep the source S1G row order and ND-to-NZ fallbacks.
 #pragma once
 #include "catlass/gemm/tile/atlasa2/copy_l0c_to_gm.hpp"
-#include "../mla_bsnd_layout.h"
-
+#include "../mla_layout.h"
 namespace flash_attn::mla::Tile {
 using namespace AscendC;
 __aicore__ inline uint32_t Align(uint32_t n, uint32_t a)
