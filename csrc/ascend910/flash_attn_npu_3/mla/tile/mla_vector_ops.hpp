@@ -10,7 +10,7 @@
 
 // Upstream license: ../LICENSE.cann.
 // Source: CANN ops-transformer ca18aee610729ca5270a44e2d84c751bc687fbf0.
-// attention/common/op_kernel/vector_common.h: RowDivs, RowMuls, ComputeSoftMaxLse.
+// attention/common/op_kernel/vector_common.h: RowDivs, RowMuls, RowSum, ComputeSoftMaxLse.
 // Preserve source vector instruction order and row/column repetition choices.
 #pragma once
 #include "kernel_operator.h"
@@ -21,6 +21,34 @@ using namespace AscendC;
 constexpr uint32_t FP32_REPEAT_ELEMENT_NUM = 64;
 constexpr uint32_t FP32_BLOCK_ELEMENT_NUM = 8;
 constexpr uint32_t REPEATE_STRIDE_UP_BOUND = 256;
+
+__aicore__ inline void RowSum(LocalTensor<float>& dstUb, LocalTensor<float> srcUb, uint32_t dealRowCount,
+                              uint32_t columnCount, uint32_t actualColumnCount)
+{
+    uint32_t blockCount = actualColumnCount / FP32_REPEAT_ELEMENT_NUM;
+    uint32_t remain = actualColumnCount % FP32_REPEAT_ELEMENT_NUM;
+    BinaryRepeatParams repeatParams;
+    repeatParams.src0BlkStride = 1;
+    repeatParams.src1BlkStride = 1;
+    repeatParams.dstBlkStride = 1;
+    repeatParams.src0RepStride = columnCount / FP32_BLOCK_ELEMENT_NUM;
+    repeatParams.src1RepStride = columnCount / FP32_BLOCK_ELEMENT_NUM;
+    repeatParams.dstRepStride = columnCount / FP32_BLOCK_ELEMENT_NUM;
+    if (blockCount > 0 && remain > 0) {
+        Add(srcUb, srcUb, srcUb[blockCount * FP32_REPEAT_ELEMENT_NUM], remain, dealRowCount, repeatParams);
+        PipeBarrier<PIPE_V>();
+    }
+    for (uint32_t pairs = blockCount / 2; pairs > 0; pairs = blockCount / 2) {
+        blockCount = (blockCount + 1) / 2;
+        for (uint32_t j = 0; j < pairs; j++) {
+            Add(srcUb[j * FP32_REPEAT_ELEMENT_NUM], srcUb[j * FP32_REPEAT_ELEMENT_NUM],
+                srcUb[(j + blockCount) * FP32_REPEAT_ELEMENT_NUM], FP32_REPEAT_ELEMENT_NUM, dealRowCount, repeatParams);
+        }
+        PipeBarrier<PIPE_V>();
+    }
+    WholeReduceSum(dstUb, srcUb, Min(actualColumnCount, FP32_REPEAT_ELEMENT_NUM), dealRowCount, 1, 1,
+                   columnCount / FP32_BLOCK_ELEMENT_NUM);
+}
 
 template <typename T>
 __aicore__ inline void RowDivs(LocalTensor<T> dstUb, LocalTensor<T> src0Ub, LocalTensor<T> src1Ub,

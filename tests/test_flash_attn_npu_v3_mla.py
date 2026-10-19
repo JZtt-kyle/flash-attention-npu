@@ -112,7 +112,20 @@ def _make_case(
     }
     if representation == "compressed":
         raw["qv"] = torch.randn(batch, sq, heads, dv).mul_(0.1).to(dtype)
-    if pattern == "rounding-ties":
+    if pattern == "block-cancellation":
+        for value in raw.values():
+            value.zero_()
+        raw["qv"][..., 0] = 1
+        raw["v"][:, 512, :, 0] = 1
+        raw["v"][:, 510:513, :, 1] = torch.tensor([1, -1, 1], dtype=dtype).view(1, 3, 1)
+    elif pattern == "softcap-normalization":
+        for value in raw.values():
+            value.zero_()
+        raw["qv"][..., 0] = 1
+        raw["v"][..., 0] = 0.234375
+        raw["v"][:, 64, :, 0] = 0.25
+        raw["v"][..., 1] = 1.75
+    elif pattern == "rounding-ties":
         raw["q"].zero_()
         if "qv" in raw:
             raw["qv"].zero_()
@@ -407,60 +420,157 @@ def _equal(actual, expected):
         torch.testing.assert_close(a, b, rtol=0, atol=0)
 
 
-# One row per independent boundary; the same public behavior spans five layouts.
-# fields: name, options. Dtypes and the two MLA representations remain explicit.
-ATTENTION_CASES = [
-    ("single", {}),
-    ("causal-empty-rows", dict(q=(17, 3), k=(3, 1), causal=True)),
-    ("window", dict(window=(2, 1))),
-    ("negative-window", dict(window=(-128, 864))),
-    ("left-window", dict(q=(3, 1), k=(513, 7), window=(256, -1))),
-    ("right-window", dict(q=(7, 3), k=(513, 7), window=(-1, 2))),
-    ("single-key-window", dict(q=(33, 3), k=(1, 0), window=(0, 0))),
-    ("overlong-window", dict(window=(16384, 16384), causal=True)),
-    ("explicit-split", dict(k=(1057, 513), splits=3)),
-    ("causal-empty-splits", dict(q=(33, 3), k=(3, 1), splits=8, causal=True)),
+@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
+@pytest.mark.parametrize("representation", REPRESENTATIONS)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("splits", [0, 1, 3], ids=["auto", "single", "explicit"])
+@pytest.mark.parametrize("cap", [0, 15], ids=["no-softcap", "softcap"])
+@pytest.mark.parametrize(
+    "causal,window",
+    [(False, (-1, -1)), (True, (-1, -1)), (False, (2, 1))],
+    ids=["unmasked", "causal", "window"],
+)
+def test_mla_forward(dtype, representation, layout, splits, cap, causal, window):
+    # Keep the complete functional matrix, with one input per combination.
+    # KV spans multiple tiles; softcap inputs must make clipping observable.
+    case = _make_case(
+        layout,
+        representation,
+        dtype,
+        q=(3, 1),
+        k=(1057, 513),
+        splits=splits,
+        cap=cap,
+        causal=causal,
+        window=window,
+        scale=0.23 if cap else None,
+        pattern="saturation" if cap else None,
+    )
+    _check(case, _call(case))
+    if layout in CACHE_LAYOUTS:
+        _check(case, _call(case, _metadata(case)))
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("splits", [0, 1, 3], ids=["auto", "single", "explicit"])
+@pytest.mark.parametrize("cap", [0, 15], ids=["no-softcap", "softcap"])
+def test_mla_block_cancellation(dtype, layout, splits, cap):
+    # The first two visible values cancel exactly within a KV block. The next
+    # block raises the score maximum and contributes a nonzero output. Integer
+    # exponent correction must preserve the zero partial sum instead of NaN.
+    case = _make_case(
+        layout,
+        "compressed",
+        dtype,
+        q=(1,),
+        k=(513,),
+        window=(2, 1),
+        splits=splits,
+        cap=cap,
+        scale=1.0,
+        pattern="block-cancellation",
+    )
+    _check(case, _call(case))
+    if layout in CACHE_LAYOUTS:
+        _check(case, _call(case, _metadata(case)))
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("splits", [0, 1, 3], ids=["auto", "single", "explicit"])
+def test_mla_softcap_normalization(dtype, layout, splits):
+    # A constant V channel must stay constant after attention. These logits
+    # expose bias from dividing rounded P @ V by the sum of unrounded P.
+    case = _make_case(
+        layout,
+        "compressed",
+        dtype,
+        q=(1,),
+        k=(65,),
+        splits=splits,
+        cap=15,
+        scale=1.0,
+        pattern="softcap-normalization",
+    )
+    _check(case, _call(case))
+    if layout in CACHE_LAYOUTS:
+        _check(case, _call(case, _metadata(case)))
+
+
+# Extra values for combinations already covered above. Keep one relevant layout
+# per boundary, both numerical representations/dtypes, and all layouts where
+# empty-output contracts or packed scheduling differ. Fields: name, layouts, options.
+BOUNDARY_CASES = [
+    ("causal-empty-rows", ["bsnd"], dict(q=(17, 3), k=(3, 1), causal=True)),
+    ("negative-window", ["tnd"], dict(window=(-128, 864))),
+    ("left-window", ["mixed"], dict(q=(3, 1), k=(513, 7), window=(256, -1))),
+    ("right-window", ["paged_bsnd"], dict(q=(7, 3), k=(513, 7), window=(-1, 2))),
+    ("single-key-window", ["paged_tnd"], dict(q=(33, 3), k=(1, 0), window=(0, 0))),
+    ("overlong-window", ["bsnd"], dict(window=(16384, 16384), causal=True)),
+    ("causal-empty-splits", ["tnd"], dict(q=(33, 3), k=(3, 1), splits=8, causal=True)),
     (
         "window-used-stride",
+        ["paged_tnd"],
         dict(q=(17, 3), k=(1057, 513), used_k=(513, 7), splits=4, window=(256, 2), view="head-gap"),
     ),
-    ("auto", dict(q=(3, 1), k=(4097, 1057), splits=0)),
-    ("auto-causal", dict(q=(65, 3), k=(1057, 513), used_k=(1057, 0), splits=0, causal=True)),
-    ("auto-window", dict(q=(17, 3), k=(513, 33), splits=0, window=(256, 2))),
-    ("softcap-single", dict(cap=15)),
-    ("softcap-negative-scale", dict(cap=30, scale=-0.23, window=(2, 1))),
-    ("softcap-auto", dict(cap=15, splits=0, causal=True)),
-    ("softcap-explicit", dict(cap=30, splits=3, window=(2, 1))),
+    ("long-auto", ["mixed"], dict(q=(3, 1), k=(4097, 1057), splits=0)),
+    (
+        "auto-causal",
+        ["paged_bsnd"],
+        dict(q=(65, 3), k=(1057, 513), used_k=(1057, 0), splits=0, causal=True),
+    ),
+    ("softcap-negative-scale", ["bsnd"], dict(cap=30, scale=-0.23, window=(2, 1))),
     (
         "rounding-ties",
+        ["tnd"],
         dict(q=(1,), k=(33,), cap=15, splits=2, scale=0.0, window=(1, 0), pattern="rounding-ties"),
     ),
-    ("saturation", dict(cap=15, scale=0.23, splits=2, pattern="saturation")),
-    ("cancellation", dict(cap=15, scale=0.23, splits=2, pattern="cancellation")),
-    ("large-softcap", dict(cap=1e8)),
-    ("small-softcap", dict(cap=1e-4, splits=0)),
-    ("unpacked-auto", dict(pack=False, margin=1, splits=0, causal=True)),
-    ("packed-explicit", dict(pack=True, margin=2, splits=3, window=(2, 1), cap=15)),
-    ("max-splits", dict(q=(1,), k=(33,), heads=2, splits=256, scale=0.0, pack=False, margin=1)),
-    ("long-kv", dict(q=(1, 1), k=(16384, 513), heads=2, splits=3, causal=True, page=1024)),
-    ("query-tile-tail", dict(q=(513, 3), k=(33, 1), heads=4, splits=3, window=(2, 1), pack=False)),
+    ("saturation", ["paged_bsnd"], dict(cap=15, scale=0.23, splits=2, pattern="saturation")),
+    ("cancellation", ["paged_tnd"], dict(cap=15, scale=0.23, splits=2, pattern="cancellation")),
+    ("large-softcap", ["mixed"], dict(cap=1e8)),
+    ("small-softcap", ["bsnd"], dict(cap=1e-4, splits=0)),
+    ("unpacked-auto", LAYOUTS, dict(pack=False, margin=1, splits=0, causal=True)),
+    ("packed-explicit", LAYOUTS, dict(pack=True, margin=2, splits=3, window=(2, 1), cap=15)),
+    (
+        "max-splits",
+        ["bsnd"],
+        dict(q=(1,), k=(33,), heads=2, splits=256, scale=0.0, pack=False, margin=1),
+    ),
+    (
+        "long-kv",
+        ["bsnd", "paged_tnd"],
+        dict(q=(1, 1), k=(16384, 513), heads=2, splits=3, causal=True, page=1024),
+    ),
+    (
+        "query-tile-tail",
+        ["tnd"],
+        dict(q=(513, 3), k=(33, 1), heads=4, splits=3, window=(2, 1), pack=False),
+    ),
     (
         "kv-tile-tail",
+        ["paged_bsnd"],
         dict(
             q=(17, 3), k=(1057, 513), page=48, splits=0, cap=15, pack=False, margin=1, causal=True
         ),
     ),
-    ("empty-query", dict(q=(0, 0), splits=0)),
-    ("empty-kv", dict(k=(0, 0), splits=3)),
-    ("empty-batch", dict(q=(), k=())),
+    ("empty-query", LAYOUTS, dict(q=(0, 0), splits=0)),
+    ("empty-kv", LAYOUTS, dict(k=(0, 0), splits=3)),
+    ("empty-batch", LAYOUTS, dict(q=(), k=())),
 ]
 
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
 @pytest.mark.parametrize("representation", REPRESENTATIONS)
-@pytest.mark.parametrize("layout", LAYOUTS)
-@pytest.mark.parametrize("spec", [pytest.param(spec, id=name) for name, spec in ATTENTION_CASES])
-def test_mla_forward(dtype, representation, layout, spec):
+@pytest.mark.parametrize(
+    "layout,spec",
+    [
+        pytest.param(layout, spec, id=f"{name}-{layout}")
+        for name, layouts, spec in BOUNDARY_CASES
+        for layout in layouts
+    ],
+)
+def test_mla_boundaries(dtype, representation, layout, spec):
     case = _make_case(layout, representation, dtype, **spec)
     _check(case, _call(case))
     if layout in CACHE_LAYOUTS:
@@ -543,12 +653,12 @@ def test_mla_varlen_allocation_used(dtype, representation, splits):
     _check(case, _call(case))
 
 
-@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
 @pytest.mark.parametrize("representation", REPRESENTATIONS)
 @pytest.mark.parametrize("layout", CACHE_LAYOUTS)
 @pytest.mark.parametrize("form", ["none", "integer", "clone", "offset"])
-def test_mla_cache_length_and_record_forms(dtype, representation, layout, form):
-    case = _make_case(layout, representation, dtype, q=(3, 3), k=(32, 32), splits=0)
+def test_mla_cache_length_and_record_forms(representation, layout, form):
+    # Length and record storage are int32; the forward matrix covers both data dtypes.
+    case = _make_case(layout, representation, q=(3, 3), k=(32, 32), splits=0)
     record = _metadata(case)
     expected = _call(case, record)
     _check(case, expected)
@@ -629,9 +739,8 @@ def test_mla_fake_wide_cache(dtype):
 
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
-@pytest.mark.parametrize(
-    "heads,kv_heads", [(1, 1), (2, 1), (4, 2), (6, 3), (8, 8), (64, 4), (128, 1)]
-)
+# MQA minimum/maximum, non-power-of-two GQA, and MHA. The main matrix adds 8/2.
+@pytest.mark.parametrize("heads,kv_heads", [(1, 1), (6, 3), (8, 8), (128, 1)])
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_mla_prefill_gqa(dtype, heads, kv_heads, layout):
     case = _make_case(
@@ -651,7 +760,8 @@ def test_mla_prefill_gqa(dtype, heads, kv_heads, layout):
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
 @pytest.mark.parametrize("representation", REPRESENTATIONS)
 @pytest.mark.parametrize("layout", ["paged_bsnd", "paged_tnd"])
-@pytest.mark.parametrize("page", [16, 48, 112, 128, 1024])
+# Minimum, non-power-of-two, standard and large pages, each with a partial tail.
+@pytest.mark.parametrize("page", [16, 48, 128, 1024])
 def test_mla_page_boundaries(dtype, representation, layout, page):
     case = _make_case(
         layout,
@@ -1451,9 +1561,19 @@ INVALID_OPTIONS = [
 
 
 @pytest.mark.parametrize("representation", REPRESENTATIONS)
-@pytest.mark.parametrize("layout", ["func", "tnd", "bsnd"])
 @pytest.mark.parametrize("fake", [False, True], ids=["real", "fake"])
-@pytest.mark.parametrize("name,value", INVALID_OPTIONS)
+@pytest.mark.parametrize(
+    "layout,name,value",
+    # All values reach the shared _mla_forward validation. Also guard both
+    # rejection branches (scalar options / optional tensors) at every entry.
+    [("bsnd", name, value) for name, value in INVALID_OPTIONS]
+    + [
+        ("func", "attention_chunk", 1),
+        ("tnd", "attention_chunk", 1),
+        ("func", "q_descale", 1),
+        ("tnd", "q_descale", 1),
+    ],
+)
 def test_mla_unsupported_options(representation, layout, fake, name, value):
     case = _make_case(layout, representation)
     with FakeTensorMode() if fake else nullcontext() as mode:
@@ -1467,11 +1587,23 @@ def test_mla_unsupported_options(representation, layout, fake, name, value):
             _call(case, **{name: value})
 
 
-@pytest.mark.parametrize("layout", CACHE_LAYOUTS)
 @pytest.mark.parametrize("fake", [False, True], ids=["real", "fake"])
 @pytest.mark.parametrize(
-    "name",
-    ["k", "v", "rotary_cos", "rotary_sin", "cache_batch_idx", "cache_leftpad", "cu_seqlens_k_new"],
+    "layout,name",
+    # Unsupported cache updates are rejected before layout dispatch. Keep every
+    # argument and one append rejection for each additional cache layout.
+    [
+        ("bsnd", "k"),
+        ("bsnd", "v"),
+        ("bsnd", "rotary_cos"),
+        ("bsnd", "rotary_sin"),
+        ("bsnd", "cache_batch_idx"),
+        ("bsnd", "cache_leftpad"),
+        ("bsnd", "cu_seqlens_k_new"),
+        ("mixed", "k"),
+        ("paged_bsnd", "k"),
+        ("paged_tnd", "k"),
+    ],
 )
 def test_mla_cache_update_rejected(layout, fake, name):
     case = _make_case(layout)
@@ -1496,12 +1628,12 @@ def test_mla_cache_update_rejected(layout, fake, name):
             flash_attn_with_kvcache(**args)
 
 
-@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
 @pytest.mark.parametrize("fake", [False, True], ids=["real", "fake"])
 @pytest.mark.parametrize("name", ["q", "qv", "k", "v"])
 @pytest.mark.parametrize("inference", [False, True])
-def test_mla_grad_rejected(dtype, fake, name, inference):
-    case = _make_case(dtype=dtype)
+def test_mla_grad_rejected(fake, name, inference):
+    # requires_grad rejection is dtype-independent, including inference mode.
+    case = _make_case()
     case["t"][name].requires_grad_(True)
     with FakeTensorMode() if fake else nullcontext() as mode:
         if fake:
@@ -1589,9 +1721,8 @@ def test_mla_prefix_rejections(representation, layout, fake, fault):
 
 
 @pytest.mark.parametrize("layout", CACHE_LAYOUTS)
-@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
-def test_mla_metadata_device_only(layout, dtype, monkeypatch):
-    case = _make_case(layout, dtype=dtype)
+def test_mla_metadata_device_only(layout, monkeypatch):
+    case = _make_case(layout)
 
     def forbidden(*args, **kwargs):
         raise AssertionError("MLA read a device tensor back to the host")

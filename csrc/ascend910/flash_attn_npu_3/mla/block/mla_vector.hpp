@@ -15,7 +15,8 @@
 // Optional compile-time causal/band masks; existing specializations retain their defaults.
 // TND O is [Tq,Hq,512]; FA3 LSE is [Hq,Tq] (source LSE is [Tq,Hq]). Scale is launch data.
 // SoftmaxFlashV2, aMLA, all UB partitions, casts and events follow the source.
-// Cross-S2 nUpdate retains the source int32 atomic update of the FP32 PV bits.
+// Cross-S2 nUpdate retains the source int32 correction of the FP32 PV bits,
+// preserving zero accumulators when cancellation occurs within a KV block.
 #pragma once
 #include "mla_cube.hpp"
 #include "../tile/mla_vector_ops.hpp"
@@ -374,6 +375,33 @@ __aicore__ inline void MlaVector<InputT, IsTnd, IsCausal, IsWindow, IsPartial>::
     WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
 
     Cast(tmpMMResCastTensor, mmResUb, AscendC::RoundMode::CAST_ROUND, computeSize);
+    if (constInfo.softcap != 0.0f) {
+        // Normalize the actual input-dtype P consumed by the Cube. Using its
+        // pre-cast sum amplifies weight-rounding bias for nearly constant V.
+        AscendC::PipeBarrier<PIPE_V>();
+        Cast(mmResUb, tmpMMResCastTensor, AscendC::RoundMode::CAST_NONE, computeSize);
+        AscendC::PipeBarrier<PIPE_V>();
+        const uint32_t base = mSplitInfo.nBufferStartM / 2 + startRow;
+        const uint32_t current = (info.loop % constInfo.preLoadNum) * SOFTMAX_TMP_BUFFER_OFFSET / sizeof(T) + base;
+        LocalTensor<T> sum = aMlaSumUb[current];
+        Tile::RowSum(sum, mmResUb, dealRowCount, columnCount, actualColumnCount);
+        if (!info.isFirstSInnerLoop) {
+            const uint32_t previous =
+                ((info.loop - 1) % constInfo.preLoadNum) * SOFTMAX_TMP_BUFFER_OFFSET / sizeof(T) + base;
+            LocalTensor<T> scaledSum = tmpBuff1.Get<T>();
+            LocalTensor<uint8_t> nonzero = attenMaskTmpBuff.Get<uint8_t>();
+            AscendC::PipeBarrier<PIPE_V>();
+            CompareScalar(nonzero, aMlaSumUb[previous], FLOAT_ZERO, CMPMODE::NE, (dealRowCount + 63) / 64 * 64);
+            AscendC::PipeBarrier<PIPE_V>();
+            Add(scaledSum.template ReinterpretCast<int32_t>(), aMlaSumUb[previous].template ReinterpretCast<int32_t>(),
+                outputBuff2.Get<int32_t>()[startRow], dealRowCount);
+            AscendC::PipeBarrier<PIPE_V>();
+            Select(scaledSum, nonzero, scaledSum, FLOAT_ZERO, SELMODE::VSEL_TENSOR_SCALAR_MODE, dealRowCount);
+            AscendC::PipeBarrier<PIPE_V>();
+            Add(sum, sum, scaledSum, dealRowCount);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+    }
     SetFlag<AscendC::HardEvent::V_MTE2>(SYNC_INPUT_BUF1_FLAG + pingpongFlag);
 
     SetFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF1_FLAG);
@@ -431,18 +459,39 @@ MlaVector<InputT, IsTnd, IsCausal, IsWindow, IsPartial>::ProcessAmlaNupdate(cons
         uint64_t baseoffset = (info.bn2IdxInCurCore % constInfo.preLoadNum) * constInfo.bmm2ResUbSize +
                               (mSplitInfo.nBufferStartM + mSplitInfo.vecStartM + loop * mSplitSize) * headDim;
 
-        SetAtomicAdd<int32_t>();
         DataCopyParams dataCopyParams;
         dataCopyParams.blockCount = static_cast<uint16_t>(processMSize);
         dataCopyParams.blockLen = dGroupSize * sizeof(int32_t) / ONE_BLOCK_SIZE; // 每个block是128个元素，单位为32B
         dataCopyParams.srcStride = 0; // 前面一个数据块的尾与后面数据块的头的间隔
         dataCopyParams.dstStride =
             static_cast<uint16_t>((headDim - dGroupSize) * sizeof(int32_t) / ONE_BLOCK_SIZE); // 单位为32B
-        for (uint32_t i = 0; i < headDim / dGroupSize; i++) {                                 // 4=512/128
-            DataCopy(mm2ResInt32Gm[baseoffset + i * dGroupSize], tmpQue, dataCopyParams);
+        DataCopyParams readParams = dataCopyParams;
+        readParams.srcStride = dataCopyParams.dstStride;
+        readParams.dstStride = 0;
+        LocalTensor<T> accumulator = tmpBuff1.Get<T>();
+        LocalTensor<int32_t> accumulatorBits = accumulator.template ReinterpretCast<int32_t>();
+        LocalTensor<uint8_t> nonzero = attenMaskTmpBuff.Get<uint8_t>();
+        const uint32_t count = processMSize * dGroupSize;
+        for (uint32_t i = 0; i < headDim / dGroupSize; i++) {
+            SetFlag<AscendC::HardEvent::V_MTE2>(0);
+            WaitFlag<AscendC::HardEvent::V_MTE2>(0);
+            DataCopy(accumulator, mm2ResGm[baseoffset + i * dGroupSize], readParams);
+            SetFlag<AscendC::HardEvent::MTE2_V>(0);
+            WaitFlag<AscendC::HardEvent::MTE2_V>(0);
+            // Integer exponent correction is only valid for nonzero FP32
+            // values. Adding a negative correction to zero produces NaN,
+            // which would discard the contributions of subsequent blocks.
+            CompareScalar(nonzero, accumulator, FLOAT_ZERO, CMPMODE::NE, count);
+            AscendC::PipeBarrier<PIPE_V>();
+            Add(accumulatorBits, accumulatorBits, tmpQue, count);
+            AscendC::PipeBarrier<PIPE_V>();
+            Select(accumulator, nonzero, accumulator, FLOAT_ZERO, SELMODE::VSEL_TENSOR_SCALAR_MODE, count);
+            SetFlag<AscendC::HardEvent::V_MTE3>(0);
+            WaitFlag<AscendC::HardEvent::V_MTE3>(0);
+            DataCopy(mm2ResGm[baseoffset + i * dGroupSize], accumulator, dataCopyParams);
+            SetFlag<AscendC::HardEvent::MTE3_V>(0);
+            WaitFlag<AscendC::HardEvent::MTE3_V>(0);
         }
-
-        SetAtomicNone();
         SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
     }
     SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);

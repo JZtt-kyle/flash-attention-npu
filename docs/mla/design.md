@@ -960,7 +960,11 @@ Q 使用 BSND 分配容量或 TND 分配前缀，可选 Q-used 不移动 64 位�
 
 QK 的 L1 循环顺序为 N→K→M，M/N 子块均为 128。576 维并非先算完整内容再算完整 RoPE：两组 288 依次为 `[content 0:256, rope 0:32]`、`[rope 32:64, content 256:512]`，每组按 K=96 的 L0 片累加到 FP32 L0C。Q 的 64 维 RoPE 一次复制跨越相邻 Q/P 槽，尾 M 用 padding 偏移保持相邻关系；复制前必须同时取得两个槽的释放事件。最终 QK 以 FP32 ND 写入 GM，再乘 scale。
 
-Vector 保留 `SoftmaxFlashV2<float,...WITHOUT_BRC>` 和其动态 tiling；随后执行 `AmlaVecCompute`：计算 `round(-max/ln2)`、指数缩放因子、FP16/BF16 因子往返转换及 `cof/eps` 修正。P 在缩放后以 `CAST_ROUND` 转成输入 dtype。跨 S2 块的 `nUpdate` 含 `-30` 截断、`1.5` 修正、`1e-6` 和 `2^23`，以 int32 原子加更新 FP32 PV 缓冲的位表示；不能替换为常规 `O *= exp(old_max-new_max)`。
+Vector 保留 `SoftmaxFlashV2<float,...WITHOUT_BRC>` 和其动态 tiling；随后执行 `AmlaVecCompute`：计算 `round(-max/ln2)`、指数缩放因子、FP16/BF16 因子往返转换及 `cof/eps` 修正。P 在缩放后以 `CAST_ROUND` 转成输入 dtype。跨 S2 块的 `nUpdate` 含 `-30` 截断、`1.5` 修正、`1e-6` 和 `2^23`，按 int32 加法更新 FP32 PV 缓冲的位表示；不能替换为常规 `O *= exp(old_max-new_max)`。
+
+R5 修复这一位修正的零值边界：块内 PV 恰好抵消为 0 时，固定源的负 int32 原子加可将零位模式变成 NaN，随后丢失后续块贡献并在输出端清零。用户已授权修复此数值问题；目标在现有 Cube/Vector 握手之间读回 PV，在 UB 执行同一 int32 加法，但对原零值保留 0，再写回。复用原 tmp1/mask 缓冲，读前等待 Vector、写前等待 Vector、写后等待 MTE3，避免与下一组或 LSE 复用冲突；不增加 workspace 或改协议。非零值的位运算保持源顺序，数值阈值不变。此边界是已实测、明确修复的固定源缺陷，不适用“源逐元素一致即可豁免数学失败”；公开 `test_mla_block_cancellation` 用解析输入覆盖五布局、双 dtype、三 split 和 softcap 开/关。
+
+非零 softcap 的输出分母使用实际送入 Cube 的输入 dtype P 总和，避免 P 的舍入偏差被近常量 V 放大。`Tile::RowSum` 复用固定源 `vector_common.h` 的行归约，在原 FP32 score 缓冲中归约 Cast 回 FP32 的 P；`aMlaSumUb` 保存各块总和，前块按相同 nUpdate 位修正后累加，零总和仍保留 0。LSE 和 split 归并权重继续使用未量化的 softmax sum/max；cap=0 保留源分母。此变更不增加 UB 或 GM 分配，公开 `test_mla_softcap_normalization` 用非均匀 logits 与常量 V 通道看护五布局、双 dtype 和三 split。
 
 PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128。首 S2 块覆盖写 FP32 GM，后续块在 nUpdate 完成后以 FP32 原子加写回。V2 每块消费完成事件，仅在最后 S2 块写输出：保留源对 `abs(PV)>1e10` 的清零、除以 `aMlaSum`、FP16 `CAST_ROUND` / BF16 `CAST_RINT`；LSE 则从原 softmax 的 max/sum 计算自然对数。单块范围也经过 aMLA 因子转换，不能省略这段数值路径。
 
@@ -1018,7 +1022,7 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 | `syncC1V1=7` | Cube `PIPE_FIX` → V1 wait | QK 的 FP32 GM 写回完成 |
 | `syncV1C2=8` | V1 `PIPE_MTE3` → Cube wait | P 写回完成，PV 可以加载 |
 | `syncC2V1=4` | Cube `PIPE_FIX` → 下一次 V1 nUpdate wait | 前次 PV 完成后才能修改其位表示；Cube 初始化先发一个 token，Vector 结束回收最后一个 |
-| `syncV1NupdateC2=5` | V1 `PIPE_MTE3` → PV 首次 Fixpipe 前 wait | nUpdate 原子加完成；首块跳过 nUpdate 计算也必须发/收事件 |
+| `syncV1NupdateC2=5` | V1 `PIPE_MTE3` → PV 首次 Fixpipe 前 wait | nUpdate 位修正写回完成；首块跳过 nUpdate 计算也必须发/收事件 |
 | `syncC2V2=9` | Cube `PIPE_FIX` → V2 wait | PV 写回完成；V2 在非末块也消费事件 |
 
 `syncV0C1=6` 在源常量中存在，但此非量化 dense 路径不使用。L1 Q/P 的本地事件为 2/3/4/5，K/V 为 6/7/1，保留 `MTE1_MTE2` 释放和 `MTE2_MTE1` 就绪配对；L0 的 `M_MTE1` / `MTE1_M` 与 unitFlag 共同约束覆盖写。Vector 保留 input 的 `V_MTE2` / `MTE2_V` 和 output 的 `MTE3_V` / `V_MTE3`；`AllocEventID/FreeEventID` 和零行同步不能被提前返回绕过。启用 LSE 时，源 `InitOutputSingleCore` 的初始化与 `SyncAll` 也在 dense 执行链内。
@@ -1160,6 +1164,8 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 INT8 M19–M21 暂不要求 graph 性能的用户授权及边界见 [3.4](#34-int8-压缩-mla-扩展)，实测失败和交付判定在 [status](status.md) 分别记录。
 
+**R5 收尾验收例外：** 2026-10-19 用户在复核同输入、同设备的修复前后及 CANN 对照后，明确确认“记录既有性能差距，提交本轮改动”。原调度/eager 固定矩阵复测通过；新增的 10 个压缩 MLA 默认路径配置在修复前后均超过公开平均门槛，该既有差距按本次授权接受后收尾。保留所有实测结果、退化明细和原始证据，不将未达标写成通过，不混合不同集合的平均。该例外只适用于 R5 测试精简与数值修复提交，不扩大到后续改动；默认 `mean_ratio <= 1.0` 和正确性要求不变，具体结果见 [status](status.md)。
+
 图内 Kernel 采样须能追溯到重放时的实际任务及调用身份。捕获准备与外层 Fill/MODEL_EXECUTE 保留于原始 trace，不能代替 attention/metadata/merge 时间；模型任务缺失、阶段缺失或身份混用均不能验收。图 Kernel 使用独立采样进程：全部 eager 发射族在 profiler 启动前初始化，首次图捕获位于 RECORD 阶段，以避免本机 CANN 的提前捕获及初始化临时流关联缺口。原始 `op_summary` 的 Model ID、阶段与任务身份必须完整，不能补写 ID 或用外层任务替代。完整重放 wall 在另一进程关闭 profiler 计时，仍包含外层执行成本，不按 profiler 任务筛选调整。实测环境与原始证据见 [status](status.md)。
 
 **覆盖：** 非量化为两种表示 × FP16/BF16 × dense/TND/PA × mask × 长短 KV × 单/多 query × 分组/尾块/stride；加 metadata 有无、重复使用、不同 scale、长度变更、split 自动/显式、graph replay。可采用代表性组合加针对性边界测试，不要求机械的全笛卡尔积，但每项源能力都要能追溯到用例或明确排除理由。INT8 按 3.4 的混合 dtype、两布局及源有效组合单列覆盖，不套用非量化的全部选项。
@@ -1188,7 +1194,13 @@ INT8 的一般随机输入受固定源动态 P 量化和整体 Q/K scale 语义�
 
 测试只保留公开功能 E2E。默认运行单文件的完整显式参数表；使用 pytest `-k` 或精确节点定位，仓库已有 `--random-sample` 仅用于 CI quick mode。没有 MLA 私有两两裁剪、`--full-matrix`、`--max-cases` 或 `--resume` 入口，不再让隐藏的收集钩子改变单文件用例集合。
 
-每个具名输入对应独立边界或行为，公共布局/表示/dtype 用参数化表达，重复的阶段性 `daily`/`representative`/`behavior` 包装合并。页大小保留 16/48/112/128/1024 的代表边界；长 KV、Q tile 尾部、最大 split、空行和 INT8 连续空尾段仍实际执行。性能和组件诊断不混入默认 pytest。
+非量化前向主矩阵完整展开五布局 × 两种表示 × FP16/BF16 × 三 mask（无 mask/causal/window）× 三 split（自动/单片/显式）× softcap 关/开，每个组合保留一个代表输入。KV 跨多个 tile；开启 softcap 时使用已有 saturation 输入，使忽略 softcap 能产生可检查的数值差异。不能只检查开关单独可用，也不以接近普通 FA3 某个选跑子集的数量为目标。
+
+同一功能组合的额外取值放在 `BOUNDARY_CASES`，按边界相关布局保留双表示/双 dtype。全局空 batch/Q/KV 和显式 packed/unpacked 仍跨五布局；长 KV 保留非分页与分页，窗口归一化、全空行、Q/KV tile 尾部、最大 split、舍入、饱和与抵消均保留。GQA 保留 1/1、6/3、8/8、128/1，主矩阵补充 8/2；页大小保留 16/48/128/1024，48 与 112 同属非二次幂且有页尾的类别，只保留 48。
+
+已发现的数值回归保留具名确定性用例。`test_mla_block_cancellation` 使同一 KV 块的两个可见值精确抵消，下一块提高 score 最大值并贡献非零输出；`test_mla_softcap_normalization` 用非均匀 logits 的常量 V 通道检查舍入后的归一化。两者不依赖 pytest 节点种子，同时检查适用入口的有/无 metadata。前者看护跨块位修正，区别于原来的 content/RoPE 分数抵消边界，不以其他随机组合代替。
+
+stride、fake/compile、图模式、动态长度/前缀与生命周期组合完整保留；INT8 现有数值、长 KV/连续空尾段、scale、地址、拒绝和冷捕获集合完整保留。共享标量错误的全部取值在 cache 入口运行，两种表示和 real/fake 均保留，func/varlen 另保留标量与可选 tensor 两条拒绝分派。cache 更新在布局分派前统一拒绝，每个参数保留，并在其他布局保留 append 拒绝。int32 长度/metadata 的存储形式、无 host readback 和与 dtype 无关的 grad 拒绝使用 BF16 代表；数据 dtype 的数值、混合 dtype 错误及空 accumulator 契约继续覆盖 FP16/BF16。性能和组件诊断不混入默认 pytest。
 
 测试代码或输入构造改变后，重新收集并实跑受影响 E2E，不能把重命名前的通过数计作新运行。生产未变且扩展哈希与已验收记录一致时不为测试整理重建扩展；实际加载路径、环境、命令、用例清单、JUnit 和日志记录在仓库外工作目录。数学缓存只减少 reference 计算，待测公开调用仍执行；证据缺失不继承。必要检查通过后只做文档、质量检查和提交收尾。
 
@@ -1212,7 +1224,9 @@ python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py -k int8
 
 | 公开行为 | 测试映射 |
 | --- | --- |
-| BSND、TND、混合、BSND PA、TND PA；三 mask、自动/单/显式 split、softcap、pack_gqa/sm_margin | `test_mla_forward` 的具名参数表，FP16/BF16；包括长 KV、尾块、最大 split、空 batch/Q/KV |
+| BSND、TND、混合、BSND PA、TND PA；三 mask、自动/单/显式 split、softcap | `test_mla_forward` 的完整功能矩阵，每组合一个输入，FP16/BF16 |
+| pack_gqa/sm_margin、窗口/数值边界、长 KV、尾块、最大 split、空 batch/Q/KV | `test_mla_boundaries` 的具名参数表，布局选择与组合保留规则见 7.3 |
+| 块内精确抵消后的跨块贡献、softcap 实际 P 总和归一化 | `test_mla_block_cancellation`、`test_mla_softcap_normalization`，不依赖随机种子的公开回归 |
 | dense func 返回值、默认 scale、O-only、全局空 K | `test_mla_func`、`test_mla_func_empty`、`test_mla_default_options` |
 | stride、offset、广播、乱序/重复页、只读 cache、不同内容复用 | `test_mla_views_and_reuse`、`test_mla_page_boundaries` |
 | TND allocation/used 不混用，长度原地变化 | `test_mla_varlen_allocation_used`、`test_mla_graph_prefix_updates` |
