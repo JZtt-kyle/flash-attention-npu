@@ -224,6 +224,8 @@ TND 的已用页预检跨完整向量 grid 分工，每个 batch 的页数读取
 
 TND 可跨 stream 复用 eager 中已完成初始化的固定 causal mask。按设备持有 tensor/event，完成状态只由 event 非阻塞查询确认，不读取用户数据；未完成时回退到原 stream 局部路径。首次冷捕获的 mask 仍由该图持有，不发布尚未执行的初始化；按设备缓存的生命周期不依赖创建它的主机线程。BSND 的 stream 局部缓存不变。
 
+两布局的公开 balanced 分派均在数值流水及 FD 归并结束后，由最后一个使用核的首 AIV 初始化源分核终点之后的空 KV 输出；TND 零 Q 段无写入。只处理实际 Q 非空且 KV 为零的尾段，保留原数值任务终点及其 flush，不改调度记录或量化算法。BSND 非 balanced 路径继续按原任务初始化。该行为也适用于图重放后长度变零，不能依赖输出 allocation 的旧内容。
+
 BSND/TND 公开性能使用合计最多 100 个固定配置，eager 和 graph 按既定等权平均 ≤1 分别报告；INT8 阶段沿用同一集合收尾。组件证据不能代替公开验收。用户于 2026-10-19 在 M19 单次暂缓之后进一步明确“图模式性能暂不做要求”：当前 INT8 M19–M21 的 graph 性能暂不作为提交阻塞，直到用户恢复该要求；eager 性能、必要正确性（含图重放）、累计回归和质量检查仍须通过。保留已有 graph 实测失败与完整原始证据，不把暂缓记为达标；后续无需为图性能单独优化或重采，若随 eager 工具采样仍如实报告。性能工具、固定集合、采样协议和默认数值门槛保持不变。
 
 ## 4. 功能边界
@@ -306,7 +308,7 @@ BSND/TND 公开性能使用合计最多 100 个固定配置，eager 和 graph �
 
 ## 5. metadata 设计
 
-metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链，以及 func/varlen 的内部生成链路。兼容公开调用语义，NPU 记录布局由本后端管理，不与 CUDA buffer 互换。以下 v1–v47 均为非量化协议，不能用于 INT8 内容；INT8 BSND 的 v48 协议见 [3.4](#34-int8-压缩-mla-扩展)。B 表示 batch，以下字数单位均为 int32。记录中的 token 起点属于分配坐标，不是元素或字节地址；真实地址还须结合各输入的 stride，见 [6.4](#64-输入-stride-与地址校验)。
+metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链，以及 func/varlen 的内部生成链路。兼容公开调用语义，NPU 记录布局由本后端管理，不与 CUDA buffer 互换。以下 v1–v47 均为非量化协议，不能用于 INT8 内容；INT8 BSND/TND 的 v48/v49 协议见 [3.4](#34-int8-压缩-mla-扩展)。B 表示 batch，以下字数单位均为 int32。记录中的 token 起点属于分配坐标，不是元素或字节地址；真实地址还须结合各输入的 stride，见 [6.4](#64-输入-stride-与地址校验)。
 
 | 协议 | version / kind | 精确字数 | 表达的布局与长度 |
 | --- | --- | --- | --- |
@@ -1357,3 +1359,27 @@ M14 阶段使用累计小输入 E2E、上述五布局公开专项、普通 FA3 �
 | 非量化阶段公开性能 | 沿用图 40 配置与调度 56 配置，共 96：先 `graph-profile-check gqa-options-profile-check`，再 `graph-profile gqa-options-schedule-profile`。双方完整调用段、R、采样、适用性和平均规则均按第 7 节；eager 与图独立报告，正 softcap 和不同原生 FD 策略单列 |
 
 非量化收尾不扩张第 4 节排除项，也不把平台配置检查记作 910C 实机通过。性能失败及已授权的例外须在当次 status 中分别说明，不能由正确性或普通回归通过推断性能达标。
+
+### 7.8 INT8 收尾映射
+
+M21 按 3.4 的 INT8/BF16/FP32 混合签名验收两种 query 布局，不从非量化矩阵扩张范围。
+固定源有效几何保存在 [`SOURCE_CASES`](../../tests/mla/support/mla_int8_cases.py)，
+两布局专项保留具名组合；累计日常清单是 [`regression_cases.py`](../../tests/mla/regression_cases.py)
+中的 `int8`、`int8_bsnd` 和 `int8_tnd`，性能保持 7.1 的 39 个固定输入。
+实际用例、耗时、通过/源精度限制与未实测项由统一驱动证据及 status 记录。
+
+| 范围 | 公开入口与验收映射 |
+| --- | --- |
+| QINT01：BSND + ND PA、无 mask/右下 causal、直接/普通 FD/快速 FD | [`int8_bsnd/test_public.py`](../../tests/mla/e2e/int8_bsnd/test_public.py) 的 `test_source` 遍历固定 BSND 源几何；`test_daily` 覆盖单片/自动及不同视图；源组件 partial 与公开输出同输入核对。含 Hq 1..128、Q=1/2/4/16/32、尾页、零 KV、causal 全空行与 4097 长 KV 代表。`test_trailing_empty_segments` 以六个具名组合检查单/多 Q、129/16385 KV、自动/单片下连续多个尾空段，日常保留 decode/causal 两例 |
+| QINT02：TND + ND PA、非均匀/零 Q、allocation 与逐 token/head scale | [`int8_tnd/test_public.py`](../../tests/mla/e2e/int8_tnd/test_public.py) 的 `test_source`、`test_views`、`test_fast_fd`、`test_allocation_corners`、`test_disjoint_nonempty_allocations`、`test_trailing_empty_segments`；检查原前缀、非连续 storage poison、首/中/尾空段、单片/自动及真实 partial，LSE 使用公开 `[Hq,Tq]` |
+| QINT03：量化极值、零 scale、ND 地址与空值 | 两布局 `test_public_scale_values`、`test_views`、`test_empty`；Q/K/V scale 分别为零、INT8 -128/127、逐 head 带符号 scale，Q/scale/page/row/table stride。固定源逐元素一致与独立 FP32/FP64 数学分开判定；M18 动态 P/舍入组件单元仅用于该模块开发，不累计继承为阶段 E2E |
+| 真实/fake/compile、metadata 与生命周期 | 两布局 `test_fake_compile`、`test_optional_lengths_and_record_views`、`test_streams_and_reuse`；TND 的 `test_output_only` 还覆盖 O-only real/fake/compile/图。静态 shape/dtype 与真实分派、四项返回、scale 更新、记录克隆/offset 复用均覆盖 |
+| 固定/动态图及过期记录 | 两布局 `test_graph` 的 implicit/reuse/generate 三入口与具名源几何，TND 另测 external 记录更新；scale 原地更新、长度变化、TND 前缀变化，及 `test_first_mask_use_inside_capture`。TND `test_cold_mask_lifetime` 在独立进程覆盖双冷图和创建线程退出后的重放；过期 KV/Q 记录另以 Trap 验证 |
+| 明确拒绝与设备值安全 | 两布局 [`test_boundaries.py`](../../tests/mla/e2e/int8_bsnd/test_boundaries.py) / [`test_boundaries.py`](../../tests/mla/e2e/int8_tnd/test_boundaries.py) 的 real/fake `test_rejections` 与隔离 `test_device_trap`：混合 dtype/scale shape、非法 Q/Hq、非 128 页、多 Q 无 mask、窗口/softcap/多 split/非默认有效调度、descale/append/rotary/grad、长度/前缀/页越界及损坏 metadata。[`int8/test_unconnected.py`](../../tests/mla/e2e/int8/test_unconnected.py) 保留缺 scale、非 PA metadata 及 compile 拒绝 |
+| 用户示例与回归 | [`mla_int8_examples.py`](../../tests/mla/support/mla_int8_examples.py) 直接调用公开 API，演示 BSND/TND、非均匀 KV、TND 零 Q、causal、metadata 复用、scale 更新和图内重生成；[`int8/test_examples.py`](../../tests/mla/e2e/int8/test_examples.py) 验证 shape/dtype、V scale 倍增、partial/LSE 与尾空行，纳入日常。`examples-check` 同时检查原 FP16/BF16 示例；累计 `e2e`、`ordinary`、`graph-ordinary` 维护相关回归 |
+| 来源与平台 | 迁移源码和版权映射见 3.4；Kernel/Block/Tile 与 host 调度保留固定源标识，不修改 CATLASS 或 CANN。`unit-platform` 使用生产平台查询检查 CANN 910B/C 配置；设备数值和性能仅实测 910B，910C 未实测 |
+| 阶段公开性能 | `int8-public-profile-tools` 先检查两布局现有采样汇总的成功/失败、缺失/重复/非法样本和身份，及统一驱动失败传播；再分别执行 `int8-bsnd-profile-check/profile` 与 `int8-tnd-profile-check/profile`。24+15 配置、三入口 R=1/4、预热和采样边界不变；源 NZ pack 准备成本与双方调用内转换成本分别保留，eager 与 graph 独立报告 |
+
+阶段正确性使用 `--suite detail-int8_bsnd detail-int8_tnd e2e ordinary graph-ordinary`。
+示例只验证公开使用流程，不能替代固定源或双数学精度验收。graph 性能暂缓按 3.4 的用户授权执行，
+不改变工具默认门槛，也不把 graph 失败、独立数学源限制或 910C 未实测记为通过。

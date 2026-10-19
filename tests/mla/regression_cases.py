@@ -208,12 +208,15 @@ def daily_suites():
     suites["int8"] = [
         "tests/mla/e2e/int8/test_unconnected.py::test_public_int8_stays_rejected",
         "tests/mla/e2e/int8/test_unconnected.py::test_compile_int8_stays_rejected",
+        "tests/mla/e2e/int8/test_examples.py::test_examples",
     ]
     suites["int8_bsnd"] = [
         "tests/mla/e2e/int8_bsnd/test_public.py::test_daily",
         "tests/mla/e2e/int8_bsnd/test_public.py::test_fake_compile",
         "tests/mla/e2e/int8_bsnd/test_public.py::test_graph[8-generate]",
         "tests/mla/e2e/int8_bsnd/test_public.py::test_empty",
+        "tests/mla/e2e/int8_bsnd/test_public.py::test_trailing_empty_segments[decode-auto-tail]",
+        "tests/mla/e2e/int8_bsnd/test_public.py::test_trailing_empty_segments[causal-auto-tail]",
     ]
     suites["int8_tnd"] = [
         "tests/mla/e2e/int8_tnd/test_public.py::test_daily",

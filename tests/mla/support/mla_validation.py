@@ -92,7 +92,10 @@ SPLIT_KV_DEVICE_SUITES = {
     "split-kv-attention-profile",
 }
 SUITES = {
-    "examples-check": ["tests/mla/e2e/interface/test_examples.py"],
+    "examples-check": [
+        "tests/mla/e2e/interface/test_examples.py",
+        "tests/mla/e2e/int8/test_examples.py",
+    ],
     "platform-tools": ["tests/mla/unit/tools/test_mla_platform_tools.py"],
     "platform-sanitize": ["tests/mla/unit/platform/test_platform.py"],
     "graph-tools": [
@@ -1093,6 +1096,11 @@ SUITES = {
 }
 SUITES.update(
     {
+        "int8-public-profile-tools": [
+            "tests/mla/unit/int8_bsnd/test_profile_tools.py",
+            "tests/mla/unit/int8_tnd/test_profile_tools.py",
+            "tests/mla/unit/tools/test_mla_validation.py::test_success_failure_interruption_and_resume[int8-public-profile-tools]",
+        ],
         "int8-tnd-check": [
             "tests/mla/e2e/int8_tnd/test_public.py::test_daily",
             "tests/mla/e2e/int8_tnd/test_public.py::test_fake_compile",
@@ -1115,6 +1123,7 @@ SUITES.update(
         "int8-bsnd-check": [
             "tests/mla/e2e/int8_bsnd/test_public.py::test_daily",
             "tests/mla/e2e/int8_bsnd/test_public.py::test_fake_compile",
+            "tests/mla/e2e/int8_bsnd/test_public.py::test_trailing_empty_segments",
         ],
         "int8-bsnd-source": [
             "tests/mla/e2e/int8_bsnd/test_public.py::test_source",
@@ -1265,6 +1274,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "int8-public-profile-tools",
     "unit-int8_bsnd",
     "unit-int8_tnd",
     "int8-tools",
@@ -1428,6 +1438,8 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
+    if suite == "int8-public-profile-tools":
+        return {}
     if suite in {"unit-int8_bsnd", "unit-int8_tnd"}:
         from tests.mla.support.mla_validation_build import files_identity
         from tests.mla.support.mla_int8_native import native_vendor, package_root

@@ -387,7 +387,7 @@ def flash_attn_varlen_func(
 
 #### MLA on Ascend 910B/C
 
-The three v3 entry points accept compressed MLA with `q/k` head dimension 64,
+For FP16/BF16, the three v3 entry points accept compressed MLA with `q/k` head dimension 64,
 `qv/v` head dimension 512 and one KV head. `q` and `k` contain the RoPE components;
 `qv` is query content and `v` is shared content K/V. Scores are
 `(q @ k.T + qv @ v.T) * softmax_scale`; the default scale is `1 / sqrt(576)`.
@@ -408,8 +408,9 @@ Both representations support all five layouts: BSND/BSND, TND/TND, TND/BSND,
 BSND/ND paged KV, and TND/ND paged KV. Nonnegative finite `softcap` is supported;
 zero disables it. `pack_gqa=None/True/False` selects default/packed/unpacked
 scheduling, and `sm_margin` reserves AIC cores with `0 <= sm_margin < physical_AIC`.
-`attention_chunk=0` and `rotary_interleaved=True` are required. Quantization,
-arbitrary masks, external NZ caches, KV appends and backward are outside this MLA scope.
+`attention_chunk=0` and `rotary_interleaved=True` are required. Arbitrary masks,
+external NZ caches, KV appends and backward are outside this MLA scope.
+INT8 has the separate, narrower contract below.
 
 The backend uses CANN's 910B and `Ascend910_93` (910C) platform resources, with
 C1V2 and memory checks. Device validation runs on 910B; 910C compatibility is
@@ -459,6 +460,51 @@ python3 -m tests.mla.support.mla_examples --device 0 --dtype fp16
 python3 -m tests.mla.support.mla_examples --device 0 --dtype bf16
 ```
 
+#### INT8 compressed MLA on Ascend 910B/C
+
+`flash_attn_with_kvcache` and `get_scheduler_metadata` also support INT8 shared
+512-dimensional content with 64-dimensional RoPE, BSND/TND queries and ND paged
+caches. This is an NPU extension to FA3. All tensors must be on the same NPU:
+
+| Argument | Dtype and shape |
+| --- | --- |
+| `q` / `qv` | BF16 RoPE / INT8 content; `[B,Sq,Hq,64/512]` or `[Tq,Hq,64/512]` |
+| `k_cache` / `v_cache` | BF16 RoPE / shared INT8 content K/V; `[Np,128,1,64/512]` |
+| `mla_q_scale` | FP32 `[B,Sq,Hq]` or `[Tq,Hq]`, one scale per query token/head |
+| `mla_k_scale` / `mla_v_scale` | FP32 `[1]` each; separate scales for shared content K/V |
+| `cache_seqlens` / `page_table` | int32 `[B]` / `[B,max_pages_per_sequence]` |
+| TND `cu_seqlens_q` | int32 `[B+1]`, starts at 0, ends at `Tq`; also pass `max_seqlen_q` |
+
+Pass all three keyword-only MLA scales; `q_descale/k_descale/v_descale` are not
+substitutes. Metadata uses `qkv_dtype=torch.int8`, `headdim=64`, `headdim_v=512`,
+`num_heads_kv=1` and `page_size=128`. Updating scale values permits record reuse;
+changing bound lengths or TND prefixes requires regeneration. Output is BF16 with
+last dimension 512, LSE is FP32 `[B,Hq,Sq]` or `[Hq,Tq]`, and empty KV rows produce
+zero O and `-inf` LSE. `return_softmax_lse=True` returns four tensors; automatic
+split uses 26 FP32 accumulator slots, with unused slots set to zero / `-inf`.
+
+Supported `Hq` values are 1/2/4/8/16/32/64/128, with at most 32 queries per sequence.
+Single-query inputs support no mask or equivalent causal; multi-query inputs
+require bottom-right `causal=True`. Use `num_splits=0/1`, `softcap=0`,
+`window_size=(-1,-1)`, `pack_gqa=None/True` and `sm_margin=0`. Non-PA inputs,
+192/128 INT8, other page sizes, explicit multiple splits, finite windows,
+softcap, offsets, postquantization and mixed quantization modes are rejected.
+
+Numerics preserve the pinned CANN INT8 algorithm, including dynamic probability
+quantization. Its Q/K scales multiply the combined content **and RoPE** score;
+this differs from scaling only the content dot product. Source equality and
+independent FP32/FP64 accuracy limits are reported separately in the
+[INT8 contract](docs/mla/design.md#34-int8-压缩-mla-扩展) and
+[coverage mapping](docs/mla/design.md#78-int8-收尾映射).
+
+The [INT8 examples](tests/mla/support/mla_int8_examples.py) demonstrate both layouts,
+metadata reuse, scale updates and graph replay with changing KV lengths:
+
+```bash
+python3 -m tests.mla.support.mla_int8_examples --device 0 --layout bsnd
+python3 -m tests.mla.support.mla_int8_examples --device 0 --layout tnd
+```
+
 #### flash_attn_with_kvcache
 
 ```python
@@ -493,6 +539,10 @@ def flash_attn_with_kvcache(
     pack_gqa=None,
     sm_margin=0,
     return_softmax_lse=False,
+    *,
+    mla_q_scale=None,
+    mla_k_scale=None,
+    mla_v_scale=None,
 ):
     """
     v3 version of the KV cache interface, with more features compared to v2.

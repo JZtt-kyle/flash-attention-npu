@@ -1,70 +1,75 @@
 # MLA 当前状态
 
-<!-- mla-loop-next: M21 -->
+<!-- mla-loop-next: none -->
 
-**M20 已闭环，唯一下一步为 M21。** TND Q + ND PA INT8 完整调用链已接通，模块单元 47 项、完整正确性验收 1,667 项全部通过。公开性能 eager 平均比 **0.6788566514，通过**；graph **1.0893393116，实测未达 ≤1**。用户于 2026-10-19 明确“图模式性能暂不做要求”，当前 INT8 M19–M21 按此授权暂缓图性能门槛；图正确性及其他必要验收保持不变。范围与授权见 [design 3.4](design.md#34-int8-压缩-mla-扩展)，下一步见 [plan M21](plan.md#m21int8-收尾)。
+**M21 已完成，已授权的 M18–M21 INT8 范围全部收尾，无下一开发步。** 本轮基线 `a284d12`，分支 `feat/mla-cann-migration`。交付可运行的 BSND/TND INT8 示例、中英文接口说明及 [组合覆盖映射](design.md#78-int8-收尾映射)，并修复 BSND balanced 调度的尾空 KV 输出初始化。阶段正确性、eager 性能及质量检查通过；graph 性能按 [design 3.4](design.md#34-int8-压缩-mla-扩展) 的既有用户授权暂缓，实测失败保留。完成本次提交后停止，不扩张范围。
 
-分支 `feat/mla-cann-migration`，本步基线为 `1ed2b328a7f9b9b716556201dd31e729afe176b0`。本次恢复收尾保持已验收的实现和测试不变，仅更新验收授权与交接文档，复核同一步原始证据。未修改 CATLASS 或只读 CANN 源。闭环提交可用 `git log -1 -- docs/mla/status.md` 定位。
+## 当前能力与本轮修复
 
-## 当前实现
+公开范围仍为 512+64 共享 KV、BF16 RoPE/输出、FP32 三 scale、BSND/TND Q、ND PA 128 页；v48/v49、mask/split 及拒绝项按 design 3.4。示例直接使用公开 API，覆盖 metadata 复用、scale 原地更新、图内重生成记录及改变 KV 长度。日常 E2E 增加两布局示例和 decode/causal 尾空段代表，旧清单无删减。
 
-TND 直接读取原 int32 `cu_seqlens_q[B+1]` allocation 前缀，Q-scale 为 `[Tq,Hq]`，O/LSE 为 `[Tq,Hq,512]` / `[Hq,Tq]`。v49 的 `int32[463+2B]` 绑定总 Q、完整前缀和 KV 长度，消费者逐字核对。沿用固定源 balanced 调度、普通/快速 FD 与 INT8/BF16 数值组件，真实 partial 为 `[26,Hq,Tq,512]` / `[26,Hq,Tq]`；不转调 CANN。BSND v48 不变，未开放组合仍明确拒绝。
+新 BSND 示例首先暴露 KV 从 `[129,0,65]` 变为 `[65,0,0]` 后尾样本保留旧输出。源 balanced 分核可能提前结束，原公开补初始化只覆盖 TND；现两布局均在数值流水与 FD 归并后由最后使用核首 AIV 清理未访问的空 KV 尾段。保留数值终点、flush、调度协议和量化算法，非 balanced 路径不变；六个具名用例覆盖短/长 KV、单/多 Q、自动/单片与连续多个空尾段。未修改 CATLASS 或 CANN 源。
 
-本步覆盖公开 real/fake/compile、无 mask/右下 causal、自动/单片、非均匀/零长度、allocation 与 stride、scale 更新、metadata 复用、图重放、stream/线程生命周期和 Trap。修复源分核未访问的尾空段 O/LSE 初始化，保留数值任务终点和流水线 flush；TND O-only 关闭可选 LSE。TND 页预检跨完整向量 grid 分工，零 Q 仍查全部已用页，数值 Cube 每次形成读地址前继续独立检查。
+## 本次闭环证据
 
-图采样发现新 stream 每次重建固定 causal mask。TND 现按设备持有已在 eager 完成初始化的 mask，以 event 非阻塞查询确认完成后跨 stream 复用；未完成或首次冷捕获走原 stream 局部路径，不发布未执行的数据。独立进程的双冷图与线程退出后重放已通过。BSND 原缓存路径不变。四配置预检中的重复 mask 生成任务由 400 个降为 0，必要视图拷贝仍计入。
+工作根为 `/tmp/flash-attention-npu-mla-46928a793876`，本轮证据实际存放于其 `mla-m21/` 子目录。`/tmp/mla-m21` 是兼容别名，保留 summary、manifest 与原始证据中的既有绝对路径；以下路径相对此证据根。构建/reference 均在工作根，`build/` 仅保留无头日志与恢复状态。
 
-## 本步闭环证据
+统一 prepare 已重建生产扩展；实际加载 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `1e5ee5b0c7d5aafbd8e0613e917f1040e6bc4fe5f2a6de7a7244d88fa9c6a015`。收尾使用现有驱动的结果、依赖、构建和原始证据校验函数，见 `closure-correctness.json`、`closure-build.json`。**本次历史 E2E 继承为 0；不继承历史单元或性能。**
 
-证据根 `/tmp/mla-m20/`，工作根 `/tmp/flash-attention-npu-mla-46928a793876`。当前证据为 `mask-*`，实际扩展 SHA256 为 `8866a0da1a4ce4f983512b6191a3047100f80766f850ae6a4b4984de227c114e`，加载路径 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`。驱动核对完整构建输入、依赖、产物和实际加载；manifest 由 `mla_validation_build prepare` 生成。
-
-下表为同一 M20 冻结实现的实际执行记录；本次恢复复核其有效性，没有重跑数值测试、单元或性能采样，也不将原结果冒充本次新增执行或跨步单元/性能继承。历史 E2E 继承为 **0**，同一步完整正确性 E2E 复核 **1,667** 项。
-
-| 检查 | 当前结果 | 证据（相对证据根） |
+| 检查 | 本次结果与耗时 | 证据 |
 | --- | --- | --- |
-| 模块单元 | 47 通过，11.5 s；固定 native 调度、边界/溢出、独立总 Q 上限、ASan/UBSan、性能工具成功/失败夹具 | `mask-tools/summary.json` |
-| dry-run / collect | 代表 28、TND 专项 151、累计 E2E 901 全部收集；无临时截断 | `mask-dry.json`、`mask-collect/summary.json` |
-| 完整构建与质量 | 构建、适用 hooks、文档检查和 `git diff --check` 通过 | `mask-build.log`、`mask-quality.log`、`handoff-doc-quality.log` |
-| 固定源对照 | 15 通过，25.4 s；O/非空 LSE 逐元素一致；独立数学 O/LSE 各 15 项源精度限制，非数学全通过 | `mask-check/attempt-1792380312581633390/int8-tnd-source/` |
-| 代表检查 | 28 通过，79.7 s；含 O-only、尾空段、冷图/跨线程、后部第 65 页与零 Q 页越界 | `mask-check/summary.json` |
-| 性能预检 | 4 配置通过，132.6 s；400 条 graph Kernel 样本，122 个归档文件校验 | `mask-profile-check/summary.json`、`mask-profile-check.log` |
-| 正式性能 | 完整 15 配置，404.1 s；eager 通过；graph 失败、按授权暂缓，15/15 配置及 78/90 分段退化 | `mask-performance/summary.json`、`mask-performance.log` |
-| 完整 TND 专项 | 151 通过，507.8 s，reference 命中 62 次；包含此前失败的尾空段、全部图和 Trap | `mask-acceptance/summary.json` |
-| 完整 BSND 专项 | 109 通过，259.9 s，reference 命中 64 次 | `mask-acceptance/summary.json` |
-| 累计小输入 E2E | 901 通过，217.8 s，reference 命中 1,240 次 | `mask-acceptance/summary.json` |
-| 普通 FA3 / 普通图 | 504 / 2 通过，28.1 / 21.2 s；reference 命中 31 / 2 次 | `mask-acceptance/summary.json`、`mask-acceptance.log` |
-| 本次恢复核对 | 实际加载、构建输入/依赖/产物、用例清单、E2E 原始证据及源/数学分类均匹配；原始 wall 样本重算与保存报告一致 | `closure-authorized-runtime.json`、`closure-authorized-evidence.json` |
-| 本次质量检查 | 适用 pre-commit、文档链接/标记及 `git diff --check` 通过 | `closure-authorized-quality.log`、`closure-authorized-doc-quality.log` |
+| 接手基线 | M20 原 1,667 项正确性及构建/native 身份有效，仅作修复前基线 | `handoff-evidence.json`、`handoff-runtime.json` |
+| 工具/平台 | 15 / 41 通过，5.6 / 6.9 s；平台组只检查 CANN 910B/C 配置 | `final-tools/summary.json` |
+| 集合与命令 | dry-run/collect 完成；BSND 专项新增 6、累计 E2E 新增 4，无截断或删减 | `final-dry-run.json`、`collect/summary.json`、`fix-collect/summary.json`、`selection-diff.json` |
+| 用户示例 | FP16/BF16/INT8 BSND/TND 共 4 通过，21.8 s；两布局 INT8 CLI 运行通过 | `fix-check/summary.json`、`example-cli.log` |
+| 两布局代表 | BSND 11 / TND 28 当次通过，24.0 / 82.1 s；旧 probe 身份处理见下文 | `fix-check/summary.json` |
+| 固定源代表 | BSND 23 / TND 15 通过，27.4 / 25.4 s | `fix-check/summary.json` |
+| 性能预检 | 两布局各 4 配置通过，145.2 / 132.4 s；231 文件归档校验 | `profile-check/summary.json`、`profile-check.log` |
+| 完整专项 | BSND 115 / TND 151 通过，273.2 / 506.6 s | `acceptance/summary.json` |
+| 累计 E2E | 905 通过，247.0 s | 同上 |
+| 普通 FA3 / 普通图 | 504 / 2 通过，28.5 / 21.7 s | 同上 |
+| 构建与质量 | 生产重建、实际加载核对、相关文档链接、diff 和仓库 hooks 通过 | `fix-build.log`、`fix-quality.log`、`quality.log`、`documentation-check.json` |
 
-正式性能保存 27,000 条 wall 样本、eager/graph 各 1,500 条 Kernel 样本及全部单例/分段，221 个文件逐文件归档校验。结果目录为 `mask-performance/attempt-1792380678698910500/int8-tnd-profile/public-profile/`。三入口 R=1/4、5 次预热、5×20 wall 和 5×10 Kernel、固定 15 配置及工具默认门槛均未变。graph 原始失败记录保留；用户暂缓要求不等于性能达标。
+正式正确性共 **1,677 项通过，零失败、零跳过**。代表检查新增 4 个 reference 缓存、命中 97 次；完整正确性命中 1,407 次且无新增计算，待测实现每次实际执行。
 
-完整专项中的源对照记录为 TND 20、BSND 28，全部逐元素一致。独立数学 O：TND 2 通过 / 18 源限制，BSND 4 通过 / 24 源限制；LSE：TND 20 源限制，BSND 1 通过 / 27 源限制。源精度优先级按 design 7 执行，不能记为双数学全部通过。
+早期 BSND 11 / TND 28 代表组执行后，固定源组重建了 INT8 `migrated.so` 及其 manifest，其旧依赖身份已过期，不能据此继承通过。收尾已核对这些节点全部包含于重建后完整专项，且完整专项的当前依赖和原始证据有效。首轮旧扩展示例失败仍保留在 `check/summary.json`（2 通过 / 1 失败 / TND 未运行）；修复后四项示例及完整回归均通过。
 
-数学 reference 沿用内容缓存，本步 source/代表分别命中 30/15 次，待测实现仍实际执行。`closure-authorized-evidence.json` 复用驱动的结果、原始证据、源码与依赖、构建输入/依赖/产物校验，全部匹配原 `closure-evidence.json`；实测扩展和加载库也完全一致。未另做手写全树审计。
+独立数学判定与固定源一致性分开记录，汇总为 `source-math.json`：
 
-## 循环报错与环境
+| 完整专项源记录 | 固定源逐元素一致 | O 数学通过 / 源限制 | LSE 数学通过 / 源限制 |
+| --- | --- | --- | --- |
+| BSND 28 | 全部 | 4 / 24 | 1 / 27 |
+| TND 20 | 全部 | 2 / 18 | 0 / 20 |
 
-最近无头轮 `20261019-010500-development-bw2yz0ji` 的 Codex 子进程退出码为 **0**、turn 已完成；当时 graph 未达门槛且尚未获本步豁免，因此没有提交，循环脚本按约定记录 `blocked` 并退出 **1**。本次按新的用户授权完成同一 M20 收尾，用现有 `--retire-pending` 归档被人工接手替代的旧会话。`retired.json` 保留原因、原状态和回执，pending 已清空；无头计数保持原值，没有伪造成功回执或启动下一轮。
+固定 CANN 的 Q/K scale 作用于内容与 RoPE 合并后的分数，且保留动态概率量化，独立反量化数学存在既有精度限制。按 design 第 7 节执行源优先级，不修改阈值、不声称双数学全部通过。
 
-首轮完整 TND 在 Q `(0,1,1)`、KV `(129,0,0)`、自动 split 时遗漏末尾 LSE 初始化：131 通过、1 失败、剩余未运行，425.4 s，见 `acceptance/attempt-1792373846973427120/detail-int8_tnd/`。当前完整 151 项专项已确认修复，旧失败记录保留。首次正式性能 `tail-performance/` 的 eager 0.7506133088 / graph 1.3740589794 是较早实现的结果，不能替代当前验收。
+## 阶段公开性能
 
-Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；实测 910B3 物理设备 7（20 AIC/40 AIV），910C 未实测。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`，固定 CANN 源 `ca18aee610729ca5270a44e2d84c751bc687fbf0`。INT8 native `/tmp/mla-m18/native` 的配方、12 keys 与内容由现有验证器核对；非量化 native `/tmp/mla-m13b/native`。
+固定 BSND 24 / TND 15 配置全部实测，三入口 R=1/4，5 次预热、5×20 wall、5×10 kernel 与双方计时边界不变。复用现有汇总器从原始样本重算并核对报告；39 配置按配置等权平均，无排除项。`performance-summary.json` 保留汇总、所有单例/分段及原始证据哈希。
 
-设备检查和公开用例收集在宿主运行，沙箱不能访问 NPU；ASan/UBSan 在宿主运行以保留 LeakSanitizer 检查。固定 CANN 环境包装器为 `/tmp/mla-m16-schedule/run.py`。本次默认 shell 直接运行 `npu-smi` 遇到 `drvSetDeviceInfo` 库符号冲突，使用该包装器后正常，设备 7 无残留任务，见 `closure-authorized-npu.log`。profiler 使用现有私有 tmpfs 包装器解决根文件系统可用空间限制，结束后逐文件校验归档。构建、reference 与原始结果放在仓库外，`build/` 只保留 `mla-codex-loop/` 日志与恢复状态。
+| 布局 | 配置 | eager 均值 | eager 退化配置 / 分段 | graph 均值 | graph 退化配置 / 分段 | 组耗时 |
+| --- | --- | --- | --- | --- | --- | --- |
+| BSND | 24 | 0.722964，通过 | 0 / 1 | 1.247368，失败、暂缓 | 24 / 130 | 709.3 s |
+| TND | 15 | 0.683287，通过 | 0 / 0 | 1.116739，失败、暂缓 | 15 / 76 | 454.3 s |
+| 合计 | 39 | **0.707703，通过** | 0 / 1 | **1.197126，失败、暂缓** | 39 / 206 | 1,163.5 s |
 
-## 唯一下一步
+两组默认工具均退出 1，唯一失败为 graph 平均门槛；未改工具或把失败记为通过。用户于 2026-10-19 明确“图模式性能暂不做要求”，当前 INT8 graph 性能按 design 3.4 暂缓；图正确性和 eager 已通过。原始证据为 `bsnd-performance/summary.json`、`tnd-performance/summary.json` 及各组 `public-profile/`。默认失败组不生成成功证据哈希，因此汇总单独使用现有 `files_identity` 保存并校验其原始文件身份。
 
-**M21：INT8 组合覆盖与用户示例收尾。** 按 plan 核对两布局及拒绝边界、补示例与 E2E、完成阶段 eager 性能和文档；图模式性能暂不要求，图正确性仍必验。本次提交后停止，尚未执行 M21。
+共 70,200 条 wall 样本，eager/graph 各 3,900 条 kernel 样本。源 NZ pack 准备成本单列于 `preflight.json`：BSND 合计 0.1712 s（单例 0.0006–0.1340 s），TND 合计 0.2377 s（0.0008–0.2045 s）；双方调用内转换成本、capture 成本及设备隔离记录均保留。性能进程固定 CPU 0、可见设备 7；私有 tmpfs 包装器分别归档并校验 238 / 221 文件，见两组外层日志。
 
-当前正确性闭环复现命令如下；新步骤只复用身份及原始证据均有效的 E2E，源码/构建变化后按影响范围重跑：
+## 环境与复现
+
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；910B3 物理设备 7（20 AIC/40 AIV），**910C 未实测**。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`，固定 CANN 源 `ca18aee610729ca5270a44e2d84c751bc687fbf0`。INT8 native `/tmp/mla-m18/native` 的配方、12 keys 与包内容有效，非量化 native `/tmp/mla-m13b/native`。设备验证在宿主运行，环境包装器 `/tmp/mla-m16-schedule/run.py`；质量使用已有 `/tmp/mla-m01-precommit` 包及仓库入口。
 
 ```bash
 export MLA_WORK_DIR=/tmp/flash-attention-npu-mla-46928a793876
 export MLA_INT8_NATIVE_ROOT=/tmp/mla-m18/native
 export MLA_INT8_SOURCE_LOG=/tmp/mla-m18/source-final/attempt-1792357915791404830/int8-source-check/output.log
 python3 /tmp/mla-m16-schedule/run.py python3 -m tests.mla \
-  --suite detail-int8_tnd detail-int8_bsnd e2e ordinary graph-ordinary \
-  --device 7 --resume --output /tmp/mla-m20/mask-acceptance
+  --suite detail-int8_bsnd detail-int8_tnd e2e ordinary graph-ordinary \
+  --device 7 --output "$MLA_WORK_DIR/mla-m21-correctness-recheck"
 ```
 
-性能先 `int8-tnd-profile-check`，再 `int8-tnd-profile`；输出必须使用尚不存在的新目录，命令前加 `unshare -Ur -m python3 /tmp/mla-m16-schedule/run_private_storage.py <新输出目录>`，后接环境包装器与 `python3 -m tests.mla ... --output <同一新目录>`。保持设备隔离、原采样协议和完整集合。工具仍会因 graph 未达阈值返回失败，交付按 design 3.4 区分 eager 门槛和已授权暂缓的 graph 结果。
+性能复现分别选择 `int8-bsnd-profile` / `int8-tnd-profile`，输出使用工作根下的新目录；命令前加 `unshare -Ur -m python3 /tmp/mla-m16-schedule/run_private_storage.py <新输出目录>`，后接环境包装器与统一驱动，`--output` 使用同一目录。包装器逐文件校验归档；默认 graph 失败须与 eager 判定分开记录。
+
+[计划 M21](plan.md#m21int8-收尾) 的交付条件已完成，唯一下一步为 `none`。没有新的已授权迁移任务。

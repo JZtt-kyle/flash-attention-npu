@@ -89,17 +89,19 @@ class MlaInt8Vector {
     {
         actualSeqLengthsGmQ.SetPublic(prefix);
     }
-    __aicore__ inline void InitPublicQueryTail()
+    __aicore__ inline void InitPublicEmptyTail()
     {
-        if ASCEND_IS_AIV {
-            if (actualSeqLengthsGmQ.publicLayout && aiCoreIdx + 1 == usedCoreNum && GetSubBlockIdx() == 0) {
-                // Source tiling can stop before trailing empty Q/KV segments.
-                // Initialize those outputs after the numerical pipeline drains;
-                // extending its final B endpoint would suppress its flush tasks.
-                for (uint32_t b = bEnd + 1; b < batchSize; ++b) {
-                    GetActualSeqLen(b);
-                    if (actS1Size)
-                        DealActSeqLenIsZero(b, 0);
+        if constexpr (BALANCE) {
+            if ASCEND_IS_AIV {
+                if (publicLengths && aiCoreIdx + 1 == usedCoreNum && GetSubBlockIdx() == 0) {
+                    // Source balanced tiling can stop before trailing empty Q/KV
+                    // segments in either layout. Initialize after the numerical
+                    // pipeline drains; extending its B endpoint suppresses flush.
+                    for (uint32_t b = bEnd + 1; b < batchSize; ++b) {
+                        GetActualSeqLen(b);
+                        if (actS1Size && curActualSeqLen == 0)
+                            DealActSeqLenIsZero(b, 0);
+                    }
                 }
             }
         }

@@ -184,3 +184,32 @@ def test_empty(empty):
         assert torch.isneginf(result[1].cpu()).all()
     else:
         assert result[0].numel() == result[1].numel() == 0
+
+
+@pytest.mark.parametrize(
+    "query,length,splits",
+    [
+        pytest.param(1, 129, 0, id="decode-auto-tail"),
+        pytest.param(1, 16385, 0, id="decode-auto-long-tail"),
+        pytest.param(2, 129, 0, id="causal-auto-tail"),
+        pytest.param(2, 16385, 0, id="causal-auto-long-tail"),
+        pytest.param(1, 129, 1, id="decode-single-tail"),
+        pytest.param(2, 16385, 1, id="causal-single-long-tail"),
+    ],
+)
+def test_trailing_empty_segments(query, length, splits):
+    # Balanced tiling can end before the final empty batches. Keep short and
+    # core-exhausting long KV, plus the unchanged non-balanced single split.
+    c = make_case(
+        ("bsnd-trailing-empty", "BSND", (query,) * 4, 8, (length, 0, 0, 0), 3 if query > 1 else 0),
+        splits=splits,
+        uniform=True,
+    )
+    result = invoke(c, metadata(c))
+    equal(result, invoke(c))
+    check_math(c, result)
+    assert torch.count_nonzero(result[0][1:].cpu()) == 0
+    assert torch.isneginf(result[1][1:].cpu()).all()
+    if splits == 0:
+        assert torch.count_nonzero(result[2][:, 1:].cpu()) == 0
+        assert torch.isneginf(result[3][:, 1:].cpu()).all()

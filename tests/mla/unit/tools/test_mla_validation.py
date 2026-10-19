@@ -146,6 +146,7 @@ def test_lock_blocks_a_second_process(tmp_path):
     [
         "e2e",
         "tools",
+        "int8-public-profile-tools",
         "window-device-tools",
         "window-paged-tnd-tools",
         "window-paged-tools",

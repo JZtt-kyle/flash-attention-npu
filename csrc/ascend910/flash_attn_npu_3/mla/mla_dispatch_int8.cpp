@@ -39,8 +39,7 @@ __aicore__ inline void Execute(const LaunchArgs& a, const Int8TilingParams& p)
     op.SetCacheLayout(a.cache);
     op.InitQuant((GM_ADDR)a.qs, (GM_ADDR)a.ks, (GM_ADDR)a.vs);
     op.Process();
-    if constexpr (Tnd)
-        op.InitPublicQueryTail();
+    op.InitPublicEmptyTail();
 }
 template <bool Tnd>
 __aicore__ inline void Dispatch(const LaunchArgs& a)

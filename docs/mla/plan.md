@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**非量化 M17、INT8 独立组件 M18、BSND 公开接入 M19 和 TND 公开接入 M20 已完成，唯一下一开发步为 M21。** 用户于 2026-10-18 批准 M18–M21 的 INT8 扩展，无需各步重复确认；范围以 [design 3.4](design.md#34-int8-压缩-mla-扩展) 为准，当前能力、限制和证据以 [status](status.md) 为准。2026-10-19 最新授权为图模式性能暂不做要求，适用于当前 INT8 M19–M21；eager、图正确性及其他必要验收保持不变，详见 design 3.4。
+本页只记录实施顺序、产物和完成条件。**非量化 M17 与已授权的 INT8 M18–M21 均已完成，无下一开发步。** 用户于 2026-10-18 批准 M18–M21 的 INT8 扩展，无需各步重复确认；范围以 [design 3.4](design.md#34-int8-压缩-mla-扩展) 为准，当前能力、限制和证据以 [status](status.md) 为准。2026-10-19 最新授权为图模式性能暂不做要求，适用于当前 INT8 M19–M21；eager、图正确性及其他必要验收保持不变，详见 design 3.4。
 
 ## INT8 后续步骤
 
@@ -11,7 +11,7 @@
 | M18（已完成） | INT8 独立数值组件、ND 读取适配及固定源对照 | 固定源和双数学精度、INT32/舍入/缩放/FD/地址边界、适用组件性能实测；公开入口继续拒绝 INT8 |
 | M19（已完成） | BSND Q + ND PA INT8 完整公开前向 | host/AICPU/Kernel/metadata/real/fake/compile/图同轮接通，必要正确性、回归及 eager 公开性能通过；graph 性能按本次授权暂缓，保留实测失败 |
 | M20（已完成） | TND Q + ND PA INT8 完整公开前向 | 沿用 M18 数值组件和 M19 接入，完整 allocation/长度/scale 地址、公开图正确性及 eager 性能验收；graph 性能按最新授权暂缓 |
-| M21 | INT8 组合覆盖与用户示例收尾 | 两布局及拒绝边界、累计 E2E、性能矩阵、示例与文档核对完成；唯一下一步改为 `none` |
+| M21（已完成） | INT8 组合覆盖与用户示例收尾、BSND 尾空 KV 初始化修复 | 两布局及拒绝边界、累计 E2E、39 配置性能、示例与文档核对完成；eager 通过、graph 按授权暂缓，唯一下一步为 `none` |
 
 ### M18：INT8 数值与 ND 适配（已完成）
 
@@ -51,9 +51,17 @@ TND 页预检沿用 metadata 的完整向量 grid 分工，每批次读取一次
 
 ### M21：INT8 收尾
 
-按 M18 冻结的源有效组合与 M19/M20 开放边界核对两布局覆盖；补独立覆盖缺口，不自动穷举所有轴。实测 INT8 两布局专项、累计日常 E2E、相关普通 FA3 与图回归，复核实际加载、来源/版权和 910B/C 配置兼容；910C 未实测如实标记。沿用 M19/M20 固定输入重跑阶段 eager 性能，最多 100 配置且平均门槛不变；graph 性能按 design 3.4 暂缓，若随工具采样则单列结果，所有单例、分段、布局转换成本与失败保留。
+本步已完成，基线 `a284d12`，交付 INT8 BSND/TND 可运行示例、组合覆盖映射及阶段验收。影响路径为 `tests/mla/support/mla_int8_examples.py`、`e2e/int8/test_examples.py`、日常清单及 `examples-check` 注册，两份 README 和三份 MLA 文档；同时修复 `mla_dispatch_int8.cpp` / `block/mla_int8_vector.hpp` 的公开 BSND balanced 尾空段初始化。复用 M20 的流水结束后初始化，保留数值分区终点与 flush、metadata 和源量化算法；不修改 CATLASS 或 CANN。
 
-添加可运行 INT8 BSND/TND 示例及对应 E2E，中英文 README 和 design 的公开接口/拒绝项/验收映射同步；status 保存唯一当前结果和证据路径。必要检查通过才单次提交；将 status 的 `mla-loop-next` 标记设为 `none`，无头脚本正常结束。eager 性能、其他必要检查失败或环境受限时保留同一待办和失败结果，不能为了自动运行而提交或跳过。
+示例直接使用公开 API，覆盖两布局、非均匀 KV、TND 零 Q、causal、自动 split、metadata 跨调用复用、scale 原地更新及图内重生成记录后改变长度/scale。对应 E2E 检查 dtype/shape、四项返回、V scale 倍增、图与 eager 一致及尾空行。BSND 的 `test_trailing_empty_segments` 以六个具名组合覆盖单/多 Q、129/16385 KV、自动/单片和连续多个尾空段，两个代表加入日常；动态尾空段由原失败示例保留验证。其余固定源、双数学、mask/FD、stride、空值、real/fake/compile、生命周期和 Trap 沿用两布局专项，映射见 [design 7.8](design.md#78-int8-收尾映射)，不扩张已冻结源边界或穷举所有轴。
+
+必跑检查由 `python3 -m tests.mla` 发起，先 `--dry-run` 再 `--collect-only` 核对实际集合。廉价 CPU 组 `int8-public-profile-tools` 只收集两布局已有性能工具夹具及驱动成功/失败/中断/复用夹具；`unit-platform` 定向核对实际生产平台查询与 CANN 910B/C 配置，不宣称 910C 实机验收。重建后先运行 `--suite examples-check int8-bsnd-check int8-tnd-check int8-bsnd-source int8-tnd-source`，再冻结代码，运行 `--suite detail-int8_bsnd detail-int8_tnd e2e ordinary graph-ordinary`。尾初始化仅在公开分派调用，独立源组件不调用该适配，调度算法未变；由公开固定源/双数学、空值和图 E2E 直接验收，不累计历史数值/调度单元。
+
+接手使用统一驱动 `validate_result`、`reusable`、`matching_files` 核对 M20 的 `mask-acceptance` 用例/原始证据、源码依赖与构建 manifest，原 1,667 项正确性有效；INT8 native 的 12 keys 和非量化 native 包均有效。本步为阶段收尾实际重跑必要正确性及性能，历史 E2E 仅作基线复核，不继承历史单元/性能。生产头文件和发射修改后必须由现有 prepare 重建，记录实际加载的新扩展；修复前结果不替代修复后验收。数学 reference 继续使用内容缓存，相同输入不重复计算。构建/reference 沿用 `/tmp/flash-attention-npu-mla-46928a793876`，本轮证据存放于其 `mla-m21/` 子目录，`/tmp/mla-m21` 保留为原始记录路径的兼容别名。
+
+性能保持 BSND 24/TND 15 个固定配置，分别先运行 `int8-bsnd-profile-check` / `int8-tnd-profile-check`，核对 native 分派、代表与成本边界及采样链，再分别运行 `int8-bsnd-profile` / `int8-tnd-profile`。使用既有私有 tmpfs 包装器并逐文件校验归档；保留全部单例/分段、布局转换成本和失败。三入口 R=1/4、预热、采样和平均门槛不变，图性能按 design 3.4 暂缓并单列，eager 必须通过。
+
+必要检查通过后核对来源/版权、两布局拒绝边界、示例和中英文接口说明，更新 status 的唯一结果、证据及 `mla-loop-next: none`，执行仓库质量检查并提交一次，提交后立即停止。任何其他必要检查失败或环境受限时保留 M21 待办和失败证据，不提交为已闭环。
 
 ## 已完成步骤
 

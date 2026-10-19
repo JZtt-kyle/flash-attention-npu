@@ -378,7 +378,7 @@ def flash_attn_varlen_func(
 
 #### Ascend 910B/C 的 MLA
 
-三个 v3 入口均可传入压缩 MLA：`q/k` 的头维度为 64，`qv/v` 为 512，KV 头数为 1。
+FP16/BF16 的三个 v3 入口均可传入压缩 MLA：`q/k` 的头维度为 64，`qv/v` 为 512，KV 头数为 1。
 `q/k` 表示已经形成的 RoPE 分量，`qv` 是 query 内容，`v` 是共享的内容 K/V。
 分数为 `(q @ k.T + qv @ v.T) * softmax_scale`，默认 scale 为 `1 / sqrt(576)`，
 输出末维为 512。MLA 仅支持前向，会拒绝需要梯度的输入。
@@ -394,8 +394,8 @@ func/varlen 的 `num_splits` 默认 1，cache 默认 0（自动）；五种布�
 两种表示均支持 BSND/BSND、TND/TND、TND/BSND、BSND/ND 分页 KV、TND/ND 分页 KV
 五种布局。支持非负有限 `softcap`，零值关闭；`pack_gqa=None/True/False` 分别选择
 默认、打包、不打包的调度，`sm_margin` 预留 AIC 核，范围为 `0 <= sm_margin < physical_AIC`。
-要求 `attention_chunk=0`、`rotary_interleaved=True`。量化、任意 mask、外部 NZ cache、
-追加 KV 和反向不在本次 MLA 范围内。
+要求 `attention_chunk=0`、`rotary_interleaved=True`。任意 mask、外部 NZ cache、
+追加 KV 和反向不在本次 MLA 范围内。INT8 使用下方单列的较窄契约。
 
 后端使用 CANN 的 910B 和 `Ascend910_93`（910C）平台资源，并检查 C1V2 与内存容量。
 实机验收使用 910B；910C 核对 CANN 平台配置兼容，不宣称已完成 910C 实机验收。
@@ -437,6 +437,47 @@ python3 -m tests.mla.support.mla_examples --device 0 --dtype fp16
 python3 -m tests.mla.support.mla_examples --device 0 --dtype bf16
 ```
 
+#### Ascend 910B/C 的 INT8 压缩 MLA
+
+`flash_attn_with_kvcache` 和 `get_scheduler_metadata` 同时支持 INT8 共享 512 维内容
+与 64 维 RoPE、BSND/TND query 及 ND 分页 cache。这是 FA3 的 NPU 扩展，所有 tensor
+必须位于同一 NPU：
+
+| 参数 | dtype 与 shape |
+| --- | --- |
+| `q` / `qv` | BF16 RoPE / INT8 内容；`[B,Sq,Hq,64/512]` 或 `[Tq,Hq,64/512]` |
+| `k_cache` / `v_cache` | BF16 RoPE / 共享 INT8 内容 K/V；`[Np,128,1,64/512]` |
+| `mla_q_scale` | FP32 `[B,Sq,Hq]` 或 `[Tq,Hq]`，每个 query token/head 一个 scale |
+| `mla_k_scale` / `mla_v_scale` | 各为 FP32 `[1]`，共享内容 K/V 分别使用各自 scale |
+| `cache_seqlens` / `page_table` | int32 `[B]` / `[B,max_pages_per_sequence]` |
+| TND `cu_seqlens_q` | int32 `[B+1]`，首项 0、末项 `Tq`；同时传入 `max_seqlen_q` |
+
+三个 MLA scale 均须通过关键字传入，不能用 `q_descale/k_descale/v_descale` 替代。
+metadata 使用 `qkv_dtype=torch.int8`、`headdim=64`、`headdim_v=512`、
+`num_heads_kv=1`、`page_size=128`。更新 scale 值可以复用记录；改变绑定的长度或 TND
+前缀须重新生成。O 为末维 512 的 BF16，LSE 为 FP32 `[B,Hq,Sq]` 或 `[Hq,Tq]`，
+空 KV 行返回 O=0、LSE=`-inf`。`return_softmax_lse=True` 返回四项；自动 split 的 FP32
+accumulator 有 26 个槽，未使用槽为 0 / `-inf`。
+
+`Hq` 支持 1/2/4/8/16/32/64/128，每段 query 不超过 32。单 query 支持无 mask 或等价
+causal，多 query 须设置右下对齐的 `causal=True`。选项为 `num_splits=0/1`、
+`softcap=0`、`window_size=(-1,-1)`、`pack_gqa=None/True`、`sm_margin=0`。
+非 PA、192/128 INT8、其他页大小、显式多 split、有限窗口、softcap、offset、postquant
+和混合量化模式均明确拒绝。
+
+数值保留固定 CANN INT8 算法及动态概率量化；源的 Q/K scale 作用于内容与 **RoPE 合并后**
+的分数，与仅反量化内容点积的数学公式不同。固定源逐元素一致和独立 FP32/FP64 的精度限制
+分别记录，见 [INT8 契约](docs/mla/design.md#34-int8-压缩-mla-扩展) 和
+[覆盖映射](docs/mla/design.md#78-int8-收尾映射)。
+
+[INT8 可运行示例](tests/mla/support/mla_int8_examples.py) 演示两种布局、metadata 复用、
+scale 更新及 KV 长度变化时的图重放：
+
+```bash
+python3 -m tests.mla.support.mla_int8_examples --device 0 --layout bsnd
+python3 -m tests.mla.support.mla_int8_examples --device 0 --layout tnd
+```
+
 #### flash_attn_with_kvcache
 
 ```python
@@ -471,6 +512,10 @@ def flash_attn_with_kvcache(
     pack_gqa=None,
     sm_margin=0,
     return_softmax_lse=False,
+    *,
+    mla_q_scale=None,
+    mla_k_scale=None,
+    mla_v_scale=None,
 ):
     """
     v3 版本的 KV 缓存接口，相比 v2 增加了更多功能。
