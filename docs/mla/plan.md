@@ -1,6 +1,6 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**非量化 M17 和 INT8 独立组件 M18 已完成，唯一下一开发步为 M19。** 用户于 2026-10-18 批准 M18–M21 的 INT8 扩展，无需各步重复确认；范围以 [design 3.4](design.md#34-int8-压缩-mla-扩展) 为准，当前能力、限制和证据以 [status](status.md) 为准。组件完成不表示公开 INT8 已接通，M17 的非量化图性能例外不适用于 INT8。
+本页只记录实施顺序、产物和完成条件。**非量化 M17、INT8 独立组件 M18 和 BSND 公开接入 M19 已完成，唯一下一开发步为 M20。** 用户于 2026-10-18 批准 M18–M21 的 INT8 扩展，无需各步重复确认；范围以 [design 3.4](design.md#34-int8-压缩-mla-扩展) 为准，当前能力、限制和证据以 [status](status.md) 为准。M19 的 graph 性能暂缓按 2026-10-19 本次明确授权处理，不沿用 M17 例外或改变后续默认门槛。
 
 ## INT8 后续步骤
 
@@ -9,7 +9,7 @@
 | 步骤 | 单次提交的产物 | 完成条件 |
 | --- | --- | --- |
 | M18（已完成） | INT8 独立数值组件、ND 读取适配及固定源对照 | 固定源和双数学精度、INT32/舍入/缩放/FD/地址边界、适用组件性能实测；公开入口继续拒绝 INT8 |
-| M19 | BSND Q + ND PA INT8 完整公开前向 | host/AICPU/Kernel/metadata/real/fake/compile/图同轮接通，必要正确性、回归及公开性能通过 |
+| M19（已完成） | BSND Q + ND PA INT8 完整公开前向 | host/AICPU/Kernel/metadata/real/fake/compile/图同轮接通，必要正确性、回归及 eager 公开性能通过；graph 性能按本次授权暂缓，保留实测失败 |
 | M20 | TND Q + ND PA INT8 完整公开前向 | 沿用 M18 数值组件和 M19 接入，完整 allocation/长度/scale 地址、公开图及性能验收 |
 | M21 | INT8 组合覆盖与用户示例收尾 | 两布局及拒绝边界、累计 E2E、性能矩阵、示例与文档核对完成；唯一下一步改为 `none` |
 
@@ -21,11 +21,13 @@
 
 ### M19：BSND 公开 INT8
 
-影响 Python 共享前向、C++ 注册/分派、host/AICPU、metadata 与 Kernel 启动、real/fake 输出，以及新增 `tests/mla/e2e/int8_bsnd/`、日常清单和公开 profile。复用 M18 完整算法、PA 安全检查及既有 metadata 生命周期；只有旧记录不能区分混合 dtype/量化模式或其安全边界时才扩协议，并写明原因。三个 INT8 scale 只在当次前向传递，不缓存到调度快照。实现前补齐实际改动文件，以及共享头、调度、发射和构建的影响。
+交付完整 BSND Q + ND PA INT8 前向：`flash_attn_npu_3/flash_attn_npu_interface.py` 的 kvcache/metadata 分派、三个 keyword-only scale 和 fake 校验，910 目录 `mla_forward.cpp` 的 host 注册及生命周期，`mla_int8_schedule.h`、`mla_int8_metadata.aicpu`、`mla_int8_launch.h`、`mla_dispatch_int8.cpp` 的调度与发射，以及 `block/mla_int8_vector.hpp` 的 int32 长度和真实 partial 输出适配。`setup.py` 注册生产编译单元。复用 M18 数值核、固定源旧 IFA 调度和 ND 页校验；v48 区分混合 dtype 与量化 FD 分区，scale 值及地址仍属当次调用，协议原因与安全边界见 design 3.4。
 
-同步调整 M18 的 `e2e/int8` 拒绝边界，仅保留仍未接通的组合。拟新增 `int8-bsnd-check/source/boundaries/profile-check/profile`、`detail-int8_bsnd` 和 `--e2e int8_bsnd`（尚未注册，`/` 分隔的是名称族，不是可执行参数）。先补用例并注册，再对所选完整组执行 `python3 -m tests.mla <选择参数> --dry-run`、`--collect-only` 与工具/native 包配方和路径预检，再实测源与双数学、全部新行为、空值/stride/页表/长度/metadata 复用/生命周期/Trap；real/fake/compile 及真实固定/动态输入、长度和 scale 的图重放不可延后。验证不支持的选项明确拒绝，scale 更新确实改变结果。拟继承 M18 的相关非量化 PA、图与普通 FA3 E2E，仅在统一驱动核对依赖、实际构建/加载身份和原始证据后复用；共享代码变化或身份失效时重跑受影响组，不继承历史单元或性能。最近基线及注释身份差异见 status；源组件证据不替代公开调用。
+必跑集合为 `--unit int8_bsnd`（固定源调度差分、边界/溢出、ASan/UBSan、性能工具成功/失败夹具）、`detail-int8_bsnd`（含完整 source/boundaries、双数学、真实 partial、长度/stride/空值、metadata/生命周期/Trap、real/fake/compile 及固定/动态图重放），再运行累计 `--suite e2e ordinary graph-ordinary`。新增日常清单归属 `--e2e int8_bsnd`；旧 `e2e/int8` 仅保留缺失 scale 与未接通 TND 的拒绝，非 PA、有限窗口/softcap、显式多 split 等边界继续拒绝。共享 Python、host、发射与构建身份改变，M18 E2E 只作基线核对，受影响累计回归实际运行，不继承历史单元或性能。
 
-本步固定并版本管理公开性能输入，包含 eager 与 graph，按配置等权平均 ≤1 分别验收，保留全部退化和不可同义比较项；与 M20 合计不超过 100 配置。先 `int8-bsnd-profile-check`，再正式 `int8-bsnd-profile`，不得沿用 M17 图性能豁免。完成完整 BSND 可调用行为、文档和质量检查后一次提交，下一步 M20。
+公开性能固定 24 配置（三入口 R=1/4，与 M20 合计不超过 100），先 `int8-bsnd-profile-check`，再 `int8-bsnd-profile`，eager/graph 按配置等权均值 ≤1 分别判定。v48 消费校验跨完整向量 grid 分摊记录字；native 在调用内处理原 device Q/Q-scale/table 的必要物化，仅源 NZ pack 位于准备阶段。工具、代表及成本边界检查完成后固定实现，再执行完整采样，保留全部单例、分段和失败。用户于 2026-10-19 明确允许本次暂缓 graph 性能优化：eager、必要正确性（含图重放）、累计回归和质量检查通过后可闭环，graph 实测失败与完整原始证据保留，默认门槛和工具不变，不自动扩展该例外至 M20/M21。
+
+收尾补齐 `tests/mla/e2e/int8_bsnd/__init__.py`，修复累计收集时与既有 `test_public.py` 的导入冲突；完整 `detail-int8_bsnd` 已重新实测。累计回归还发现旧 `e2e/int8/test_unconnected.py` 的 compile 拒绝断言依赖原始异常文案：先断言同一 eager 调用因缺少 scale 而拒绝，再检查 Dynamo 的 `Unsupported/Observed exception` 包装及 RuntimeError 类型，避免把正确拒绝误判为失败。该修正只影响测试断言，不改生产、用例选择或性能工具；先 dry-run/collect 和实跑 `--e2e int8 int8_bsnd`，通过后完整重跑 `--suite e2e ordinary graph-ordinary --device 7 --output /tmp/mla-m19/closure-regression-final`（环境包装器见 status），不以失败组的部分通过代替累计验收。已通过的完整专项按依赖与原始证据复核，源码/构建未变时不重复；本步单元与性能同样保留原实测结果，不计作新运行或历史继承。必要验收、文档和质量检查完成后一次提交，下一步 M20，提交后立即停止。
 
 ### M20：TND 公开 INT8
 

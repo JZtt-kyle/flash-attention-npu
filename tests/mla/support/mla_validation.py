@@ -1093,6 +1093,17 @@ SUITES = {
 }
 SUITES.update(
     {
+        "int8-bsnd-check": [
+            "tests/mla/e2e/int8_bsnd/test_public.py::test_daily",
+            "tests/mla/e2e/int8_bsnd/test_public.py::test_fake_compile",
+        ],
+        "int8-bsnd-source": [
+            "tests/mla/e2e/int8_bsnd/test_public.py::test_source",
+            "tests/mla/e2e/int8_bsnd/test_public.py::test_views",
+        ],
+        "int8-bsnd-boundaries": ["tests/mla/e2e/int8_bsnd/test_boundaries.py"],
+        "int8-bsnd-profile-check": ["tests/mla/e2e/int8_bsnd/public_profile.py"],
+        "int8-bsnd-profile": ["tests/mla/e2e/int8_bsnd/public_profile.py"],
         "split-kv-sanitize": ["tests/mla/unit/split_kv/test_split_kv.py"],
         "split-kv-tools": ["tests/mla/unit/tools/test_mla_split_kv_tools.py"],
     }
@@ -1125,6 +1136,8 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "int8-bsnd-profile-check",
+    "int8-bsnd-profile",
     "int8-profile-check",
     "int8-component-profile",
     "graph-profile",
@@ -1231,6 +1244,7 @@ CAUSAL_DEVICE_SUITES = {
     "causal-bsnd-profile",
 }
 CPU_SUITES = {
+    "unit-int8_bsnd",
     "int8-tools",
     "platform-tools",
     "unit-platform",
@@ -1392,7 +1406,19 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
-    if suite.startswith("int8-") or suite == "unit-int8":
+    if suite == "unit-int8_bsnd":
+        from tests.mla.support.mla_validation_build import files_identity
+        from tests.mla.support.mla_int8_native import native_vendor, package_root
+
+        native_vendor()
+        return files_identity(
+            [
+                Path("/usr/bin/g++"),
+                package_root() / "package.json",
+                Path(os.environ.get("MLA_INT8_SOURCE_LOG", "/nonexistent-int8-fixture")),
+            ]
+        )
+    if suite.startswith("int8-") or suite in {"unit-int8", "detail-int8_bsnd"}:
         from tests.mla.paths import work_dir
         from tests.mla.support.mla_int8_native import package_root
         from tests.mla.support.mla_validation_build import files_identity
@@ -1717,6 +1743,8 @@ def environment(args, directory, suite):
         env["MLA_SCHEDULE_SANITIZE"] = str(int(suite.endswith("sanitize")))
     if suite in {"graph-profile", "graph-profile-check"}:
         env["MLA_GRAPH_PROFILE_CHECK"] = str(int(suite.endswith("check")))
+    if suite in {"int8-bsnd-profile", "int8-bsnd-profile-check"}:
+        env["MLA_INT8_BSND_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {
         "gqa-options-profile",
         "gqa-options-profile-check",
@@ -1784,6 +1812,8 @@ def environment(args, directory, suite):
     env["MLA_FULL_MATRIX"] = "1" if getattr(args, "full_matrix", False) else "0"
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
     if suite in {
+        "int8-bsnd-source",
+        "detail-int8_bsnd",
         "int8-component-check",
         "int8-source-check",
         "int8-profile-check",

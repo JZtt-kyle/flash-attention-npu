@@ -4039,6 +4039,114 @@ def flash_attn_combine(out_partial, lse_partial, out=None, out_dtype=None):
     return flash_attn_npu_3.fwd_combine(out_partial, lse_partial, out, out_dtype)
 
 
+def _check_mla_int8_config(batch, sq, heads, capacity, splits, causal):
+    if not (
+        0 <= batch <= (2**32 - 1 - 462)
+        and 0 <= sq <= 32
+        and heads in (1, 2, 4, 8, 16, 32, 64, 128)
+        and 0 <= capacity <= 2**31 - 1
+        and capacity % 128 == 0
+        and splits in (0, 1)
+        and (sq <= 1 or causal)
+        and batch * max(sq, 1) * heads <= 2**31 - 1
+        and batch * heads * 512 <= 2**32 - 1
+    ):
+        raise RuntimeError(
+            "MLA INT8: BSND Q<=32, power-of-two Hq<=128, page=128, multi-Q causal and num_splits=0/1 required"
+        )
+
+
+def _check_mla_int8_storage(tensor, device, dtype, last_contiguous=True):
+    if (
+        tensor is None
+        or tensor.device != device
+        or device.type != "npu"
+        or tensor.dtype != dtype
+        or tensor.requires_grad
+    ):
+        raise RuntimeError("MLA INT8: wrong dtype/device, missing scale or unsupported gradients")
+    if (
+        tensor.ndim == 0
+        or (last_contiguous and tensor.stride(-1) != 1)
+        or any(s < 0 for s in tensor.stride())
+    ):
+        raise RuntimeError("MLA INT8: invalid stride; data last dimension must be contiguous")
+    if not torch.compiler.is_compiling() and tensor.numel():
+        span = 1 + sum((n - 1) * s for n, s in zip(tensor.shape, tensor.stride()))
+        end = (tensor.storage_offset() + span) * tensor.element_size()
+        if (
+            tensor.storage_offset() < 0
+            or end > 2**63 - 1
+            or end > tensor.untyped_storage().nbytes()
+        ):
+            raise RuntimeError("MLA INT8: view exceeds storage/byte bounds")
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_int8_metadata")
+def _mla_int8_metadata_fake(batch, sq, heads, capacity, lengths, splits, causal):
+    _check_mla_int8_config(batch, sq, heads, capacity, splits, causal)
+    _check_mla_cache_lengths(lengths, batch, lengths.device)
+    if lengths.device.type != "npu":
+        raise RuntimeError("MLA INT8: lengths must be NPU tensors")
+    return torch.empty((462 + batch,), device=lengths.device, dtype=torch.int32)
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_int8_bsnd")
+def _mla_int8_bsnd_fake(
+    q, k, v, qv, table, qs, ks, vs, lengths, metadata, scale, causal, splits, partials
+):
+    if q.ndim != 4 or qv.ndim != 4 or k.ndim != 4 or v.ndim != 4 or table.ndim != 2:
+        raise RuntimeError("MLA INT8: BSND Q and ND PA cache required; TND is not connected")
+    for t in (q, k):
+        _check_mla_int8_storage(t, q.device, torch.bfloat16)
+    for t in (qv, v):
+        _check_mla_int8_storage(t, q.device, torch.int8)
+    for t in (qs, ks, vs):
+        _check_mla_int8_storage(t, q.device, torch.float32, False)
+    _check_mla_int8_storage(table, q.device, torch.int32)
+    b, sq, h, d = q.shape
+    capacity = table.shape[1] * 128
+    _check_mla_int8_config(b, sq, h, capacity, splits, causal)
+    if (
+        d != 64
+        or qv.shape != (b, sq, h, 512)
+        or qs.shape != (b, sq, h)
+        or ks.shape != (1,)
+        or vs.shape != (1,)
+        or table.shape[0] != b
+        or k.shape != (*v.shape[:-1], 64)
+        or v.shape[1:] != (128, 1, 512)
+        or v.shape[0] > 2**31
+    ):
+        raise RuntimeError("MLA INT8: invalid Q/content/scale/page-table/cache shapes")
+    if lengths is not None:
+        _check_mla_cache_lengths(lengths, b, q.device)
+    if metadata is not None:
+        if (
+            metadata.device != q.device
+            or metadata.dtype != torch.int32
+            or metadata.shape != (462 + b,)
+            or not metadata.is_contiguous()
+        ):
+            raise RuntimeError("MLA INT8: metadata must be same-device contiguous int32[462+B]")
+    if scale is not None and (not math.isfinite(scale) or abs(scale) > 3.4028234663852886e38):
+        raise RuntimeError("MLA INT8: softmax_scale must be finite in FP32")
+    return (
+        torch.empty((b, sq, h, 512), device=q.device, dtype=torch.bfloat16),
+        torch.empty((b, h, sq), device=q.device, dtype=torch.float32),
+        torch.empty(
+            (26, b, h, sq, 512) if partials and splits == 0 else (0,),
+            device=q.device,
+            dtype=torch.float32,
+        ),
+        torch.empty(
+            (26, b, h, sq) if partials and splits == 0 else (0,),
+            device=q.device,
+            dtype=torch.float32,
+        ),
+    )
+
+
 def flash_attn_with_kvcache(
     q,
     k_cache,
@@ -4070,6 +4178,10 @@ def flash_attn_with_kvcache(
     pack_gqa=None,  # Can be tuned for speed
     sm_margin=0,  # Can be tuned if some SMs are used for communication
     return_softmax_lse=False,
+    *,
+    mla_q_scale: Optional[torch.Tensor] = None,
+    mla_k_scale: Optional[torch.Tensor] = None,
+    mla_v_scale: Optional[torch.Tensor] = None,
 ):
     """
     NPU MLA supports compressed 64/512 inputs with qv and independent 192/128
@@ -4180,6 +4292,14 @@ def flash_attn_with_kvcache(
             record, but changing softcap activation or lengths requires regeneration.
             Reuse skips AICPU generation; host workspace budgeting still runs.
         return_softmax_lse: bool. Whether to return the logsumexp of the attention scores.
+        mla_q_scale, mla_k_scale, mla_v_scale: Keyword-only INT8 MLA extension.
+            For BSND q/qv and ND paged cache with page_size=128, q/k_cache are
+            BF16 RoPE (64), qv/v_cache are INT8 content (512), and these same-device
+            FP32 scales have shapes [B,Sq,Hq], [1], [1]. All three are required.
+            Sq<=32, power-of-two Hq<=128, Hkv=1; multi-query requires causal=True.
+            Only num_splits=0/1 and the default effective GQA options are supported.
+            Scale values may change while reusing metadata. See design section 3.4
+            for the fixed source's RoPE scaling semantics and rejected combinations.
 
     Return:
         out: query layout with last dimension v_cache.shape[-1].
@@ -4187,8 +4307,79 @@ def flash_attn_with_kvcache(
         softmax_lse is FP32 with shape (batch_size, nheads, seqlen) for BSND queries or
             (nheads, total_q) for TND queries. It contains the natural log of each row's
             softmax normalization factor, including the qv contribution for MLA.
-        For MLA without split, both accumulators are empty tensors on the output device.
+        For MLA with num_splits=1, both accumulators are empty tensors on the output device.
+        INT8 num_splits=0 returns FP32 partials [26,B,Hq,Sq,512] and [26,B,Hq,Sq];
+            unused slots contain zero output and -inf LSE. Slots follow the source
+            native partition, including a single active slot when no split is needed.
     """
+    if (
+        v_cache.dtype == torch.int8
+        or (qv is not None and qv.dtype == torch.int8)
+        or any(t is not None for t in (mla_q_scale, mla_k_scale, mla_v_scale))
+    ):
+        if (
+            qv is None
+            or page_table is None
+            or any(t is None for t in (mla_q_scale, mla_k_scale, mla_v_scale))
+        ):
+            raise RuntimeError(
+                "MLA INT8: qv, ND page_table and all three mla_*_scale tensors are required"
+            )
+        if q.ndim != 4 or cu_seqlens_q is not None or max_seqlen_q is not None:
+            raise RuntimeError("MLA INT8: only BSND Q is connected; TND is not implemented yet")
+        _check_mla_dense_options(
+            softmax_scale=softmax_scale,
+            causal=causal,
+            allow_causal=True,
+            window_size=window_size,
+            attention_chunk=attention_chunk,
+            softcap=softcap,
+            num_splits=num_splits,
+            allow_split=True,
+            pack_gqa=pack_gqa,
+            sm_margin=sm_margin,
+            rotary_interleaved=rotary_interleaved,
+            optional_tensors=(
+                k,
+                v,
+                rotary_cos,
+                rotary_sin,
+                cache_batch_idx,
+                cache_leftpad,
+                cu_seqlens_k_new,
+                rotary_seqlens,
+                q_descale,
+                k_descale,
+                v_descale,
+            ),
+        )
+        if num_splits not in (0, 1) or _mla_gqa_active(q.shape[-2], 1, pack_gqa, sm_margin):
+            raise RuntimeError(
+                "MLA INT8: only native num_splits=0/1 and default effective pack_gqa/sm_margin are connected"
+            )
+        if isinstance(cache_seqlens, int):
+            if not 0 <= cache_seqlens <= 2**31 - 1:
+                raise RuntimeError("MLA INT8: invalid cache_seqlens")
+            cache_seqlens = torch.full(
+                (q.shape[0],), cache_seqlens, dtype=torch.int32, device=q.device
+            )
+        result = torch.ops.flash_attn_npu_3._mla_int8_bsnd(
+            q,
+            k_cache,
+            v_cache,
+            qv,
+            page_table,
+            mla_q_scale,
+            mla_k_scale,
+            mla_v_scale,
+            cache_seqlens,
+            scheduler_metadata,
+            softmax_scale,
+            causal,
+            num_splits,
+            return_softmax_lse,
+        )
+        return result if return_softmax_lse else result[0]
     # MLA operators validate tensors independently in real/fake execution.
     # Route before repeating those checks in Python; other forms
     # retain the common recognition/rejection path.
@@ -5018,6 +5209,42 @@ def get_scheduler_metadata(
     """
     if headdim_v is None:
         headdim_v = headdim
+    if qkv_dtype == torch.int8:
+        if (
+            headdim != 64
+            or headdim_v != 512
+            or num_heads_kv != 1
+            or page_size != 128
+            or cu_seqlens_q is not None
+        ):
+            raise RuntimeError(
+                "MLA INT8: metadata requires BSND Q, 64/512 shared content and ND PA page=128"
+            )
+        _check_mla_metadata_options(
+            num_heads_kv,
+            max_seqlen_k_new,
+            causal,
+            window_size,
+            attention_chunk,
+            has_softcap,
+            num_splits,
+            sm_margin,
+            (cu_seqlens_k_new, cache_leftpad, softcap, softmax_scale),
+            allow_causal=True,
+            allow_split=True,
+        )
+        _check_mla_gqa_options(pack_gqa, sm_margin)
+        if num_splits not in (0, 1) or _mla_gqa_active(num_heads_q, 1, pack_gqa, sm_margin):
+            raise RuntimeError("MLA INT8: unsupported split/pack_gqa/sm_margin")
+        return torch.ops.flash_attn_npu_3._mla_int8_metadata(
+            batch_size,
+            max_seqlen_q,
+            num_heads_q,
+            max_seqlen_k,
+            cache_seqlens,
+            num_splits,
+            causal,
+        )
     if _check_mla_metadata(headdim, headdim_v):
         _check_mla_metadata_options(
             num_heads_kv,

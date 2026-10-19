@@ -209,4 +209,10 @@ def daily_suites():
         "tests/mla/e2e/int8/test_unconnected.py::test_public_int8_stays_rejected",
         "tests/mla/e2e/int8/test_unconnected.py::test_compile_int8_stays_rejected",
     ]
+    suites["int8_bsnd"] = [
+        "tests/mla/e2e/int8_bsnd/test_public.py::test_daily",
+        "tests/mla/e2e/int8_bsnd/test_public.py::test_fake_compile",
+        "tests/mla/e2e/int8_bsnd/test_public.py::test_graph[8-generate]",
+        "tests/mla/e2e/int8_bsnd/test_public.py::test_empty",
+    ]
     return suites

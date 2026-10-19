@@ -1,4 +1,5 @@
 #include "mla_forward.h"
+#include "mla_int8_launch.h"
 #include "mla_gqa_launch.h"
 #include "mla_gqa_schedule.h"
 #include "mla_launch.h"
@@ -54,6 +55,7 @@
 #include <unordered_map>
 
 extern __global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args);
+extern __global__ __aicpu__ uint32_t ComputeMlaInt8Metadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaGqaMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaPrefillBsndMetadata(void* args);
 extern __global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args);
@@ -2799,10 +2801,176 @@ PrefillMixedForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor
     return {result[0], result[1], result[2], result[3]};
 }
 
+namespace {
+Int8::Config Int8Config(int64_t batch, int64_t sq, int64_t heads, int64_t capacity, int64_t splits, bool causal,
+                        c10::DeviceIndex device)
+{
+    TORCH_CHECK(batch >= 0 && uint64_t(batch) <= UINT32_MAX && sq >= 0 && sq <= 32 && heads > 0 && heads <= 128 &&
+                    capacity >= 0 && capacity <= INT32_MAX && splits >= 0 && splits <= 1,
+                "MLA INT8: BSND shape or split bounds exceeded");
+    auto platform = CausalPlatform(device, true);
+    TORCH_CHECK(platform.blockDims[platform.aicNum - 1] == platform.aicNum,
+                "MLA INT8: unsupported C1V2 blockDim mapping");
+    Int8::Config c{uint32_t(batch),
+                   uint32_t(sq),
+                   uint32_t(heads),
+                   uint32_t(capacity),
+                   platform.aicNum,
+                   uint32_t(splits),
+                   uint32_t(causal && sq > 1),
+                   0};
+    TORCH_CHECK(Int8::Valid(c), "MLA INT8: expected BSND Q<=32, power-of-two Hq<=128, page=128 and multi-Q causal");
+    return c;
+}
+
+void CheckInt8Storage(const at::Tensor& tensor, c10::Device device, at::ScalarType dtype, bool lastContiguous = true)
+{
+    TORCH_CHECK(tensor.device() == device && device.type() == c10::DeviceType::PrivateUse1 &&
+                    tensor.scalar_type() == dtype && !tensor.requires_grad(),
+                "MLA INT8: wrong dtype/device or unsupported gradients");
+    TORCH_CHECK(tensor.dim() > 0 && (!lastContiguous || tensor.stride(-1) == 1),
+                "MLA INT8: contiguous last dimension required");
+    unsigned __int128 span = 1;
+    for (int i = 0; i < tensor.dim(); ++i) {
+        TORCH_CHECK(tensor.stride(i) >= 0, "MLA INT8: negative stride");
+        if (tensor.size(i))
+            span += uint64_t(tensor.size(i) - 1) * static_cast<unsigned __int128>(tensor.stride(i));
+    }
+    TORCH_CHECK(tensor.storage_offset() >= 0, "MLA INT8: negative storage offset");
+    if (!tensor.numel())
+        return;
+    const auto end = (span + uint64_t(tensor.storage_offset())) * tensor.element_size();
+    TORCH_CHECK(end <= INT64_MAX && end <= tensor.storage().nbytes(), "MLA INT8: view exceeds storage/byte bounds");
+}
+
+at::Tensor Int8Mask(const at::Tensor& q)
+{
+    // Fixed source mask only; never cache user tensors, lengths or scales.
+    // Stream-local ownership preserves initialization ordering. A first call
+    // inside capture owns its own mask instead of publishing unexecuted data.
+    static thread_local std::unordered_map<int, std::unordered_map<uint64_t, at::Tensor>> deviceMasks;
+    auto& masks = deviceMasks[q.device().index()];
+    uint64_t stream = uint64_t(c10_npu::getCurrentNPUStream().stream(false));
+    auto found = masks.find(stream);
+    if (found != masks.end())
+        return found->second;
+    auto mask = at::ones({2048, 2048}, q.options().dtype(at::kBool)).triu(1);
+    if (c10_npu::currentStreamCaptureStatusMayInitCtx() != c10_npu::CaptureStatus::Active)
+        masks.emplace(stream, mask);
+    return mask;
+}
+} // namespace
+
+at::Tensor Int8MetadataOp(int64_t batch, int64_t sq, int64_t heads, int64_t capacity, const at::Tensor& lengths,
+                          int64_t splits, bool causal)
+{
+    TORCH_CHECK(lengths.device().type() == c10::DeviceType::PrivateUse1, "MLA INT8: lengths must be NPU tensors");
+    CheckCacheLengths(lengths, batch, lengths.device());
+    const c10::OptionalDeviceGuard guard(device_of(lengths));
+    auto c = Int8Config(batch, sq, heads, capacity, splits, causal, lengths.device().index());
+    auto metadata = at::empty({Int8::kFixedWords + int64_t(c.batch)}, lengths.options());
+    Int8::MetadataArgs args{c, PrefillPointer(lengths), PrefillPointer(metadata)};
+    auto stream = c10_npu::getCurrentNPUStream();
+    RecordPrefill(lengths, stream);
+    RecordPrefill(metadata, stream);
+    RunCausalLaunch("ascendc_mla_int8_metadata", [args, lengths, metadata, stream]() mutable {
+        ComputeMlaInt8Metadata<<<1, nullptr, stream.stream(false)>>>(&args, sizeof(args));
+        return 0;
+    });
+    return metadata;
+}
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+Int8ForwardOp(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, const at::Tensor& qv,
+              const at::Tensor& table, const at::Tensor& qs, const at::Tensor& ks, const at::Tensor& vs,
+              const std::optional<at::Tensor>& lengths, const std::optional<at::Tensor>& metadata,
+              std::optional<double> scale, bool causal, int64_t splits, bool partials)
+{
+    TORCH_CHECK(q.dim() == 4 && qv.dim() == 4 && k.dim() == 4 && v.dim() == 4 && table.dim() == 2,
+                "MLA INT8: BSND Q and ND PA cache required; TND is not connected");
+    const auto device = q.device();
+    for (const auto& t : {q, k})
+        CheckInt8Storage(t, device, at::kBFloat16);
+    for (const auto& t : {qv, v})
+        CheckInt8Storage(t, device, at::kChar);
+    for (const auto& t : {qs, ks, vs})
+        CheckInt8Storage(t, device, at::kFloat, false);
+    CheckInt8Storage(table, device, at::kInt);
+    const int64_t b = q.size(0), sq = q.size(1), h = q.size(2);
+    TORCH_CHECK(q.size(3) == 64 && qv.sizes() == at::IntArrayRef({b, sq, h, 512}) &&
+                    qs.sizes() == at::IntArrayRef({b, sq, h}) && ks.sizes() == at::IntArrayRef({1}) &&
+                    vs.sizes() == at::IntArrayRef({1}) && table.size(0) == b,
+                "MLA INT8: invalid Q/content/scale/page-table shapes");
+    MlaPagedCacheLayout cache{};
+    TORCH_CHECK(BuildInt8PagedCacheLayout(PagedTensorView<MlaPageTableView>(table), PagedTensorView(k),
+                                          PagedTensorView(v), cache) == MlaLayoutStatus::Success,
+                "MLA INT8: invalid ND PA cache layout/storage");
+    TORCH_CHECK(!scale || (std::isfinite(*scale) && std::isfinite(float(*scale))),
+                "MLA INT8: softmax_scale must be finite in FP32");
+    if (lengths)
+        CheckCacheLengths(*lengths, b, device);
+    const c10::OptionalDeviceGuard guard(device_of(q));
+    auto c = Int8Config(b, sq, h, cache.logicalCapacity, splits, causal, device.index());
+    if (metadata)
+        CheckGqaRecord(*metadata, device, Int8::kFixedWords + c.batch);
+    auto query = q.contiguous(), content = qv.contiguous(), qscale = qs.contiguous();
+    auto mask = sq > 1 ? Int8Mask(q) : at::empty({0}, q.options().dtype(at::kBool));
+    auto out = at::empty({b, sq, h, 512}, q.options());
+    auto lse = at::empty({b, h, sq}, q.options().dtype(at::kFloat));
+    auto accum = partials && splits == 0 ? at::zeros({26, b, h, sq, 512}, q.options().dtype(at::kFloat))
+                                         : at::empty({0}, q.options().dtype(at::kFloat));
+    auto accumLse = partials && splits == 0 ? at::full({26, b, h, sq}, -INFINITY, q.options().dtype(at::kFloat))
+                                            : at::empty({0}, q.options().dtype(at::kFloat));
+    // Full launch remains independent of current device lengths. Numerical
+    // workspace uses the source's GetBlockNum(), plus bounded balanced FD.
+    const uint64_t rows = std::min<uint64_t>(sq * h, 128);
+    const uint64_t bytes =
+        c.cores * 2ULL * (rows * 512 * 9) + 4ULL * (c.cores * 2 * 128 * 512 + 2 * c.cores * 2 * 128 * 8);
+    auto workspace = at::empty({int64_t(bytes + 512)}, q.options().dtype(at::kByte));
+    auto stream = c10_npu::getCurrentNPUStream();
+    auto owned = std::vector<at::Tensor>{q,  qv,    query, content, k,   v,     qs,       qscale,   ks,
+                                         vs, table, mask,  out,     lse, accum, accumLse, workspace};
+    if (lengths)
+        owned.push_back(*lengths);
+    if (metadata)
+        owned.push_back(*metadata);
+    for (const auto& t : owned)
+        RecordPrefill(t, stream);
+    Int8::LaunchArgs a{};
+    a.stream = stream.stream(false);
+    uint32_t fftsLength = 0;
+    TORCH_CHECK(rtGetC2cCtrlAddr(&a.ffts, &fftsLength) == RT_ERROR_NONE, "MLA INT8: FFTS unavailable");
+    a.q = PrefillPointer(query);
+    a.qv = PrefillPointer(content);
+    a.k = PrefillPointer(k);
+    a.v = PrefillPointer(v);
+    a.qs = PrefillPointer(qscale);
+    a.ks = PrefillPointer(ks);
+    a.vs = PrefillPointer(vs);
+    a.table = PrefillPointer(table);
+    a.mask = sq > 1 ? PrefillPointer(mask) : 0;
+    a.lengths = lengths ? PrefillPointer(*lengths) : 0;
+    a.metadata = metadata ? PrefillPointer(*metadata) : 0;
+    a.out = PrefillPointer(out);
+    a.lse = PrefillPointer(lse);
+    a.accum = accum.numel() ? PrefillPointer(accum) : 0;
+    a.accumLse = accumLse.numel() ? PrefillPointer(accumLse) : 0;
+    a.workspace = PrefillPointer(workspace);
+    a.config = c;
+    a.cache = cache;
+    a.scale = scale ? float(*scale) : 1.0f / 24.0f;
+    RunCausalLaunch("ascendc_mla_int8_bsnd", [a, owned]() { return Int8::Launch(a); });
+    return {out, lse, accum, accumLse};
+}
 } // namespace flash_attn::mla
 
 TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 {
+    m.def("_mla_int8_metadata(int batch, int sq, int heads, int capacity, Tensor lengths, int splits, bool causal) -> "
+          "Tensor");
+    m.def("_mla_int8_bsnd(Tensor q, Tensor k, Tensor v, Tensor qv, Tensor table, Tensor qs, Tensor ks, Tensor vs, "
+          "Tensor? lengths, Tensor? metadata, float? scale, bool causal, int splits, bool partials) -> (Tensor, "
+          "Tensor, Tensor, Tensor)");
     m.def("_mla_gqa_forward(Tensor q, Tensor k, Tensor v, Tensor? qv, int num_splits, int window_left, "
           "int window_right, bool causal, float? softmax_scale, Tensor? seqused_q, Tensor? seqused_k, "
           "Tensor? scheduler_metadata, Tensor? cu_seqlens_q, Tensor? cu_seqlens_k, int max_seqlen_q, "
@@ -2938,6 +3106,8 @@ TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
 {
+    m.impl("_mla_int8_metadata", &flash_attn::mla::Int8MetadataOp);
+    m.impl("_mla_int8_bsnd", &flash_attn::mla::Int8ForwardOp);
     m.impl("_mla_gqa_metadata", &flash_attn::mla::GqaMetadataOp);
     m.impl("_mla_prefill_bsnd_metadata", &flash_attn::mla::PrefillBsndMetadataOp);
     m.impl("_mla_split_bsnd_metadata", &flash_attn::mla::SplitBsndMetadataOp);
@@ -2954,6 +3124,8 @@ TORCH_LIBRARY_IMPL(flash_attn_npu_3, CompositeExplicitAutograd, m)
 
 TORCH_LIBRARY_IMPL(flash_attn_npu_3, Autograd, m)
 {
+    m.impl("_mla_int8_metadata", torch::CppFunction::makeFallthrough());
+    m.impl("_mla_int8_bsnd", torch::CppFunction::makeFallthrough());
     m.impl("_mla_gqa_metadata", torch::CppFunction::makeFallthrough());
     m.impl("_mla_gqa_forward", torch::CppFunction::makeFallthrough());
     m.impl("_mla_prefill_bsnd_metadata", torch::CppFunction::makeFallthrough());

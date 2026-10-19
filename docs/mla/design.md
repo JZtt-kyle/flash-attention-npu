@@ -204,9 +204,15 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 | `ifa_service_matmul_full_quant.h` 的内容/RoPE QK、量化 PV | [`block/mla_int8_cube.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/block/mla_int8_cube.hpp) 直接读 ND 页，复用现有页校验和 `mla_copy.hpp`；INT8 C0=32、BF16 C0=16，独立 64 位页/行/table stride，逐页检查物理页。NZ pack 只在源测试侧 |
 | 源普通 FD 的 BSND LSE 为 `[B,Sq,Hq]`，快速 FD 未写 LSE | 普通 FD 写回适配 `[B,Hq,Sq]`；TND 数值组件保留源 `[Tq,Hq]`，公开 `[Hq,Tq]` 的布局适配在 M20 接入；[`block/mla_int8_merge.hpp`](../../csrc/ascend910/flash_attn_npu_3/mla/block/mla_int8_merge.hpp) 复用快速归并的 FP32 sum/max 生成 LSE。快速 FD 的 LSE 另用固定源普通归并比较，前提是源/目标/普通归并输入的真实 partial 逐元素一致；不拿另一归并的 O 替代原生快速 FD 对照 |
 | 源空行 LSE 为正无穷；当前 CANN `InitOutput` 连续初始化 O/LSE 会复用尚未写完的 stack UB | 目标空行 LSE 归一为负无穷，并增加初始化完成同步；源 O 按默认 native 端点关闭 LSE 后对照，LSE 单独调用源，源空 KV 的 O 初始化缺陷另记证据，不冒充数学通过 |
-| `op_host/incre_flash_attention_tiling_mla.h` 的原始 tiling 与组件发射 | [`mla_int8_params.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_int8_params.h) 是数值调用描述，测试回放已校验 native 的原始 tiling，绑定输入夹具签名和包身份；它不是生产 metadata 或新公开协议。host/AICPU 与公开 real/fake/图接入留在 M19/M20 |
+| `op_host/incre_flash_attention_tiling_mla.h` 的原始 tiling 与组件发射 | [`mla_int8_params.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_int8_params.h) 是数值调用描述，测试回放已校验 native 的原始 tiling，绑定输入夹具签名和包身份；原始 tiling 本身不是生产 metadata。M19 BSND 生产调用使用下述 v48，TND 公开接入仍属 M20 |
 
-BSND/TND 公开接入各自实测 eager 和 graph 性能，两布局合计最多 100 个固定配置，按既定等权平均 ≤1 分别验收；INT8 阶段沿用同一集合收尾。组件证据不能代替公开验收，M17 的非量化图性能例外不适用于 INT8。
+**M19 BSND 生产协议。** [`mla_int8_schedule.h`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_int8_schedule.h) 专门化固定源 `SplitBN_V0`、`SplitBNS`、`SplitBalancedFd` / `SplitBalanced` 及快速 FD 分配，CPU/AICPU/消费者共用相同边界检查。v1–v47 不能表达 INT8/BF16 混合模式和旧 IFA 的量化 FD 分区，故 v48 使用连续 `int32[462+B]`：16 字头包含 magic/version/总长、混合 dtype 标记、成功状态、调度模式及 B/Sq/Hq/逻辑容量/平台核数/split/causal，随后 446 字是无调用 scale 的数值调度，尾部 B 字保存实际 KV 长度。保留字段须为零。Q=1 的 causal 与无 mask 归一为同一记录。记录不保存输入地址、页表、物理页数或三个 scale 的值。
+
+公开 `get_scheduler_metadata(qkv_dtype=torch.int8, page_size=128, headdim=64, headdim_v=512, num_heads_kv=1, ...)` 的 BSND 分支用 [`mla_int8_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_int8_metadata.aicpu) 在设备端读取 `int32[B]` 长度并生成 v48；前向消费在 [`mla_dispatch_int8.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_dispatch_int8.cpp) 从当次设备长度重新求出规范调度，跨完整向量 grid 分摊核对所给记录的每个字，含没有 attention 工作的 lane；数值仅使用独立求出的规范调度，不从未经校验的记录取地址或分区。前向使用 M18 数值核；任一 lane 发现不匹配都会使整个异步调用失败。隐式调用直接使用该调度，不生成 AICPU 记录；复用省去生成器，仍保留完整消费检查。长度、模式或调度字损坏会 Trap；scale 更新无需重新生成。每次前向检查所有使用页，空 Q 也不跳过长度/页安全检查。
+
+host 仅可按需物化小 Q/qv/Q-scale 的合法视图，ND KV 与页表保持原 storage/stride。固定 causal mask 按设备和 stream 持有，不缓存用户数据；首次图捕获内创建的 mask 由该调用持有，避免发布尚未执行的初始化。`num_splits=1` 返回空 accumulator；`num_splits=0` 的公开 FP32 accumulator 为 `[26,B,Hq,Sq,512]` / `[26,B,Hq,Sq]`，按实际源分区导出归一化 partial O 与自然对数 LSE，未使用槽为 0 / `-inf`；direct 情况只有第 0 槽有效。Q=0/B=0 保留空输出 shape。是否已完成实机闭环以 [status](status.md) 为准。
+
+BSND/TND 公开接入各自实测 eager 和 graph 性能，两布局合计最多 100 个固定配置，按既定等权平均 ≤1 分别验收；INT8 阶段沿用同一集合收尾。组件证据不能代替公开验收，M17 的非量化图性能例外不自动适用于 INT8。用户于 2026-10-19 明确允许本次 M19 暂缓 graph 性能优化，保留其完整实测失败记录，在 eager 性能、必要正确性（含图重放）及累计回归通过后闭环。此例外仅用于 M19 本次交付，不把 graph 记为达标，不修改性能工具、固定集合或默认门槛，也不自动扩展到 M20/M21。
 
 ## 4. 功能边界
 
@@ -288,7 +294,7 @@ BSND/TND 公开接入各自实测 eager 和 graph 性能，两布局合计最多
 
 ## 5. metadata 设计
 
-metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链，以及 func/varlen 的内部生成链路。兼容公开调用语义，NPU 记录布局由本后端管理，不与 CUDA buffer 互换。以下 v1–v47 均为非量化协议，不能用于 INT8 内容；INT8 的 metadata 目标见 3.4。B 表示 batch，以下字数单位均为 int32。记录中的 token 起点属于分配坐标，不是元素或字节地址；真实地址还须结合各输入的 stride，见 [6.4](#64-输入-stride-与地址校验)。
+metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链，以及 func/varlen 的内部生成链路。兼容公开调用语义，NPU 记录布局由本后端管理，不与 CUDA buffer 互换。以下 v1–v47 均为非量化协议，不能用于 INT8 内容；INT8 BSND 的 v48 协议见 [3.4](#34-int8-压缩-mla-扩展)。B 表示 batch，以下字数单位均为 int32。记录中的 token 起点属于分配坐标，不是元素或字节地址；真实地址还须结合各输入的 stride，见 [6.4](#64-输入-stride-与地址校验)。
 
 | 协议 | version / kind | 精确字数 | 表达的布局与长度 |
 | --- | --- | --- | --- |
@@ -1071,7 +1077,7 @@ CANN 9.0 Bisheng ASC launcher 未提供调度模式参数；MLA 发射使用线�
 | `mla_split_paged_tnd_metadata.aicpu`、`mla_auto_split_paged_tnd_metadata.aicpu` | TND PA 显式 v25、原生自动 v26；softcap 单/显式 v44、自动 v45 |
 | `mla_prefill_bsnd_metadata.aicpu` | 192/128 五布局 v27–v31 及五布局 softcap v34/v37/v40/v43/v46，共用生成器与原生分核 |
 
-v47 使用 `mla_dispatch_fp16_gqa.cpp` / `mla_dispatch_bf16_gqa.cpp` 与 `mla_gqa_launch_impl.hpp`，setup 同时编入共用 GQA 调度/metadata；INT8 独立 probe 由 `tests/mla/support/mla_int8_build.py` 构建，不在此表中表示已完成生产接入。
+v47 使用 `mla_dispatch_fp16_gqa.cpp` / `mla_dispatch_bf16_gqa.cpp` 与 `mla_gqa_launch_impl.hpp`，setup 同时编入共用 GQA 调度/metadata。INT8 BSND 的 v48 在 `mla_forward.cpp` 注册 `_mla_int8_metadata` / `_mla_int8_bsnd`，setup 编入 `mla_int8_metadata.aicpu` 与 `mla_dispatch_int8.cpp`；范围与协议见 3.4。独立 INT8 probe 仍由 `tests/mla/support/mla_int8_build.py` 构建，不能代替生产扩展身份。
 
 192/128 的五布局由 `mla_dispatch_fp16_prefill_bsnd.cpp` / `mla_dispatch_bf16_prefill_bsnd.cpp` 薄实例共用 prefill launcher，沿用文件名，不按布局另建数值核。公开生成器与内部前向复用对应构造器；带 TND Q 的公开生成模式在设备上安全解析前缀，生产前向再核对总量。split 单元同时编入所属计划/预算和安全协议，PA 构建包含静态布局与双 dtype 实例。编译选项、头文件和 `.cpp` 均参与依赖检查；MLA 另生成设备预处理依赖，防止 host `-MMD` 漏掉 `__NPU_ARCH__` 内的 Kernel 头。已有 `.so` 不证明源码已生效，运行验收须核对实际加载路径、哈希和链接对象。
 
@@ -1140,6 +1146,8 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 **M17 收尾验收例外：** 2026-10-18 完整实测与文档/质量检查完成后，用户明确确认“接受已知限制并提交”，允许 M17 在图性能未达平均门槛时完成收尾提交。图性能实测失败、退化明细和证据位置从 `git show ebdf3eb:docs/mla/status.md` 查询；工具继续报告失败，默认 `mean_ratio <= 1.0` 不变。该例外只适用于 M17 收尾，不扩展到正确性、eager 或后续改动，也不表示已达到源 CANN 等速。此前 M16 的单次授权及证据由 Git 保留。
 
+M19 本次暂缓 graph 性能优化的独立授权及边界见 [3.4](#34-int8-压缩-mla-扩展)，实测失败和交付判定在 [status](status.md) 分别记录。
+
 图内 Kernel 采样须能追溯到重放时的实际任务及调用身份。捕获准备与外层 Fill/MODEL_EXECUTE 保留于原始 trace，不能代替 attention/metadata/merge 时间；模型任务缺失、阶段缺失或身份混用均不能验收。图 Kernel 使用独立采样进程：全部 eager 发射族在 profiler 启动前初始化，首次图捕获位于 RECORD 阶段，以避免本机 CANN 的提前捕获及初始化临时流关联缺口。原始 `op_summary` 的 Model ID、阶段与任务身份必须完整，不能补写 ID 或用外层任务替代。完整重放 wall 在另一进程关闭 profiler 计时，仍包含外层执行成本，不按 profiler 任务筛选调整。实测环境与原始证据见 [status](status.md)。
 
 **覆盖：** 非量化为两种表示 × FP16/BF16 × dense/TND/PA × mask × 长短 KV × 单/多 query × 分组/尾块/stride；加 metadata 有无、重复使用、不同 scale、长度变更、split 自动/显式、graph replay。可采用代表性组合加针对性边界测试，不要求机械的全笛卡尔积，但每项源能力都要能追溯到用例或明确排除理由。INT8 按 3.4 的混合 dtype、两布局及源有效组合单列覆盖，不套用非量化的全部选项。
@@ -1157,6 +1165,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 | 192/128 TND / 混合公开 | [`mla_prefill_tnd_cases.py`](../../tests/mla/support/mla_prefill_tnd_cases.py)、[`mla_prefill_mixed_cases.py`](../../tests/mla/support/mla_prefill_mixed_cases.py)；分别先 `--suite prefill-tnd-profile-check` / `prefill-mixed-profile-check`，再运行对应 `*-profile`。采样次数沿用上一行；TND 计 varlen R=1/4，混合计隐式/生成/复用 R=1/4，native 转换边界见 [7.2](#72-参考工具与对照边界) |
 | 192/128 BSND/TND PA 公开 | [`mla_prefill_paged_bsnd_cases.py`](../../tests/mla/support/mla_prefill_paged_bsnd_cases.py)、[`mla_prefill_paged_tnd_cases.py`](../../tests/mla/support/mla_prefill_paged_tnd_cases.py)；分别以 `prefill-paged-bsnd-profile-check` / `prefill-paged-tnd-profile-check` 核对适用 native PA 包与解析，再执行对应 `*-profile`。三入口各 R=1/4，采样协议和原生 FD 分类保持不变 |
 | INT8 压缩数值组件 | [`mla_int8_profile.py`](../../tests/mla/support/mla_int8_profile.py) 的 `PERFORMANCE_CASES`：源 NZ 与目标 ND 同原生分区，含普通/快速 FD、mask、空值及 ND 行 stride；先 `int8-profile-check` 再 `int8-component-profile`，5 次预热、5×20 probe wall、5×10 Kernel，单列源 NZ pack 耗时，不称公开 E2E |
+| INT8 BSND 公开 | [`mla_int8_bsnd_profile_rows.py`](../../tests/mla/support/mla_int8_bsnd_profile_rows.py) 的 24 个固定配置：16 个 BSND 源几何加 8 个 Q/scale/cache/table stride；reuse/generate/implicit 各 R=1/4，先在 4 个代表与最大分配输入预检，再以相同 5 次预热、5×20 eager/graph wall 与 5×10 Kernel 采样分别验收。native 每次分配输出，并在调用内处理原 device Q/Q-scale/table 的必要物化；源 NZ pack 准备耗时另存；目标转换也在调用内。保留全部单例、分段、退化与图 model/task 证据 |
 | 512+64 基础与布局组件 | [`mla_profile_cases.py`](../../tests/mla/support/mla_profile_cases.py)、[`support/components/`](../../tests/mla/support/components/) 及所属单元中的固定清单；`mla_*_profile.py` 运行相应 probe。只在模块变化或定位时显式选择，不累计历史组件性能 |
 | 非 PA 公开基础/长度/stride | [`mla_forward_profile.py`](../../tests/mla/support/mla_forward_profile.py)、[`mla_varlen_profile.py`](../../tests/mla/support/mla_varlen_profile.py)、[`mla_mixed_profile.py`](../../tests/mla/support/mla_mixed_profile.py)；输入见驱动及 [`support/public_cases/`](../../tests/mla/support/public_cases/) |
 | PA / causal / window 公开 | `support/public_cases/` 与 `mla_window*_cases.py` 中的 `PERFORMANCE_CASES`；`--suite causal-*-profile` / `window-*-profile` 选择具体布局，完整名字以 [`--list`](#74-统一验收入口) 为准 |

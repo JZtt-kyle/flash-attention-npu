@@ -1,9 +1,10 @@
-"""M18 components must not silently enable mixed INT8 public execution."""
+"""Keep missing-scale BSND and the unconnected TND INT8 path explicit."""
 
 from contextlib import nullcontext
 
 import pytest
 import torch
+from torch._dynamo.exc import Unsupported
 from torch._subclasses.fake_tensor import FakeTensorMode
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
@@ -24,13 +25,12 @@ def inputs(tnd):
     )
 
 
-@pytest.mark.parametrize("tnd", [False, True], ids=["bsnd", "tnd"])
-@pytest.mark.parametrize("entry", ["forward", "metadata"])
+@pytest.mark.parametrize("tnd,entry", [(False, "forward"), (True, "forward"), (True, "metadata")])
 @pytest.mark.parametrize("fake", [False, True], ids=["real", "fake"])
 def test_public_int8_stays_rejected(tnd, entry, fake):
     with FakeTensorMode() if fake else nullcontext():
         args = inputs(tnd)
-        with pytest.raises(RuntimeError, match="dtype|FP16|BF16"):
+        with pytest.raises(RuntimeError, match="INT8|dtype|FP16|BF16"):
             if entry == "forward":
                 api.flash_attn_with_kvcache(**args)
             else:
@@ -56,5 +56,9 @@ def test_compile_int8_stays_rejected():
     def forward(qv):
         return api.flash_attn_with_kvcache(**dict(args, qv=qv))
 
-    with pytest.raises(RuntimeError, match="dtype|FP16|BF16"):
+    with pytest.raises(RuntimeError, match="MLA INT8: qv, ND page_table and all three"):
+        forward(args["qv"])
+    # Dynamo wraps a Python precondition failure instead of preserving its text.
+    with pytest.raises(Unsupported, match="Observed exception") as error:
         torch.compile(forward, backend="eager", fullgraph=True)(args["qv"])
+    assert "raised exception ExceptionVariable(<class 'RuntimeError'>)" in str(error.value)

@@ -391,6 +391,7 @@ class BishengBuildExt(build_ext):
         sources = [os.path.join(src_dir, "fa_metadata.aicpu")]
         if ext_name == "flash_attn_npu_3.flash_attn_npu_3":
             sources.append(os.path.join(src_dir, "mla", "mla_metadata.aicpu"))
+            sources.append(os.path.join(src_dir, "mla", "mla_int8_metadata.aicpu"))
             sources.append(os.path.join(src_dir, "mla", "mla_gqa_metadata.aicpu"))
             sources.append(os.path.join(src_dir, "mla", "mla_prefill_bsnd_metadata.aicpu"))
             sources.append(os.path.join(src_dir, "mla", "mla_bsnd_metadata.aicpu"))
@@ -675,6 +676,7 @@ src_ascend910_v3 += [
     os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3/mla", name)
     for name in (
         "mla_forward.cpp",
+        "mla_dispatch_int8.cpp",
         "mla_dispatch_fp16_prefill_bsnd.cpp",
         "mla_dispatch_fp16_gqa.cpp",
         "mla_dispatch_bf16_gqa.cpp",

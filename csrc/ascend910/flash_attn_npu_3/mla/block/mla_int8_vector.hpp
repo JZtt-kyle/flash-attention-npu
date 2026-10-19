@@ -78,6 +78,19 @@ class MlaInt8Vector {
                                 GM_ADDR attentionOut, GM_ADDR softmaxLse, GM_ADDR workspace,
                                 const Int8TilingParams* tiling, TPipe* tPipe);
     __aicore__ inline void InitQuant(GM_ADDR dequantScaleQuery, GM_ADDR keyAntiquantScale, GM_ADDR valueAntiquantScale);
+    // Public FA3 lengths are int32; isolated fixed-source probes retain uint64.
+    __aicore__ inline void SetInt32Lengths(GM_ADDR lengths)
+    {
+        publicLengths = true;
+        publicLengthsPresent = lengths != nullptr;
+        lengths32.SetGlobalBuffer((__gm__ int32_t*)lengths);
+    }
+    __aicore__ inline void SetPublicPartials(GM_ADDR out, GM_ADDR lse)
+    {
+        publicPartials = out != nullptr;
+        publicOut.SetGlobalBuffer((__gm__ float*)out);
+        publicLse.SetGlobalBuffer((__gm__ float*)lse);
+    }
 
     // 中间计算数据类型为float，高精度模式
     using T = float;
@@ -158,6 +171,46 @@ class MlaInt8Vector {
 
     GlobalTensor<uint64_t> actualSeqLengthsGmQ;
     GlobalTensor<uint64_t> actualSeqLengthsGm;
+    GlobalTensor<int32_t> lengths32;
+    GlobalTensor<float> publicOut, publicLse;
+    bool publicLengths = false, publicLengthsPresent = false, publicPartials = false;
+    __aicore__ inline uint64_t KvLength(uint32_t b)
+    {
+        return publicLengths ? (publicLengthsPresent ? uint64_t(lengths32.GetValue(b)) : kvSeqSize)
+                             : actualSeqLengthsGm.GetValue(b);
+    }
+    __aicore__ inline uint64_t PublicRow(const ExtraInfoMla& info, uint32_t row)
+    {
+        uint32_t part = 0;
+        if constexpr (FLASH_DECODE)
+            part = BALANCE ? (info.tndIsS2SplitCore ? info.tndCoreStartKVSplitPos : 0) : s2IdxFD;
+        uint32_t m = mSizeVStart + row;
+        return ((uint64_t(part) * batchSize + info.bIdx) * qHeadNum + m % info.gSize) * qSeqSize +
+               info.s1Idx * s1SizeSub + m / info.gSize;
+    }
+    __aicore__ inline void ExportPublicLse(const ExtraInfoMla& info, LocalTensor<float> sum, LocalTensor<float> max)
+    {
+        if (!publicPartials)
+            return;
+        LocalTensor<float> value = tmpBuff3.Get<float>();
+        Log(value, sum, mSizeVector);
+        PipeBarrier<PIPE_V>();
+        Add(value, value, max, mSizeVector);
+        PipeBarrier<PIPE_V>();
+        LocalTensor<float> broadcast = outputQue2.AllocTensor<float>();
+        Brcb(broadcast, value, (mSizeVector + 7) / 8, {1, 8});
+        PipeBarrier<PIPE_V>();
+        for (uint32_t row = 0; row < mSizeVector; ++row) {
+            uint32_t q = info.s1Idx * s1SizeSub + (mSizeVStart + row) / info.gSize;
+            if (attenMaskFlag && uint64_t(q) + info.s2Size < qSeqSize)
+                Duplicate(broadcast[row * 8], -FLOAT_INF, 8);
+        }
+        outputQue2.EnQue(broadcast);
+        outputQue2.DeQue<float>();
+        for (uint32_t row = 0; row < mSizeVector; ++row)
+            DataCopyPad(publicLse[PublicRow(info, row)], broadcast[row * 8], DataCopyExtParams{1, 4, 0, 0, 0});
+        outputQue2.FreeTensor(broadcast);
+    }
 
     // quant
     GlobalTensor<T> deqScale1Gm;
@@ -666,9 +719,9 @@ __aicore__ inline void MlaInt8Vector<IFAT>::GetActualSeqLen(uint32_t bIdx, uint3
             curActualSeqLen = SeqLenFromTensorList(bIdx);
         }
     } else if (actualLenDims == 1) {
-        curActualSeqLen = actualSeqLengthsGm.GetValue(0);
+        curActualSeqLen = KvLength(0);
     } else {
-        curActualSeqLen = actualSeqLengthsGm.GetValue(bIdx);
+        curActualSeqLen = KvLength(bIdx);
     }
 
     if constexpr (BALANCE) {
@@ -793,7 +846,8 @@ __aicore__ inline void MlaInt8Vector<IFAT>::Init(GM_ADDR query, GM_ADDR key, GM_
     // Bind them before InitCalcParamsEach (the source orders this too late).
     InitActualSeqLen(actualSeqLengthsQ, actualSeqLengths);
     // 初始化计算参数
-    InitCalcParamsEach();
+    if (aiCoreIdx < usedCoreNum)
+        InitCalcParamsEach();
 
     pipe = tPipe;
     keyPtr = key;
@@ -1336,7 +1390,7 @@ __aicore__ inline void MlaInt8Vector<IFAT>::FlashDecodeComputeND()
     actualCombineLoopSize = tndFDCoreInfo.kvSplitNum;
 
     uint32_t actualSeqQ = GetBalanceActualSeqLengths(actualSeqLengthsGmQ, bIdx);
-    curActualSeqLen = actualSeqLengthsGm.GetValue(bIdx);
+    curActualSeqLen = KvLength(bIdx);
     int sOuterLoopTailIdx = ((actualSeqQ + s1SizeSub - 1) / s1SizeSub) - 1;
     int s1RowSize = s1SizeSub;
     if (s1Idx == sOuterLoopTailIdx) { // 尾块场景
@@ -1392,9 +1446,9 @@ __aicore__ inline void MlaInt8Vector<IFAT>::FlashDecodeCompute()
                 curActualSeqLen = SeqLenFromTensorList(bIdx);
             }
         } else if (actualLenDims == 1) {
-            curActualSeqLen = actualSeqLengthsGm.GetValue(0);
+            curActualSeqLen = KvLength(0);
         } else {
-            curActualSeqLen = actualSeqLengthsGm.GetValue(bIdx);
+            curActualSeqLen = KvLength(bIdx);
         }
 
         actualCombineLoopSize = (curActualSeqLen + sInnerLoopSize - 1) / sInnerLoopSize;
@@ -1941,6 +1995,17 @@ __aicore__ inline void MlaInt8Vector<IFAT>::Bmm2ResCopyOut(const ExtraInfoMla& i
                                                            uint32_t startRow, uint32_t dealRowCount,
                                                            uint32_t columnCount, uint32_t actualColumnCount)
 {
+    if (publicPartials) {
+        DealInvalidRows(info, bmm2ResUb, startRow, dealRowCount, columnCount, actualColumnCount);
+        LocalTensor<T> tmp = outputQue1.AllocTensor<T>();
+        DataCopy(tmp, bmm2ResUb, columnCount * dealRowCount);
+        outputQue1.EnQue(tmp);
+        outputQue1.DeQue<T>();
+        for (uint32_t row = 0; row < dealRowCount; ++row)
+            DataCopyPad(publicOut[PublicRow(info, startRow + row) * headDim], tmp[row * columnCount],
+                        DataCopyExtParams{1, uint32_t(headDim * sizeof(T)), 0, 0, 0});
+        outputQue1.FreeTensor(tmp);
+    }
     if constexpr (BALANCE) {
         if constexpr (FLASH_DECODE) {
             if (info.tndIsS2SplitCore) {
@@ -2130,6 +2195,7 @@ __aicore__ inline void MlaInt8Vector<IFAT>::ProcessVec1Inner(const ExtraInfoMla&
         uint32_t softmaxOutOffset = outIdx * BUFFER_SIZE_BYTE_2K / sizeof(T);
         LocalTensor<T> sumTensor = softmaxSumUb[softmaxOutOffset];
         LocalTensor<T> maxTensor = softmaxMaxUb[softmaxOutOffset];
+        ExportPublicLse(info, sumTensor, maxTensor);
 
         if constexpr (BALANCE) {
             if (!info.tndIsS2SplitCore) {
@@ -2627,7 +2693,7 @@ __aicore__ inline void MlaInt8Vector<IFAT>::GetTNDAxisStartId(uint32_t& bStart, 
             s2Start = 0;
         } else {
             uint32_t actualSeqQPrev = GetBalanceActualSeqLengths(actualSeqLengthsGmQ, bEndPrev);
-            uint32_t actualSeqKVPrev = actualSeqLengthsGm.GetValue(bEndPrev);
+            uint32_t actualSeqKVPrev = KvLength(bEndPrev);
             uint32_t s1PrevSplitNum = (actualSeqQPrev + s1SizeSub - 1) / s1SizeSub;
             uint32_t s2PrevSplitNum = (actualSeqKVPrev + singleProcessSInnerSize - 1) / singleProcessSInnerSize;
             bStart = bEndPrev;
