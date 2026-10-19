@@ -25,7 +25,9 @@ from tests.mla.support.mla_graph_profile_rows import select_model_rows
 from tests.mla.support.mla_prefill_bsnd_profile import sample_kernels
 from tests.mla.support.mla_native_dispatch import sha256, e2e_applicable
 from tests.mla.support.public_cases.graph import capture
-from tests.mla.support.public_cases.int8_bsnd import make_case, metadata, invoke
+from tests.mla.support.public_cases.int8_bsnd import make_case as bsnd_case, metadata, invoke
+from tests.mla.support.public_cases.int8_tnd import make_case as tnd_case
+from tests.mla.support.mla_int8_tnd_profile_rows import selected as tnd_selected
 
 
 class PublicNativeCall:
@@ -59,9 +61,10 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2) + "\n")
 
 
-def run(directory, check=False, dispatch=None, graph_kernels=False):
+def run(directory, check=False, dispatch=None, graph_kernels=False, layout="bsnd"):
     directory.mkdir(parents=True, exist_ok=True)
-    specs = selected(check)
+    specs = tnd_selected(check) if layout == "tnd" else selected(check)
+    make_case = tnd_case if layout == "tnd" else bsnd_case
     cases = [make_case(SOURCE_CASES[s["index"]], s["view"]) for s in specs]
     natives = [PublicNativeCall(c) for c in cases]
     records = [metadata(c) for c in cases]
@@ -195,5 +198,6 @@ if __name__ == "__main__":
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--dispatch", type=Path)
     parser.add_argument("--graph-kernels", action="store_true")
+    parser.add_argument("--layout", choices=("bsnd", "tnd"), default="bsnd")
     args = parser.parse_args()
-    run(args.output, args.check, args.dispatch, args.graph_kernels)
+    run(args.output, args.check, args.dispatch, args.graph_kernels, args.layout)

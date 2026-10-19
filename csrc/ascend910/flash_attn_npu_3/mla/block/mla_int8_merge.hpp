@@ -303,7 +303,7 @@ template <LAYOUT LAYOUT_T, typename OUT_T>
 __aicore__ inline void
 Bmm2DataCopyOutNBSDMTilingFd(LocalTensor<OUT_T>& attenOutUb, const FusedTransposeInfoFD& transInfo,
                              const AttentionCommonFlashDecode::ConstInfoFD& constInfo,
-                             GlobalTensor<uint64_t>& actualSeqLengthsGmQ, GlobalTensor<OUT_T>& attentionOutGm)
+                             QueryLengths& actualSeqLengthsGmQ, GlobalTensor<OUT_T>& attentionOutGm)
 {
     uint32_t tSize = constInfo.batchSize * constInfo.qSeqSize;
     uint32_t tBase = transInfo.bIdx * constInfo.qSeqSize;
@@ -438,7 +438,7 @@ class ServiceFlashDecode {
 
     __aicore__ inline void InitGlobalTensor(GlobalTensor<T> lseMaxFdGm, GlobalTensor<T> lseSumFdGm,
                                             GlobalTensor<T> accumOutGm, GlobalTensor<OUT_T> attentionOutGm,
-                                            GlobalTensor<uint64_t> actualSeqLengthsGmQ);
+                                            QueryLengths actualSeqLengthsGmQ);
     __aicore__ inline void InitParams(const AttentionCommonFlashDecode::ConstInfoFD& constInfo);
     __aicore__ inline void InitDecodeParams();
     __aicore__ inline void InitBuffers(TPipe* pipe);
@@ -476,7 +476,7 @@ class ServiceFlashDecode {
     GlobalTensor<T> lseMaxFdGm;
     GlobalTensor<T> accumOutGm;
     GlobalTensor<OUT_T> attentionOutGm;
-    GlobalTensor<uint64_t> actualSeqLengthsGmQ;
+    QueryLengths actualSeqLengthsGmQ;
     GlobalTensor<T> softmaxLseGm;
     bool softmaxLseFlag = false;
 
@@ -506,7 +506,7 @@ template <typename IFAT>
 __aicore__ inline void
 ServiceFlashDecode<IFAT>::InitGlobalTensor(GlobalTensor<T> lseMaxFdGm, GlobalTensor<T> lseSumFdGm,
                                            GlobalTensor<T> accumOutGm, GlobalTensor<OUT_T> attentionOutGm,
-                                           GlobalTensor<uint64_t> actualSeqLengthsGmQ)
+                                           QueryLengths actualSeqLengthsGmQ)
 {
     this->lseMaxFdGm = lseMaxFdGm;
     this->lseSumFdGm = lseSumFdGm;
@@ -744,7 +744,11 @@ __aicore__ inline void ServiceFlashDecode<IFAT>::CopyFinalResOut(LocalTensor<T>&
         for (uint32_t row = 0; row < dealRowCount; ++row) {
             uint64_t flat = attenOutOffset / constInfo.headDim + startRow + row;
             uint64_t offset = flat;
-            if constexpr (LAYOUT_T != LAYOUT::TND) {
+            if constexpr (LAYOUT_T == LAYOUT::TND) {
+                if (actualSeqLengthsGmQ.publicLayout)
+                    offset = (flat % constInfo.qHeadNum) * actualSeqLengthsGmQ.GetValue(constInfo.batchSize - 1) +
+                             flat / constInfo.qHeadNum;
+            } else {
                 uint64_t batch = flat / (constInfo.qSeqSize * constInfo.qHeadNum);
                 uint64_t token = (flat / constInfo.qHeadNum) % constInfo.qSeqSize;
                 uint64_t head = flat % constInfo.qHeadNum;

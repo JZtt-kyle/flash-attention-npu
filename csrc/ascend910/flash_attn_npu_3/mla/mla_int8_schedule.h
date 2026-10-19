@@ -4,7 +4,7 @@
 // incre_flash_attention_tiling.cpp::SplitBN_V0, SplitBNS, SplitBalancedFd,
 // SplitBalanced, SplitFDMLa, CalcInnerSize and FillTilingMla; and
 // incre_flash_attention_tiling_check.cpp::IsFlashDecode/CheckCoreOkFlag.
-// Specialization: BSND INT8/BF16, Hkv=1, ND PA. No framework dependencies.
+// Specialization: BSND/TND INT8/BF16, Hkv=1, ND PA. No framework dependencies.
 // The same checked scheduler runs on CPU/AICPU and in the device consumer.
 #pragma once
 #include "mla_int8_params.h"
@@ -46,8 +46,9 @@ MLA_INT8_INLINE bool Valid(const Config& c)
 
 // Bounds are checked before reading lengths, including empty Q. False leaves a
 // zero descriptor. Numerical scale, LSE and addresses are invocation state.
-template <class Length>
-MLA_INT8_INLINE bool Schedule(const Config& c, const Length& length, Int8TilingParams& p, uint32_t& mode)
+template <bool Tnd, class Length, class Query>
+MLA_INT8_INLINE bool ScheduleImpl(const Config& c, const Length& length, const Query& query, uint32_t totalQuery,
+                                  Int8TilingParams& p, uint32_t& mode)
 {
     p = {};
     mode = 0;
@@ -76,7 +77,9 @@ MLA_INT8_INLINE bool Schedule(const Config& c, const Length& length, Int8TilingP
     base.actualLenDims = c.batch;
     base.attenMaskFlag = c.query > 1;
     base.sparseMode = c.query > 1 ? 3 : 0;
-    base.tSeqSize = 1;
+    base.tSeqSize = Tnd ? totalQuery : 1;
+    base.actualLenQDims = Tnd ? c.batch : 0;
+    base.outputLayout = Tnd ? 3 : 0;
     auto& single = p.increFlashAttentionSingleCoreParams;
     auto& split = p.splitKVParams;
     auto& core = p.increFlashAttentionCoreParams;
@@ -87,21 +90,21 @@ MLA_INT8_INLINE bool Schedule(const Config& c, const Length& length, Int8TilingP
           longest <= 5120) ||
          (c.batch == 4 && c.query >= 2 && c.query <= 4 && c.heads == 64 && shortest >= 4096 && longest <= 5120) ||
          (c.batch == 1 && c.query == 2 && c.heads == 128 && shortest >= 37000 && longest <= 65536));
-    const bool balance = c.splits == 0 && (!same || fast);
+    const bool balance = Tnd || (c.splits == 0 && (!same || fast));
     fd.FdBalanceFlag = fast;
     single.groupSplitSize = c.heads;
     single.s1SplitSize = balance ? 128 / c.heads : Min(128 / c.heads, c.query);
     uint32_t inner = Min(512, Max(c.capacity, 128));
     uint32_t parts = 1;
     if (balance) {
-        mode = 4;
-        uint32_t outer = longest ? Div(c.query, single.s1SplitSize) : 1;
+        mode = Tnd ? 5 : 4;
         uint64_t total = 0;
         uint32_t last = 0;
         for (uint32_t b = 0; b < c.batch; ++b) {
             uint32_t n = longest ? Div(uint32_t(length(b)), inner) : 1;
+            uint32_t outer = longest ? Div(query(b), single.s1SplitSize) : 1;
             total += uint64_t(outer) * n;
-            if (n)
+            if (n && outer)
                 last = b;
         }
         uint64_t average = (total + c.cores - 1) / c.cores;
@@ -112,11 +115,13 @@ MLA_INT8_INLINE bool Schedule(const Config& c, const Length& length, Int8TilingP
         bool pending = false;
         for (uint32_t b = 0; b < c.batch; ++b) {
             uint32_t n = longest ? Div(uint32_t(length(b)), inner) : 1;
+            uint32_t outer = longest ? Div(query(b), single.s1SplitSize) : 1;
             for (uint32_t q = 0; q < outer; ++q) {
                 uint32_t count = 1;
                 for (uint32_t k = 0; k < n; ++k) {
                     ++accumulated;
-                    if (accumulated >= uint64_t(used + 1) * average && used + 2 <= c.cores) {
+                    if (accumulated >= uint64_t(used + 1) * average && used + 2 <= c.cores &&
+                        (!Tnd || !c.splits || k + 1 == n)) {
                         core.coreBEnd[used] = b;
                         core.coreS1OuterEnd[used] = q;
                         core.coreS2End[used++] = k;
@@ -134,7 +139,7 @@ MLA_INT8_INLINE bool Schedule(const Config& c, const Length& length, Int8TilingP
                     fd.balanceFDCoreS1Arr[tasks] = q;
                     fd.balanceFDCoreKVSplitArr[tasks] = count;
                     if (fast) {
-                        uint32_t m = Min(single.s1SplitSize, c.query - q * single.s1SplitSize) * c.heads;
+                        uint32_t m = Min(single.s1SplitSize, query(b) - q * single.s1SplitSize) * c.heads;
                         fd.gS1SplitNumOfFdHeadMla[tasks] = Div(m, 8);
                         fd.gS1LastPartSizeOfFdHead[tasks] = (m - 1) % 8 + 1;
                     }
@@ -144,10 +149,16 @@ MLA_INT8_INLINE bool Schedule(const Config& c, const Length& length, Int8TilingP
         }
         if (pending) {
             core.coreBEnd[used] = last;
-            core.coreS1OuterEnd[used] = outer - 1;
+            core.coreS1OuterEnd[used] = longest ? Div(query(last), single.s1SplitSize) - 1 : 0;
             core.coreS2End[used++] = longest ? Div(uint32_t(length(last)), inner) - 1 : 0;
         } else if (last + 1 < c.batch) {
             core.coreBEnd[used++] = last + 1;
+        }
+        if constexpr (Tnd) {
+            if (!used) {
+                core.coreBEnd[0] = c.batch - 1;
+                used = 1;
+            }
         }
         single.usedCoreNum = used;
         fd.tndFDCoreArrLen = tasks;
@@ -211,9 +222,60 @@ MLA_INT8_INLINE bool Schedule(const Config& c, const Length& length, Int8TilingP
     return single.usedCoreNum > 0 && single.usedCoreNum <= c.cores;
 }
 
+struct FixedQuery {
+    uint32_t length;
+    MLA_INT8_INLINE uint32_t operator()(uint32_t) const
+    {
+        return length;
+    }
+};
+template <class Prefix>
+struct QuerySpan {
+    const Prefix& prefix;
+    MLA_INT8_INLINE uint32_t operator()(uint32_t b) const
+    {
+        return uint32_t(prefix(b + 1) - prefix(b));
+    }
+};
+
+template <class Length>
+MLA_INT8_INLINE bool Schedule(const Config& c, const Length& length, Int8TilingParams& p, uint32_t& mode)
+{
+    return ScheduleImpl<false>(c, length, FixedQuery{c.query}, 0, p, mode);
+}
+
+MLA_INT8_INLINE bool ValidTnd(const Config& c)
+{
+    return Valid(c) && c.batch <= (UINT32_MAX - kFixedWords - 1) / 2;
+}
+
+template <class Length, class Prefix>
+MLA_INT8_INLINE bool ScheduleTnd(const Config& c, const Length& length, const Prefix& prefix, int64_t totalQuery,
+                                 Int8TilingParams& p, uint32_t& mode)
+{
+    p = {};
+    mode = 0;
+    if (!ValidTnd(c) || prefix(0) != 0)
+        return false;
+    int64_t total = prefix(c.batch);
+    if (total < 0 || total > 1048576 || uint64_t(total) * c.heads > INT32_MAX ||
+        (totalQuery >= 0 && total != totalQuery))
+        return false;
+    uint32_t maximum = 0;
+    for (uint32_t b = 0; b < c.batch; ++b) {
+        int64_t begin = prefix(b), end = prefix(b + 1);
+        if (begin < 0 || end < begin || end > total || uint64_t(end - begin) > c.query)
+            return false;
+        maximum = Max(maximum, uint32_t(end - begin));
+    }
+    Config numerical = c;
+    numerical.query = maximum;
+    return ScheduleImpl<true>(numerical, length, QuerySpan<Prefix>{prefix}, uint32_t(total), p, mode);
+}
+
 struct MetadataArgs {
     Config config;
-    uint64_t lengths, output;
+    uint64_t lengths, output, prefix = 0;
 };
 
 MLA_INT8_INLINE uint32_t HeaderWord(const Config& c, uint32_t word, uint32_t mode, bool valid)
@@ -233,5 +295,15 @@ MLA_INT8_INLINE uint32_t HeaderWord(const Config& c, uint32_t word, uint32_t mod
     if (word >= 6 && word < 14)
         return reinterpret_cast<const uint32_t*>(&c)[word - 6];
     return 0;
+}
+MLA_INT8_INLINE uint32_t TndHeaderWord(const Config& c, uint32_t word, uint32_t mode, bool valid, uint32_t total)
+{
+    if (word == 1)
+        return 49;
+    if (word == 2)
+        return kFixedWords + c.batch * 2 + 1;
+    if (word == 14)
+        return total;
+    return HeaderWord(c, word, mode, valid);
 }
 } // namespace flash_attn::mla::Int8

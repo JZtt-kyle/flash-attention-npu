@@ -14,11 +14,17 @@ __global__ __aicpu__ uint32_t ComputeMlaInt8Metadata(void* args)
     auto length = [&](uint32_t b) -> int64_t { return lengths ? lengths[b] : a.config.capacity; };
     Int8TilingParams p{};
     uint32_t mode = 0;
-    bool valid = Schedule(a.config, length, p, mode);
-    for (uint32_t w = 0; w < kHeaderWords; ++w) output[w] = HeaderWord(a.config, w, mode, valid);
+    const auto* prefix = reinterpret_cast<const int32_t*>(a.prefix);
+    auto q = [&](uint32_t b) -> int64_t { return prefix[b]; };
+    bool valid = prefix ? ScheduleTnd(a.config, length, q, -1, p, mode) : Schedule(a.config, length, p, mode);
+    for (uint32_t w = 0; w < kHeaderWords; ++w)
+        output[w] = prefix ? TndHeaderWord(a.config, w, mode, valid, uint32_t(prefix[a.config.batch]))
+                           : HeaderWord(a.config, w, mode, valid);
     const auto* params = reinterpret_cast<const uint32_t*>(&p);
     for (uint32_t w = 0; w < sizeof(p) / 4; ++w) output[kHeaderWords + w] = params[w];
     for (uint32_t b = 0; b < a.config.batch; ++b) output[kFixedWords + b] = uint32_t(length(b));
+    if (prefix)
+        for (uint32_t b = 0; b <= a.config.batch; ++b) output[kFixedWords + a.config.batch + b] = prefix[b];
     AscendC::DataStoreBarrier();
     return 0;
 }

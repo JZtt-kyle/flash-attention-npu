@@ -1,4 +1,4 @@
-"""Keep missing-scale BSND and the unconnected TND INT8 path explicit."""
+"""Keep missing-scale BSND/TND and non-PA metadata rejection explicit."""
 
 from contextlib import nullcontext
 
@@ -44,7 +44,7 @@ def test_public_int8_stays_rejected(tnd, entry, fake):
                     args["cache_seqlens"],
                     qkv_dtype=torch.int8,
                     headdim_v=512,
-                    page_size=128,
+                    page_size=None,
                     cu_seqlens_q=args["cu_seqlens_q"],
                     num_splits=1,
                 )

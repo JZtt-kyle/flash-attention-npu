@@ -117,7 +117,10 @@ def partition_kernels(rows, labels, specs, dtype):
     pos, result, models = 0, [], {}
     for label in labels:
         ours = label["name"] == "fa3"
-        terminal = "mla_int8_bsnd" if ours else "_FusedInferAttentionScore"
+        target = (
+            "mla_int8_tnd" if specs[label["case"]]["layout"] == "paged_tnd" else "mla_int8_bsnd"
+        )
+        terminal = target if ours else "_FusedInferAttentionScore"
         group = []
         while pos < len(rows):
             row = rows[pos]
@@ -129,7 +132,7 @@ def partition_kernels(rows, labels, specs, dtype):
             raise ValueError("Missing INT8/native terminal task")
         if any(
             "ComputeMla" in row["Name"]
-            or ("mla_int8_bsnd" in row["Name"] and not ours)
+            or ("mla_int8_" in row["Name"] and (not ours or target not in row["Name"]))
             or ("FusedInferAttentionScore" in row["Name"] and ours)
             for row in group
         ):

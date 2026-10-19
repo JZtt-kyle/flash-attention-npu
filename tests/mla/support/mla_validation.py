@@ -1093,6 +1093,25 @@ SUITES = {
 }
 SUITES.update(
     {
+        "int8-tnd-check": [
+            "tests/mla/e2e/int8_tnd/test_public.py::test_daily",
+            "tests/mla/e2e/int8_tnd/test_public.py::test_fake_compile",
+            "tests/mla/e2e/int8_tnd/test_public.py::test_output_only",
+            "tests/mla/e2e/int8_tnd/test_public.py::test_allocation_corners",
+            "tests/mla/e2e/int8_tnd/test_public.py::test_disjoint_nonempty_allocations",
+            "tests/mla/e2e/int8_tnd/test_public.py::test_trailing_empty_segments",
+            "tests/mla/e2e/int8_tnd/test_boundaries.py::test_cold_mask_lifetime",
+            "tests/mla/e2e/int8_tnd/test_boundaries.py::test_device_trap[page-late]",
+            "tests/mla/e2e/int8_tnd/test_boundaries.py::test_device_trap[page-empty-query]",
+        ],
+        "int8-tnd-source": [
+            "tests/mla/e2e/int8_tnd/test_public.py::test_source",
+            "tests/mla/e2e/int8_tnd/test_public.py::test_views",
+            "tests/mla/e2e/int8_tnd/test_public.py::test_fast_fd",
+        ],
+        "int8-tnd-boundaries": ["tests/mla/e2e/int8_tnd/test_boundaries.py"],
+        "int8-tnd-profile-check": ["tests/mla/e2e/int8_tnd/public_profile.py"],
+        "int8-tnd-profile": ["tests/mla/e2e/int8_tnd/public_profile.py"],
         "int8-bsnd-check": [
             "tests/mla/e2e/int8_bsnd/test_public.py::test_daily",
             "tests/mla/e2e/int8_bsnd/test_public.py::test_fake_compile",
@@ -1136,6 +1155,8 @@ SUITES.update({f"unit-{name}": paths for name, paths in UNITS.items()})
 SUITES.update({f"detail-{name}": paths for name, paths in DIAGNOSTIC_E2E.items()})
 
 PERFORMANCE_SUITES = {
+    "int8-tnd-profile-check",
+    "int8-tnd-profile",
     "int8-bsnd-profile-check",
     "int8-bsnd-profile",
     "int8-profile-check",
@@ -1245,6 +1266,7 @@ CAUSAL_DEVICE_SUITES = {
 }
 CPU_SUITES = {
     "unit-int8_bsnd",
+    "unit-int8_tnd",
     "int8-tools",
     "platform-tools",
     "unit-platform",
@@ -1406,7 +1428,7 @@ CPU_SUITES = {
 
 
 def suite_dependencies(suite):
-    if suite == "unit-int8_bsnd":
+    if suite in {"unit-int8_bsnd", "unit-int8_tnd"}:
         from tests.mla.support.mla_validation_build import files_identity
         from tests.mla.support.mla_int8_native import native_vendor, package_root
 
@@ -1418,7 +1440,7 @@ def suite_dependencies(suite):
                 Path(os.environ.get("MLA_INT8_SOURCE_LOG", "/nonexistent-int8-fixture")),
             ]
         )
-    if suite.startswith("int8-") or suite in {"unit-int8", "detail-int8_bsnd"}:
+    if suite.startswith("int8-") or suite in {"unit-int8", "detail-int8_bsnd", "detail-int8_tnd"}:
         from tests.mla.paths import work_dir
         from tests.mla.support.mla_int8_native import package_root
         from tests.mla.support.mla_validation_build import files_identity
@@ -1743,6 +1765,8 @@ def environment(args, directory, suite):
         env["MLA_SCHEDULE_SANITIZE"] = str(int(suite.endswith("sanitize")))
     if suite in {"graph-profile", "graph-profile-check"}:
         env["MLA_GRAPH_PROFILE_CHECK"] = str(int(suite.endswith("check")))
+    if suite in {"int8-tnd-profile", "int8-tnd-profile-check"}:
+        env["MLA_INT8_TND_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {"int8-bsnd-profile", "int8-bsnd-profile-check"}:
         env["MLA_INT8_BSND_PROFILE_CHECK"] = str(int(suite.endswith("check")))
     if suite in {
@@ -1813,6 +1837,8 @@ def environment(args, directory, suite):
     env["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0" if suite in CPU_SUITES else "1"
     if suite in {
         "int8-bsnd-source",
+        "int8-tnd-source",
+        "detail-int8_tnd",
         "detail-int8_bsnd",
         "int8-component-check",
         "int8-source-check",

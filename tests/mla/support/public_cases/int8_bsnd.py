@@ -1,6 +1,7 @@
 """Public INT8 fixtures; source NZ packing stays exclusively in test helpers."""
 
 import json
+import itertools
 import os
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import torch
 
 from flash_attn_npu_3 import flash_attn_npu_interface as api
 from tests.common.compare import assert_fa_close
-from tests.mla.support.mla_int8_cases import SOURCE_CASES, strided_inputs
+from tests.mla.support.mla_int8_cases import SOURCE_CASES, strided_inputs, NativeCall
 from tests.mla.support.mla_int8_component import ComponentCall
 from tests.mla.support.mla_int8_layout import preserve_view
 from tests.mla.support.mla_int8_reference import references
@@ -33,12 +34,19 @@ def make_case(spec=SOURCE_CASES[8], view="contiguous", splits=0, uniform=False):
         raw["qv"].zero_()
     tensors = {name: preserve_view(t) for name, t in raw.items()}
     lengths = torch.tensor(spec[4], dtype=torch.int32, device="npu")
-    return dict(spec=spec, raw=raw, tensors=tensors, lengths=lengths, splits=splits, view=view)
+    case = dict(spec=spec, raw=raw, tensors=tensors, lengths=lengths, splits=splits, view=view)
+    if spec[1] == "TND":
+        case["prefix"] = torch.tensor(
+            [0, *itertools.accumulate(spec[2])], dtype=torch.int32, device="npu"
+        )
+    return case
 
 
 def kwargs(c, record=None, lse=True):
     t = c["tensors"]
     return dict(
+        cu_seqlens_q=c.get("prefix"),
+        max_seqlen_q=max(c["spec"][2]) if "prefix" in c else None,
         q=t["q"],
         qv=t["qv"],
         k_cache=t["k"],
@@ -58,14 +66,15 @@ def kwargs(c, record=None, lse=True):
 def metadata(c):
     t = c["tensors"]
     return api.get_scheduler_metadata(
-        t["q"].shape[0],
-        t["q"].shape[1],
+        len(c["spec"][2]),
+        max(c["spec"][2]),
         t["table"].shape[1] * 128,
-        t["q"].shape[2],
+        t["q"].shape[-2],
         1,
         64,
         c["lengths"],
         qkv_dtype=torch.int8,
+        cu_seqlens_q=c.get("prefix"),
         headdim_v=512,
         page_size=128,
         causal=bool(c["spec"][5]),
@@ -90,7 +99,8 @@ def check_math(c, result, *, source_equal=False):
         actual = result[i].cpu()
         high, low = refs[name + "_high"], refs[name + "_low"]
         if i:
-            high, low = high.transpose(1, 2), low.transpose(1, 2)
+            axis = 0 if "prefix" in c else 1
+            high, low = high.transpose(axis, axis + 1), low.transpose(axis, axis + 1)
         else:
             high, low = high.to(torch.bfloat16), low.to(torch.bfloat16)
         try:
@@ -110,7 +120,11 @@ def check_partials(c, result, source):
         assert accum.numel() == logs.numel() == 0
         return
     assert accum.dtype == logs.dtype == torch.float32
-    assert accum.shape == (26, out.shape[0], out.shape[2], out.shape[1], 512)
+    tnd = "prefix" in c
+    hq = out.shape[-2]
+    assert accum.shape == (
+        (26, hq, out.shape[0], 512) if tnd else (26, out.shape[0], hq, out.shape[1], 512)
+    )
     p = source.params
     mode = source.fixture["mode"]
     if mode & 2:
@@ -122,8 +136,9 @@ def check_partials(c, result, source):
             .cpu()
         )
         for b, sk in enumerate(c["spec"][4]):
-            for q in range(out.shape[1]):
-                for h in range(out.shape[2]):
+            for q in range(c["spec"][2][b]):
+                for h in range(hq):
+                    index = (h, sum(c["spec"][2][:b]) + q) if tnd else (b, h, q)
                     if not sk:
                         continue
                     if mode & 4:
@@ -142,9 +157,7 @@ def check_partials(c, result, source):
                             continue
                         parts = fd.balanceFDCoreKVSplitArr[task]
                         start = sum(fd.balanceFDCoreKVSplitArr[i] for i in range(task))
-                        row = (q % p.increFlashAttentionSingleCoreParams.s1SplitSize) * out.shape[
-                            2
-                        ] + h
+                        row = (q % p.increFlashAttentionSingleCoreParams.s1SplitSize) * hq + h
 
                         def offset(part):
                             return ((start + part) * 128 + row) * 512
@@ -154,21 +167,24 @@ def check_partials(c, result, source):
                         ) // p.splitKVParams.sInnerLoopSize
 
                         def offset(part):
-                            return (
-                                b * out.shape[2] * p.splitKVParams.s2 + part * out.shape[2] + h
-                            ) * 512
+                            return (b * hq * p.splitKVParams.s2 + part * hq + h) * 512
 
                     for part in range(parts):
                         torch.testing.assert_close(
-                            accum[part, b, h, q],
+                            accum[(part, *index)],
                             source_out[offset(part) : offset(part) + 512],
                             rtol=0,
                             atol=0,
                         )
-                    assert torch.count_nonzero(accum[parts:, b, h, q]) == 0
-                    assert torch.isneginf(logs[parts:, b, h, q]).all()
+                    assert torch.count_nonzero(accum[(slice(parts, None), *index)]) == 0
+                    assert torch.isneginf(logs[(slice(parts, None), *index)]).all()
     weights = torch.softmax(logs, dim=0).nan_to_num()
-    merged = (weights.unsqueeze(-1) * accum).sum(0).transpose(1, 2).to(torch.bfloat16)
+    merged = (
+        (weights.unsqueeze(-1) * accum)
+        .sum(0)
+        .transpose(0 if tnd else 1, 1 if tnd else 2)
+        .to(torch.bfloat16)
+    )
     torch.testing.assert_close(merged, out, rtol=0.008, atol=0.004)
     finite = torch.isfinite(lse)
     torch.testing.assert_close(
@@ -179,17 +195,26 @@ def check_partials(c, result, source):
 
 def check_source(c, *, label="source"):
     spec, raw = c["spec"], c["raw"]
-    oracle = ComponentCall(spec, raw, oracle=True, lse=False)
-    expected = oracle().cpu()
-    native = oracle.native().cpu()
+    source_spec = c.get("source_spec", spec)
+    source_raw = dict(raw)
+    if source_spec != spec:
+        # B=1 fast FD has identical source matrices/partitions in either layout.
+        # Use its frozen source component for LSE/partials, and independently
+        # execute native TND for the public layout's output comparison.
+        assert len(spec[2]) == 1
+        for key in ("q", "qv", "qs"):
+            source_raw[key] = raw[key].unsqueeze(0)
+    oracle = ComponentCall(source_spec, source_raw, oracle=True, lse=False)
+    expected = oracle().cpu().reshape(raw["qv"].shape)
+    native = (NativeCall(spec, raw)() if source_spec != spec else oracle.native()).cpu()
     assert torch.equal(expected, native)
     record = metadata(c)
     result = invoke(c, record)
     actual = result[0].cpu()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     lse_source = ComponentCall(
-        spec,
-        raw,
+        source_spec,
+        source_raw,
         oracle=True,
         lse=True,
         legacy_fd=bool(oracle.params.tndSplitCoreParams.FdBalanceFlag),
@@ -203,12 +228,16 @@ def check_source(c, *, label="source"):
             atol=0,
         )
     source_lse = lse_source.lse.cpu()
-    if oracle.fixture["mode"] & 2:
+    if "prefix" in c:
+        source_lse = source_lse.reshape(actual.shape[:-1]).transpose(0, 1)
+    elif oracle.fixture["mode"] & 2:
         source_lse = source_lse.reshape(actual.shape[:-1]).transpose(1, 2)
     else:
         source_lse = source_lse.reshape(result[1].shape)
     refs = references(raw, spec)
-    valid = torch.isfinite(refs["lse_high"].transpose(1, 2))
+    valid = torch.isfinite(
+        refs["lse_high"].transpose(0 if "prefix" in c else 1, 1 if "prefix" in c else 2)
+    )
     assert torch.isfinite(source_lse[valid]).all()
     assert torch.isposinf(source_lse[~valid]).all()
     torch.testing.assert_close(result[1].cpu()[valid], source_lse[valid], rtol=0, atol=0)

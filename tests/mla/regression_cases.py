@@ -215,4 +215,13 @@ def daily_suites():
         "tests/mla/e2e/int8_bsnd/test_public.py::test_graph[8-generate]",
         "tests/mla/e2e/int8_bsnd/test_public.py::test_empty",
     ]
+    suites["int8_tnd"] = [
+        "tests/mla/e2e/int8_tnd/test_public.py::test_daily",
+        "tests/mla/e2e/int8_tnd/test_public.py::test_fake_compile",
+        "tests/mla/e2e/int8_tnd/test_public.py::test_output_only[12]",
+        "tests/mla/e2e/int8_tnd/test_public.py::test_graph[12-generate]",
+        "tests/mla/e2e/int8_tnd/test_public.py::test_empty",
+        "tests/mla/e2e/int8_tnd/test_public.py::test_disjoint_nonempty_allocations[0-qlens1-klens1]",
+        "tests/mla/e2e/int8_tnd/test_public.py::test_trailing_empty_segments[0-129]",
+    ]
     return suites

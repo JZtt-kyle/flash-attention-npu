@@ -9,6 +9,8 @@ struct LaunchArgs {
     Config config;
     MlaPagedCacheLayout cache;
     float scale;
+    uint64_t prefix = 0;
+    uint32_t totalQuery = 0;
 };
 aclError Launch(const LaunchArgs&);
 } // namespace flash_attn::mla::Int8

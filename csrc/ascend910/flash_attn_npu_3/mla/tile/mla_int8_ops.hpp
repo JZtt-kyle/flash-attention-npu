@@ -31,6 +31,27 @@ using AscendC::WaitFlag;
 using matmul::Matmul;
 using matmul::MatmulType;
 
+// Isolated source probes use cumulative uint64 lengths without a leading zero.
+// Public TND uses the original int32 allocation prefix, including its leading 0.
+struct QueryLengths {
+    GlobalTensor<uint64_t> source;
+    GlobalTensor<int32_t> allocation;
+    bool publicLayout = false;
+    __aicore__ inline void SetGlobalBuffer(__gm__ uint64_t* ptr, uint64_t count)
+    {
+        source.SetGlobalBuffer(ptr, count);
+    }
+    __aicore__ inline void SetPublic(GM_ADDR ptr)
+    {
+        allocation.SetGlobalBuffer((__gm__ int32_t*)ptr);
+        publicLayout = true;
+    }
+    __aicore__ inline uint64_t GetValue(uint32_t b) const
+    {
+        return publicLayout ? uint64_t(allocation.GetValue(b + 1)) : source.GetValue(b);
+    }
+};
+
 constexpr float FLT_MAX = 3.402823466e+38F;
 constexpr int32_t VMLA_ONE_REPEATE_ROW_COUNT = 4;
 constexpr int32_t VMLA_ONE_REPEATE_COLUMN_COUNT = 16;

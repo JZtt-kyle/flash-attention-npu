@@ -4052,7 +4052,7 @@ def _check_mla_int8_config(batch, sq, heads, capacity, splits, causal):
         and batch * heads * 512 <= 2**32 - 1
     ):
         raise RuntimeError(
-            "MLA INT8: BSND Q<=32, power-of-two Hq<=128, page=128, multi-Q causal and num_splits=0/1 required"
+            "MLA INT8: Q<=32, power-of-two Hq<=128, page=128, multi-Q causal and num_splits=0/1 required"
         )
 
 
@@ -4083,20 +4083,47 @@ def _check_mla_int8_storage(tensor, device, dtype, last_contiguous=True):
 
 
 @_torch_register_fake_wrapper("flash_attn_npu_3::_mla_int8_metadata")
-def _mla_int8_metadata_fake(batch, sq, heads, capacity, lengths, splits, causal):
+def _mla_int8_metadata_fake(batch, sq, heads, capacity, lengths, splits, causal, prefix=None):
     _check_mla_int8_config(batch, sq, heads, capacity, splits, causal)
     _check_mla_cache_lengths(lengths, batch, lengths.device)
     if lengths.device.type != "npu":
         raise RuntimeError("MLA INT8: lengths must be NPU tensors")
-    return torch.empty((462 + batch,), device=lengths.device, dtype=torch.int32)
+    if prefix is not None:
+        _check_mla_metadata_query_prefix(prefix, batch, lengths.device)
+    return torch.empty(
+        (462 + batch * (2 if prefix is not None else 1) + int(prefix is not None),),
+        device=lengths.device,
+        dtype=torch.int32,
+    )
 
 
-@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_int8_bsnd")
-def _mla_int8_bsnd_fake(
-    q, k, v, qv, table, qs, ks, vs, lengths, metadata, scale, causal, splits, partials
+def _mla_int8_forward_fake(
+    q,
+    k,
+    v,
+    qv,
+    table,
+    qs,
+    ks,
+    vs,
+    lengths,
+    metadata,
+    scale,
+    causal,
+    splits,
+    partials,
+    prefix=None,
+    max_q=0,
 ):
-    if q.ndim != 4 or qv.ndim != 4 or k.ndim != 4 or v.ndim != 4 or table.ndim != 2:
-        raise RuntimeError("MLA INT8: BSND Q and ND PA cache required; TND is not connected")
+    tnd = prefix is not None
+    if (
+        q.ndim != (3 if tnd else 4)
+        or qv.ndim != q.ndim
+        or k.ndim != 4
+        or v.ndim != 4
+        or table.ndim != 2
+    ):
+        raise RuntimeError("MLA INT8: BSND/TND Q and ND PA cache required")
     for t in (q, k):
         _check_mla_int8_storage(t, q.device, torch.bfloat16)
     for t in (qv, v):
@@ -4104,13 +4131,17 @@ def _mla_int8_bsnd_fake(
     for t in (qs, ks, vs):
         _check_mla_int8_storage(t, q.device, torch.float32, False)
     _check_mla_int8_storage(table, q.device, torch.int32)
-    b, sq, h, d = q.shape
+    b, sq, h, d = (table.shape[0], max_q, q.shape[1], q.shape[2]) if tnd else q.shape
     capacity = table.shape[1] * 128
+    if tnd:
+        _check_mla_metadata_query_prefix(prefix, b, q.device)
+        if q.shape[0] > 1048576 or q.shape[0] * h > 2**31 - 1:
+            raise RuntimeError("MLA INT8: TND allocation bounds exceeded")
     _check_mla_int8_config(b, sq, h, capacity, splits, causal)
     if (
         d != 64
-        or qv.shape != (b, sq, h, 512)
-        or qs.shape != (b, sq, h)
+        or qv.shape != (*q.shape[:-1], 512)
+        or qs.shape != q.shape[:-1]
         or ks.shape != (1,)
         or vs.shape != (1,)
         or table.shape[0] != b
@@ -4125,25 +4156,78 @@ def _mla_int8_bsnd_fake(
         if (
             metadata.device != q.device
             or metadata.dtype != torch.int32
-            or metadata.shape != (462 + b,)
+            or metadata.shape != (462 + b * (2 if tnd else 1) + int(tnd),)
             or not metadata.is_contiguous()
         ):
-            raise RuntimeError("MLA INT8: metadata must be same-device contiguous int32[462+B]")
+            raise RuntimeError(
+                "MLA INT8: metadata must be same-device contiguous int32 with matching layout size"
+            )
     if scale is not None and (not math.isfinite(scale) or abs(scale) > 3.4028234663852886e38):
         raise RuntimeError("MLA INT8: softmax_scale must be finite in FP32")
+    lse_shape = (h, q.shape[0]) if tnd else (b, h, sq)
     return (
-        torch.empty((b, sq, h, 512), device=q.device, dtype=torch.bfloat16),
-        torch.empty((b, h, sq), device=q.device, dtype=torch.float32),
+        torch.empty((*q.shape[:-1], 512), device=q.device, dtype=torch.bfloat16),
         torch.empty(
-            (26, b, h, sq, 512) if partials and splits == 0 else (0,),
+            lse_shape if not tnd or partials else (0,), device=q.device, dtype=torch.float32
+        ),
+        torch.empty(
+            (26, *lse_shape, 512) if partials and splits == 0 else (0,),
             device=q.device,
             dtype=torch.float32,
         ),
         torch.empty(
-            (26, b, h, sq) if partials and splits == 0 else (0,),
+            (26, *lse_shape) if partials and splits == 0 else (0,),
             device=q.device,
             dtype=torch.float32,
         ),
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_int8_bsnd")
+def _mla_int8_bsnd_fake(
+    q, k, v, qv, table, qs, ks, vs, lengths, metadata, scale, causal, splits, partials
+):
+    return _mla_int8_forward_fake(
+        q, k, v, qv, table, qs, ks, vs, lengths, metadata, scale, causal, splits, partials
+    )
+
+
+@_torch_register_fake_wrapper("flash_attn_npu_3::_mla_int8_tnd")
+def _mla_int8_tnd_fake(
+    q,
+    k,
+    v,
+    qv,
+    table,
+    qs,
+    ks,
+    vs,
+    lengths,
+    metadata,
+    scale,
+    causal,
+    splits,
+    partials,
+    prefix,
+    max_q,
+):
+    return _mla_int8_forward_fake(
+        q,
+        k,
+        v,
+        qv,
+        table,
+        qs,
+        ks,
+        vs,
+        lengths,
+        metadata,
+        scale,
+        causal,
+        splits,
+        partials,
+        prefix,
+        max_q,
     )
 
 
@@ -4293,9 +4377,11 @@ def flash_attn_with_kvcache(
             Reuse skips AICPU generation; host workspace budgeting still runs.
         return_softmax_lse: bool. Whether to return the logsumexp of the attention scores.
         mla_q_scale, mla_k_scale, mla_v_scale: Keyword-only INT8 MLA extension.
-            For BSND q/qv and ND paged cache with page_size=128, q/k_cache are
+            For BSND/TND q/qv and ND paged cache with page_size=128, q/k_cache are
             BF16 RoPE (64), qv/v_cache are INT8 content (512), and these same-device
-            FP32 scales have shapes [B,Sq,Hq], [1], [1]. All three are required.
+            FP32 scales have shapes [B,Sq,Hq] (TND: [Tq,Hq]), [1], [1].
+            All three are required. TND uses cu_seqlens_q and max_seqlen_q;
+            the prefix describes the full original query allocation.
             Sq<=32, power-of-two Hq<=128, Hkv=1; multi-query requires causal=True.
             Only num_splits=0/1 and the default effective GQA options are supported.
             Scale values may change while reusing metadata. See design section 3.4
@@ -4308,7 +4394,8 @@ def flash_attn_with_kvcache(
             (nheads, total_q) for TND queries. It contains the natural log of each row's
             softmax normalization factor, including the qv contribution for MLA.
         For MLA with num_splits=1, both accumulators are empty tensors on the output device.
-        INT8 num_splits=0 returns FP32 partials [26,B,Hq,Sq,512] and [26,B,Hq,Sq];
+        INT8 num_splits=0 returns FP32 partials [26,B,Hq,Sq,512] and [26,B,Hq,Sq]
+            for BSND, or [26,Hq,Tq,512] and [26,Hq,Tq] for TND;
             unused slots contain zero output and -inf LSE. Slots follow the source
             native partition, including a single active slot when no split is needed.
     """
@@ -4325,8 +4412,13 @@ def flash_attn_with_kvcache(
             raise RuntimeError(
                 "MLA INT8: qv, ND page_table and all three mla_*_scale tensors are required"
             )
-        if q.ndim != 4 or cu_seqlens_q is not None or max_seqlen_q is not None:
-            raise RuntimeError("MLA INT8: only BSND Q is connected; TND is not implemented yet")
+        tnd = q.ndim == 3
+        if (tnd and (cu_seqlens_q is None or max_seqlen_q is None)) or (
+            not tnd and (q.ndim != 4 or cu_seqlens_q is not None or max_seqlen_q is not None)
+        ):
+            raise RuntimeError(
+                "MLA INT8: TND requires cu_seqlens_q/max_seqlen_q; BSND does not accept them"
+            )
         _check_mla_dense_options(
             softmax_scale=softmax_scale,
             causal=causal,
@@ -4361,9 +4453,18 @@ def flash_attn_with_kvcache(
             if not 0 <= cache_seqlens <= 2**31 - 1:
                 raise RuntimeError("MLA INT8: invalid cache_seqlens")
             cache_seqlens = torch.full(
-                (q.shape[0],), cache_seqlens, dtype=torch.int32, device=q.device
+                (page_table.shape[0] if tnd else q.shape[0],),
+                cache_seqlens,
+                dtype=torch.int32,
+                device=q.device,
             )
-        result = torch.ops.flash_attn_npu_3._mla_int8_bsnd(
+        op = (
+            torch.ops.flash_attn_npu_3._mla_int8_tnd
+            if tnd
+            else torch.ops.flash_attn_npu_3._mla_int8_bsnd
+        )
+        extra = (cu_seqlens_q, max_seqlen_q) if tnd else ()
+        result = op(
             q,
             k_cache,
             v_cache,
@@ -4378,6 +4479,7 @@ def flash_attn_with_kvcache(
             causal,
             num_splits,
             return_softmax_lse,
+            *extra,
         )
         return result if return_softmax_lse else result[0]
     # MLA operators validate tensors independently in real/fake execution.
@@ -5210,15 +5312,9 @@ def get_scheduler_metadata(
     if headdim_v is None:
         headdim_v = headdim
     if qkv_dtype == torch.int8:
-        if (
-            headdim != 64
-            or headdim_v != 512
-            or num_heads_kv != 1
-            or page_size != 128
-            or cu_seqlens_q is not None
-        ):
+        if headdim != 64 or headdim_v != 512 or num_heads_kv != 1 or page_size != 128:
             raise RuntimeError(
-                "MLA INT8: metadata requires BSND Q, 64/512 shared content and ND PA page=128"
+                "MLA INT8: metadata requires BSND/TND Q, 64/512 shared content and ND PA page=128"
             )
         _check_mla_metadata_options(
             num_heads_kv,
@@ -5244,6 +5340,7 @@ def get_scheduler_metadata(
             cache_seqlens,
             num_splits,
             causal,
+            cu_seqlens_q,
         )
     if _check_mla_metadata(headdim, headdim_v):
         _check_mla_metadata_options(

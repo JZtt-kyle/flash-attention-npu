@@ -85,6 +85,25 @@ class MlaInt8Vector {
         publicLengthsPresent = lengths != nullptr;
         lengths32.SetGlobalBuffer((__gm__ int32_t*)lengths);
     }
+    __aicore__ inline void SetPublicQuery(GM_ADDR prefix)
+    {
+        actualSeqLengthsGmQ.SetPublic(prefix);
+    }
+    __aicore__ inline void InitPublicQueryTail()
+    {
+        if ASCEND_IS_AIV {
+            if (actualSeqLengthsGmQ.publicLayout && aiCoreIdx + 1 == usedCoreNum && GetSubBlockIdx() == 0) {
+                // Source tiling can stop before trailing empty Q/KV segments.
+                // Initialize those outputs after the numerical pipeline drains;
+                // extending its final B endpoint would suppress its flush tasks.
+                for (uint32_t b = bEnd + 1; b < batchSize; ++b) {
+                    GetActualSeqLen(b);
+                    if (actS1Size)
+                        DealActSeqLenIsZero(b, 0);
+                }
+            }
+        }
+    }
     __aicore__ inline void SetPublicPartials(GM_ADDR out, GM_ADDR lse)
     {
         publicPartials = out != nullptr;
@@ -169,7 +188,7 @@ class MlaInt8Vector {
     GlobalTensor<ANTIQ_PARAMS_T> valueAntiqOffsetGm;
     GlobalTensor<ANTIQ_PARAMS_T> valueAntiqScaleGm;
 
-    GlobalTensor<uint64_t> actualSeqLengthsGmQ;
+    QueryLengths actualSeqLengthsGmQ;
     GlobalTensor<uint64_t> actualSeqLengthsGm;
     GlobalTensor<int32_t> lengths32;
     GlobalTensor<float> publicOut, publicLse;
@@ -185,6 +204,12 @@ class MlaInt8Vector {
         if constexpr (FLASH_DECODE)
             part = BALANCE ? (info.tndIsS2SplitCore ? info.tndCoreStartKVSplitPos : 0) : s2IdxFD;
         uint32_t m = mSizeVStart + row;
+        if constexpr (LAYOUT_T == LAYOUT::TND) {
+            uint64_t total = actualSeqLengthsGmQ.GetValue(batchSize - 1);
+            uint64_t begin = info.bIdx ? actualSeqLengthsGmQ.GetValue(info.bIdx - 1) : 0;
+            return (uint64_t(part) * qHeadNum + m % info.gSize) * total + begin + info.s1Idx * s1SizeSub +
+                   m / info.gSize;
+        }
         return ((uint64_t(part) * batchSize + info.bIdx) * qHeadNum + m % info.gSize) * qSeqSize +
                info.s1Idx * s1SizeSub + m / info.gSize;
     }
@@ -202,7 +227,7 @@ class MlaInt8Vector {
         PipeBarrier<PIPE_V>();
         for (uint32_t row = 0; row < mSizeVector; ++row) {
             uint32_t q = info.s1Idx * s1SizeSub + (mSizeVStart + row) / info.gSize;
-            if (attenMaskFlag && uint64_t(q) + info.s2Size < qSeqSize)
+            if (attenMaskFlag && uint64_t(q) + info.s2Size < (LAYOUT_T == LAYOUT::TND ? info.actS1Size : qSeqSize))
                 Duplicate(broadcast[row * 8], -FLOAT_INF, 8);
         }
         outputQue2.EnQue(broadcast);
@@ -474,7 +499,7 @@ class MlaInt8Vector {
 
     __aicore__ inline void GetTNDAxisStartId(uint32_t& bStart, uint32_t& n2Start, uint32_t& s1OuterStart,
                                              uint32_t& s2Start, int bEnd, int n2End, int s1OuterIdxEnd, int s2End);
-    __aicore__ inline uint64_t GetBalanceActualSeqLengths(GlobalTensor<uint64_t>& actualSeqLengthsTND, int bIdx);
+    __aicore__ inline uint64_t GetBalanceActualSeqLengths(QueryLengths& actualSeqLengthsTND, int bIdx);
 
     __aicore__ inline uint64_t GetTNDBatchOffset(int bIdx);
 
@@ -703,7 +728,14 @@ __aicore__ inline void MlaInt8Vector<IFAT>::InitSoftmaxLseAllInfOutput(uint32_t 
     if constexpr (LAYOUT_T == LAYOUT::TND) {
         uint32_t tokenPrefixSum = bIdx == 0 ? 0 : actualSeqLengthsGmQ.GetValue(bIdx - 1);
         uint64_t softmaxLseOffset = tokenPrefixSum * kvHeadNum * gSize + n2Idx * gSize;
-        matmul::InitOutput<float>(softmaxLseGm[softmaxLseOffset], gSize * actS1Size, -FLOAT_INF);
+        if (actualSeqLengthsGmQ.publicLayout) {
+            uint64_t total = actualSeqLengthsGmQ.GetValue(batchSize - 1);
+            for (uint32_t h = 0; h < gSize; ++h)
+                matmul::InitOutput<float>(softmaxLseGm[(n2Idx * gSize + h) * total + tokenPrefixSum], actS1Size,
+                                          -FLOAT_INF);
+        } else {
+            matmul::InitOutput<float>(softmaxLseGm[softmaxLseOffset], gSize * actS1Size, -FLOAT_INF);
+        }
     } else { // BSH BSND
         uint64_t softmaxLseOffset = bIdx * kvHeadNum * gSize * qSeqSize + n2Idx * gSize * qSeqSize;
         matmul::InitOutput<T>(softmaxLseGm[softmaxLseOffset], gSize * qSeqSize, -FLOAT_INF);
@@ -1244,7 +1276,17 @@ __aicore__ inline void MlaInt8Vector<IFAT>::ComputeScaleValue(LocalTensor<T>& ls
         dataCopyParams.srcStride = 0;
         dataCopyParams.dstStride = 0;
         if constexpr (LAYOUT_T == LAYOUT::TND) {
-            DataCopyPad(softmaxLseGm[softmaxLseOutOffset], softmaxlseUb, dataCopyParams);
+            if (actualSeqLengthsGmQ.publicLayout) {
+                uint64_t total = actualSeqLengthsGmQ.GetValue(batchSize - 1);
+                dataCopyParams.blockCount = 1;
+                for (uint32_t row = 0; row < dealRowCount; ++row) {
+                    uint64_t flat = softmaxLseOutOffset + row;
+                    DataCopyPad(softmaxLseGm[(flat % qHeadNum) * total + flat / qHeadNum],
+                                softmaxlseUb[row * FP32_ONE_BLOCK_SIZE], dataCopyParams);
+                }
+            } else {
+                DataCopyPad(softmaxLseGm[softmaxLseOutOffset], softmaxlseUb, dataCopyParams);
+            }
         } else {
             // Source FD writes flattened [B,S,H]; use the same [B,H,S]
             // output contract as the non-FD path, without a separate transpose.
@@ -2273,6 +2315,11 @@ __aicore__ inline void MlaInt8Vector<IFAT>::SoftmaxLseCopyOut(const ExtraInfoMla
             dataCopyParams.blockLen = sizeof(T);
             dataCopyParams.srcStride = 0;
             dataCopyParams.dstStride = 0;
+            if (actualSeqLengthsGmQ.publicLayout) {
+                uint64_t total = actualSeqLengthsGmQ.GetValue(batchSize - 1);
+                outOffset = (info.n2Idx * info.gSize + startGIdx) * total + tokenPrefixSum + s1Idx;
+                dataCopyParams.dstStride = (total - 1) * sizeof(T);
+            }
             DataCopyPad(softmaxLseGm[outOffset], softmaxlseUb[ubOffset], dataCopyParams);
             startGIdx = 0;
             ubOffset += curDealRowCount * FP32_ONE_BLOCK_SIZE;
@@ -2664,8 +2711,7 @@ __aicore__ inline void MlaInt8Vector<IFAT>::ComputeMm2(const ExtraInfoMla& info)
 }
 
 template <typename IFAT>
-__aicore__ inline uint64_t MlaInt8Vector<IFAT>::GetBalanceActualSeqLengths(GlobalTensor<uint64_t>& actualSeqLengths,
-                                                                           int bIdx)
+__aicore__ inline uint64_t MlaInt8Vector<IFAT>::GetBalanceActualSeqLengths(QueryLengths& actualSeqLengths, int bIdx)
 {
     if constexpr (LAYOUT_T == LAYOUT::TND) {
         if (bIdx > 0) {
