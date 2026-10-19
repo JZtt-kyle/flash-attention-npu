@@ -429,12 +429,11 @@ ND 分页 cache 为 `[num_pages, page_size, Hkv, D]`，页大小是 `[16, 1024]`
 依赖更新图持有的外部记录；旧记录不会自行更新。图正确性与图性能分别验收，最新图性能
 实测仍超过默认门槛，见 [当前证据与限制](docs/mla/status.md)。
 
-[可运行示例](tests/mla/support/mla_examples.py) 演示压缩 dense、prefill varlen、分页
-metadata 跨调用复用，以及长度变化时的图重放。构建 v3 后在本仓运行：
+[MLA E2E 测试](tests/test_flash_attn_npu_v3_mla.py) 覆盖公开 dense、varlen、分页接口、
+metadata 复用、fake/compile 和图重放。构建 v3 并加载 CANN 环境后，使用仓库原有 pytest 入口：
 
 ```bash
-python3 -m tests.mla.support.mla_examples --device 0 --dtype fp16
-python3 -m tests.mla.support.mla_examples --device 0 --dtype bf16
+python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py
 ```
 
 #### Ascend 910B/C 的 INT8 压缩 MLA
@@ -470,12 +469,11 @@ causal，多 query 须设置右下对齐的 `causal=True`。选项为 `num_split
 分别记录，见 [INT8 契约](docs/mla/design.md#34-int8-压缩-mla-扩展) 和
 [覆盖映射](docs/mla/design.md#78-int8-收尾映射)。
 
-[INT8 可运行示例](tests/mla/support/mla_int8_examples.py) 演示两种布局、metadata 复用、
-scale 更新及 KV 长度变化时的图重放：
+同一文件覆盖 INT8 两种布局、metadata 复用、scale 更新及 KV 长度变化时的图重放。
+只运行 INT8 E2E：
 
 ```bash
-python3 -m tests.mla.support.mla_int8_examples --device 0 --layout bsnd
-python3 -m tests.mla.support.mla_int8_examples --device 0 --layout tnd
+python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py -k int8
 ```
 
 #### flash_attn_with_kvcache

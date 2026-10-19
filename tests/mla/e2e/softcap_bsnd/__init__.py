@@ -1,1 +1,0 @@
-"""Public BSND softcap acceptance."""

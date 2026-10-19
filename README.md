@@ -451,13 +451,12 @@ not update itself. Graph correctness and graph performance are separate: the
 latest graph measurement still exceeds the default performance target; see
 [current evidence and limitations](docs/mla/status.md).
 
-The [runnable examples](tests/mla/support/mla_examples.py) demonstrate compressed
-dense attention, prefill varlen, paged metadata reuse, and graph replay with
-changing lengths. Run them from this checkout after building v3:
+The [MLA E2E tests](tests/test_flash_attn_npu_v3_mla.py) cover the public dense,
+varlen and paged APIs, metadata reuse, fake/compile and graph replay. After building
+v3 and loading the CANN environment, run them with the regular pytest entry:
 
 ```bash
-python3 -m tests.mla.support.mla_examples --device 0 --dtype fp16
-python3 -m tests.mla.support.mla_examples --device 0 --dtype bf16
+python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py
 ```
 
 #### INT8 compressed MLA on Ascend 910B/C
@@ -497,12 +496,11 @@ independent FP32/FP64 accuracy limits are reported separately in the
 [INT8 contract](docs/mla/design.md#34-int8-压缩-mla-扩展) and
 [coverage mapping](docs/mla/design.md#78-int8-收尾映射).
 
-The [INT8 examples](tests/mla/support/mla_int8_examples.py) demonstrate both layouts,
-metadata reuse, scale updates and graph replay with changing KV lengths:
+The same test file covers both INT8 layouts, scale updates, metadata reuse and
+changing lengths during graph replay. Run only INT8 E2Es with:
 
 ```bash
-python3 -m tests.mla.support.mla_int8_examples --device 0 --layout bsnd
-python3 -m tests.mla.support.mla_int8_examples --device 0 --layout tnd
+python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py -k int8
 ```
 
 #### flash_attn_with_kvcache

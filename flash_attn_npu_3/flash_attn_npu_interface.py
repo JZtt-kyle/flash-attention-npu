@@ -4294,7 +4294,7 @@ def flash_attn_with_kvcache(
     If not causal and not local, the query @q will be rotated by rotary_cos and rotary_sin at
     indices cache_seqlens only (i.e. we consider all tokens in @q to be at position cache_seqlens).
 
-    MLA cache examples are in tests/mla/e2e/dense/test_flash_attn_npu_v3_mla_kvcache.py.
+    MLA cache examples are in tests/test_flash_attn_npu_v3_mla.py.
 
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.

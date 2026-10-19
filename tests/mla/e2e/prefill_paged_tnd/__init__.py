@@ -1,1 +1,0 @@
-"""TND PA prefill acceptance."""

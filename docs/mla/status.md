@@ -2,74 +2,57 @@
 
 <!-- mla-loop-next: none -->
 
-**M21 已完成，已授权的 M18–M21 INT8 范围全部收尾，无下一开发步。** 本轮基线 `a284d12`，分支 `feat/mla-cann-migration`。交付可运行的 BSND/TND INT8 示例、中英文接口说明及 [组合覆盖映射](design.md#78-int8-收尾映射)，并修复 BSND balanced 调度的尾空 KV 输出初始化。阶段正确性、eager 性能及质量检查通过；graph 性能按 [design 3.4](design.md#34-int8-压缩-mla-扩展) 的既有用户授权暂缓，实测失败保留。完成本次提交后停止，不扩张范围。
+**R4 测试整理已完成验收，当前无后续已授权步骤。** 基线 `d433904`，分支 `feat/mla-cann-migration`。非量化 M17 与 INT8 M18–M21 已完成；本轮按用户 2026-10-19 的要求，仅保留公开功能 E2E，集中到 `tests/test_flash_attn_npu_v3_mla.py`，参照仓库原有测试风格。
 
-## 当前能力与本轮修复
+## 当前交付
 
-公开范围仍为 512+64 共享 KV、BF16 RoPE/输出、FP32 三 scale、BSND/TND Q、ND PA 128 页；v48/v49、mask/split 及拒绝项按 design 3.4。示例直接使用公开 API，覆盖 metadata 复用、scale 原地更新、图内重生成记录及改变 KV 长度。日常 E2E 增加两布局示例和 decode/causal 尾空段代表，旧清单无删减。
+单个测试文件覆盖两种非量化表示/五布局、INT8 BSND/TND、独立数学 reference、mask/split/softcap、长度/stride/空值、metadata 复用、参数拒绝、fake/compile、图与生命周期。重复的阶段性包装合并为具名参数表；旧日常清单与新完整参数表不是逐节点一一对应，保留/合并/移除依据见 [design 第 7 节](design.md#7-验收口径)。
 
-新 BSND 示例首先暴露 KV 从 `[129,0,65]` 变为 `[65,0,0]` 后尾样本保留旧输出。源 balanced 分核可能提前结束，原公开补初始化只覆盖 TND；现两布局均在数值流水与 FD 归并后由最后使用核首 AIV 清理未访问的空 KV 尾段。保留数值终点、flush、调度协议和量化算法，非 balanced 路径不变；六个具名用例覆盖短/长 KV、单/多 Q、自动/单片与连续多个空尾段。未修改 CATLASS 或 CANN 源。
+删除旧 `tests/mla/` 与兼容验收入口的 858 个受版本管理文件，清理公共 conftest 的私有 driver/旧节点映射依赖；README、开发约定、无头脚本及现有全量 CI 改用普通 pytest。非 910B/C 设备跳过 MLA 文件。生产逻辑、C++、构建参数、CATLASS 和 CANN 源未改；生产 Python 仅修正 docstring 的测试路径。
 
-## 本次闭环证据
+## 最近一次验收
 
-工作根为 `/tmp/flash-attention-npu-mla-46928a793876`，本轮证据实际存放于其 `mla-m21/` 子目录。`/tmp/mla-m21` 是兼容别名，保留 summary、manifest 与原始证据中的既有绝对路径；以下路径相对此证据根。构建/reference 均在工作根，`build/` 仅保留无头日志与恢复状态。
+证据根 `/tmp/flash-attention-npu-mla-46928a793876/mla-test-cleanup/`。最终 `acceptance-final.log` 和 `acceptance-final.xml`：**1,954 passed，0 failed/error/skipped，357.30 s**。
 
-统一 prepare 已重建生产扩展；实际加载 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `1e5ee5b0c7d5aafbd8e0613e917f1040e6bc4fe5f2a6de7a7244d88fa9c6a015`。收尾使用现有驱动的结果、依赖、构建和原始证据校验函数，见 `closure-correctness.json`、`closure-build.json`。**本次历史 E2E 继承为 0；不继承历史单元或性能。**
+| 集合 | 本次实际通过 |
+| --- | ---: |
+| 新单文件 MLA E2E | 1,814 |
+| 原有 metadata 签名/兼容 | 129 |
+| 原有 dense/varlen/分页/FD 数值 | 6 |
+| 原有 torch.compile | 3 |
+| 原有图重放 | 2 |
 
-| 检查 | 本次结果与耗时 | 证据 |
-| --- | --- | --- |
-| 接手基线 | M20 原 1,667 项正确性及构建/native 身份有效，仅作修复前基线 | `handoff-evidence.json`、`handoff-runtime.json` |
-| 工具/平台 | 15 / 41 通过，5.6 / 6.9 s；平台组只检查 CANN 910B/C 配置 | `final-tools/summary.json` |
-| 集合与命令 | dry-run/collect 完成；BSND 专项新增 6、累计 E2E 新增 4，无截断或删减 | `final-dry-run.json`、`collect/summary.json`、`fix-collect/summary.json`、`selection-diff.json` |
-| 用户示例 | FP16/BF16/INT8 BSND/TND 共 4 通过，21.8 s；两布局 INT8 CLI 运行通过 | `fix-check/summary.json`、`example-cli.log` |
-| 两布局代表 | BSND 11 / TND 28 当次通过，24.0 / 82.1 s；旧 probe 身份处理见下文 | `fix-check/summary.json` |
-| 固定源代表 | BSND 23 / TND 15 通过，27.4 / 25.4 s | `fix-check/summary.json` |
-| 性能预检 | 两布局各 4 配置通过，145.2 / 132.4 s；231 文件归档校验 | `profile-check/summary.json`、`profile-check.log` |
-| 完整专项 | BSND 115 / TND 151 通过，273.2 / 506.6 s | `acceptance/summary.json` |
-| 累计 E2E | 905 通过，247.0 s | 同上 |
-| 普通 FA3 / 普通图 | 504 / 2 通过，28.5 / 21.7 s | 同上 |
-| 构建与质量 | 生产重建、实际加载核对、相关文档链接、diff 和仓库 hooks 通过 | `fix-build.log`、`fix-quality.log`、`quality.log`、`documentation-check.json` |
+旧驱动 dry-run/collect 的日常 E2E 为 905 项（31.5 s），见 `before-collect/summary.json`；新文件收集 1,814 项（14.24 s），见 `final-collect.log`；普通回归收集 140 项（21.02 s），见 `ordinary-collect.log`。新节点均实际执行，不继承旧节点通过数。边界组 186 项及契约组 293 项先行通过，最终再次完整执行，不重复累计。
 
-正式正确性共 **1,677 项通过，零失败、零跳过**。代表检查新增 4 个 reference 缓存、命中 97 次；完整正确性命中 1,407 次且无新增计算，待测实现每次实际执行。
+初版夹具曾发现真实/FakeTensor 混用、负窗口归一化、全局空 KV 与 accumulator 的预期错误，均修正后重跑。失败日志保留为 `probe.log`、`public-probe.log`、`acceptance.log`、`boundaries.log` 和 `full-e2e.log`，不记为完整组通过。最终检查使用仓库 pre-commit（含 Ruff、YAML、Actionlint）、相关文档链接及 `git diff --check`；记录在 `final-quality.log`。源码/扩展校验值在 `checksums.txt`，旧源码副本在 `original.tar`，也可从 Git `d433904` 查询。
 
-早期 BSND 11 / TND 28 代表组执行后，固定源组重建了 INT8 `migrated.so` 及其 manifest，其旧依赖身份已过期，不能据此继承通过。收尾已核对这些节点全部包含于重建后完整专项，且完整专项的当前依赖和原始证据有效。首轮旧扩展示例失败仍保留在 `check/summary.json`（2 通过 / 1 失败 / TND 未运行）；修复后四项示例及完整回归均通过。
-
-独立数学判定与固定源一致性分开记录，汇总为 `source-math.json`：
-
-| 完整专项源记录 | 固定源逐元素一致 | O 数学通过 / 源限制 | LSE 数学通过 / 源限制 |
-| --- | --- | --- | --- |
-| BSND 28 | 全部 | 4 / 24 | 1 / 27 |
-| TND 20 | 全部 | 2 / 18 | 0 / 20 |
-
-固定 CANN 的 Q/K scale 作用于内容与 RoPE 合并后的分数，且保留动态概率量化，独立反量化数学存在既有精度限制。按 design 第 7 节执行源优先级，不修改阈值、不声称双数学全部通过。
-
-## 阶段公开性能
-
-固定 BSND 24 / TND 15 配置全部实测，三入口 R=1/4，5 次预热、5×20 wall、5×10 kernel 与双方计时边界不变。复用现有汇总器从原始样本重算并核对报告；39 配置按配置等权平均，无排除项。`performance-summary.json` 保留汇总、所有单例/分段及原始证据哈希。
-
-| 布局 | 配置 | eager 均值 | eager 退化配置 / 分段 | graph 均值 | graph 退化配置 / 分段 | 组耗时 |
-| --- | --- | --- | --- | --- | --- | --- |
-| BSND | 24 | 0.722964，通过 | 0 / 1 | 1.247368，失败、暂缓 | 24 / 130 | 709.3 s |
-| TND | 15 | 0.683287，通过 | 0 / 0 | 1.116739，失败、暂缓 | 15 / 76 | 454.3 s |
-| 合计 | 39 | **0.707703，通过** | 0 / 1 | **1.197126，失败、暂缓** | 39 / 206 | 1,163.5 s |
-
-两组默认工具均退出 1，唯一失败为 graph 平均门槛；未改工具或把失败记为通过。用户于 2026-10-19 明确“图模式性能暂不做要求”，当前 INT8 graph 性能按 design 3.4 暂缓；图正确性和 eager 已通过。原始证据为 `bsnd-performance/summary.json`、`tnd-performance/summary.json` 及各组 `public-profile/`。默认失败组不生成成功证据哈希，因此汇总单独使用现有 `files_identity` 保存并校验其原始文件身份。
-
-共 70,200 条 wall 样本，eager/graph 各 3,900 条 kernel 样本。源 NZ pack 准备成本单列于 `preflight.json`：BSND 合计 0.1712 s（单例 0.0006–0.1340 s），TND 合计 0.2377 s（0.0008–0.2045 s）；双方调用内转换成本、capture 成本及设备隔离记录均保留。性能进程固定 CPU 0、可见设备 7；私有 tmpfs 包装器分别归档并校验 238 / 221 文件，见两组外层日志。
-
-## 环境与复现
-
-Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；910B3 物理设备 7（20 AIC/40 AIV），**910C 未实测**。CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`，固定 CANN 源 `ca18aee610729ca5270a44e2d84c751bc687fbf0`。INT8 native `/tmp/mla-m18/native` 的配方、12 keys 与包内容有效，非量化 native `/tmp/mla-m13b/native`。设备验证在宿主运行，环境包装器 `/tmp/mla-m16-schedule/run.py`；质量使用已有 `/tmp/mla-m01-precommit` 包及仓库入口。
+加载 CANN 环境后可直接复现完整 MLA：
 
 ```bash
-export MLA_WORK_DIR=/tmp/flash-attention-npu-mla-46928a793876
-export MLA_INT8_NATIVE_ROOT=/tmp/mla-m18/native
-export MLA_INT8_SOURCE_LOG=/tmp/mla-m18/source-final/attempt-1792357915791404830/int8-source-check/output.log
-python3 /tmp/mla-m16-schedule/run.py python3 -m tests.mla \
-  --suite detail-int8_bsnd detail-int8_tnd e2e ordinary graph-ordinary \
-  --device 7 --output "$MLA_WORK_DIR/mla-m21-correctness-recheck"
+ASCEND_RT_VISIBLE_DEVICES=7 OMP_NUM_THREADS=1 python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py
 ```
 
-性能复现分别选择 `int8-bsnd-profile` / `int8-tnd-profile`，输出使用工作根下的新目录；命令前加 `unshare -Ur -m python3 /tmp/mla-m16-schedule/run_private_storage.py <新输出目录>`，后接环境包装器与统一驱动，`--output` 使用同一目录。包装器逐文件校验归档；默认 graph 失败须与 eager 判定分开记录。
+本机最终组合命令如下；仓库外的 `run.py` 仅恢复已有 CANN 环境，未启用 native 包或旧测试插件。各普通节点沿用 M21 中未改变的适用回归：
 
-[计划 M21](plan.md#m21int8-收尾) 的交付条件已完成，唯一下一步为 `none`。没有新的已授权迁移任务。
+```bash
+ASCEND_RT_VISIBLE_DEVICES=7 OMP_NUM_THREADS=1 python3 /tmp/mla-m16-schedule/run.py python3 -m pytest -x -q \
+  tests/test_flash_attn_npu_v3_mla.py \
+  tests/test_flash_attn_npu_v3_metadata_signature.py \
+  tests/test_flash_attn_npu_v3_metadata.py::test_flash_attn_func_metadata_bsnd \
+  'tests/test_flash_attn_npu_v3_metadata.py::test_flash_attn_varlen_func_metadata_tnd[data_type0-1-1-1-512-1024-128-True]' \
+  'tests/test_flash_attn_npu_v3_metadata.py::test_flash_attn_kvcache_metadata_bsnd[data_type0-1-1-1-1024-1024-128-128-False]' \
+  'tests/test_flash_attn_npu_v3_metadata.py::test_flash_attn_kvcache_metadata_flash_decode[data_type1-8-1-64-2-False-0.0-0]' \
+  tests/test_torch_compile_fa3.py::test_fa3_910_scheduler_metadata_torch_compile_correctness \
+  tests/test_torch_compile_fa3.py::test_fa3_910_varlen_torch_compile_correctness \
+  tests/test_torch_compile_fa3.py::test_fa3_910_fixed_torch_compile_correctness \
+  tests/test_flash_attn_npu_v3_graph.py --durations=10 \
+  --junitxml=/tmp/flash-attention-npu-mla-46928a793876/mla-test-cleanup/acceptance-final.xml
+```
+
+## 环境与生产基线
+
+Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；物理设备 7 为 Ascend910B3，可见逻辑设备 0。实际加载 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 `1e5ee5b0c7d5aafbd8e0613e917f1040e6bc4fe5f2a6de7a7244d88fa9c6a015`，与 M21 一致；CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。沙箱不能访问 NPU，设备检查和测试在宿主进行。生产逻辑未变，未重建扩展。
+
+M21 历史正确性 1,677 项通过，原始证据在工作根 `mla-m21/`；39 个 INT8 配置 eager 平均耗时比 0.707703，通过；graph 1.197126，失败并按用户授权暂缓。INT8 固定源 Q/K scale 对 content/RoPE 合并分数及动态 P 量化的语义、历史独立数学限制仍在；当前可解析输入的数学测试不等价于一般量化固定源验收。固定源、Trap 和性能本轮未重跑，910C 未实测；本轮 E2E 通过不改变这些历史限制。完整历史结论见 `git show d433904:docs/mla/status.md`。
+
+唯一下一步：无已授权开发步骤；本轮提交后停止。
