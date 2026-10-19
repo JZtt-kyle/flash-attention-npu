@@ -105,7 +105,7 @@ def mla_kernel(dtype: str, layout: str, implementation: str, defines: dict) -> K
     )
     for name, value in defines.items():
         body += f"#define {name} {value.format(**values)}\n"
-    body += f'#include "../mla/device/{implementation}"\n'
+    body += f'#include "../mla/{implementation}"\n'
     return Kernel("mla", dtype, layout, f"mla_dispatch_{dtype}_{layout}.cpp", body)
 
 
@@ -119,13 +119,13 @@ def get_all_kernels() -> List[Kernel]:
     # Preserve separate compiler instantiations, with one declaration of each
     # supported family instead of maintaining two copies of every wrapper.
     direct = [
-        ("bsnd", "DENSE", "dense", "Dense", "mla_launch_impl.hpp"),
-        ("tnd", "TND", "tnd", "Tnd", "mla_tnd_launch_impl.hpp"),
-        ("tnd_bsnd", "MIXED", "tnd_bsnd", "TndBsnd", "mla_tnd_bsnd_launch_impl.hpp"),
-        ("bsnd_used", "USED", "bsnd_used", "BsndUsed", "mla_bsnd_used_launch_impl.hpp"),
-        ("tnd_used", "USED", "tnd_used", "TndUsed", "mla_tnd_used_launch_impl.hpp"),
-        ("paged_bsnd", "PAGED", "paged_bsnd", "PagedBsnd", "mla_paged_bsnd_launch_impl.hpp"),
-        ("paged_tnd", "PAGED", "paged_tnd", "PagedTnd", "mla_paged_tnd_launch_impl.hpp"),
+        ("bsnd", "DENSE", "dense", "Dense"),
+        ("tnd", "TND", "tnd", "Tnd"),
+        ("tnd_bsnd", "MIXED", "tnd_bsnd", "TndBsnd"),
+        ("bsnd_used", "USED", "bsnd_used", "BsndUsed"),
+        ("tnd_used", "USED", "tnd_used", "TndUsed"),
+        ("paged_bsnd", "PAGED", "paged_bsnd", "PagedBsnd"),
+        ("paged_tnd", "PAGED", "paged_tnd", "PagedTnd"),
     ]
     split_layouts = [
         ("bsnd", "Bsnd"),
@@ -135,17 +135,20 @@ def get_all_kernels() -> List[Kernel]:
         ("paged_tnd", "PagedTnd"),
     ]
     for dtype in DTYPE_MAP:
-        for layout, prefix, entry, launch, implementation in direct:
+        for layout, prefix, entry, launch in direct:
+            defines = {
+                f"MLA_{prefix}_TYPE": "{ctype}",
+                f"MLA_{prefix}_ENTRY": f"mla_{entry}_{{dtype}}",
+                f"MLA_{prefix}_LAUNCH": f"Launch{launch}{{title}}",
+            }
+            if prefix in ("USED", "PAGED"):
+                defines[f"MLA_{prefix}_TND"] = str(int("tnd" in layout))
             kernels.append(
                 mla_kernel(
                     dtype,
                     layout,
-                    implementation,
-                    {
-                        f"MLA_{prefix}_TYPE": "{ctype}",
-                        f"MLA_{prefix}_ENTRY": f"mla_{entry}_{{dtype}}",
-                        f"MLA_{prefix}_LAUNCH": f"Launch{launch}{{title}}",
-                    },
+                    "mla_dispatch_impl.hpp",
+                    defines,
                 )
             )
         for layout, launch in split_layouts:
@@ -154,14 +157,13 @@ def get_all_kernels() -> List[Kernel]:
                 "MLA_SPLIT_PARTIAL": f"mla_split_{layout}_partial_{{dtype}}",
                 "MLA_SPLIT_MERGE": f"mla_split_{layout}_merge_{{dtype}}",
                 "MLA_SPLIT_LAUNCH": f"LaunchSplit{launch}{{title}}",
+                f"MLA_SPLIT_{layout.upper()}": "1",
             }
-            implementation = f"mla_split_{layout}_launch_impl.hpp"
-            if layout == "mixed":
-                defines["MLA_SPLIT_MIXED"] = "1"
-                implementation = "mla_split_tnd_launch_impl.hpp"
             if layout == "paged_tnd":
                 defines["MLA_SPLIT_INIT"] = "mla_split_paged_tnd_init_{dtype}"
-            kernels.append(mla_kernel(dtype, f"split_{layout}", implementation, defines))
+            kernels.append(
+                mla_kernel(dtype, f"split_{layout}", "mla_split_dispatch_impl.hpp", defines)
+            )
 
             defines = {
                 "MLA_AUTO_TYPE": "{ctype}",
@@ -169,19 +171,20 @@ def get_all_kernels() -> List[Kernel]:
                 "MLA_AUTO_PARTIAL": f"mla_auto_split_{layout}_partial_{{dtype}}",
                 "MLA_AUTO_MERGE": f"mla_auto_split_{layout}_merge_{{dtype}}",
                 "MLA_AUTO_LAUNCH": f"LaunchAutoSplit{launch}{{title}}",
+                "MLA_AUTO_PAGED": str(int(layout.startswith("paged_"))),
+                "MLA_AUTO_TND": str(int(layout in ("tnd", "mixed", "paged_tnd"))),
+                "MLA_AUTO_MIXED": str(int(layout == "mixed")),
             }
-            if layout.startswith("paged_"):
-                implementation = f"mla_auto_split_{layout}_launch_impl.hpp"
-            else:
-                implementation = "mla_auto_split_launch_impl.hpp"
-                defines["MLA_AUTO_TND"] = str(int(layout != "bsnd"))
-                defines["MLA_AUTO_MIXED"] = str(int(layout == "mixed"))
-            kernels.append(mla_kernel(dtype, f"auto_split_{layout}", implementation, defines))
+            kernels.append(
+                mla_kernel(
+                    dtype, f"auto_split_{layout}", "mla_auto_split_dispatch_impl.hpp", defines
+                )
+            )
         kernels.append(
             mla_kernel(
                 dtype,
                 "prefill_bsnd",
-                "mla_prefill_bsnd_launch_impl.hpp",
+                "mla_prefill_dispatch_impl.hpp",
                 {
                     "MLA_PREFILL_TYPE": "{ctype}",
                     "MLA_PREFILL_INIT": "MlaPrefillTnd{title}Init",
@@ -195,7 +198,7 @@ def get_all_kernels() -> List[Kernel]:
             mla_kernel(
                 dtype,
                 "gqa",
-                "mla_gqa_launch_impl.hpp",
+                "mla_gqa_dispatch_impl.hpp",
                 {
                     "MLA_GQA_TYPE": "{ctype}",
                     "MLA_GQA_ATTENTION": "MlaGqa{title}Attention",

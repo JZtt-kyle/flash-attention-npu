@@ -7,4 +7,4 @@
 #define MLA_MIXED_TYPE half
 #define MLA_MIXED_ENTRY mla_tnd_bsnd_fp16
 #define MLA_MIXED_LAUNCH LaunchTndBsndFp16
-#include "../mla/device/mla_tnd_bsnd_launch_impl.hpp"
+#include "../mla/mla_dispatch_impl.hpp"

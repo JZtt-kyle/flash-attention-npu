@@ -7,4 +7,4 @@
 #define MLA_DENSE_TYPE bfloat16_t
 #define MLA_DENSE_ENTRY mla_dense_bf16
 #define MLA_DENSE_LAUNCH LaunchDenseBf16
-#include "../mla/device/mla_launch_impl.hpp"
+#include "../mla/mla_dispatch_impl.hpp"

@@ -7,4 +7,5 @@
 #define MLA_USED_TYPE bfloat16_t
 #define MLA_USED_ENTRY mla_bsnd_used_bf16
 #define MLA_USED_LAUNCH LaunchBsndUsedBf16
-#include "../mla/device/mla_bsnd_used_launch_impl.hpp"
+#define MLA_USED_TND 0
+#include "../mla/mla_dispatch_impl.hpp"

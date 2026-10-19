@@ -1,7 +1,6 @@
 #pragma once
 #include <cstdint>
 #include "mla_layout.h"
-
 // Shared device arguments for the compressed and prefill MLA kernels.
 // No tensor addresses or scale are stored in the reusable schedule.
 namespace flash_attn::mla {

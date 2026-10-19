@@ -7,4 +7,5 @@
 #define MLA_PAGED_TYPE half
 #define MLA_PAGED_ENTRY mla_paged_bsnd_fp16
 #define MLA_PAGED_LAUNCH LaunchPagedBsndFp16
-#include "../mla/device/mla_paged_bsnd_launch_impl.hpp"
+#define MLA_PAGED_TND 0
+#include "../mla/mla_dispatch_impl.hpp"

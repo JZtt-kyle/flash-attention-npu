@@ -1,6 +1,5 @@
 #pragma once
 #include <torch/extension.h>
-
 namespace flash_attn::mla {
 std::vector<at::Tensor> GqaForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                    const std::optional<at::Tensor>& qv, int64_t splits, int64_t left, int64_t right,

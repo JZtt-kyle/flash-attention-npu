@@ -1,6 +1,5 @@
 #pragma once
 #include <cstdint>
-
 // FA3 input-view adapter for MLA (FP16/BF16, D=64/128/192/512).
 // Pointer/stride convention: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
 // hopper/flash_api.cpp::set_params_fprop and mha_fwd's q_v handling.

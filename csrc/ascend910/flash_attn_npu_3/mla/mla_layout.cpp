@@ -1,6 +1,5 @@
 #include "mla_layout.h"
 #include <algorithm>
-
 namespace flash_attn::mla {
 
 namespace {

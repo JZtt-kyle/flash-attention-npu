@@ -391,8 +391,8 @@ class BishengBuildExt(build_ext):
         sources = [os.path.join(src_dir, "fa_metadata.aicpu")]
         if ext_name == "flash_attn_npu_3.flash_attn_npu_3":
             # Keep the independent FIA and quantized IFA scheduler binaries separate.
-            sources.append(os.path.join(src_dir, "mla", "metadata", "mla_metadata.aicpu"))
-            sources.append(os.path.join(src_dir, "mla", "metadata", "mla_int8.aicpu"))
+            sources.append(os.path.join(src_dir, "mla", "mla_metadata.aicpu"))
+            sources.append(os.path.join(src_dir, "mla", "mla_int8_metadata.aicpu"))
         return [self._build_aicpu_object(ext_fullpath, src) for src in sources]
 
     def _build_aicpu_object(self, ext_fullpath, aicpu_src):
@@ -660,19 +660,12 @@ src_ascend910_v3 += [
     os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3/mla", name)
     for name in (
         "mla_forward.cpp",
-        "device/mla_dispatch_int8.cpp",
-        "tiling/mla_gqa_schedule.cpp",
-        "tiling/mla_split_kv.cpp",
-        "tiling/mla_split_plan.cpp",
-        "tiling/mla_auto_split_plan.cpp",
+        "mla_dispatch_int8.cpp",
         "mla_layout.cpp",
-        "tiling/mla_paged_plan.cpp",
-        "device/mla_launch.cpp",
-        "tiling/mla_schedule.cpp",
-        "tiling/mla_sequence.cpp",
-        "tiling/mla_causal.cpp",
-        "tiling/mla_window.cpp",
-        "detail/cann_split_core.cpp",
+        "mla_dispatch.cpp",
+        "mla_tiling.cpp",
+        "mla_split.cpp",
+        "cann_split_core.cpp",
     )
 ]
 

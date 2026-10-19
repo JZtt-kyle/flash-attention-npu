@@ -13,7 +13,6 @@
 // Only INT8 content / BF16 RoPE and output, Hkv=1, 512+64, ND PA.
 #pragma once
 #include <cstdint>
-
 namespace flash_attn::mla::Int8 {
 constexpr uint32_t MAX_AIC_CORE_NUM = 26;
 struct alignas(8) IncreFlashAttentionBaseParamsMla {

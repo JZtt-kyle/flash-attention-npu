@@ -7,4 +7,4 @@
 #define MLA_TND_TYPE half
 #define MLA_TND_ENTRY mla_tnd_fp16
 #define MLA_TND_LAUNCH LaunchTndFp16
-#include "../mla/device/mla_tnd_launch_impl.hpp"
+#include "../mla/mla_dispatch_impl.hpp"

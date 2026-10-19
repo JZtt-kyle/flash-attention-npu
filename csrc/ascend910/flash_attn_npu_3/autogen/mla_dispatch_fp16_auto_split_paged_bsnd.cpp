@@ -9,4 +9,7 @@
 #define MLA_AUTO_PARTIAL mla_auto_split_paged_bsnd_partial_fp16
 #define MLA_AUTO_MERGE mla_auto_split_paged_bsnd_merge_fp16
 #define MLA_AUTO_LAUNCH LaunchAutoSplitPagedBsndFp16
-#include "../mla/device/mla_auto_split_paged_bsnd_launch_impl.hpp"
+#define MLA_AUTO_PAGED 1
+#define MLA_AUTO_TND 0
+#define MLA_AUTO_MIXED 0
+#include "../mla/mla_auto_split_dispatch_impl.hpp"

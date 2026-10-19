@@ -9,4 +9,4 @@
 #define MLA_PREFILL_ATTENTION MlaPrefillBsndFp16Attention
 #define MLA_PREFILL_MERGE MlaPrefillBsndFp16Merge
 #define MLA_PREFILL_LAUNCH LaunchPrefillBsndFp16
-#include "../mla/device/mla_prefill_bsnd_launch_impl.hpp"
+#include "../mla/mla_prefill_dispatch_impl.hpp"

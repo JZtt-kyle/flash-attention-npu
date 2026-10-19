@@ -7,4 +7,5 @@
 #define MLA_USED_TYPE half
 #define MLA_USED_ENTRY mla_tnd_used_fp16
 #define MLA_USED_LAUNCH LaunchTndUsedFp16
-#include "../mla/device/mla_tnd_used_launch_impl.hpp"
+#define MLA_USED_TND 1
+#include "../mla/mla_dispatch_impl.hpp"

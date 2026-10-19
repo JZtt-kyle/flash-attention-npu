@@ -8,5 +8,6 @@
 #define MLA_SPLIT_PARTIAL mla_split_paged_tnd_partial_bf16
 #define MLA_SPLIT_MERGE mla_split_paged_tnd_merge_bf16
 #define MLA_SPLIT_LAUNCH LaunchSplitPagedTndBf16
+#define MLA_SPLIT_PAGED_TND 1
 #define MLA_SPLIT_INIT mla_split_paged_tnd_init_bf16
-#include "../mla/device/mla_split_paged_tnd_launch_impl.hpp"
+#include "../mla/mla_split_dispatch_impl.hpp"

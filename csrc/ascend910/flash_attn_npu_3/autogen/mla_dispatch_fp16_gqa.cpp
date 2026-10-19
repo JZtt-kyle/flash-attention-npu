@@ -7,4 +7,4 @@
 #define MLA_GQA_TYPE half
 #define MLA_GQA_ATTENTION MlaGqaFp16Attention
 #define MLA_GQA_LAUNCH LaunchGqaFp16
-#include "../mla/device/mla_gqa_launch_impl.hpp"
+#include "../mla/mla_gqa_dispatch_impl.hpp"

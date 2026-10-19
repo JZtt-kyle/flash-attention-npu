@@ -7,4 +7,5 @@
 #define MLA_PAGED_TYPE bfloat16_t
 #define MLA_PAGED_ENTRY mla_paged_tnd_bf16
 #define MLA_PAGED_LAUNCH LaunchPagedTndBf16
-#include "../mla/device/mla_paged_tnd_launch_impl.hpp"
+#define MLA_PAGED_TND 1
+#include "../mla/mla_dispatch_impl.hpp"

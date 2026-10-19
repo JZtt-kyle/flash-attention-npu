@@ -1,8 +1,7 @@
 #pragma once
 
 #include <torch/extension.h>
-#include "metadata/mla_sequence.h"
-#include "metadata/mla_paged.h"
+#include "mla_metadata.h"
 #include "mla_layout.h"
 // Host-only boundary for the two representations in docs/mla/design.md.
 // Contract: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,

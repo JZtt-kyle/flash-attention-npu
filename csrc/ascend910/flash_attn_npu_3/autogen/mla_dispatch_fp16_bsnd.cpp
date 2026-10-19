@@ -7,4 +7,4 @@
 #define MLA_DENSE_TYPE half
 #define MLA_DENSE_ENTRY mla_dense_fp16
 #define MLA_DENSE_LAUNCH LaunchDenseFp16
-#include "../mla/device/mla_launch_impl.hpp"
+#include "../mla/mla_dispatch_impl.hpp"
