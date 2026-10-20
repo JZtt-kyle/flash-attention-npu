@@ -77,13 +77,14 @@ inline bool FitsDenseShape(int64_t batch, int64_t sq, int64_t heads, int64_t sk)
 inline bool CheckForwardBoundary(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                  const std::optional<at::Tensor>& qv, bool varlenQ, bool varlenK, bool pagedKV)
 {
+    // Keep ordinary layout and malformed-query validation in the upstream path.
+    if (!qv.has_value() && ((varlenQ && q.dim() != 3) || (q.dim() > 0 && v.dim() > 0 && q.size(-1) == v.size(-1)))) {
+        return false;
+    }
     TORCH_CHECK(q.dim() == (varlenQ ? 3 : 4), "FlashAttention: q rank must match BSND/TND layout");
     TORCH_CHECK(k.dim() == (varlenK ? 3 : 4) && v.dim() == k.dim(),
                 "FlashAttention: k/v rank must match dense, TND or paged KV layout");
     TORCH_CHECK(q.size(-1) == k.size(-1), "FlashAttention: q and k head dimensions must match");
-    if (!qv.has_value() && q.size(-1) == v.size(-1)) {
-        return false;
-    }
 
     TORCH_CHECK(!pagedKV || !varlenK, "MLA: page_table and cu_seqlens_k cannot be combined");
     TORCH_CHECK(q.scalar_type() == at::kHalf || q.scalar_type() == at::kBFloat16,
@@ -159,18 +160,6 @@ inline uint32_t CheckTndInputs(const at::Tensor& q, const at::Tensor& k, const a
                     uint64_t(q.size(0)) * q.size(1) <= kMlaMaxBatchRows,
                 "MLA: compact TND shape or max_seqlen bounds exceeded");
     return kMlaTndMetadataPrefixWords + kMlaTndMetadataSequenceWords * batch;
-}
-
-inline bool CheckMetadataBoundary(int64_t headDim, int64_t headDimV)
-{
-    if (headDim == headDimV) {
-        return false;
-    }
-    // This selects the representation's schedule family. Forward independently
-    // checks qv presence, actual tensors and the record's geometry.
-    TORCH_CHECK((headDim == 64 && headDimV == 512) || (headDim == 192 && headDimV == 128),
-                "NPU FlashAttention MLA scheduler metadata is not implemented yet for these head dimensions");
-    return true;
 }
 
 inline void CheckCacheLengths(const at::Tensor& lengths, int64_t batch, const at::Device& device)

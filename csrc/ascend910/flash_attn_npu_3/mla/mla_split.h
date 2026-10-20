@@ -153,8 +153,7 @@ struct MlaSplitKvPlannedRow {
     uint64_t partialOut, partialSum, partialMax;
 };
 
-// Owned, immutable CPU plan, NOT a device metadata record or launcher. A later
-// device consumer must validate its serialized protocol independently.
+// Owned, immutable CPU plan. Device consumers validate the serialized record independently.
 class MlaSplitKvPlan {
   public:
     const MlaSplitKvPlanLayout& Layout() const
@@ -269,7 +268,6 @@ class MlaSplitTndPlan {
 // and accumulator addresses use allocation tokens, never packed used tokens.
 // Global empty total Q/KV has no work/workspace; zero used KV in a nonempty
 // allocation retains initialization tasks. All failures leave output unchanged.
-// CPU component only: no metadata, device synchronization or public split path.
 MlaScheduleStatus BuildSplitTndPlan(const MlaSplitTndPlanConfig&, const MlaWindowConfig&, const MlaUsedInputs&,
                                     MlaSplitTndPlan&);
 
@@ -333,7 +331,6 @@ class MlaSplitMixedPlan {
 // and accumulator addresses use allocation tokens, never packed used tokens.
 // Global empty total Q or BSND KV capacity has no work/workspace; zero used KV in a nonempty
 // allocation retains initialization tasks. All failures leave output unchanged.
-// CPU component only: no metadata, device synchronization or public split path.
 MlaScheduleStatus BuildSplitMixedPlan(const MlaSplitMixedPlanConfig&, const MlaWindowConfig&, const MlaUsedInputs&,
                                       MlaSplitMixedPlan&);
 
@@ -613,7 +610,6 @@ class MlaAutoSplitTndPlan {
 // writes must finish before merge (e.g. a later kernel on the same stream).
 // Global empty total Q/KV allocation has no tasks/workspace but validates every input.
 // Owns parsed spans; input buffers may be destroyed after build.
-// CPU component only; no device metadata or public auto TND path.
 // Logical M/N bounds do not validate device resources. Failures are atomic.
 MlaScheduleStatus BuildAutoSplitTndPlan(const MlaAutoSplitTndPlanConfig& config, const MlaWindowConfig& window,
                                         const MlaUsedInputs& inputs, MlaAutoSplitTndPlan& output);

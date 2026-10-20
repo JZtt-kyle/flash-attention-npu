@@ -17,7 +17,6 @@ struct MlaDenseKernelSchedule {
 } // namespace flash_attn::mla
 
 // Device-only window parameters after the checked CPU NormalizeWindow step.
-// No metadata ABI or public entry is defined by this standalone component.
 namespace flash_attn::mla {
 struct MlaWindowKernelParams {
     // Same values as MlaWindowKind: None=0, Causal=1, Local=2.

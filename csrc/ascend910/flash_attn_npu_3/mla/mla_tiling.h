@@ -136,8 +136,7 @@ enum class MlaScheduleStatus {
 // no mask/length arrays, num_splits=1.
 // A zero batch/query/KV capacity produces a validation-only schedule: one
 // launch core, zero tiles/endpoints/workspace. No attention Kernel consumes it.
-// FP16 and BF16 have identical scheduling. This is not a public forward or
-// metadata entry point; callers must separately validate tensor/layout/options.
+// FP16 and BF16 have identical scheduling; callers validate tensor/layout/options.
 // No tensor addresses or scale are stored. On failure, output is unchanged.
 MlaScheduleStatus BuildDenseSchedule(const MlaDenseShape& shape, const MlaPlatformInfo& platform, MlaSchedule& output);
 
@@ -313,8 +312,7 @@ MlaScheduleStatus ParseUsedLengths(const MlaUsedShape& shape, const MlaUsedInput
 // lengths; absent TND used retains the original cumulative allocation tails.
 // The shared variable-M SplitCore adapter computes tasks/costs from used lengths.
 // Empty allocation has the existing validation-only schedule; all-zero used in
-// nonempty allocation retains zero-cost scheduling and workspace. This API is
-// not a metadata protocol, AICPU launcher, device consumer or public entry.
+// nonempty allocation retains zero-cost scheduling and workspace.
 MlaScheduleStatus BuildUsedSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& platform,
                                     const MlaUsedInputs& inputs, MlaUsedSchedule& output);
 
@@ -352,7 +350,7 @@ struct MlaPagedSchedule {
 };
 
 // Independent CPU/AICPU component: BSND/TND Q, optional Q-used, shared 512+64
-// KV, no mask, num_splits=1. Shared by standalone and production v6 generation;
+// KV, no mask, num_splits=1. Used by v6 metadata generation;
 // forward kernels consume the serialized record through device validation.
 // P is 16..1024 in multiples of 16; C is 0..16384 and divisible by P.
 // Q allocation/prefix/used follow ParseUsedLengths. KV lengths are mandatory
@@ -500,8 +498,7 @@ struct MlaWindow {
 // Negative window values denote unlimited sides. Large positive int64 windows
 // are normalized before narrowing/arithmetic; host-normalized values below
 // INT32_MIN reject (FA3 forward narrows to int, unlike metadata).
-// The single-query causal optimization
-// follows FA3's exact -1 checks. No public or device capability is enabled.
+// The single-query causal optimization follows FA3's exact -1 checks.
 // Bounds use the existing MLA limits; failure leaves output unchanged.
 MlaCausalStatus NormalizeWindow(const MlaWindowConfig& input, MlaWindow& output);
 

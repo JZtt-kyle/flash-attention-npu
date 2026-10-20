@@ -443,16 +443,13 @@ those change. They can be reused across layers with matching conditions. ND page
 are `[num_pages, page_size, Hkv, D]`; page size must be a multiple of 16 in
 `[16, 1024]`, with logical capacity at most 16384. The page table is int32.
 
-Graph capture/replay supports both representations and all five layouts. Keep
-tensor shapes, strides, storage addresses and scalar options fixed. To change
-device lengths during replay, regenerate metadata inside the graph or update the
-captured external record with correct stream dependencies. An old record does
-not update itself. Graph correctness and graph performance are separate: the
-latest graph measurement still exceeds the default performance target; see
-[current evidence and limitations](docs/mla/status.md).
+MLA uses the ordinary call path without capture-specific handling. Current
+validation covers ordinary calls and multiple streams; see the
+[validation scope](docs/mla/design.md#22-后端选项与返回值) and
+[current evidence](docs/mla/status.md).
 
 The [MLA E2E tests](tests/test_flash_attn_npu_v3_mla.py) cover the public dense,
-varlen and paged APIs, metadata reuse, fake/compile and graph replay. After building
+varlen and paged APIs, metadata reuse, fake/compile and stream lifetimes. After building
 v3 and loading the CANN environment, run them with the regular pytest entry:
 
 ```bash
@@ -497,7 +494,7 @@ independent FP32/FP64 accuracy limits are reported separately in the
 [coverage mapping](docs/mla/design.md#78-int8-收尾映射).
 
 The same test file covers both INT8 layouts, scale updates, metadata reuse and
-changing lengths during graph replay. Run only INT8 E2Es with:
+changing lengths between ordinary calls. Run only INT8 E2Es with:
 
 ```bash
 python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py -k int8

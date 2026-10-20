@@ -1,6 +1,17 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**R9 已完成：移除额外的 MLA 图捕获拒绝；无待开发步骤。** R8 普通调用优化及之前迁移步骤已完成；能力、限制和证据见 [status](status.md)，接口与来源见 [design](design.md)。
+本页只记录实施顺序、产物和完成条件。**R10 已完成：已基于最新主仓 rebase，并完成 MLA 与普通 FA3 的集成修正及验收。** 能力、限制和证据见 [status](status.md)，接口与来源见 [design](design.md)。
+
+## R10：rebase 与整体代码检视（已完成）
+
+用户于 2026-10-20 要求基于最新远程 rebase，并核对当前开发的代码风格、注释、冗余和错误。原分支 `baafdf5` 已保存在 `backup/mla-before-rebase-20261020`；最新 `origin/main` 为 `1486554`，176 个本地提交已回放，当前基线 `1ed342c`。
+
+- 改动与影响：保留上游普通 FA3 的长度校验、used-length、512 维、metadata 与构建修复。普通 metadata 的 C++/Python real/fake、字节数和参数指纹回归主仓；删除旧数值兼容层及重复私有 MLA 分派，公开 MLA 使用已有注册生产者。Python/C++ 将普通等维输入及无 qv 的错误 varlen query 交回上游校验，修复 TND cache 误拒绝和错误消息优先级；varlen 快捷分派与 func/cache 一样识别合法的 prefill 形状。清理过时注释、重复默认值/声明、无调用方函数和重复测试，不修改 CANN/CATLASS。
+- 测试与文档：旧普通 metadata 数值协议断言退役，公开签名、real/fake 形状和 has_softcap 特征合入现有 metadata 文件。公共计时包装避开 Dynamo 对 host 计时的跟踪；MLA 测试与独立 reference 保持原样。中英文 README 同步 R8/R9 已确认的普通调用范围，移除过期的 MLA 图验收和图测试覆盖说明。
+- 验证准备：工作根 `/tmp/flash-attention-npu-mla-46928a793876/mla-rebase-review-20261020`；核对环境、910B3 设备和实际扩展身份，保存三方源码与旧扩展。先做收集、格式/语法、生成器清单/幂等及 AICPU 对象隔离/依赖检查，再沿用仓库外目录构建 v3/910；共享校验头修改后重建两份 host 单元，并固定源码/扩展/测试身份。
+- 必跑集合：106 项 MLA 代表覆盖双 dtype、五布局、INT8、长 KV、空值和 fake/compile；普通 113 项预检包含 12 项接口/成本边界、18 个 TND cache 失败复现和既有 83 项 query rank/大小/符号维度校验。随后设备 5 完整运行 1,480 MLA，设备 3 完整运行普通 FA3、metadata、compile、graph 四文件的 551 项。普通使用仓库 full CI 的 `pytest-xdist -n 2`、8 个 CPU 线程及公共 golden 缓存；只缓存独立 reference，每项待测实现仍实际执行。保留完整参数表和原 `assert_fa_close` 阈值，不抽样，保存原始日志/JUnit。
+- 继承与性能：49 份 MLA 文件除已列清理和入口识别外，数值、调度、地址及发射代码与原基线等价。继承来源契约及未变覆盖目的；协议、入口、共享头和构建变化后的 E2E 本轮重跑，不累计旧通过数。本步未调整数值算法、调度或发射策略，未重测固定 CANN 性能，不将正确性通过作为新的性能结论。
+- 完成条件（已满足）：最新主仓行为保留、失效兼容逻辑清除，重建、受影响公开回归、文档与仓库质量检查通过；完整结果见 status。仅提交本轮文件一次后停止。
 
 ## R9：移除额外的 MLA 图捕获拒绝（已完成）
 

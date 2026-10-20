@@ -424,13 +424,11 @@ mask、split 和调度选项；这些条件变化后须重新生成，匹配条�
 ND 分页 cache 为 `[num_pages, page_size, Hkv, D]`，页大小是 `[16, 1024]` 内的 16 倍数，
 逻辑容量不超过 16384，页表为 int32。
 
-两种表示的五种布局均支持图捕获和重放。捕获后保持 tensor 的 shape、stride、存储地址
-及标量选项不变。重放期间修改设备长度时，应在图内重新生成 metadata，或按正确的 stream
-依赖更新图持有的外部记录；旧记录不会自行更新。图正确性与图性能分别验收，最新图性能
-实测仍超过默认门槛，见 [当前证据与限制](docs/mla/status.md)。
+MLA 使用普通调用路径，不按捕获状态增加特殊处理。当前验收覆盖普通调用与多 stream，
+范围见 [验收边界](docs/mla/design.md#22-后端选项与返回值)，实测见 [当前证据](docs/mla/status.md)。
 
 [MLA E2E 测试](tests/test_flash_attn_npu_v3_mla.py) 覆盖公开 dense、varlen、分页接口、
-metadata 复用、fake/compile 和图重放。构建 v3 并加载 CANN 环境后，使用仓库原有 pytest 入口：
+metadata 复用、fake/compile 和 stream 生命周期。构建 v3 并加载 CANN 环境后，使用仓库原有 pytest 入口：
 
 ```bash
 python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py
@@ -469,7 +467,7 @@ causal，多 query 须设置右下对齐的 `causal=True`。选项为 `num_split
 分别记录，见 [INT8 契约](docs/mla/design.md#34-int8-压缩-mla-扩展) 和
 [覆盖映射](docs/mla/design.md#78-int8-收尾映射)。
 
-同一文件覆盖 INT8 两种布局、metadata 复用、scale 更新及 KV 长度变化时的图重放。
+同一文件覆盖 INT8 两种布局、metadata 复用、scale 更新及普通调用间的 KV 长度变化。
 只运行 INT8 E2E：
 
 ```bash

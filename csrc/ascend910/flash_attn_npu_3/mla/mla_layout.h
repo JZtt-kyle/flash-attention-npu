@@ -45,7 +45,7 @@ enum class MlaLayoutStatus {
 // Empty views access no storage; like PyTorch, their offset may exceed storage.
 // Singleton/empty axes do not impose a byte limit on an unused stride.
 // Callers must separately check dtype, device, shape compatibility and schedule
-// limits. Production BSND and isolated probes validate before device launch.
+// limits before device launch.
 // Failure leaves output unchanged.
 MlaLayoutStatus BuildBsndTensorLayout(const MlaBsndTensorView& view, MlaBsndTensorLayout& output);
 
@@ -55,7 +55,7 @@ MlaLayoutStatus BuildInt8BsndTensorLayout(const MlaBsndTensorView& view, MlaBsnd
 
 } // namespace flash_attn::mla
 
-// FA3 input-view adapter for compressed MLA (FP16/BF16, D=64 or 512).
+// FA3 input-view adapter for compressed and prefill MLA (FP16/BF16).
 // Pointer/stride convention: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
 // hopper/flash_api.cpp::set_params_fprop and mha_fwd's q_v handling.
 namespace flash_attn::mla {
@@ -78,18 +78,16 @@ struct MlaTndTensorLayout {
 };
 
 // CPU-only adapter to the shared BSND storage/checked-byte validation, with a
-// singleton batch. Requires T>=0, H>0, D=64/512, nonnegative token/head strides
+// singleton batch. Requires T>=0, H>0, D=64/128/192/512, nonnegative token/head strides
 // and a unit last stride. Validates the entire allocation, even with zero used.
 // Empty T accesses no storage; unused singleton/empty strides remain 64-bit.
 // Callers separately validate dtype/device, shape compatibility, allocation
 // prefixes, used lengths and schedule limits. Failure leaves output unchanged.
-// This independent component does not enable production TND/mixed strides.
 MlaLayoutStatus BuildTndTensorLayout(const MlaTndTensorView& view, MlaTndTensorLayout& output);
 
 } // namespace flash_attn::mla
 
-// Independent CPU address adapter for compressed MLA ND paged caches.
-// This component does not enable PA in a launcher, metadata or public entry.
+// CPU address validation for MLA ND paged caches.
 namespace flash_attn::mla {
 
 struct MlaPageTableView {

@@ -104,7 +104,7 @@ split 请求在单 split 的窗口/causal 分派之前选择下表协议；每�
 
 ### 2.2 后端选项与返回值
 
-512+64 的五种布局及 192/128 的五种布局均支持无 mask、右下 causal、有限/单侧窗口及 causal 叠加，窗口按 [6.2.6](#626-独立-cpu-window-归一化与范围) 归一化。split 与记录选择统一见 [2.1](#21-入口与记录选择)。五种布局的两种表示接受非负有限 FP32 `softcap`；正值启用 [6.5.3](#653-softcap-独立数值组件) 的数值语义，零值旁路。`pack_gqa=None/True/False` 与 `0 <= sm_margin < physical_AIC` 的调度语义见 [6.2.13](#6213-独立-gqa-调度坐标与资源预算)；非默认有效选项采用 [v47](#521-gqa-调度选项记录)，覆盖三 mask、全部 split 和 softcap。其余选项限定为 `attention_chunk=0` 和 `rotary_interleaved=True`；追加 KV、rotary/量化输入、cache 重映射/leftpad 等由 Python 与 C++ 明确拒绝。公开 metadata 生成器的 `has_softcap=True` 开放非 PA BSND、混合及 BSND/TND PA 布局，TND Q/KV 通过内部生成器绑定特征，表示特征而非 cap 数值；生成器仍要求 `max_seqlen_k_new=0`，拒绝数值 scale/softcap 兼容关键字。
+512+64 的五种布局及 192/128 的五种布局均支持无 mask、右下 causal、有限/单侧窗口及 causal 叠加，窗口按 [6.2.6](#626-独立-cpu-window-归一化与范围) 归一化。split 与记录选择统一见 [2.1](#21-入口与记录选择)。五种布局的两种表示接受非负有限 FP32 `softcap`；正值启用 [6.5.3](#653-softcap-独立数值组件) 的数值语义，零值旁路。`pack_gqa=None/True/False` 与 `0 <= sm_margin < physical_AIC` 的调度语义见 [6.2.13](#6213-独立-gqa-调度坐标与资源预算)；非默认有效选项采用 [v47](#521-gqa-调度选项记录)，覆盖三 mask、全部 split 和 softcap。其余选项限定为 `attention_chunk=0` 和 `rotary_interleaved=True`；追加 KV、rotary/量化输入、cache 重映射/leftpad 等由 Python 与 C++ 明确拒绝。公开 metadata 生成器的 `has_softcap=True` 开放非 PA BSND、混合及 BSND/TND PA 布局，TND Q/KV 通过内部生成器绑定特征，表示特征而非 cap 数值；生成器仍要求 `max_seqlen_k_new=0`，不接收数值 scale/softcap 关键字。
 
 func/varlen/内部前向的 `num_splits` 默认 1，kvcache/metadata 默认 0；普通与分页 cache 的 BSND/TND query 默认均使用自动路径。各已开放布局接受 0..256，负值明确拒绝。生成器 `qkv_dtype` 默认 BF16，必须匹配当次输入。前向默认 scale 见 [3.3](#33-共同契约)，显式值须能表示为有限 FP32；scale 不进入 MLA metadata。
 
@@ -371,7 +371,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 - 无记录时内部生成，显式复用时省去 AICPU 生成；两者共用源调度函数。host 只读 shape/dtype/stride 等静态信息，长度值由 AICPU/设备读取，不增加长度 D2H、`.item()` 或主机同步。host 分配预算仍可能计算调度，见 [6.7](#67-生产接入与构建)。
 - 同设备、同调度条件和长度下可跨层复用；长度变化后重新生成。记录可克隆或用连续偏移视图复用，不依赖 Python 私有属性。每次调用独占 O/LSE/workspace；stream 和输入只读要求见 [5.8](#58-stream-与内存生命周期)。
 
-普通 FA3 保留 `uint8` 协议。其旧数值参数 `softcap` / `softmax_scale` 为关键字兼容项，仍写入 byte 记录；单独 `has_softcap=True` 拒绝，须同时给出正 `softcap`。省略 `has_softcap` 时可由正 `softcap` 启用；True 与零值冲突、负值或非有限值均拒绝。MLA 不接受这两个生成器数值关键字。
+普通 FA3 按最新主仓保留 `uint8` 调度协议（910 后端为 2,376 字节），`has_softcap` 只表示特征；数值 `softcap` / `softmax_scale` 由每次前向传入，同一特征下可变值复用。生成器签名与主仓一致，不再保留旧数值关键字兼容层；普通路径使用主仓的 real/fake 和 AICPU 实现，MLA 由已有注册生产者生成 `int32` 记录。
 
 **PA 生成接口与协议边界。** 上述 v1–v5 均不表达分页，不能把物理页当作 BSND batch，或只设置一个 PA 标志后复用旧记录。v6 保存 PA 类型、页大小、每样本逻辑容量、Q 分配/实际长度和 KV 实际长度及源调度；编码与独立调用 context 见 [5.7](#57-v6nd-pa-记录)。公开生成器 `get_scheduler_metadata(..., page_size=P)` 只知道逻辑几何和长度，既没有页表、物理页数，也没有 K/V storage 信息；生成器不校验或快照这些数据。P 须为 16..1024 的 16 倍数，`max_seqlen_k=C` 须在 0..16384 且可被 P 整除；`cache_seqlens` 仍必须是同设备连续 `int32[B]`，可选 `cu_seqlens_q` 是同设备连续 `int32[B+1]`。无 Q 前缀时 Q 使用 BSND 整容量，有前缀时使用 TND 分配段，总 Q 由 AICPU 推导。BSND/TND 公开 PA 前向核对记录的页大小与逻辑容量，再独立校验当次前缀、页表和物理 cache，见 [6.4.3](#643-nd-paged-cache-契约与来源)。
 

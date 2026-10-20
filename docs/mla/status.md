@@ -2,52 +2,55 @@
 
 <!-- mla-loop-next: none -->
 
-**R9 已完成：MLA 使用普通调用路径，移除额外的图捕获拒绝。** 基线 `a96f49b`，分支 `feat/mla-cann-migration`。用户于 2026-10-20 明确“不用特殊处理就行，不要加额外的”，本轮按该要求修正 R8 对图处理的解释。
+**R10 已完成：rebase、整体检视和受影响回归已闭环。** 已将 176 个本地提交回放到最新 `origin/main`（`1486554`），rebase 后基线为 `1ed342c`。原分支 `baafdf5` 保存在 `backup/mla-before-rebase-20261020`，工作区原先干净。
 
-## 改动与身份
+## 本轮改动
 
-- 生产代码仅删除 `mla_forward.cpp` 的 9 行：`CheckEagerExecution`、`DensePlatform` / `CausalPlatform` 两处调用及 `NPUGraphsUtils.h` 依赖。前向和 metadata 沿用普通提交路径，不查询捕获状态或增加图调用拒绝。
-- R8 已删除的 metadata 捕获切流、INT8 冷捕获 mask 特例和 MLA 图专项测试保持删除。本轮数值组件、发射、动态校验、多流、Python real/fake 与测试文件均未修改；普通 FA3 既有图测试继续回归。同步修正 design、plan 与开发约定，不将取消拒绝记为 MLA 图验收通过。
-- 证据根 `W=/tmp/flash-attention-npu-mla-46928a793876/mla-plain-capture-20261020`。实际加载主树 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，SHA256 **`d372ce62ee861296b1d8c679ef8e319487e42204012aa74d44df8a2cd31507ac`**；源码/测试哈希为 `final-identity.json`，加载记录为 `candidate-environment.log`。基线扩展另存 `before-extension.so`（SHA256 `1d28ae6eb482f1fe12ba80d8908aa6d1ccd1f663bb34e845259cc34f32dea812`），生产差异见 `production.patch`。
+普通 FA3 的 metadata 按主仓统一为 2,376 字节、has_softcap 特征及官方参数顺序；删除旧数值兼容层、重复私有 MLA 分派和失效测试。补齐 `math` 引用，移除普通 varlen fake 路径误加的 MLA 校验；Python/C++ 均先分流普通等维、无 qv 输入，修复非分页 TND cache 被 MLA 布局检查错误拒绝的问题，并保留普通 varlen 错误 query 的上游报错优先级。公共测试计时避开 Dynamo 跟踪，清理过时注释、重复默认值/声明及无调用方函数，保留来源和版权。
 
-环境：Ascend910B3 物理设备 **3** / 逻辑 0，性能 CPU 48–51；Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0-beta.2；CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。固定 CANN 源为 `ca18aee610729ca5270a44e2d84c751bc687fbf0`，非量化包 `/tmp/mla-m13b/native`、INT8 包 `/tmp/mla-m18/native` 的 2,027/2,025 个文件逐项验 SHA；CANN/CATLASS 未修改。构建、缓存和日志均位于仓库外。
+保留上游普通 FA3 的长度/used-length/512 维修复、动态 HCC 发现和 AICPU 对象隔离；MLA 数值、调度、地址及发射代码保持原基线，CANN/CATLASS 未修改。普通 metadata 签名和 real/fake 契约合入已有 metadata 测试，MLA 仍只有现有公开 E2E 文件。
 
-## 本次验证
+中英文 README 已移除过期的 MLA 图验收和图测试覆盖说明，与 R8/R9 的普通调用范围一致。
 
-| 检查 | 结果与证据 |
-| --- | --- |
-| 构建与加载 | **通过 / 151.87 s**，复用原对象目录，仅重编 `mla_forward.cpp` 并重新链接；`build-cached.log`、`build-sources.log`、`candidate-environment.log` |
-| 收集 | **1,480 MLA / 合计 1,620**，与 R8 节点清单逐项一致；`collect.log`、`acceptance-collect.log`、`collection-check.log` |
-| 代表/成本边界 | **106 passed / 39.36 s**，覆盖五布局、双 dtype、长 KV、INT8、fake/compile 与多流；`representative.xml` |
-| 完整公开回归 | **1,480 MLA + 140 普通 FA3 = 1,620 passed / 141.72 s**，零失败/错误/跳过；`acceptance.log` / `acceptance.xml`；普通 FA3 含 129 metadata 签名、6 metadata、3 compile、2 图节点 |
-| 性能预检 | 非量化 10 配置、INT8 BSND/TND 各 4 配置的数值与最长分配通过；正常/缺失/重复/非有限统计夹具及 native 包哈希通过；各 `*-preflight.log` |
-| 性能结果校验 | 非量化两侧各 **56,000** 条样本、INT8 **35,100** 条样本的完整性、有限值、输入/扩展身份、统计重算与门槛通过；`performance-validation.log`、`e2e-summary-validation.log` |
-| 仓库质量 | 本步五个文件的既有 pre-commit、149 个本地文档链接、最终源码/扩展身份与 `git diff --check` 通过；`quality.log`、`final-checks.log` |
+## 环境与构建身份
 
-数值使用现有独立 reference 与 `assert_fa_close`，阈值未放宽。公共 golden 缓存仅复用未变的 reference，当前扩展均实际执行；106 项代表不重复累计到完整 1,620 项，R8 的通过数和性能不累计继承。MLA 图专项未运行，仓库中未新增或恢复图测试。
+证据根 `W=/tmp/flash-attention-npu-mla-46928a793876/mla-rebase-review-20261020` 保存三方源码、旧扩展、命令及原始 pytest 日志/JUnit。Python 3.11.15、torch 2.7.1+cpu、torch_npu 2.7.1、CANN 9.0.0.beta2；CATLASS `769cd40a8716b28650b6bebb08db4834eea4462f`。普通 FA3 使用 Ascend910B3 物理设备 3，MLA 使用同型号设备 5，均映射逻辑 0。沙箱不能访问 NPU 驱动，实机命令使用 `/tmp/mla-m16-schedule/run.py` 固定环境启动器在主机运行。
 
-准备调整：裸 shell 的 `npu-smi` 因驱动库路径冲突失败，固定环境启动器下正常且设备 3 空闲。最初新 `build-lib` 目录绕过对象缓存，285.66 s 后主动停止；改用原对象目录完成上述构建。中断构建不计通过，保留 `build.log`、`build-restart.log`；最终无未解决失败。
+最终 v3/910 重建通过（129.15 s），见 `build-final.log`；沿用仓库外 R8 对象目录，重新编译受共享校验头影响的两份 host 单元。实际加载路径为 `flash_attn_npu_3/flash_attn_npu_3.cpython-311-aarch64-linux-gnu.so`，两设备 SHA256 均为 `f4f4e1a5d6937cb04250c172825dcc034e88b9889773351eb5bbbaf0e819d8be`，见 `candidate-environment.log`、`mla-environment.log`、`extension-sha256.txt`。156 份生产/构建/测试文件身份记录在 `source-sha256.txt`。
 
-## 当前普通调用性能
+## 当前验证
 
-沿用 R8 固定输入与普通调用计时边界：5 次预热、5×20 wall、适用 implicit/generated/reuse 及 R=1/4；先对配置内入口/R 等权，再对配置等权。采样及统计代码仅更换证据目录。下表 **FA3 / 固定 CANN** 均值门槛 ≤1，各阶段分开验收。
+| 集合 | 本次结果 | 原始证据 |
+| --- | --- | --- |
+| MLA 代表与成本边界 | 106 passed / 33.39 s | `representative.log/xml` |
+| 普通失败复现、输入校验与成本边界 | 113 passed / 46.21 s | `ordinary-final-preflight.log/xml` |
+| 完整 MLA 显式参数表 | 1,480 passed / 106.96 s | `mla-acceptance.log/xml` |
+| 普通 FA3、metadata、compile、graph 四文件 | 538 passed、13 skipped / 114.49 s | `ordinary-acceptance.log/xml` |
 
-| 集合 | 配置数 | 当前 / CANN | 当前 / R7 | 对 CANN 退化配置/分段 |
-| --- | ---: | ---: | ---: | ---: |
-| 原调度 | 20 | **0.749028，通过** | 1.019583 | 0 / 6 |
-| 原 eager 矩阵 | 40 | **0.783272，通过** | 1.014362 | 0 / 21 |
-| 默认压缩路径 | 10 | **0.698634，通过** | 0.693762 | 0 / 2 |
-| INT8 BSND | 24 | **0.597725，通过** | 本次未测 | 0 / 0 |
-| INT8 TND | 15 | **0.607951，通过** | 本次未测 | 0 / 0 |
+完整集合合计 **2,018 passed、13 skipped，0 failed / errors**。13 项跳过沿用仓库条件：11 项仅适用 Ascend950，1 项 512 维配置不满足 TND query + 分页 KV 条件，1 项 512 维追加 KV 不支持；不计为通过。本次未运行 950/910C 实机或 MLA 图专项。
 
-非量化同时保留原 R7（`36e8609`）对照：扩展 SHA256 `92ca4037ef8a6e08632090b12bb675ac62ca3b924a332d6897d4d32006bea233`。原调度/eager 组分别比 R7 慢 **1.96% / 1.44%**，14/20 与 28/40 个配置变慢；默认压缩路径比 R7 快 **30.62%**。这些差值包含 R8 优化，不能归因于本步删除捕获检查。完整逐配置/分段、R7/CANN、原生对照波动及输入哈希在 `e2e-nonquant/comparison.json` 和原始样本中。非量化采样总耗时 422.85 s。
+收集清单为 1,480 MLA + 551 普通 FA3；MLA 节点与 R9 逐项一致，不抽样。普通回归使用仓库 full CI 的 `pytest-xdist -n 2`、8 个 CPU 线程；MLA 使用测试原有单线程 fixture。保留上游独立 reference 和 `assert_fa_close` 阈值；本轮公共 golden 缓存只复用 reference，待测实现每项实际执行。
 
-INT8 39 配置合计均值 **0.601658**，配置/分段均无对 CANN 退化；BSND **21,600**、TND **13,500** 条样本在 `fixed-e2e-int8-{bsnd,tnd}/`，合计见 `e2e-int8-summary.json`。两组总耗时分别为 56.05/47.66 s。
+49 份 MLA 文件 token 复核确认仅注释、两处多余声明、一个无调用方函数及普通输入识别顺序变化；普通前向/Python fake/metadata 后续逻辑与主仓一致，见 `source-audit-final.log`。46 个生成实例（MLA 38）、生成器幂等、AICPU 对象隔离/依赖、CPU 计时夹具、仓库 pre-commit 和 `git diff --check` 通过；三份 MLA 文档及中英文 README 的 379 个相关本地链接/锚点检查通过。
 
-## 复现与交接
+失败和中断如实保留：初轮代表 72 passed、1 failed（`initial-representative.*`）暴露公共计时的 Dynamo 问题；首次普通全量中断于 18 failed、188 passed、9 skipped（`before-tnd-fix-ordinary-acceptance.*`），均为 TND cache 布局误拒绝。仅修正 Python 后仍有 15 项 C++ 前向失败（`python-tnd-fix-ordinary-final-preflight.*`）；同步修复后上述 30 项已全部通过。普通单线程成本预检中断和各旧扩展结果保存在对应日志，不计作最终通过；低精度 CPU reference 标量 GEMM 的耗时通过本轮缓存及仓库双 worker 配方缓解，未修改 reference 或删减用例。
 
-每项完整命令保存在 `W/*-command.json`，环境启动器为 `/tmp/mla-m16-schedule/run.py`。`python3 "$W/run.py" acceptance` 运行完整 pytest，性能任务为 `e2e-nonquant`、`int8-bsnd`、`int8-tnd`；`python3 "$W/verify_performance.py"` 重算并核对所有性能结果。构建任务为 `build-cached`，复用的对象目录在上一轮工作根，命令已记录。
+上一版完整普通回归为 7 failed、531 passed、13 skipped / 1796.12 s，失败均是无 qv 的二维 query 被误判为 MLA，覆盖上游 `q must be 3-dimensional` 错误；原始记录在 `before-query-rank-fix-ordinary-acceptance.*`。末段低精度 CPU reference 已完成并保存缓存；错误分派已修正，新扩展的 113 项普通预检包含全部 7 个失败，完整集合亦已通过。对应 106 MLA 代表、30 普通边界和 1,480 MLA 的通过结果一并归档为 `before-query-rank-fix-*`，不计为最终结果。
 
-R8 的优化与此前图性能失败见 `git show a96f49b:docs/mla/status.md`；旧捕获拒绝诊断不再属于当前契约，历史图性能结论不改写。
+## 复现与下一步
 
-唯一下一步：**none**。本轮已授权改动与验证完成。当前闭环提交用 `git log -1 -- docs/mla/status.md` 定位。
+每项完整命令保存在 `W/*-command.json`，日志封装只执行其中的标准构建/pytest 命令：
+
+```bash
+W=/tmp/flash-attention-npu-mla-46928a793876/mla-rebase-review-20261020
+python3 "$W/run.py" build-final
+python3 "$W/run.py" representative
+python3 "$W/run.py" ordinary-final-preflight
+python3 "$W/run.py" mla-acceptance
+python3 "$W/run.py" ordinary-acceptance
+python3 "$W/run.py" quality
+```
+
+MLA 完整入口为 `python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py`；普通完整入口为 `python3 -m pytest -q -n 2 tests/test_flash_attn_npu_v3_metadata.py tests/test_flash_attn_npu_v3.py tests/test_torch_compile_fa3.py tests/test_flash_attn_npu_v3_graph.py`，实际命令另保存 JUnit 与耗时。来源契约及未变覆盖目的继承，旧正确性通过数和性能不累计。本轮未重测固定 CANN 性能，R9 历史闭环由 `git show baafdf5:docs/mla/status.md` 查询。
+
+唯一下一步：**无**（`none`）。已授权范围完成，本轮提交后停止。

@@ -101,7 +101,7 @@ class MlaBatchLaunchScope {
 };
 } // namespace flash_attn::mla
 
-// Private production PA launch interface. No public entry is enabled here.
+// Private PA launch interface used by the host forward adapters.
 namespace flash_attn::mla {
 struct MlaPagedLaunchArgs {
     aclrtStream stream;

@@ -3,6 +3,7 @@
 
 from typing import Optional, Union, Tuple
 
+import math
 import torch
 
 # isort: off
@@ -132,6 +133,11 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
     ascend910/flash_attn_npu_3/mla/mla_validation.h. Outer strides and storage
     offsets are legal for BSND, TND and mixed views; no view is materialized here.
     """
+    # Keep ordinary layout and malformed-query validation in the upstream path.
+    if qv is None and (
+        (varlen_q and q.ndim != 3) or (q.ndim > 0 and v.ndim > 0 and q.shape[-1] == v.shape[-1])
+    ):
+        return False
 
     def check(condition, message):
         if not condition:
@@ -143,8 +149,6 @@ def _check_mla_inputs(q, k, v, qv=None, *, varlen_q=False, varlen_k=False, paged
         "FlashAttention: k/v rank must match dense, TND or paged KV layout",
     )
     check(q.shape[-1] == k.shape[-1], "FlashAttention: q and k head dimensions must match")
-    if qv is None and q.shape[-1] == v.shape[-1]:
-        return False
     check(not paged_kv or not varlen_k, "MLA: page_table and cu_seqlens_k cannot be combined")
     check(q.dtype in (torch.float16, torch.bfloat16), "MLA: inputs must have FP16 or BF16 dtype")
     check(q.device.type == "npu", "MLA: inputs must be NPU tensors")
@@ -3085,7 +3089,6 @@ def _flash_attn_forward_fake(
     is_varlen_q = cu_seqlens_q is not None
     if is_varlen_q:
         _validate_varlen_query(q, cu_seqlens_q)
-        _check_mla_inputs(q, k, v, qv, varlen_q=True, varlen_k=True)
 
     # Get dimensions from query tensor
     if is_varlen_q:
@@ -4021,7 +4024,10 @@ def flash_attn_varlen_func(
     There is no explicit metadata or page-table parameter; paged MLA uses
     flash_attn_with_kvcache. Current acceptance is in docs/mla/status.md.
     """
-    if q.device.type == "npu" and (qv is not None or q.shape[-1] != v.shape[-1]):
+    if q.device.type == "npu" and (
+        qv is not None
+        or (q.ndim == 3 and v.ndim == 3 and q.shape[-1] == 192 and v.shape[-1] == 128)
+    ):
         out, lse = _mla_forward(
             q,
             k,
@@ -4581,7 +4587,7 @@ def flash_attn_with_kvcache(
             (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
         )
         cache_seqlens = maybe_contiguous(cache_seqlens)
-    if scheduler_metadata is not None and not is_mla:
+    if scheduler_metadata is not None:
         _validate_scheduler_metadata(
             scheduler_metadata,
             causal=causal,
@@ -4691,7 +4697,7 @@ def _validate_scheduler_metadata(
 
 # Real metadata contract:
 #   all mask types:
-#       shape = (2384,)
+#       shape = (2376,)
 #   dtype  = torch.uint8
 #   device = NPU
 #   stride = (1,)
@@ -4699,24 +4705,6 @@ def _validate_scheduler_metadata(
 # get_scheduler_metadata() implementation. Schema matches the V3 910
 # pybind signature in flash_api.cpp (not the V4 parameter list).
 _SCHEDULER_METADATA_TILING_BYTES = 2376
-
-
-def _resolve_legacy_metadata_softcap(has_softcap, softcap):
-    # Ordinary FA3 byte metadata still stores the numerical softcap and scale.
-    # A feature flag cannot supply that value. Preserve old keyword calls, but
-    # reject the flag-only form until this protocol can consume runtime values.
-    if softcap is None:
-        if has_softcap:
-            raise RuntimeError(
-                "NPU FlashAttention byte metadata with has_softcap=True is not implemented "
-                "yet without the legacy softcap keyword"
-            )
-        return 0.0
-    if not math.isfinite(softcap) or softcap < 0.0:
-        raise RuntimeError("softcap must be finite and non-negative (0.0 disables softcap)")
-    if has_softcap and softcap == 0.0:
-        raise RuntimeError("has_softcap=True conflicts with legacy softcap=0.0")
-    return softcap
 
 
 def _check_mla_metadata_options(
@@ -4750,12 +4738,12 @@ def _check_mla_metadata_options(
     ):
         raise RuntimeError(
             "MLA scheduler metadata is not implemented yet for these length, mask, split, "
-            "scheduling or legacy numerical options"
+            "or scheduling options"
         )
 
 
 def _fits_mla_dense_shape(batch, sq, heads, sk):
-    # Match mla_schedule.h: source ceil-div, query/LSE DMA strides and tensor bytes.
+    # Match mla_tiling.h: source ceil-div, query/LSE DMA strides and tensor bytes.
     return (
         0 <= batch <= 2**32 - 1
         and 0 <= sq <= 2**30
@@ -5000,10 +4988,9 @@ def _get_scheduler_metadata_op(
     headdim_v: int,
     qkv_dtype: torch.dtype,
     cache_seqlens: torch.Tensor,
-    cu_seqlens_q: Optional[torch.Tensor],
+    seqlens_q: Optional[torch.Tensor],
     cu_seqlens_k: Optional[torch.Tensor],
     cu_seqlens_k_new: Optional[torch.Tensor],
-    seqused_q: Optional[torch.Tensor],
     cache_leftpad: Optional[torch.Tensor],
     page_size: Optional[int],
     max_seqlen_k_new: int,
@@ -5015,11 +5002,7 @@ def _get_scheduler_metadata_op(
     num_splits: int,
     pack_gqa: Optional[bool],
     sm_margin: int,
-    softcap: Optional[float],
-    softmax_scale: Optional[float],
 ) -> torch.Tensor:
-    is_mla = _check_mla_metadata(headdim, headdim_v)
-    resolved_softcap = None if is_mla else _resolve_legacy_metadata_softcap(has_softcap, softcap)
     scheduler_metadata = flash_attn_npu_3.get_scheduler_metadata(
         batch_size,
         max_seqlen_q,
@@ -5030,10 +5013,9 @@ def _get_scheduler_metadata_op(
         headdim_v,
         qkv_dtype,
         cache_seqlens,
-        cu_seqlens_q,
+        seqlens_q,
         cu_seqlens_k,
         cu_seqlens_k_new,
-        seqused_q,
         cache_leftpad,
         page_size,
         max_seqlen_k_new,
@@ -5045,26 +5027,17 @@ def _get_scheduler_metadata_op(
         num_splits,
         pack_gqa,
         sm_margin,
-        softcap,
-        softmax_scale,
     )
-    if is_mla:
-        # All compatibility checks are in the device record and the current
-        # call; no Python attribute is needed to clone or reuse MLA metadata.
-        return scheduler_metadata
     # Keep this side effect inside the opaque custom op so Dynamo does not
     # trace the setattr while still attaching the runtime fingerprint.
-    if softmax_scale is None:
-        softmax_scale = headdim ** (-0.5)
     scheduler_metadata._fa_scheduler_params = {
         "causal": bool(causal),
         "window_size": (int(window_size_left), int(window_size_right)),
-        "softcap": float(resolved_softcap),
-        "softmax_scale": float(softmax_scale),
+        "has_softcap": bool(has_softcap),
         "page_size": None if page_size is None else int(page_size),
         "max_seqlen_q": int(max_seqlen_q),
         "max_seqlen_k": int(max_seqlen_k),
-        "varlen_q": cu_seqlens_q is not None,
+        "varlen_q": seqlens_q is not None,
         "num_splits": int(num_splits),
     }
     return scheduler_metadata
@@ -5081,10 +5054,9 @@ def _get_scheduler_metadata_fake(
     headdim_v: int,
     qkv_dtype: torch.dtype,
     cache_seqlens: torch.Tensor,
-    cu_seqlens_q: Optional[torch.Tensor],
+    seqlens_q: Optional[torch.Tensor],
     cu_seqlens_k: Optional[torch.Tensor],
     cu_seqlens_k_new: Optional[torch.Tensor],
-    seqused_q: Optional[torch.Tensor],
     cache_leftpad: Optional[torch.Tensor],
     page_size: Optional[int],
     max_seqlen_k_new: int,
@@ -5096,194 +5068,9 @@ def _get_scheduler_metadata_fake(
     num_splits: int,
     pack_gqa: Optional[bool],
     sm_margin: int,
-    softcap: Optional[float],
-    softmax_scale: Optional[float],
 ) -> torch.Tensor:
-    if _check_mla_metadata(headdim, headdim_v):
-        _check_mla_metadata_options(
-            num_heads_kv,
-            max_seqlen_k_new,
-            causal,
-            (window_size_left, window_size_right),
-            attention_chunk,
-            has_softcap,
-            num_splits,
-            sm_margin,
-            (
-                cu_seqlens_k,
-                cu_seqlens_k_new,
-                seqused_q,
-                cache_leftpad,
-                softcap,
-                softmax_scale,
-            ),
-            allow_causal=True,
-            allow_window=True,
-            allow_split=True,
-            prefill=headdim == 192,
-            allow_softcap=True,
-        )
-        _check_mla_gqa_options(pack_gqa, sm_margin)
-        if _mla_gqa_active(num_heads_q, num_heads_kv, pack_gqa, sm_margin):
-            if page_size is not None and page_size == 0:
-                raise RuntimeError("MLA: page_size must be nonzero")
-            return torch.ops.flash_attn_npu_3._mla_gqa_metadata(
-                batch_size,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_heads_q,
-                num_heads_kv,
-                headdim_v,
-                qkv_dtype,
-                cache_seqlens,
-                cu_seqlens_q,
-                num_splits,
-                window_size_left,
-                window_size_right,
-                causal,
-                page_size or 0,
-                has_softcap,
-                pack_gqa,
-                sm_margin,
-            )
-        if headdim == 192:
-            if page_size is not None and page_size == 0:
-                raise RuntimeError("MLA: prefill page_size must be 16..1024 in multiples of 16")
-            if cu_seqlens_q is not None:
-                return torch.ops.flash_attn_npu_3._mla_prefill_mixed_metadata(
-                    batch_size,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    num_heads_q,
-                    num_heads_kv,
-                    qkv_dtype,
-                    cache_seqlens,
-                    cu_seqlens_q,
-                    num_splits,
-                    window_size_left,
-                    window_size_right,
-                    causal,
-                    None,
-                    page_size or 0,
-                    has_softcap=has_softcap,
-                )
-            return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_metadata(
-                batch_size,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_heads_q,
-                num_heads_kv,
-                qkv_dtype,
-                cache_seqlens,
-                num_splits,
-                window_size_left,
-                window_size_right,
-                causal,
-                page_size or 0,
-                has_softcap=has_softcap,
-            )
-        if num_splits != 1 or has_softcap:
-            if page_size is not None:
-                return _mla_paged_metadata_fake(
-                    batch_size,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    num_heads_q,
-                    page_size,
-                    qkv_dtype,
-                    cache_seqlens,
-                    cu_seqlens_q,
-                    causal,
-                    window_size_left,
-                    window_size_right,
-                    num_splits,
-                    has_softcap=has_softcap,
-                )
-            if cu_seqlens_q is not None:
-                return _mla_split_mixed_metadata_fake(
-                    batch_size,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    num_heads_q,
-                    qkv_dtype,
-                    cache_seqlens,
-                    cu_seqlens_q,
-                    window_size_left,
-                    window_size_right,
-                    causal,
-                    num_splits,
-                    has_softcap=has_softcap,
-                )
-            return _mla_split_bsnd_metadata_fake(
-                batch_size,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_heads_q,
-                qkv_dtype,
-                cache_seqlens,
-                window_size_left,
-                window_size_right,
-                causal,
-                num_splits,
-                has_softcap=has_softcap,
-            )
-        if page_size is not None:
-            return _mla_paged_metadata_fake(
-                batch_size,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_heads_q,
-                page_size,
-                qkv_dtype,
-                cache_seqlens,
-                cu_seqlens_q,
-                causal,
-                window_size_left,
-                window_size_right,
-            )
-        if (window_size_left, window_size_right) != (-1, -1):
-            if cu_seqlens_q is not None:
-                return _mla_window_mixed_metadata_fake(
-                    batch_size,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    num_heads_q,
-                    qkv_dtype,
-                    cache_seqlens,
-                    cu_seqlens_q,
-                    window_size_left,
-                    window_size_right,
-                    causal,
-                )
-            return _mla_window_bsnd_metadata_fake(
-                batch_size,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_heads_q,
-                qkv_dtype,
-                cache_seqlens,
-                window_size_left,
-                window_size_right,
-                causal,
-            )
-        if cu_seqlens_q is not None:
-            return (_mla_causal_mixed_metadata_fake if causal else _mla_tnd_bsnd_metadata_fake)(
-                batch_size,
-                max_seqlen_q,
-                max_seqlen_k,
-                num_heads_q,
-                qkv_dtype,
-                cache_seqlens,
-                cu_seqlens_q,
-            )
-        if causal:
-            return _mla_causal_bsnd_metadata_fake(
-                batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
-            )
-        return _mla_dense_metadata_fake(
-            batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
-        )
-    _resolve_legacy_metadata_softcap(has_softcap, softcap)
+    if headdim != headdim_v:
+        raise RuntimeError("MLA metadata requires the public get_scheduler_metadata entry")
     return torch.empty(
         (_SCHEDULER_METADATA_TILING_BYTES,),
         dtype=torch.uint8,
@@ -5313,16 +5100,11 @@ def get_scheduler_metadata(
     num_splits=0,  # Can be tuned for speed
     pack_gqa=None,  # Can be tuned for speed
     sm_margin=0,  # Can be tuned if some SMs are used for communication
-    *,
-    softcap=None,  # legacy ordinary-FA byte metadata only; 0.0 means deactivated
-    softmax_scale=None,  # defaults to 1 / sqrt(headdim); must match the fwd call
 ):
     """Precompute NPU scheduling metadata with the official FA3 argument order.
 
-    Ordinary FA3 returns byte metadata and still embeds numerical softcap/scale.
-    Its legacy ``softcap`` and ``softmax_scale`` arguments are keyword-only; a
-    positive legacy softcap enables softcapping even when has_softcap is omitted.
-    ``has_softcap=True`` requires a positive legacy softcap for this protocol.
+    Ordinary FA3 returns byte scheduling metadata. Numerical softcap and scale
+    are supplied by each forward call; has_softcap selects the scheduling feature.
     MLA uses device int32 records for compressed headdim=64/headdim_v=512
     with one KV head, or independent prefill headdim=192/headdim_v=128 with
     GQA. Both accept BSND/TND queries, nonpaged or ND paged caches, all masks
@@ -5343,9 +5125,9 @@ def get_scheduler_metadata(
     Records bind shape, lengths, dtype, normalized mask, split, platform and
     softcap activation, but not scale, positive cap values, addresses or strides.
     Regenerate after lengths, prefixes or other bound conditions change.
-    MLA rejects legacy numerical softcap/softmax_scale keywords; supply their
-    values to forward. There is no Q-used or KV allocation-prefix parameter here;
-    compact TND Q/KV uses flash_attn_varlen_func and generates metadata internally.
+    Supply numerical softcap and softmax_scale values to forward. There is no
+    Q-used or KV allocation-prefix parameter here; compact TND Q/KV uses
+    flash_attn_varlen_func and generates metadata internally.
     """
     if headdim_v is None:
         headdim_v = headdim
@@ -5363,7 +5145,7 @@ def get_scheduler_metadata(
             has_softcap,
             num_splits,
             sm_margin,
-            (cu_seqlens_k_new, cache_leftpad, softcap, softmax_scale),
+            (cu_seqlens_k_new, cache_leftpad),
             allow_causal=True,
             allow_split=True,
         )
@@ -5390,12 +5172,7 @@ def get_scheduler_metadata(
             has_softcap,
             num_splits,
             sm_margin,
-            (
-                cu_seqlens_k_new,
-                cache_leftpad,
-                softcap,
-                softmax_scale,
-            ),
+            (cu_seqlens_k_new, cache_leftpad),
             allow_causal=True,
             allow_window=True,
             allow_split=True,
@@ -5568,9 +5345,9 @@ def get_scheduler_metadata(
             batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, qkv_dtype, cache_seqlens
         )
     cache_seqlens = maybe_contiguous(cache_seqlens)
+    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1] if cu_seqlens_q is not None else None
     # Route through the custom op so torch.compile / FakeTensor can use the
     # registered fake instead of tracing into the raw pybind extension.
-    # Public API still hard-codes cu_seqlens_k / seqused_q as None (unchanged).
     scheduler_metadata = _get_scheduler_metadata_op(
         batch_size,
         max_seqlen_q,
@@ -5581,10 +5358,9 @@ def get_scheduler_metadata(
         headdim_v,
         qkv_dtype,
         cache_seqlens,
-        cu_seqlens_q,
+        seqlens_q,
         None,  # cu_seqlens_k
         cu_seqlens_k_new,
-        None,  # seqused_q
         cache_leftpad,
         page_size,
         max_seqlen_k_new,
@@ -5596,7 +5372,5 @@ def get_scheduler_metadata(
         num_splits,
         pack_gqa,
         sm_margin,
-        softcap,
-        softmax_scale,
     )
     return scheduler_metadata
