@@ -7,7 +7,7 @@ std::vector<at::Tensor> GqaForward(const at::Tensor& q, const at::Tensor& k, con
                                    const std::optional<at::Tensor>& usedK, const std::optional<at::Tensor>& metadata,
                                    const std::optional<at::Tensor>& cuQ, const std::optional<at::Tensor>& cuK,
                                    int64_t maxQ, int64_t maxK, const std::optional<at::Tensor>& pageTable,
-                                   double softcap, std::optional<bool> pack, int64_t margin);
+                                   double softcap, std::optional<bool> pack, int64_t margin, bool partials = true);
 at::Tensor GqaMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads, int64_t valueDim,
                          at::ScalarType dtype, const at::Tensor& lengths, const std::optional<at::Tensor>& cuQ,
                          int64_t splits, int64_t left, int64_t right, bool causal, int64_t pageSize, bool hasSoftcap,
@@ -21,13 +21,12 @@ at::Tensor PrefillMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64
 at::Tensor PrefillBsndMetadataOp(int64_t batch, int64_t sq, int64_t sk, int64_t heads, int64_t kvHeads,
                                  at::ScalarType dtype, const at::Tensor& lengths, int64_t splits, int64_t left,
                                  int64_t right, bool causal, int64_t pageSize = 0, bool hasSoftcap = false);
-std::vector<at::Tensor>
-PrefillBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, float scale, int64_t splits,
-                   int64_t left, int64_t right, bool causal, const std::optional<at::Tensor>& usedQ,
-                   const std::optional<at::Tensor>& usedK, const std::optional<at::Tensor>& metadata,
-                   const std::optional<at::Tensor>& cuQ = std::nullopt,
-                   const std::optional<at::Tensor>& cuK = std::nullopt, int64_t maxQ = 0, int64_t maxK = 0,
-                   const std::optional<at::Tensor>& pageTable = std::nullopt, float softcap = 0.0f);
+std::vector<at::Tensor> PrefillBsndForward(
+    const at::Tensor& q, const at::Tensor& k, const at::Tensor& v, float scale, int64_t splits, int64_t left,
+    int64_t right, bool causal, const std::optional<at::Tensor>& usedQ, const std::optional<at::Tensor>& usedK,
+    const std::optional<at::Tensor>& metadata, const std::optional<at::Tensor>& cuQ = std::nullopt,
+    const std::optional<at::Tensor>& cuK = std::nullopt, int64_t maxQ = 0, int64_t maxK = 0,
+    const std::optional<at::Tensor>& pageTable = std::nullopt, float softcap = 0.0f, bool partials = true);
 // TND explicit/native automatic split (v19/v20). Shared host adapters validate
 // allocation/used lengths and optional records before launching the kernels.
 std::vector<at::Tensor> SplitTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -35,12 +34,14 @@ std::vector<at::Tensor> SplitTndForward(const at::Tensor& q, const at::Tensor& k
                                         int64_t maxQ, int64_t maxK, float scale, int64_t left, int64_t right,
                                         bool causal, int64_t splits, const std::optional<at::Tensor>& usedQ,
                                         const std::optional<at::Tensor>& usedK,
-                                        const std::optional<at::Tensor>& metadata, float softcap = 0.0f);
+                                        const std::optional<at::Tensor>& metadata, float softcap = 0.0f,
+                                        bool partials = true);
 std::vector<at::Tensor> SplitBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                          const at::Tensor& qv, float scale, int64_t windowLeft, int64_t windowRight,
                                          bool causal, int64_t splits, const std::optional<at::Tensor>& cacheSeqlens,
                                          const std::optional<at::Tensor>& usedQuery,
-                                         const std::optional<at::Tensor>& schedulerMetadata, float softcap = 0.0f);
+                                         const std::optional<at::Tensor>& schedulerMetadata, float softcap = 0.0f,
+                                         bool partials = true);
 std::vector<at::Tensor> WindowBsndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                           const at::Tensor& qv, float scale, int64_t windowLeft, int64_t windowRight,
                                           bool causal, const std::optional<at::Tensor>& cacheSeqlens,
@@ -66,7 +67,8 @@ std::vector<at::Tensor> SplitMixedForward(const at::Tensor& q, const at::Tensor&
                                           int64_t windowLeft, int64_t windowRight, bool causal, int64_t splits,
                                           const std::optional<at::Tensor>& cacheSeqlens,
                                           const std::optional<at::Tensor>& usedQuery,
-                                          const std::optional<at::Tensor>& schedulerMetadata, float softcap = 0.0f);
+                                          const std::optional<at::Tensor>& schedulerMetadata, float softcap = 0.0f,
+                                          bool partials = true);
 at::Tensor SplitMixedMetadataOp(int64_t batch, int64_t maxQ, int64_t sk, int64_t heads, at::ScalarType dtype,
                                 const at::Tensor& cacheSeqlens, const at::Tensor& cuQ, int64_t windowLeft,
                                 int64_t windowRight, bool causal, int64_t splits, bool hasSoftcap = false);
@@ -107,7 +109,7 @@ std::vector<at::Tensor> PagedBsndForward(const at::Tensor& q, const at::Tensor& 
                                          const std::optional<at::Tensor>& usedQuery,
                                          const std::optional<at::Tensor>& schedulerMetadata, bool causal = false,
                                          int64_t windowLeft = -1, int64_t windowRight = -1, int64_t splits = 1,
-                                         float softcap = 0.0f);
+                                         float softcap = 0.0f, bool partials = true);
 // TND PA, including causal v11 and window v16. Allocation prefixes determine sample starts
 // independently of effective Q-used lengths.
 std::vector<at::Tensor> PagedTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
@@ -116,7 +118,7 @@ std::vector<at::Tensor> PagedTndForward(const at::Tensor& q, const at::Tensor& k
                                         const std::optional<at::Tensor>& usedQuery,
                                         const std::optional<at::Tensor>& schedulerMetadata, bool causal = false,
                                         int64_t windowLeft = -1, int64_t windowRight = -1, int64_t splits = 1,
-                                        float softcap = 0.0f);
+                                        float softcap = 0.0f, bool partials = true);
 std::vector<at::Tensor> WindowTndForward(const at::Tensor& q, const at::Tensor& k, const at::Tensor& v,
                                          const at::Tensor& qv, const at::Tensor& cuQ, const at::Tensor& cuK,
                                          int64_t maxQ, int64_t maxK, float scale, int64_t windowLeft,

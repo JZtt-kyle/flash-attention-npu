@@ -68,6 +68,8 @@ __aicore__ inline bool LoadAutoSplit(GM_ADDR metadata, const AutoContext& c, con
 template <typename T>
 __aicore__ inline void AutoInitialize(GM_ADDR address, uint64_t elements, T value)
 {
+    if (!address)
+        return;
     const uint64_t cores = AscendC::GetBlockNum() * AscendC::GetSubBlockNum();
     const uint64_t chunk = (elements + cores * 64 - 1) / (cores * 64) * 64;
     const uint64_t start = uint64_t(AscendC::GetBlockIdx()) * chunk;
@@ -104,26 +106,24 @@ __aicore__ inline MlaSplitKvMergeParams AutoMergeParams(const Kernel::MetadataRe
     p.maskKind = w.kind;
     p.left = w.left;
     p.right = w.right;
+    auto geometry = t;
+    auto_split_detail::Geometry<false>(read, s, w, geometry);
+    auto_split_detail::Parts(s, geometry, UINT32_MAX, nullptr, p.begin, p.end);
     for (uint32_t split = 0; split < p.splits; ++split) {
-        MlaAutoSplitBsndTask fragment;
-        AutoSplitBsndTask(read, s, w, t.group, split, fragment);
-        p.begin[split] = fragment.kvBegin;
-        p.end[split] = fragment.kvEnd;
+        const uint32_t begin = p.begin[split] * a.s2BaseSize, end = p.end[split] * a.s2BaseSize;
+        p.begin[split] = geometry.kvBegin > begin ? geometry.kvBegin : begin;
+        p.end[split] = geometry.kvEnd < end ? geometry.kvEnd : end;
     }
     return p;
 }
 #endif
 } // namespace
-// Stream ordering supplies the initialization and partial->FD barriers. Every
-// stage checks its layout-specific record before any output access, including globally empty inputs.
-__global__ __aicore__ __mix__(1, 2) void MLA_AUTO_INIT(GM_ADDR metadata, AutoContext c, MlaUsedMetadataInputs inputs,
-                                                       GM_ADDR out, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse)
-{
+// Validate once, then reuse the checked schedule for initialization,
+// attention and FD. The numerical stages retain their existing ownership.
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    MlaAutoSplitBsndSchedule s{};
-    Kernel::MetadataReader read;
-    if (!LoadAutoSplit(metadata, c, inputs, s, read))
-        return;
+namespace {
+__aicore__ inline void AutoInit(const AutoContext& c, GM_ADDR out, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse)
+{
     if ASCEND_IS_AIV {
         AscendC::TPipe pipe;
         const uint64_t rows = uint64_t(c.used.heads) * UsedMetadataTotal(c.used.query);
@@ -132,20 +132,12 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_INIT(GM_ADDR metadata, AutoCon
         AutoInitialize<float>(accum, rows * kMlaAutoSplitCapacity * 512, 0.0f);
         AutoInitialize<float>(accumLse, rows * kMlaAutoSplitCapacity, -float(1.0 / 0.0));
     }
-#endif
 }
-__global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
-                                                          GM_ADDR workspace, GM_ADDR metadata, AutoContext c,
-                                                          MlaUsedMetadataInputs inputs, float scale,
-                                                          MlaBsndInputLayouts layouts, GM_ADDR out, GM_ADDR lse,
-                                                          GM_ADDR accum, GM_ADDR accumLse, float softcap)
+__aicore__ inline void AutoPartial(GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr, GM_ADDR workspace, GM_ADDR metadata,
+                                   const AutoContext& c, float scale, MlaBsndInputLayouts layouts, GM_ADDR out,
+                                   GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse, float softcap,
+                                   const MlaAutoSplitBsndSchedule& s, const Kernel::MetadataReader& read)
 {
-#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    MlaAutoSplitBsndSchedule s{};
-    Kernel::MetadataReader read;
-    if (!LoadAutoSplit(metadata, c, inputs, s, read) || !s.groups)
-        return;
-    AscendC::SetSyncBaseAddr(ffts);
     uint32_t core = AscendC::GetBlockIdx();
     if ASCEND_IS_AIV {
         core /= AscendC::GetSubBlockNum();
@@ -164,9 +156,13 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
         MlaAutoSplitBsndTask t{};
         if (!AutoSplitBsndTask(read, s, c.window, group, 0, t) || t.kind == 2)
             continue;
-        uint32_t split = 0;
-        while (t.owner != core && ++split < t.splitCount)
+        if (t.owner != core) {
+            auto geometry = t;
+            auto_split_detail::Geometry<false>(read, s, c.window, geometry);
+            uint32_t split = 0;
+            auto_split_detail::Parts(s, geometry, core, &split);
             AutoSplitBsndTask(read, s, c.window, group, split, t);
+        }
         if (t.owner != core)
             continue;
         MlaSplitKvKernelParams p{};
@@ -215,24 +211,25 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
             }
         }
     }
-#endif
 }
-__global__ __aicore__ __mix__(1, 2) void MLA_AUTO_MERGE(GM_ADDR workspace, GM_ADDR metadata, AutoContext c,
-                                                        MlaUsedMetadataInputs inputs, GM_ADDR out, GM_ADDR lse,
-                                                        GM_ADDR accum, GM_ADDR accumLse, float softcap)
+__aicore__ inline void AutoMerge(GM_ADDR workspace, const AutoContext& c, GM_ADDR out, GM_ADDR lse, GM_ADDR accum,
+                                 GM_ADDR accumLse, float softcap, const MlaAutoSplitBsndSchedule& s,
+                                 const Kernel::MetadataReader& read)
 {
-#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    MlaAutoSplitBsndSchedule s{};
-    Kernel::MetadataReader read;
-    if (!LoadAutoSplit(metadata, c, inputs, s, read))
-        return;
     if ASCEND_IS_AIV {
         const uint32_t owner = AscendC::GetBlockIdx();
         if (owner >= s.vectors)
             return;
-        for (uint32_t h = 0; h < s.fdHeads; ++h) {
-            const uint32_t parts = read(auto_split_detail::Base(c.used.batch) + 190 + h);
-            for (uint32_t part = 0; part < parts; ++part) {
+        const uint32_t base = auto_split_detail::Base(c.used.batch);
+        const uint32_t firstHead = owner ? read(base + 242 + owner - 1) : 0;
+        const uint32_t firstPart = owner ? read(base + 294 + owner - 1) + 1 : 0;
+        const uint32_t lastHead = read(base + 242 + owner);
+        const uint32_t lastPart = read(base + 294 + owner);
+        // The validated vector endpoints already give this lane's contiguous
+        // FD interval. Do not rediscover ownership for every other lane's row.
+        for (uint32_t h = firstHead; h <= lastHead; ++h) {
+            const uint32_t parts = h == lastHead ? lastPart + 1 : read(base + 190 + h);
+            for (uint32_t part = h == firstHead ? firstPart : 0; part < parts; ++part) {
                 MlaAutoSplitBsndMerge r{};
                 AutoSplitBsndMerge(read, s, h, part, r);
                 if (r.owner != owner)
@@ -252,6 +249,34 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_MERGE(GM_ADDR workspace, GM_AD
             }
         }
     }
+}
+} // namespace
+#endif
+__global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR kv, GM_ADDR kr,
+                                                          GM_ADDR workspace, GM_ADDR metadata, AutoContext c,
+                                                          MlaUsedMetadataInputs inputs, float scale,
+                                                          MlaBsndInputLayouts layouts, GM_ADDR out, GM_ADDR lse,
+                                                          GM_ADDR accum, GM_ADDR accumLse, float softcap)
+{
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
+    MlaAutoSplitBsndSchedule s{};
+    Kernel::MetadataReader read;
+    if (!LoadAutoSplit(metadata, c, inputs, s, read))
+        return;
+    AscendC::SetSyncBaseAddr(ffts);
+    AutoInit(c, out, lse, accum, accumLse);
+    if (!s.groups)
+        return;
+    // Direct fragments write final output, so all output initialization must
+    // finish first. Idle vector cores participate in both barriers.
+    if ASCEND_IS_AIV {
+        AscendC::SyncAll();
+    }
+    AutoPartial(qc, qr, kv, kr, workspace, metadata, c, scale, layouts, out, lse, accum, accumLse, softcap, s, read);
+    if ASCEND_IS_AIV {
+        AscendC::SyncAll();
+        AutoMerge(workspace, c, out, lse, accum, accumLse, softcap, s, read);
+    }
 #endif
 }
 aclError MLA_AUTO_LAUNCH(const AutoLaunchArgs& args)
@@ -259,29 +284,10 @@ aclError MLA_AUTO_LAUNCH(const AutoLaunchArgs& args)
     const auto& a = args.used;
     AutoContext c{a.context, a.window};
     c.hasSoftcap = a.softcap > 0;
-    {
-        MlaBatchLaunchScope launch;
-        MLA_AUTO_INIT<<<a.context.blockDim, nullptr, a.stream>>>(a.metadata, c, a.inputs, a.output, a.lse, args.accum,
-                                                                 args.accumLse);
-        const auto error = launch.Result();
-        if (error != ACL_SUCCESS)
-            return error;
-    }
-    if ((!a.context.query.totalTokens.low && !a.context.query.totalTokens.high) ||
-        (!a.context.kv.totalTokens.low && !a.context.kv.totalTokens.high))
-        return ACL_SUCCESS;
-    {
-        MlaBatchLaunchScope launch;
-        MLA_AUTO_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(
-            a.ffts, a.qc, a.qr, a.kv, a.kr, a.workspace, a.metadata, c, a.inputs, a.scale, a.layouts, a.output, a.lse,
-            args.accum, args.accumLse, a.softcap);
-        const auto error = launch.Result();
-        if (error != ACL_SUCCESS)
-            return error;
-    }
     MlaBatchLaunchScope launch;
-    MLA_AUTO_MERGE<<<a.context.blockDim, nullptr, a.stream>>>(a.workspace, a.metadata, c, a.inputs, a.output, a.lse,
-                                                              args.accum, args.accumLse, a.softcap);
+    MLA_AUTO_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.kv, a.kr, a.workspace, a.metadata,
+                                                                c, a.inputs, a.scale, a.layouts, a.output, a.lse,
+                                                                args.accum, args.accumLse, a.softcap);
     return launch.Result();
 }
 } // namespace flash_attn::mla
@@ -341,6 +347,8 @@ __aicore__ inline bool LoadAutoSplit(GM_ADDR metadata, const AutoContext& c, con
 template <typename T>
 __aicore__ inline void AutoInitialize(GM_ADDR address, uint64_t elements, T value)
 {
+    if (!address)
+        return;
     const uint64_t cores = AscendC::GetBlockNum() * AscendC::GetSubBlockNum();
     const uint64_t chunk = (elements + cores * 64 - 1) / (cores * 64) * 64;
     const uint64_t start = uint64_t(AscendC::GetBlockIdx()) * chunk;
@@ -381,27 +389,24 @@ __aicore__ inline MlaSplitKvMergeParams AutoMergeParams(const Kernel::MetadataRe
     p.maskKind = w.kind;
     p.left = w.left;
     p.right = w.right;
+    auto geometry = t;
+    auto_split_detail::Geometry<true>(read, s, w, geometry);
+    auto_split_detail::Parts(s, geometry, UINT32_MAX, nullptr, p.begin, p.end);
     for (uint32_t split = 0; split < p.splits; ++split) {
-        MlaAutoSplitBsndTask fragment;
-        AutoSplitBsndTask<true>(read, s, w, t.group, split, fragment);
-        p.begin[split] = fragment.kvBegin;
-        p.end[split] = fragment.kvEnd;
+        const uint32_t begin = p.begin[split] * a.s2BaseSize, end = p.end[split] * a.s2BaseSize;
+        p.begin[split] = geometry.kvBegin > begin ? geometry.kvBegin : begin;
+        p.end[split] = geometry.kvEnd < end ? geometry.kvEnd : end;
     }
     return p;
 }
 #endif
 } // namespace
-// Stream ordering supplies the initialization and partial->FD barriers. Every
-// stage checks its layout-specific record before any output access, including globally empty inputs.
-__global__ __aicore__ __mix__(1, 2) void MLA_AUTO_INIT(GM_ADDR metadata, AutoContext c, MlaPagedMetadataInputs inputs,
-                                                       MlaPagedCacheInputs cache, GM_ADDR out, GM_ADDR lse,
-                                                       GM_ADDR accum, GM_ADDR accumLse)
-{
+// Validate once, then reuse the checked schedule for initialization,
+// attention and FD. The numerical stages retain their existing ownership.
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    MlaAutoSplitBsndSchedule s{};
-    Kernel::MetadataReader read;
-    if (!LoadAutoSplit(metadata, c, inputs, cache, s, read))
-        return;
+namespace {
+__aicore__ inline void AutoInit(const AutoContext& c, GM_ADDR out, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse)
+{
     if ASCEND_IS_AIV {
         AscendC::TPipe pipe;
         const uint64_t rows = uint64_t(c.paged.heads) * (uint64_t(c.paged.query.totalTokens.low) |
@@ -411,20 +416,12 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_INIT(GM_ADDR metadata, AutoCon
         AutoInitialize<float>(accum, rows * kMlaAutoSplitCapacity * 512, 0.0f);
         AutoInitialize<float>(accumLse, rows * kMlaAutoSplitCapacity, -float(1.0 / 0.0));
     }
-#endif
 }
-__global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR workspace,
-                                                          GM_ADDR metadata, AutoContext c,
-                                                          MlaPagedMetadataInputs inputs, MlaPagedCacheInputs cache,
-                                                          float scale, MlaBsndInputLayouts layouts, GM_ADDR out,
-                                                          GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse, float softcap)
+__aicore__ inline void AutoPartial(GM_ADDR qc, GM_ADDR qr, GM_ADDR workspace, GM_ADDR metadata, const AutoContext& c,
+                                   const MlaPagedCacheInputs& cache, float scale, MlaBsndInputLayouts layouts,
+                                   GM_ADDR out, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse, float softcap,
+                                   const MlaAutoSplitBsndSchedule& s, const Kernel::MetadataReader& read)
 {
-#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    MlaAutoSplitBsndSchedule s{};
-    Kernel::MetadataReader read;
-    if (!LoadAutoSplit(metadata, c, inputs, cache, s, read) || !s.groups)
-        return;
-    AscendC::SetSyncBaseAddr(ffts);
     uint32_t core = AscendC::GetBlockIdx();
     if ASCEND_IS_AIV {
         core /= AscendC::GetSubBlockNum();
@@ -443,9 +440,13 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
         MlaAutoSplitBsndTask t{};
         if (!AutoSplitBsndTask<true>(read, s, c.window, group, 0, t) || t.kind == 2)
             continue;
-        uint32_t split = 0;
-        while (t.owner != core && ++split < t.splitCount)
+        if (t.owner != core) {
+            auto geometry = t;
+            auto_split_detail::Geometry<true>(read, s, c.window, geometry);
+            uint32_t split = 0;
+            auto_split_detail::Parts(s, geometry, core, &split);
             AutoSplitBsndTask<true>(read, s, c.window, group, split, t);
+        }
         if (t.owner != core)
             continue;
         MlaSplitKvKernelParams p{};
@@ -488,25 +489,25 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR
             }
         }
     }
-#endif
 }
-__global__ __aicore__ __mix__(1, 2) void MLA_AUTO_MERGE(GM_ADDR workspace, GM_ADDR metadata, AutoContext c,
-                                                        MlaPagedMetadataInputs inputs, MlaPagedCacheInputs cache,
-                                                        GM_ADDR out, GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse,
-                                                        float softcap)
+__aicore__ inline void AutoMerge(GM_ADDR workspace, const AutoContext& c, GM_ADDR out, GM_ADDR lse, GM_ADDR accum,
+                                 GM_ADDR accumLse, float softcap, const MlaAutoSplitBsndSchedule& s,
+                                 const Kernel::MetadataReader& read)
 {
-#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
-    MlaAutoSplitBsndSchedule s{};
-    Kernel::MetadataReader read;
-    if (!LoadAutoSplit(metadata, c, inputs, cache, s, read))
-        return;
     if ASCEND_IS_AIV {
         const uint32_t owner = AscendC::GetBlockIdx();
         if (owner >= s.vectors)
             return;
-        for (uint32_t h = 0; h < s.fdHeads; ++h) {
-            const uint32_t parts = read(auto_split_detail::Base<true>(c.paged.batch) + 190 + h);
-            for (uint32_t part = 0; part < parts; ++part) {
+        const uint32_t base = auto_split_detail::Base<true>(c.paged.batch);
+        const uint32_t firstHead = owner ? read(base + 242 + owner - 1) : 0;
+        const uint32_t firstPart = owner ? read(base + 294 + owner - 1) + 1 : 0;
+        const uint32_t lastHead = read(base + 242 + owner);
+        const uint32_t lastPart = read(base + 294 + owner);
+        // The validated vector endpoints already give this lane's contiguous
+        // FD interval. Do not rediscover ownership for every other lane's row.
+        for (uint32_t h = firstHead; h <= lastHead; ++h) {
+            const uint32_t parts = h == lastHead ? lastPart + 1 : read(base + 190 + h);
+            for (uint32_t part = h == firstHead ? firstPart : 0; part < parts; ++part) {
                 MlaAutoSplitBsndMerge r{};
                 AutoSplitBsndMerge<true>(read, s, h, part, r);
                 if (r.owner != owner)
@@ -526,34 +527,44 @@ __global__ __aicore__ __mix__(1, 2) void MLA_AUTO_MERGE(GM_ADDR workspace, GM_AD
             }
         }
     }
+}
+} // namespace
+#endif
+__global__ __aicore__ __mix__(1, 2) void MLA_AUTO_PARTIAL(uint64_t ffts, GM_ADDR qc, GM_ADDR qr, GM_ADDR workspace,
+                                                          GM_ADDR metadata, AutoContext c,
+                                                          MlaPagedMetadataInputs inputs, MlaPagedCacheInputs cache,
+                                                          float scale, MlaBsndInputLayouts layouts, GM_ADDR out,
+                                                          GM_ADDR lse, GM_ADDR accum, GM_ADDR accumLse, float softcap)
+{
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
+    MlaAutoSplitBsndSchedule s{};
+    Kernel::MetadataReader read;
+    if (!LoadAutoSplit(metadata, c, inputs, cache, s, read))
+        return;
+    AscendC::SetSyncBaseAddr(ffts);
+    AutoInit(c, out, lse, accum, accumLse);
+    if (!s.groups)
+        return;
+    // Direct fragments write final output, so all output initialization must
+    // finish first. Idle vector cores participate in both barriers.
+    if ASCEND_IS_AIV {
+        AscendC::SyncAll();
+    }
+    AutoPartial(qc, qr, workspace, metadata, c, cache, scale, layouts, out, lse, accum, accumLse, softcap, s, read);
+    if ASCEND_IS_AIV {
+        AscendC::SyncAll();
+        AutoMerge(workspace, c, out, lse, accum, accumLse, softcap, s, read);
+    }
 #endif
 }
 aclError MLA_AUTO_LAUNCH(const AutoLaunchArgs& args)
 {
     const auto& a = args.paged;
     AutoContext c{a.context, a.window, uint32_t(args.softcap > 0)};
-    {
-        MlaBatchLaunchScope launch;
-        MLA_AUTO_INIT<<<a.context.blockDim, nullptr, a.stream>>>(a.metadata, c, a.inputs, a.cache, a.output, a.lse,
-                                                                 args.accum, args.accumLse);
-        const auto error = launch.Result();
-        if (error != ACL_SUCCESS)
-            return error;
-    }
-    if ((!a.context.query.totalTokens.low && !a.context.query.totalTokens.high) || a.context.logicalKvCapacity == 0)
-        return ACL_SUCCESS;
-    {
-        MlaBatchLaunchScope launch;
-        MLA_AUTO_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.workspace, a.metadata, c,
-                                                                    a.inputs, a.cache, a.scale, a.layouts, a.output,
-                                                                    a.lse, args.accum, args.accumLse, args.softcap);
-        const auto error = launch.Result();
-        if (error != ACL_SUCCESS)
-            return error;
-    }
     MlaBatchLaunchScope launch;
-    MLA_AUTO_MERGE<<<a.context.blockDim, nullptr, a.stream>>>(a.workspace, a.metadata, c, a.inputs, a.cache, a.output,
-                                                              a.lse, args.accum, args.accumLse, args.softcap);
+    MLA_AUTO_PARTIAL<<<a.context.blockDim, nullptr, a.stream>>>(a.ffts, a.qc, a.qr, a.workspace, a.metadata, c,
+                                                                a.inputs, a.cache, a.scale, a.layouts, a.output, a.lse,
+                                                                args.accum, args.accumLse, args.softcap);
     return launch.Result();
 }
 } // namespace flash_attn::mla

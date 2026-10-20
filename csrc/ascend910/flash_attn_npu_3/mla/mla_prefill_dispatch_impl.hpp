@@ -90,6 +90,8 @@ __aicore__ inline void PrefillMerge(const MlaPrefillBsndLaunchArgs& a, const Mla
 template <typename T>
 __aicore__ inline void PrefillInitialize(uint64_t address, uint64_t elements, T value)
 {
+    if (!address)
+        return;
     const uint64_t cores = AscendC::GetBlockNum() * AscendC::GetSubBlockNum();
     const uint64_t chunk = (elements + cores * 64 - 1) / (cores * 64) * 64;
     const uint64_t start = uint64_t(AscendC::GetBlockIdx()) * chunk;

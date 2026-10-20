@@ -373,6 +373,8 @@ __aicore__ inline bool LoadSplitPagedBsnd(GM_ADDR metadata, const MlaSplitPagedB
 template <typename T>
 __aicore__ inline void InitSplitPagedEmpty(GM_ADDR addr, uint64_t elements, T value)
 {
+    if (!addr)
+        return;
     const uint64_t lanes = AscendC::GetBlockNum() * AscendC::GetSubBlockNum();
     const uint64_t chunk = (elements + lanes - 1) / lanes;
     const uint64_t begin = uint64_t(AscendC::GetBlockIdx()) * chunk;
@@ -535,6 +537,8 @@ __aicore__ inline bool LoadSplitPagedTnd(GM_ADDR metadata, const MlaSplitPagedTn
 template <typename T>
 __aicore__ inline void InitSplitPagedEmpty(GM_ADDR addr, uint64_t elements, T value)
 {
+    if (!addr)
+        return;
     const uint64_t lanes = AscendC::GetBlockNum() * AscendC::GetSubBlockNum();
     const uint64_t chunk = ((elements + lanes - 1) / lanes + 31) / 32 * 32;
     const uint64_t begin = uint64_t(AscendC::GetBlockIdx()) * chunk;

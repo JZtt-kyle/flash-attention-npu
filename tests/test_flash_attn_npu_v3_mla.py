@@ -5,14 +5,9 @@
 
 """Public MLA forward tests. Run with pytest, like test_flash_attn_npu_v3.py."""
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 import gc
 import math
-import os
-from pathlib import Path
-import subprocess
-import sys
 
 import pytest
 import torch
@@ -446,9 +441,14 @@ def test_mla_forward(dtype, representation, layout, splits, cap, causal, window)
         scale=0.23 if cap else None,
         pattern="saturation" if cap else None,
     )
-    _check(case, _call(case))
+    full = _call(case)
+    _check(case, full)
+    torch.testing.assert_close(_call(case, lse=False), full[0], rtol=0, atol=0)
     if layout in CACHE_LAYOUTS:
-        _check(case, _call(case, _metadata(case)))
+        record = _metadata(case)
+        reused = _call(case, record)
+        _check(case, reused)
+        torch.testing.assert_close(_call(case, record, lse=False), reused[0], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
@@ -572,9 +572,14 @@ BOUNDARY_CASES = [
 )
 def test_mla_boundaries(dtype, representation, layout, spec):
     case = _make_case(layout, representation, dtype, **spec)
-    _check(case, _call(case))
+    full = _call(case)
+    _check(case, full)
+    torch.testing.assert_close(_call(case, lse=False), full[0], rtol=0, atol=0)
     if layout in CACHE_LAYOUTS:
-        _check(case, _call(case, _metadata(case)))
+        record = _metadata(case)
+        reused = _call(case, record)
+        _check(case, reused)
+        torch.testing.assert_close(_call(case, record, lse=False), reused[0], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
@@ -805,68 +810,25 @@ def test_mla_fake_compile(representation, layout, splits, pack, margin, cap):
         assert _call(fake, lse=False).shape == expected[0].shape
     torch._dynamo.reset()
     compiled = torch.compile(
-        lambda: _call(case, record), backend="eager", fullgraph=True, dynamic=False
+        lambda: (_call(case, record), _call(case, record, lse=False)),
+        backend="eager",
+        fullgraph=True,
+        dynamic=False,
     )
-    _equal(compiled(), expected)
+    full, output = compiled()
+    _equal(full, expected)
+    _equal(output, expected[0])
     case["t"]["q"].neg_()
     case["raw"]["q"].neg_()
-    _check(case, compiled())
-    graph, replayed = _capture(compiled)
-    graph.replay()
-    torch.npu.synchronize()
-    _equal(replayed, compiled())
-    _check(case, replayed)
-    graph.reset()
-
-
-def _capture(call, *, stream=None, warmup=True):
-    if warmup:
-        call()
-        torch.npu.synchronize()
-    graph = torch.npu.NPUGraph()
-    with torch.npu.graph(graph, stream=stream):
-        result = call()
-    return graph, result
-
-
-@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
-@pytest.mark.parametrize("representation", REPRESENTATIONS)
-@pytest.mark.parametrize("layout", LAYOUTS)
-@pytest.mark.parametrize(
-    "mode,splits,pack,cap",
-    [("reuse", 1, None, 0), ("generate", 0, False, 15), ("implicit", 3, True, 30)],
-)
-def test_mla_graph(dtype, representation, layout, mode, splits, pack, cap):
-    case = _make_case(
-        layout, representation, dtype, splits=splits, pack=pack, cap=cap, window=(2, 1)
-    )
-    record = _metadata(case) if mode == "reuse" else None
-
-    def call():
-        current = _metadata(case) if mode == "generate" else record
-        return _call(case, current), _call(case, current)
-
-    graph, outputs = _capture(call)
-    for lengths in ([0, 1], [33, 7], [65, 33]):
-        if mode != "reuse":
-            case["lengths"].copy_(case["lengths"].new_tensor(lengths))
-            case["kused"] = lengths
-        case["raw"]["q"].mul_(0.5)
-        case["t"]["q"].mul_(0.5)
-        graph.replay()
-        torch.npu.synchronize()
-        expected = _call(case, _metadata(case))
-        for result in outputs:
-            _equal(result, expected)
-            _check(case, result)
-        assert outputs[0][0].data_ptr() != outputs[1][0].data_ptr()
-    graph.reset()
+    full, output = compiled()
+    _check(case, full)
+    _equal(output, full[0])
 
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
 @pytest.mark.parametrize("representation", REPRESENTATIONS)
 @pytest.mark.parametrize("layout", ["func", *LAYOUTS])
-def test_mla_stream_and_graph_lifetime(dtype, representation, layout):
+def test_mla_stream_lifetime(dtype, representation, layout):
     case = _make_case(
         layout, representation, dtype, splits=3, cap=15, window=(2, 1), view="head-gap"
     )
@@ -874,25 +836,23 @@ def test_mla_stream_and_graph_lifetime(dtype, representation, layout):
     _check(case, expected)
     ready = torch.npu.Event()
     ready.record()
-
-    def call(captured=case):
-        temporary = dict(captured, t={key: value.clone() for key, value in captured["t"].items()})
-        return tuple(value.clone() for value in _call(temporary, _metadata(temporary)))
-
-    stream = torch.npu.Stream()
-    stream.wait_event(ready)
-    graph, output = _capture(call, stream=stream)
+    work = []
+    for _ in range(3):
+        stream = torch.npu.Stream()
+        with torch.npu.stream(stream):
+            stream.wait_event(ready)
+            temporary = dict(case, t={key: value.clone() for key, value in case["t"].items()})
+            output = tuple(value.clone() for value in _call(temporary, _metadata(temporary)))
+            work.append((stream, output))
+            del temporary
+    del case
     gc.collect()
-    for _ in range(2):
-        pressure = [torch.full((262144,), 99.0, device="npu") for _ in range(4)]
-        graph.replay()
-        torch.npu.synchronize()
+    pressure = [torch.full((262144,), 99.0, device="npu") for _ in range(4)]
+    for stream, output in work:
+        stream.synchronize()
         _equal(output, expected)
-        del pressure
-    graph.reset()
-    del case, call
-    gc.collect()
-    _equal(output, expected)
+    assert len({output[0].data_ptr() for _, output in work}) == 3
+    del pressure
 
 
 # (name, layout, query allocation, heads, KV used lengths, causal)
@@ -1228,42 +1188,6 @@ def test_mla_int8_fake_compile(layout, lse):
 
 
 @pytest.mark.parametrize("layout", ["bsnd", "tnd"])
-@pytest.mark.parametrize("mode", ["implicit", "reuse", "generate", "external"])
-@pytest.mark.parametrize("lse", [False, True])
-def test_mla_int8_graph(layout, mode, lse):
-    case = _make_int8_case(
-        layout, q=(2, 2, 2) if layout == "bsnd" else (2, 0, 1), k=(129, 0, 65), pattern="random"
-    )
-    record = _int8_metadata(case) if mode in ("reuse", "external") else None
-
-    def call():
-        return _int8_call(case, _int8_metadata(case) if mode == "generate" else record, lse=lse)
-
-    graph, result = _capture(call)
-    baseline = _int8_call(case)[0].clone()
-    case["args"]["mla_v_scale"].mul_(2)
-    scaled = _int8_call(case)[0]
-    torch.testing.assert_close(scaled, baseline * 2, rtol=0, atol=0)
-    for values in ([65, 0, 0], [0, 0, 0], [129, 1, 2]):
-        if mode != "reuse":
-            case["args"]["cache_seqlens"].copy_(case["args"]["cache_seqlens"].new_tensor(values))
-            case["k"] = values
-        for key in ("mla_q_scale", "mla_k_scale", "mla_v_scale"):
-            case["args"][key].mul_(0.75)
-        if mode == "external":
-            record.copy_(_int8_metadata(case))
-        graph.replay()
-        torch.npu.synchronize()
-        _equal(result, call())
-        if mode != "reuse" and values == [0, 0, 0]:
-            out = result[0] if lse else result
-            assert out.count_nonzero() == 0
-            if lse:
-                assert torch.isneginf(result[1]).all()
-    graph.reset()
-
-
-@pytest.mark.parametrize("layout", ["bsnd", "tnd"])
 def test_mla_int8_stream_lifetime(layout):
     case = _make_int8_case(layout, view="query-gap")
     record = _int8_metadata(case)
@@ -1285,51 +1209,6 @@ def test_mla_int8_stream_lifetime(layout):
         _equal(result, expected)
     assert len({result[0].data_ptr() for _, result in work}) == 3
     del pressure
-
-
-def test_mla_int8_capture_thread_lifetime():
-    if os.environ.get("MLA_COLD_CAPTURE_CHILD") != "1":
-        # A fresh process is required: earlier E2Es may have initialized masks.
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-x",
-                "-q",
-                f"{__file__}::test_mla_int8_capture_thread_lifetime",
-            ],
-            env=dict(os.environ, MLA_COLD_CAPTURE_CHILD="1"),
-            cwd=Path(__file__).resolve().parents[1],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        return
-    case = _make_int8_case("tnd")
-    cold = [
-        _capture(lambda: _int8_call(case), stream=torch.npu.Stream(), warmup=False)
-        for _ in range(2)
-    ]
-    expected = _int8_call(case)
-    _int8_check(case, expected)
-    for graph, result in cold:
-        graph.replay()
-        torch.npu.synchronize()
-        _equal(result, expected)
-        graph.reset()
-
-    def in_thread():
-        torch.npu.set_device(case["args"]["q"].device)
-        return _capture(lambda: _int8_call(case), stream=torch.npu.Stream(), warmup=False)
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        graph, result = executor.submit(in_thread).result()
-    graph.replay()
-    torch.npu.synchronize()
-    _equal(result, expected)
-    graph.reset()
 
 
 INT8_INVALID = [
@@ -1746,84 +1625,3 @@ def test_mla_default_options(representation, layout):
     _equal(_call(case), expected)
     torch._dynamo.reset()
     _equal(torch.compile(lambda: _call(case), backend="eager", fullgraph=True)(), expected)
-
-
-@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
-@pytest.mark.parametrize("representation", REPRESENTATIONS)
-@pytest.mark.parametrize("layout", ["tnd", "mixed", "paged_tnd"])
-def test_mla_graph_prefix_updates(dtype, representation, layout):
-    case = _make_case(layout, representation, dtype, splits=0, pack=False, window=(2, 1))
-    case["sq"] = 10
-    packed = {
-        name: torch.cat([value[b, :n] for b, n in enumerate(case["q"])])
-        for name, value in case["raw"].items()
-        if name in ("q", "qv")
-    }
-    graph, outputs = _capture(lambda: _call(case, _metadata(case)))
-    for lengths in ([0, 10], [5, 5], [7, 3]):
-        case["prefix"].copy_(make_cu_seqlens(lengths).to("npu"))
-        case["q"] = case["qused"] = lengths
-        for name, value in packed.items():
-            raw = value.new_zeros(2, 10, *value.shape[1:])
-            raw[0, : lengths[0]], raw[1, : lengths[1]] = value[: lengths[0]], value[lengths[0] :]
-            case["raw"][name] = raw
-        graph.replay()
-        torch.npu.synchronize()
-        _equal(outputs, _call(case, _metadata(case)))
-        _check(case, outputs)
-    graph.reset()
-
-
-@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
-@pytest.mark.parametrize("representation", REPRESENTATIONS)
-def test_mla_graph_kv_prefix_updates(dtype, representation):
-    case = _make_case("tnd", representation, dtype)
-    packed = {
-        name: torch.cat([value[b, :n] for b, n in enumerate(case["k"])])
-        for name, value in case["raw"].items()
-        if name in ("k", "v")
-    }
-    graph, outputs = _capture(lambda: _call(case))
-    for lengths in ([33, 65], [65, 33]):
-        case["prefix_k"].copy_(make_cu_seqlens(lengths).to("npu"))
-        case["lengths"].copy_(case["lengths"].new_tensor(lengths))
-        case["k"] = case["kused"] = lengths
-        for name, value in packed.items():
-            raw = value.new_zeros(2, 65, *value.shape[1:])
-            raw[0, : lengths[0]], raw[1, : lengths[1]] = value[: lengths[0]], value[lengths[0] :]
-            case["raw"][name] = raw
-        graph.replay()
-        torch.npu.synchronize()
-        _equal(outputs, _call(case))
-        _check(case, outputs)
-    graph.reset()
-
-
-@pytest.mark.parametrize("dtype", DTYPES, ids=["fp16", "bf16"])
-@pytest.mark.parametrize("representation", REPRESENTATIONS)
-def test_mla_graph_query_used_updates(dtype, representation):
-    case = _make_case(
-        "tnd", representation, dtype, used_q=(3, 1), splits=0, pack=False, window=(2, 1)
-    )
-    graph, outputs = _capture(lambda: _call(case))
-    for lengths in ([0, 0], [1, 1], [3, 1]):
-        case["used_q"].copy_(case["used_q"].new_tensor(lengths))
-        case["qused"] = lengths
-        graph.replay()
-        torch.npu.synchronize()
-        # Unused Q rows are unspecified; the reference checks only used rows.
-        _check(case, outputs)
-    graph.reset()
-
-
-def test_mla_int8_graph_prefix_updates():
-    case = _make_int8_case("tnd", q=(2, 4, 1), k=(129, 512, 127))
-    graph, outputs = _capture(lambda: _int8_call(case, _int8_metadata(case)))
-    for lengths in ([1, 4, 2], [3, 0, 4], [2, 4, 1]):
-        case["q"] = lengths
-        case["args"]["cu_seqlens_q"].copy_(make_cu_seqlens(lengths).to("npu"))
-        graph.replay()
-        torch.npu.synchronize()
-        _equal(outputs, _int8_call(case))
-        _int8_check(case, outputs)
-    graph.reset()

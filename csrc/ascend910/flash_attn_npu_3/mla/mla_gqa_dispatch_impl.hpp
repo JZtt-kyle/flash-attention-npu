@@ -64,6 +64,8 @@ __aicore__ inline bool LoadGqa(const MlaGqaLaunchArgs& a, GqaReader& read, MlaGq
 template <typename T>
 __aicore__ inline void GqaInitialize(uint64_t address, uint64_t count, T value)
 {
+    if (!address)
+        return;
     const uint64_t cores = AscendC::GetBlockNum() * AscendC::GetSubBlockNum();
     const uint64_t chunk = (count + cores * 64 - 1) / (cores * 64) * 64;
     const uint64_t start = uint64_t(AscendC::GetBlockIdx()) * chunk;
@@ -242,13 +244,18 @@ __aicore__ inline void RunGqaMerge(const MlaGqaLaunchArgs& a, const GqaReader& r
             p.maskKind = c.window.kind;
             p.left = c.window.left;
             p.right = c.window.right;
+            if (!c.splits) {
+                auto geometry = t;
+                auto_split_detail::Geometry<false>(GqaPartitionView<GqaReader>{read, c, l}, s, c.window, geometry);
+                auto_split_detail::Parts(s, geometry, UINT32_MAX, nullptr, p.begin, p.end);
+            }
             for (uint32_t split = 0; split < p.splits; ++split) {
-                if (!GqaTask(read, c, l, s, group, split, t)) {
-                    AscendC::Trap();
-                    return;
-                }
-                p.begin[split] = p.kvLength < t.s2Begin * l.n ? p.kvLength : t.s2Begin * l.n;
-                p.end[split] = p.kvLength < t.s2End * l.n ? p.kvLength : t.s2End * l.n;
+                uint32_t begin = p.begin[split], end = p.end[split];
+                if (c.splits)
+                    SplitBsndFragment(p.queryLength, p.kvLength, l.g, t.m, l.m, l.n, c.window, c.splits, split, begin,
+                                      end);
+                p.begin[split] = p.kvLength < begin * l.n ? p.kvLength : begin * l.n;
+                p.end[split] = p.kvLength < end * l.n ? p.kvLength : end * l.n;
             }
             const uint64_t row = group * l.capacity * l.m;
             const uint32_t count = tile < p.rows - begin ? tile : p.rows - begin;

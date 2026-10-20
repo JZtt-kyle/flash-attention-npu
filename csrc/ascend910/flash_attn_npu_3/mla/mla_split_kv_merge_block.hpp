@@ -30,6 +30,7 @@ class MlaSplitKvMerge {
     {
         params = p;
         roundToEven = softcap != 0.0f;
+        writeAccumulators = accum != nullptr;
         partial.SetGlobalBuffer((__gm__ float*)out);
         sums.SetGlobalBuffer((__gm__ float*)sum);
         maxima.SetGlobalBuffer((__gm__ float*)maximum);
@@ -181,7 +182,7 @@ class MlaSplitKvMerge {
                 }
             }
             PipeBarrier<PIPE_V>();
-            if (params.adapt && (params.splits > 1 || WriteSingleAccumulator)) {
+            if (writeAccumulators && params.adapt && (params.splits > 1 || WriteSingleAccumulator)) {
                 auto s = sum[split * width], m = maximum[split * width];
                 Tile::ComputeSoftMaxLse(lse, s, m, rows);
                 for (uint32_t row = 0; row < rows; ++row) {
@@ -262,6 +263,7 @@ class MlaSplitKvMerge {
 
     MlaSplitKvMergeParams params;
     bool roundToEven = false;
+    bool writeAccumulators = true;
     GlobalTensor<float> partial, sums, maxima, outputLse, accumulator, accumulatorLse;
     GlobalTensor<OutputT> output;
     TBuf<> sumBuf, maxBuf, weightBuf, rowMaxBuf, rowSumBuf, lseBuf, partialBuf[2], reduceBuf, castBuf;

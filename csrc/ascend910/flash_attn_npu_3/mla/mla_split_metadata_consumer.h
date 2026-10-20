@@ -750,31 +750,56 @@ MLA_AUTO_INLINE void Geometry(const Reader& read, const MlaAutoSplitBsndSchedule
 // Adjacent exclusive endpoints form disjoint intervals. Intersect them with
 // this M's visible interval; do not uniformly divide by maxSplits.
 MLA_AUTO_INLINE uint32_t Parts(const MlaAutoSplitBsndSchedule& s, MlaAutoSplitBsndTask& t, uint32_t owner = UINT32_MAX,
-                               uint32_t* ownerSplit = nullptr)
+                               uint32_t* ownerSplit = nullptr, uint16_t* begin = nullptr, uint16_t* end = nullptr)
 {
-    const uint32_t first = t.s2Begin, stop = t.s2End;
-    uint32_t count = 0;
-    for (uint32_t core = 0; core < s.usedCoreNum; ++core) {
-        uint32_t lo = first, hi = stop;
-        if (core) {
-            if (Less(t.batch, t.m, UINT32_MAX, s.bEnd[core - 1], s.mEnd[core - 1], 0))
-                continue;
-            if (t.batch == s.bEnd[core - 1] && t.m == s.mEnd[core - 1])
-                lo = lo > s.nEnd[core - 1] ? lo : s.nEnd[core - 1];
-        }
-        if (Less(s.bEnd[core], s.mEnd[core], UINT32_MAX, t.batch, t.m, 0))
-            continue;
+    const uint32_t start = t.s2Begin, stop = t.s2End;
+    if (start >= stop)
+        return 0;
+    // Endpoints are strictly increasing and checked before any task query.
+    // Positive intersections form one contiguous interval of cores. Locate
+    // its boundaries instead of rescanning every core for each FD fragment.
+    uint32_t lo = 0, hi = s.usedCoreNum;
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        if (Less(t.batch, t.m, start, s.bEnd[mid], s.mEnd[mid], s.nEnd[mid]))
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    const uint32_t first = lo;
+    if (first == s.usedCoreNum)
+        return 0;
+    hi = s.usedCoreNum;
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        if (Less(s.bEnd[mid], s.mEnd[mid], s.nEnd[mid], t.batch, t.m, stop))
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    const uint32_t last = lo < s.usedCoreNum ? lo + 1 : lo;
+    const uint32_t count = last - first;
+    if (ownerSplit && owner >= first && owner < last)
+        *ownerSplit = owner - first;
+    if (!begin && t.split >= count)
+        return count;
+    const uint32_t from = begin ? first : first + t.split;
+    const uint32_t to = begin ? last : (from < last ? from + 1 : from);
+    for (uint32_t core = from; core < to; ++core) {
+        uint32_t low = start, high = stop;
+        if (core && t.batch == s.bEnd[core - 1] && t.m == s.mEnd[core - 1])
+            low = low > s.nEnd[core - 1] ? low : s.nEnd[core - 1];
         if (t.batch == s.bEnd[core] && t.m == s.mEnd[core])
-            hi = hi < s.nEnd[core] ? hi : s.nEnd[core];
-        if (lo < hi) {
-            if (ownerSplit && core == owner)
-                *ownerSplit = count;
-            if (count == t.split) {
-                t.owner = core;
-                t.s2Begin = lo;
-                t.s2End = hi;
-            }
-            ++count;
+            high = high < s.nEnd[core] ? high : s.nEnd[core];
+        const uint32_t split = core - first;
+        if (begin) {
+            begin[split] = low;
+            end[split] = high;
+        }
+        if (split == t.split) {
+            t.owner = core;
+            t.s2Begin = low;
+            t.s2End = high;
         }
     }
     return count;
@@ -932,22 +957,8 @@ MLA_AUTO_INLINE MlaMetadataReadStatus ReadAutoSplitPartitions(const Reader& read
             t.batch = s.bEnd[i - 1];
             t.m = s.mEnd[i - 1];
             Geometry<IsPaged>(read, s, w, t);
-            if constexpr (Prefill) {
-                // The same fragment traversal supplies its inverse owner ->
-                // split mapping; do not enumerate every split and rescan all
-                // cores just to validate this one ordinal.
-                Parts(s, t, i, &startSplit);
-            } else {
-                const uint32_t first = t.s2Begin, stop = t.s2End, count = Parts(s, t);
-                for (uint32_t split = 0; split < count; ++split) {
-                    t.split = split;
-                    t.s2Begin = first;
-                    t.s2End = stop;
-                    Parts(s, t);
-                    if (t.owner == i)
-                        startSplit = split;
-                }
-            }
+            // Parts supplies the inverse owner -> split mapping in one scan.
+            Parts(s, t, i, &startSplit);
         }
         if (read(base + 164 + i) != startSplit)
             return Status::InvalidEndpoints;

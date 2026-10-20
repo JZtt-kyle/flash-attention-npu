@@ -776,6 +776,7 @@ def _mla_split_paged_bsnd_forward_fake(
     seqused_q=None,
     scheduler_metadata=None,
     softcap=0.0,
+    partials=True,
 ):
     _check_mla_inputs(q, k, v, qv, paged_kv=True)
     _check_mla_dense_options(softmax_scale=softmax_scale, softcap=softcap, allow_softcap=True)
@@ -807,10 +808,10 @@ def _mla_split_paged_bsnd_forward_fake(
         q.new_empty((b, sq, h, 512)),
         q.new_empty((b, h, sq), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((count, b, h, sq, 512), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((count, b, h, sq), dtype=torch.float32),
     )
 
@@ -833,6 +834,7 @@ def _mla_split_paged_tnd_forward_fake(
     seqused_q=None,
     scheduler_metadata=None,
     softcap=0.0,
+    partials=True,
 ):
     _check_mla_dense_options(softmax_scale=softmax_scale, softcap=softcap, allow_softcap=True)
     if num_splits != 0 and not (1 if softcap > 0 else 2) <= num_splits <= 256:
@@ -859,10 +861,10 @@ def _mla_split_paged_tnd_forward_fake(
         q.new_empty((total, heads, 512)),
         q.new_empty((heads, total), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((count, heads, total, 512), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((count, heads, total), dtype=torch.float32),
     )
 
@@ -929,6 +931,7 @@ def _mla_split_bsnd_forward_fake(
     seqused_q=None,
     scheduler_metadata=None,
     softcap=0.0,
+    partials=True,
 ):
     _check_mla_inputs(q, k, v, qv)
     _check_mla_dense_options(softmax_scale=softmax_scale, softcap=softcap, allow_softcap=True)
@@ -950,10 +953,10 @@ def _mla_split_bsnd_forward_fake(
         q.new_empty((batch, sq, heads, 512)),
         q.new_empty((batch, heads, sq), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, batch, heads, sq, 512), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, batch, heads, sq), dtype=torch.float32),
     )
 
@@ -1122,6 +1125,7 @@ def _mla_split_mixed_forward_fake(
     seqused_q=None,
     scheduler_metadata=None,
     softcap=0.0,
+    partials=True,
 ):
     _check_mla_inputs(q, k, v, qv, varlen_q=True)
     _check_mla_dense_options(softmax_scale=softmax_scale, softcap=softcap, allow_softcap=True)
@@ -1161,10 +1165,10 @@ def _mla_split_mixed_forward_fake(
         q.new_empty((total, heads, 512)),
         q.new_empty((heads, total), dtype=torch.float32),
         torch.empty(0, device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, heads, total, 512), dtype=torch.float32),
         torch.empty(0, device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, heads, total), dtype=torch.float32),
     )
 
@@ -1212,6 +1216,7 @@ def _mla_split_tnd_forward_fake(
     seqused_k=None,
     scheduler_metadata=None,
     softcap=0.0,
+    partials=True,
 ):
     _check_mla_dense_options(softcap=softcap, allow_softcap=True)
     out, lse = _mla_causal_tnd_forward_fake(
@@ -1265,10 +1270,10 @@ def _mla_split_tnd_forward_fake(
         out,
         lse,
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, q.shape[1], q.shape[0], 512), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, q.shape[1], q.shape[0]), dtype=torch.float32),
     )
 
@@ -1585,6 +1590,7 @@ def _mla_gqa_forward_fake(
     softcap,
     pack_gqa,
     sm_margin,
+    partials=True,
 ):
     tnd = cu_seqlens_q is not None
     if not _check_mla_inputs(
@@ -1669,10 +1675,10 @@ def _mla_gqa_forward_fake(
         q.new_empty((*q.shape[:-1], v.shape[-1])),
         q.new_empty(lse_shape, dtype=torch.float32),
         torch.empty(0, device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, *lse_shape, v.shape[-1]), dtype=torch.float32),
         torch.empty(0, device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, *lse_shape), dtype=torch.float32),
     )
 
@@ -1843,6 +1849,7 @@ def _mla_prefill_bsnd_forward_fake(
     scheduler_metadata=None,
     page_table=None,
     softcap=0.0,
+    partials=True,
 ):
     _check_mla_inputs(q, k, v, paged_kv=page_table is not None)
     if q.shape[-1] != 192 or v.shape[-1] != 128:
@@ -1898,10 +1905,10 @@ def _mla_prefill_bsnd_forward_fake(
         q.new_empty((b, sq, h, 128)),
         q.new_empty((b, h, sq), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, b, h, sq, 128), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, b, h, sq), dtype=torch.float32),
     )
 
@@ -1924,6 +1931,7 @@ def _mla_prefill_forward(
     max_k=None,
     page_table=None,
     softcap=0.0,
+    partials=True,
 ):
     if page_table is not None:
         if cu_q is not None:
@@ -1943,6 +1951,7 @@ def _mla_prefill_forward(
                 metadata,
                 page_table,
                 softcap,
+                partials=partials,
             )
         return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_forward(
             q,
@@ -1958,6 +1967,7 @@ def _mla_prefill_forward(
             metadata,
             page_table,
             softcap,
+            partials=partials,
         )
     if cu_q is not None and cu_k is not None:
         _check_mla_tnd_inputs(q, k, cu_q, cu_k, max_q, max_k)
@@ -1978,6 +1988,7 @@ def _mla_prefill_forward(
             used_k,
             metadata,
             softcap,
+            partials=partials,
         )
     if cu_q is not None:
         _check_mla_mixed_inputs(q, k, cu_q, max_q, used_k, None, used_q)
@@ -1996,9 +2007,22 @@ def _mla_prefill_forward(
             used_q,
             metadata,
             softcap=softcap,
+            partials=partials,
         )
     return torch.ops.flash_attn_npu_3._mla_prefill_bsnd_forward(
-        q, k, v, splits, left, right, causal, scale, used_k, used_q, metadata, softcap=softcap
+        q,
+        k,
+        v,
+        splits,
+        left,
+        right,
+        causal,
+        scale,
+        used_k,
+        used_q,
+        metadata,
+        softcap=softcap,
+        partials=partials,
     )
 
 
@@ -2059,6 +2083,7 @@ def _mla_prefill_mixed_forward_fake(
     scheduler_metadata=None,
     page_table=None,
     softcap=0.0,
+    partials=True,
 ):
     _check_mla_dense_options(softcap=softcap, allow_softcap=True)
     _check_mla_inputs(q, k, v, varlen_q=True, paged_kv=page_table is not None)
@@ -2114,10 +2139,10 @@ def _mla_prefill_mixed_forward_fake(
         q.new_empty((tq, h, 128)),
         q.new_empty((h, tq), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, h, tq, 128), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, h, tq), dtype=torch.float32),
     )
 
@@ -2198,6 +2223,7 @@ def _mla_prefill_tnd_forward_fake(
     seqused_k=None,
     scheduler_metadata=None,
     softcap=0.0,
+    partials=True,
 ):
     _check_mla_dense_options(softcap=softcap, allow_softcap=True)
     words = _check_prefill_tnd(
@@ -2231,10 +2257,10 @@ def _mla_prefill_tnd_forward_fake(
         q.new_empty((tq, h, 128)),
         q.new_empty((h, tq), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, h, tq, 128), dtype=torch.float32),
         torch.empty((0,), device=q.device)
-        if num_splits == 1
+        if num_splits == 1 or not partials
         else q.new_empty((capacity, h, tq), dtype=torch.float32),
     )
 
@@ -2258,6 +2284,7 @@ def _mla_split_forward(
     page_table=None,
     scheduler_metadata=None,
     softcap=0.0,
+    partials=True,
 ):
     """Select the existing split operator; its registered fake uses the same route."""
     ops = torch.ops.flash_attn_npu_3
@@ -2285,6 +2312,7 @@ def _mla_split_forward(
                 cache_seqlens=seqused_k,
                 softcap=softcap,
                 **options,
+                partials=partials,
             )
         return ops._mla_split_paged_bsnd_forward(
             q,
@@ -2295,6 +2323,7 @@ def _mla_split_forward(
             cache_seqlens=seqused_k,
             softcap=softcap,
             **options,
+            partials=partials,
         )
     if cu_seqlens_q is not None:
         if cu_seqlens_k is not None:
@@ -2310,6 +2339,7 @@ def _mla_split_forward(
                 seqused_k=seqused_k,
                 softcap=softcap,
                 **options,
+                partials=partials,
             )
         return ops._mla_split_mixed_forward(
             q,
@@ -2321,9 +2351,17 @@ def _mla_split_forward(
             cache_seqlens=seqused_k,
             softcap=softcap,
             **options,
+            partials=partials,
         )
     return ops._mla_split_bsnd_forward(
-        q, k, v, qv, cache_seqlens=seqused_k, softcap=softcap, **options
+        q,
+        k,
+        v,
+        qv,
+        cache_seqlens=seqused_k,
+        softcap=softcap,
+        **options,
+        partials=partials,
     )
 
 
@@ -2442,6 +2480,7 @@ def _mla_forward(
             softcap,
             pack_gqa,
             sm_margin,
+            partials=return_accumulators,
         )
         return result if return_accumulators else result[:2]
     if qv is None:
@@ -2462,6 +2501,7 @@ def _mla_forward(
             max_seqlen_k,
             page_table,
             softcap=softcap,
+            partials=return_accumulators,
         )
         return result if return_accumulators else result[:2]
     if num_splits != 1 or softcap != 0:
@@ -2483,6 +2523,7 @@ def _mla_forward(
             page_table=page_table,
             scheduler_metadata=scheduler_metadata,
             softcap=softcap,
+            partials=return_accumulators,
         )
         return result if return_accumulators else result[:2]
     ops = torch.ops.flash_attn_npu_3
@@ -3214,7 +3255,6 @@ def _flash_attn_backward_fake(
     deterministic: bool = False,
     sm_margin: int = 0,
 ) -> torch.Tensor:
-
     is_varlen_q = cu_seqlens_q is not None
     is_varlen_k = cu_seqlens_q is not None
     is_varlen = is_varlen_q or is_varlen_k or sequed_q is not None or sequed_k is not None
@@ -4167,9 +4207,7 @@ def _mla_int8_forward_fake(
     lse_shape = (h, q.shape[0]) if tnd else (b, h, sq)
     return (
         torch.empty((*q.shape[:-1], 512), device=q.device, dtype=torch.bfloat16),
-        torch.empty(
-            lse_shape if not tnd or partials else (0,), device=q.device, dtype=torch.float32
-        ),
+        torch.empty(lse_shape if partials else (0,), device=q.device, dtype=torch.float32),
         torch.empty(
             (26, *lse_shape, 512) if partials and splits == 0 else (0,),
             device=q.device,
