@@ -1,24 +1,22 @@
 # MLA 迭代计划
 
-本页只记录实施顺序、产物和完成条件。**R8 已完成：优化 MLA 普通调用并移除图模式；无待开发步骤。** R7 结构收敛及之前迁移步骤已完成；能力、限制和证据见 [status](status.md)，接口与来源见 [design](design.md)。
+本页只记录实施顺序、产物和完成条件。**R9 已完成：移除额外的 MLA 图捕获拒绝；无待开发步骤。** R8 普通调用优化及之前迁移步骤已完成；能力、限制和证据见 [status](status.md)，接口与来源见 [design](design.md)。
 
-## R8：优化普通调用并移除 MLA 图模式（已完成）
+## R9：移除额外的 MLA 图捕获拒绝（已完成）
 
-基线 `36e8609`。用户先确认合并自动 split 发射、消除重复 metadata/分片扫描与未使用输出开销；2026-10-20 进一步明确“先删除图模式相关的实现和测试”。本轮按最新范围完成一次提交，不再要求 MLA 图功能或图性能验收。此前未提交的普通调用优化保留，普通 FA3 的图路径不变。
+基线 `a96f49b`。用户于 2026-10-20 明确“不用特殊处理就行，不要加额外的”，本轮直接按该要求修正 R8 对图范围的解释。
 
-- 改动与影响：保留已实现的五布局自动 split 融合、分片二分查询及 O-only 输出准备优化；删除 `mla_forward.cpp` 中 metadata 的捕获切流分支及 INT8 冷捕获 mask 特例。所有 MLA real 前向/metadata 入口在 host 平台准备阶段明确拒绝捕获；保留 fake/compile、动态校验、普通多流依赖与已完成初始化的不可变 mask 复用。数值 Kernel、AICPU 记录协议、CANN/CATLASS 不因删除图模式而修改。
-- 测试调整：删除 `tests/test_flash_attn_npu_v3_mla.py` 的图捕获/重放、图内动态长度/前缀、冷捕获和 compile 后重放测试；混合 stream/graph 生命周期用例改为普通多流调用，保留临时输入、独立输出及分配压力检查。`torch.compile(fullgraph=True)` 的 fullgraph 参数属于 Dynamo 跟踪边界，继续保留。不新增图测试目录或框架，捕获拒绝用一次性公开入口诊断核对。
-- 环境及证据：工作根 `/tmp/flash-attention-npu-mla-46928a793876/mla-no-graph-20261020`；变更前源码/差异已保存到 `before/` 与 `before.diff`。核对当前源码、Python/torch/torch_npu/CANN、910B、CATLASS 与扩展 SHA，沿用已确认的环境启动器 `/tmp/mla-m16-schedule/run.py`、物理设备 3 和 CPU 48–51。所有构建、参考缓存和日志在仓库外。
-- 必跑预检：既有 pre-commit 工具、pytest `--collect-only` 与新旧节点差分；正常 v3/910 构建。代表集合沿用前次 88 节点中仍保留的 80 个，再补普通多流生命周期节点，覆盖五布局/双 dtype、单片/显式/自动、最长 KV、INT8 与 fake/compile；捕获拒绝覆盖公开 func/varlen/cache/metadata、两种非量化表示及两种 INT8 布局。
-- 正确性：实现固定后完整执行 `python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py`，加此前的 140 项普通 FA3 相关集合（含普通 FA3 图测试），保存 JUnit/原始日志及实际扩展身份。保留独立 reference 与 `assert_fa_close` 阈值，原始接口拒绝及数值边界不变。
-- 性能：host 平台检查和 INT8 mask 路径改变，重测固定非量化 70 配置（调度 20、原 eager 40、默认 10）和 INT8 BSND 24/TND 15；沿用固定 CANN 包、输入、5 次预热、5×20 wall、入口/R 内及配置间等权、完整调用计时边界。先运行代表工具预检及成本边界，再采完整 eager 集合；图采样不再执行。通过均值 ≤1，保留每配置/分段退化及完整样本。
-- 继承：仅继承未变的数值组件、参考方程、固定 native 包身份与原始覆盖目的。前次 1,719 通过、图性能失败及普通调用性能结果保存在 `mla-e2e-opt-20261020/`，不能计作本次修改后的通过数；前次分片查询等价诊断可作为未改算法的依据。修改/改名用例及新扩展重新实跑。
+- 改动与影响：删除 `mla_forward.cpp` 的 `CheckEagerExecution`、`DensePlatform` / `CausalPlatform` 两处调用及仅用于该检查的图头文件。前向与 metadata 统一沿用普通提交路径；不恢复已删除的捕获适配或图测试，不增加拒绝、回退或其他图分支。数值组件、发射、动态校验、Python real/fake 和公共测试保持基线。
+- 环境与继承：核对 Python/torch/torch_npu/CANN、CATLASS、910B 及实际加载扩展；工作根为 `/tmp/flash-attention-npu-mla-46928a793876/mla-plain-capture-20261020`。复用 R8 环境启动器、构建配方、公共 golden 缓存、固定 CANN 包和未改的验收工具；保存基线扩展与源码身份。旧通过数及性能只作历史，不计作本次结果。
+- 必跑检查：先运行仓库 pre-commit 与 `python3 -m pytest --collect-only -q tests/test_flash_attn_npu_v3_mla.py`，确认仍为 1,480 个节点；正常 v3/910 构建后运行 R8 的 106 项代表/成本边界，再固定实现执行完整 1,480 MLA + 140 普通 FA3 相关回归。选择依据为两处平台准备被各布局、两种表示、FP16/BF16、INT8 和 metadata 共用；保留独立 reference、`assert_fa_close` 及普通 FA3 既有图测试。
+- 性能：移除每次平台准备的 host 捕获查询，沿用 R8 固定非量化 70 配置及 INT8 BSND 24/TND 15 的完整普通调用集合与原统计口径。先核对工具、native 包及代表/最长分配，再以新扩展重测；不采样 MLA 图性能，不将取消拒绝称为图验收通过。
+- 完成条件（已满足）：生产路径不再查询或拒绝图捕获，文档与最新要求一致；构建、上述回归、固定 CANN 普通调用性能及质量检查通过。只提交本轮五个文件一次并立即停止；必要检查未完成时保留 R9 交接。
 
-加载预检发现当前 torch_npu 未导出 `IsContextInitialized`，故捕获拒绝使用仓库原先已验证的 `currentStreamCaptureStatusMayInitCtx`。调用位于真实 NPU tensor 的 device guard / 平台准备路径，保持原上下文前提；初始加载失败日志保留，修正后重建再运行全部检查。
+## R8：优化普通调用并清理 MLA 图专项（已完成）
 
-最终产物：删除 99 个图专用节点，24 个生命周期节点改为普通多流；1,480 MLA + 140 普通 FA3 共 1,620 项通过。固定 CANN 的非量化调度/原 eager/默认路径均值为 0.771881/0.802949/0.741942，INT8 39 配置为 0.597452；分段及相对 R7 的局部退化保留在 status。捕获拒绝与最终质量检查通过，本轮范围已验收完成。
+基线 `36e8609`，产物提交 `a96f49b`。按已确认方案合并五布局自动 split 发射、消除重复 metadata/分片扫描和未使用输出开销；按用户后续要求删除 metadata 捕获切流、INT8 冷捕获 mask 特例及图专项测试，混合生命周期用例改为普通多流。数值组件、动态校验、fake/compile 和普通 FA3 既有图测试保留。
 
-完成条件：图模式支持分支与 MLA 图测试移除，公开捕获明确拒绝；当前范围内完整正确性与固定 CANN eager 门槛通过；三份文档和开发约定与新范围一致。完成既有 pre-commit 和 `git diff --check` 后，只提交本轮文件一次并立即停止。未完成时保留 R8 标记及实际结果，不把删除前的图失败写成通过。
+当时误将删除特殊处理理解为禁用 MLA 图调用，额外增加了捕获拒绝；该限制由 R9 按用户澄清移除。R8 完整回归 1,620 项及固定 CANN 普通调用性能通过，具体环境、命令、结果和分段退化见 `git show a96f49b:docs/mla/status.md`；历史图性能失败不改写。
 
 ## R7：按仓库已有范式继续收敛 MLA（已完成）
 

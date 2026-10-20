@@ -10,7 +10,6 @@
 #include "torch_npu/csrc/core/npu/NPUStream.h"
 #include "torch_npu/csrc/core/npu/NPUEvent.h"
 #include "torch_npu/csrc/core/npu/NPUCachingAllocator.h"
-#include "torch_npu/csrc/core/npu/NPUGraphsUtils.h"
 #include "torch_npu/csrc/framework/OpCommand.h"
 #include "runtime/rt_ffts.h"
 #include <c10/core/DeviceGuard.h>
@@ -310,15 +309,8 @@ void RunCausalLaunch(const char* name, const std::function<int()>& launch)
     TORCH_CHECK(launch() == ACL_SUCCESS, "MLA: causal kernel submission failed");
 }
 
-void CheckEagerExecution()
-{
-    TORCH_CHECK(c10_npu::currentStreamCaptureStatusMayInitCtx() == c10_npu::CaptureStatus::None,
-                "MLA: NPU graph capture is not supported");
-}
-
 MlaPlatformInfo DensePlatform(bool fullLaunch = false)
 {
-    CheckEagerExecution();
     const char* soc = aclrtGetSocName();
     // CANN names the 910C family Ascend910_93; both families use the 2201
     // kernels. Keep resource validation below for each actual device/partition.
@@ -351,7 +343,6 @@ MlaPlatformInfo DensePlatform(bool fullLaunch = false)
 
 MlaPlatformInfo CausalPlatform(c10::DeviceIndex device, bool fullLaunch)
 {
-    CheckEagerExecution();
     // These chip resources are immutable. Keep each host thread/device's
     // validated descriptor separate; no tensor, length or schedule is cached.
     static thread_local std::unordered_map<c10::DeviceIndex, MlaPlatformInfo> platforms;
