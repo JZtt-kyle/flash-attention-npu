@@ -1,6 +1,6 @@
 # CANN FIA MLA → FA3 NPU：契约与架构
 
-本文保存已确认的迁移契约和实现依据。**第 1、4 节定义范围，第 2–3 节定义接口，第 5–6 节说明 metadata 与实现架构，第 7 节定义验收口径。** 交付状态、运行结果和环境只在 [status](status.md) 维护，实施顺序和完成条件只在 [plan](plan.md) 维护；本文的目标能力不等于已接通能力。
+本文说明 MLA 的支持范围、接口契约和实现依据。**第 1、4 节定义范围，第 2–3 节定义接口，第 5–6 节说明 metadata 与实现架构，第 7 节定义验收口径。**
 
 | 核对内容 | 阅读位置 |
 | --- | --- |
@@ -18,7 +18,7 @@
 
 ## 1. 范围与固定依据
 
-迁移集合是 **910B/C 上 CANN FIA 已有 MLA 前向能力，与官方 FA3 可表达能力的交集**，再加接入所必需的 metadata、softcap 与调度选项。2026-10-18 用户另行确认迁移 INT8、不迁外部 NZ，允许 [3.4](#34-int8-压缩-mla-扩展) 所列的 dtype/scale 扩展；这是本仓 NPU 扩展，不宣称固定官方 FA3 原生支持 INT8 qv。其余接口冲突按 FA3 调整；不搬迁普通 MHA/GQA、量化大框架、950 专用模板或反向算子。MLA prefill 中使用 GQA 的分组语义仍在范围内。
+迁移集合是 **910B/C 上 CANN FIA 已有 MLA 前向能力，与官方 FA3 可表达能力的交集**，再加接入所必需的 metadata、softcap 与调度选项。[3.4](#34-int8-压缩-mla-扩展) 另定义 INT8 压缩 MLA 的 dtype/scale 扩展，不迁外部 NZ；这是本仓 NPU 扩展，不宣称固定官方 FA3 原生支持 INT8 qv。其余接口冲突按 FA3 调整；不搬迁普通 MHA/GQA、量化大框架、950 专用模板或反向算子。MLA prefill 中使用 GQA 的分组语义仍在范围内。
 
 **迁移原则：保留固定 CANN 实现的行为，只做 CATLASS 风格的结构重构和必要的 FA3 接入。** 以源实现的验证积累为基础，保持数值路径与设备流水，具体边界见第 6 节。
 
@@ -38,7 +38,7 @@
 - [split 块范围](https://github.com/Dao-AILab/flash-attention/blob/d15f1531a460ba456f41b01a774f33ab2db8febf/hopper/block.h)：在 mask 范围内按 ceil-div 分片；显式 split 复用分片规则，逻辑 tile 与 mask 范围仍取 CANN。
 - [softmax](https://github.com/Dao-AILab/flash-attention/blob/d15f1531a460ba456f41b01a774f33ab2db8febf/hopper/softmax.h) 的 `finalize` 与 [写回](https://github.com/Dao-AILab/flash-attention/blob/d15f1531a460ba456f41b01a774f33ab2db8febf/hopper/epilogue_fwd.hpp) 的 `store` / `store_zero`：全遮罩行及 kernel 内空 KV 的 O/LSE；不能只参考 host 的全局空张量分支。
 
-CANN 根目录：`/home/zhangqijia/repo/ops-transformer/attention/fused_infer_attention_score`。下列路径均相对于此目录：
+CANN 来源目录为 `ops-transformer` 仓库中的 `attention/fused_infer_attention_score`。下列路径均相对于此目录：
 
 | 来源 | 已核实的事实 |
 | --- | --- |
@@ -52,11 +52,11 @@ CANN 根目录：`/home/zhangqijia/repo/ops-transformer/attention/fused_infer_at
 
 ## 2. FA3 入口与后端边界
 
-本节描述非量化 FP16/BF16 路径。INT8 的已批准扩展单列于 [3.4](#34-int8-压缩-mla-扩展)，其接入状态见 [status](status.md)，不沿用本节五布局及全部选项的支持结论。
+本节描述非量化 FP16/BF16 路径。INT8 扩展单列于 [3.4](#34-int8-压缩-mla-扩展)，不沿用本节五布局及全部选项的支持结论。
 
 - [Python FA3 入口](../../flash_attn_npu_3/flash_attn_npu_interface.py) 与 [910 C++ 前向](../../csrc/ascend910/flash_attn_npu_3/flash_api.cpp) 按 `qv` 和维度识别两种 MLA 表示，透传内容与 RoPE 分量，明确校验支持边界。
 - Python 的三个公开 MLA 前向入口共用 `_mla_forward`，沿用固定 FA3 的公开参数、共用前向适配、后端算子边界。NPU 适配在此集中选择布局、mask、split 和调度选项；默认压缩 split 共用 `_mla_split_forward`，非默认有效调度选项使用 `_mla_gqa_forward`。各已注册算子仍独立校验 tensor/metadata，普通 attention 保留原有 Autograd 路径。
-- 两种表示的五布局均按 V 维度分配 O，真实路径与 fake 对齐 O/LSE/accumulator。实现与验收状态见 [status](status.md)。
+- 两种表示的五布局均按 V 维度分配 O，真实路径与 fake 对齐 O/LSE/accumulator。
 - dense/varlen metadata 调用传入实际 `headdim_v=v.shape[-1]`，使入口、调度和设备执行使用同一组维度。
 - 复用 [metadata 参数](../../csrc/ascend910/flash_attn_npu_3/fa_metadata_args.h) 和 [AICPU 实现](../../csrc/ascend910/flash_attn_npu_3/fa_metadata.aicpu) 的启动与流同步机制，MLA 使用与源实现对应的调度字段。
 - 普通 FA 保持现有 `uint8` metadata 协议兼容；MLA 提供设备 `int32` 调度 tensor，公开使用 `has_softcap`，计算 scale/softcap 数值由前向传入。
@@ -174,7 +174,7 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 
 ### 3.4 INT8 压缩 MLA 扩展
 
-本节是用户已确认的 M18–M21 契约；实施顺序和当前接入状态分别见 [plan](plan.md#已完成步骤) 与 [status](status.md)。不能从非量化能力表推断 INT8 同时开放五布局、全部窗口/softcap/split。固定 FA3 的 `mha_fwd` 要求 Q/K/V 同 dtype，qv 只接受 FP16/BF16；其 FP8 三个 descale 是 `[B,Hkv]`，不等价于源 INT8 的逐 token/head Q scale。本扩展保留 attention 的输入角色、标准 mask 和输出语义，显式增加必要的混合 dtype 和量化参数。
+本节定义 INT8 压缩 MLA 的支持范围，不能从非量化能力表推断 INT8 同时开放五布局、全部窗口/softcap/split。固定 FA3 的 `mha_fwd` 要求 Q/K/V 同 dtype，qv 只接受 FP16/BF16；其 FP8 三个 descale 是 `[B,Hkv]`，不等价于源 INT8 的逐 token/head Q scale。本扩展保留 attention 的输入角色、标准 mask 和输出语义，显式增加必要的混合 dtype 和量化参数。
 
 源依据均取固定 `ca18aee...`，以下路径相对于 `attention/incre_flash_attention/`：
 
@@ -212,13 +212,13 @@ FA3 的 `qv` 形式为 `scores = (q kᵀ + qv vᵀ) * scale`，输出为 `softma
 
 公开 `get_scheduler_metadata(qkv_dtype=torch.int8, page_size=128, headdim=64, headdim_v=512, num_heads_kv=1, ...)` 的 BSND 分支用 [`mla_metadata.aicpu`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_metadata.aicpu) 在设备端读取 `int32[B]` 长度并生成 v48；前向消费在 [`mla_dispatch_int8.cpp`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_dispatch_int8.cpp) 从当次设备长度重新求出规范调度，跨完整向量 grid 分摊核对所给记录的每个字，含没有 attention 工作的 lane；数值仅使用独立求出的规范调度，不从未经校验的记录取地址或分区。前向使用 M18 数值核；任一 lane 发现不匹配都会使整个异步调用失败。隐式调用直接使用该调度，不生成 AICPU 记录；复用省去生成器，仍保留完整消费检查。长度、模式或调度字损坏会 Trap；scale 更新无需重新生成。每次前向检查所有使用页，空 Q 也不跳过长度/页安全检查。
 
-host 仅可按需物化小 Q/qv/Q-scale 的合法视图，ND KV 与页表保持原 storage/stride。BSND/TND 共用按设备缓存的不可变 causal mask，仅在初始化 event 确认完成后跨 stream/线程复用；尚未完成时沿用 stream 局部 mask，不缓存用户数据。O-only 调用不生成未请求的 LSE/accumulator。`num_splits=1` 返回空 accumulator；`num_splits=0` 的公开 FP32 accumulator 为 `[26,B,Hq,Sq,512]` / `[26,B,Hq,Sq]`，按实际源分区导出归一化 partial O 与自然对数 LSE，未使用槽为 0 / `-inf`；direct 情况只有第 0 槽有效。Q=0/B=0 保留空输出 shape。是否已完成实机闭环以 [status](status.md) 为准。
+host 仅可按需物化小 Q/qv/Q-scale 的合法视图，ND KV 与页表保持原 storage/stride。BSND/TND 共用按设备缓存的不可变 causal mask，仅在初始化 event 确认完成后跨 stream/线程复用；尚未完成时沿用 stream 局部 mask，不缓存用户数据。O-only 调用不生成未请求的 LSE/accumulator。`num_splits=1` 返回空 accumulator；`num_splits=0` 的公开 FP32 accumulator 为 `[26,B,Hq,Sq,512]` / `[26,B,Hq,Sq]`，按实际源分区导出归一化 partial O 与自然对数 LSE，未使用槽为 0 / `-inf`；direct 情况只有第 0 槽有效。Q=0/B=0 保留空输出 shape。公开数值与边界覆盖见 [第 7 节](#7-验收口径)。
 
 **M20 TND 生产协议。** TND query 使用同一 host、AICPU、Kernel 和量化数值组件；独立数值组件的 uint64 源前缀仍保留，公开路径通过 `QueryLengths` 直接读取带起始 0 的 int32 allocation 前缀，不转换为压紧索引或回读主机。`cu_seqlens_q:int32[B+1]` 必须从 0 单调递增或相等，末项等于实际 Q allocation 的 `Tq`，每段不超过 `max_seqlen_q<=32`；源 TND 的总分配上限为 1,048,576 token。公开生成器没有 Q-used 参数，每段完整参与计算；合法非连续 Q/Q-scale 的存储间隙不属于逻辑 token。Q scale 为 `[Tq,Hq]`，O 为 BF16 `[Tq,Hq,512]`，LSE 为 FP32 `[Hq,Tq]`；自动片真实 partial 为 `[26,Hq,Tq,512]` / `[26,Hq,Tq]`，空值及未使用槽沿用 BSND。
 
 v48 缺少 Q 前缀和总 allocation 绑定，故 TND 用 v49 连续 `int32[463+2B]`：保持 16 字头与 446 字数值调度，头第 14 字保存 `Tq`，尾部依次保存 B 个 KV used 长度和 B+1 个 Q allocation 前缀；第 13/15 字保留为零。生成器从设备前缀推导 Tq，消费者同时核对当次 Q shape、前缀、KV 长度和每个调度字。BSND 与 TND 记录不能互用；前缀或长度改变须重生成，scale 值更新仍无需重生成。隐式、生成后调用和跨层复用共享此校验。TND 沿用固定源 balanced 调度及普通/快速 FD；显式 `num_splits=1` 只在完整 M 行组边界分核，不拆 KV。零 Q 段、空 KV、全空 Q 和全空 batch 保留公开 shape 与页安全检查。源分核未访问的末尾空段在数值流水结束后补齐 O=0/LSE=`-inf`，不延长数值任务的 B 终点或改变其末尾 flush。
 
-固定 native 调度差分与地址边界由 `tests/mla/unit/int8_tnd/` 检查；公开源逐元素、双数学、LSE/partial、stride/前缀/空值、real/fake/compile 和 Trap 的历史检查在 `tests/mla/e2e/int8_tnd/`。单 batch 快速 FD 另实际调用 native TND 比较 O，并使用相同冻结 BSND 源矩阵和分区核对 LSE/partial；不把跨布局组件证据替代公开调用。公开性能固定 15 个 TND 配置，与 BSND 合计 39；实际通过、失败或未运行状态以 status 为准。
+固定 native 调度差分与地址边界由 `tests/mla/unit/int8_tnd/` 检查；公开源逐元素、双数学、LSE/partial、stride/前缀/空值、real/fake/compile 和 Trap 的历史检查在 `tests/mla/e2e/int8_tnd/`。单 batch 快速 FD 另实际调用 native TND 比较 O，并使用相同冻结 BSND 源矩阵和分区核对 LSE/partial；不把跨布局组件证据替代公开调用。公开性能固定 15 个 TND 配置，与 BSND 合计 39；性能结果须绑定实测基线。
 
 TND 的 `return_softmax_lse=False` 沿用源数值组件已有的 LSE 开关，不分配或写回可选的公开 LSE；real/fake 的内部 LSE 返回为空，公开只返回 O。FD 所需的内部 sum/max 仍按原算法计算，请求 LSE/partial 时仍完整生成公开输出；同一 metadata 可在这两类调用之间复用。
 
@@ -250,7 +250,7 @@ BSND/TND 公开性能使用合计最多 100 个固定配置，普通调用按既
 | softcap、pack_gqa、sm_margin | 数学或调度参数不能默默丢弃；MLA 适配分别实现其有效语义，硬件调度方式可不同，资源不足清楚报错 |
 | backward | 原 FIA 为推理前向，迁移不扩反向范围；qv 路径上游测试也跳过 backward。新增 MLA 前向不能误走本仓等维 backward，需要明确拦截未支持的梯度请求 |
 
-这张表是需求边界；下列来源清单和代表用例定义验收追踪关系，运行结果只记入 status。
+下列来源清单和代表用例定义各项能力与验收的对应关系。
 
 ### 4.1 源能力清单
 
@@ -360,7 +360,7 @@ metadata 指 FA3 的 `get_scheduler_metadata` → `scheduler_metadata` 调用链
 | [v46](#520-tnd-pa-softcap-记录) | 46 / 46 | 372+8B+2B·Hkv | 192/128 TND Q / ND PA KV softcap，三 mask 与全部 split 模式 |
 | [v47](#521-gqa-调度选项记录) | 47 / 47 | 380+B·(8+2·headGroups) | 两种表示、五布局的非默认有效 GQA/资源选项；三 mask、全部 split 与 softcap |
 
-协议能表达某布局，不代表该布局已接通生产入口。生成记录、设备校验、独立 attention、入口调用分别验收；当前接入层次见 [status](status.md)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 使用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
+协议能表达某布局，不代表所有公开入口都接受该布局。公开组合见 [第 2 节](#2-fa3-入口与后端边界)，生产分派见 [6.7](#67-生产接入与构建)。v1–v4 均不表达独立 Q-used 或 TND KV-used；v5 使用的归一与调度见 [6.3.4](#634-分配长度与-used-的-cpu-归一)。
 
 ### 5.1 签名与复用规则
 
@@ -606,7 +606,7 @@ v44/v45/v46 分别沿用 v25/v26/v31 的字段、字数和原生调度，遵循 
 
 私有 `_mla_gqa_metadata` 的可选 `seqused_q` 仅用于 192/128 的 TND Q / BSND 或 PA KV，保留这些布局既有的内部 Q-used 记录复用能力；host 与 fake 校验长度描述，AICPU 保存实际 allocation/used，消费时重新核对，公开生成器不传入该参数。
 
-设备复用既有压缩 partial、prefill 和 FD merge 算法，只转换原输入 head/token 和输出/accumulator 坐标。init、attention、merge 合为一次剩余 C1V2 核数发射，各核先完整校验，再初始化并执行 partial；全部 Vector（含零工作核）按固定源 FlashDecode 的同步顺序进入归并。auto 的任务枚举使用实际最大分片数，partial 地址仍使用容量步长；短 Q 归并只枚举可能有行的 tile。auto 仍返回 26 个公开 accumulator 槽，内部 partial 容量使用剩余核数，single 返回空 accumulator。单元在 `tests/mla/unit/gqa_options/`，公开验收在 `tests/mla/e2e/gqa_options/`；是否完成实机验收以 status 为准。
+设备复用既有压缩 partial、prefill 和 FD merge 算法，只转换原输入 head/token 和输出/accumulator 坐标。init、attention、merge 合为一次剩余 C1V2 核数发射，各核先完整校验，再初始化并执行 partial；全部 Vector（含零工作核）按固定源 FlashDecode 的同步顺序进入归并。auto 的任务枚举使用实际最大分片数，partial 地址仍使用容量步长；短 Q 归并只枚举可能有行的 tile。auto 仍返回 26 个公开 accumulator 槽，内部 partial 容量使用剩余核数，single 返回空 accumulator。单元在 `tests/mla/unit/gqa_options/`，公开验收在 `tests/mla/e2e/gqa_options/`；当前公开覆盖见 [7.7](#77-非量化收尾映射)。
 
 ## 6. 代码结构
 
@@ -638,14 +638,14 @@ MLA 参照本仓普通 FA3 的 `fwd_dispatch.hpp` / `fwd_dispatch_impl.hpp`、`f
 
 不同布局使用独立 context，Q/KV 起点和运行时地址保持 64 位；metadata 不保存地址或 scratch。PA 的静态 storage 描述、CPU 页检查、设备消费者和页内 Copy 职责分开，见 [6.4.3](#643-nd-paged-cache-契约与来源)。构建包含某个对象或独立 probe 通过，不证明公开调用已接通。
 
-- 保留固定 CANN 来源与版权，许可证为 [`LICENSE.cann`](../../csrc/ascend910/flash_attn_npu_3/mla/LICENSE.cann)。CATLASS 提供分层与可等价组件，不能替代源执行流程。
+- 保留固定 CANN 来源与版权，许可证为 [`LICENSE.cann`](../../csrc/ascend910/flash_attn_npu_3/mla/LICENSE.cann)。FA3 改编部分保留原版权声明，适用根目录的 [BSD 3-Clause 许可证](../../LICENSE)。CATLASS 提供分层与可等价组件，不能替代源执行流程。
 - 允许文件/类/模板组织、参数封装、构建接入和 gert/optiling 解耦；保留切块/分核、数值顺序、中间 dtype、舍入、尾块、内部布局、缓冲/预取及事件依赖。FA3 所需的长度、地址、mask/split 适配须单列。
 - 组件无法等价复用时在本仓封装源逻辑，常规迭代不改 CATLASS 子模块或 CANN 源仓。生产不转调原 CANN attention。
 - 目标兼容 910B/C 资源；核数、Cube/Vector 比和存储量来自平台查询。CPU 保留 C1V1/C1V2 不代表 910C 实机已验收。新增 AICPU 和设备头依赖须纳入 [构建清单](#673-实例与构建依赖)。
 
 ### 6.1 压缩 MLA 的来源映射
 
-以下映射固定到第 1 节 CANN commit；路径仍相对于 FIA 根目录，`../common/` 指 `attention/common/`。目标路径相对于本仓 `csrc/ascend910/flash_attn_npu_3/mla/`，各模块的实现状态见 [plan](plan.md)。
+以下映射固定到第 1 节 CANN commit；路径仍相对于 FIA 根目录，`../common/` 指 `attention/common/`。目标路径相对于本仓 `csrc/ascend910/flash_attn_npu_3/mla/`。
 
 | 固定源文件 / 函数 | CATLASS 层次与迁移位置 | 必须保留的行为 |
 | --- | --- | --- |
@@ -656,7 +656,7 @@ MLA 参照本仓普通 FA3 的 `fwd_dispatch.hpp` / `fwd_dispatch_impl.hpp`、`f
 | 同一 tiling 的 `CreateSplitInput` 非累计 Q/KV 分支及 `SplitCore` | `mla_tiling.h` 声明，`mla_tiling.cpp` 的 CPU/AICPU 共用 used 入口 | 分配起点/容量与实际使用长度分别保存，Q/KV 独立选择累计尾值或非累计 used，复用变长端点映射 |
 | `../common/op_host/split_core.cpp`：`SplitCore`、`CalcSplitInfo`、`CalcCostInfo`、`CalcSplitPlan`、`AssignByBatch/Row/Block`、`ForceAssign` | 调度模块私有的 `cann_split_core.h/.cpp` | 枚举核数、cost、容差、遍历次序和相同 cost 时保留已有方案的规则；专用 MLA 使用此文件，不是 `split_core_v2.cpp`；保留源算法分支不表示开放对应功能 |
 | 同一 `split_core.cpp`：`CalcNextTokenLeftUp`、`CalcS2Range`、`CalcS1GCache`、`SplitCore` | CPU `mla_tiling.h/.cpp`，v7 BSND / v8 TND / v9 mixed / v10/v11 PA AICPU 调用 | 右下 causal 的逐样本有效长度、块范围与成本；完整 M 块端点及全遮罩行的输出归属，见 6.2.4 |
-| 同一 `split_core.cpp`：`CalcPreTokenLeftUp`、BAND 分支、成本与分核；固定 FA3 `hopper/flash_api.cpp` 的 forward/metadata 归一化 | CPU `mla_tiling.h/.cpp`，v12/v13/v14/v15/v16 AICPU 与 host 归一化调用 | 调用级窗口归一化、逐样本 band 范围/空行和完整 M 分核，见 6.2.6。保留 `LICENSE.cann` 与 `LICENSE.fa3` |
+| 同一 `split_core.cpp`：`CalcPreTokenLeftUp`、BAND 分支、成本与分核；固定 FA3 `hopper/flash_api.cpp` 的 forward/metadata 归一化 | CPU `mla_tiling.h/.cpp`，v12/v13/v14/v15/v16 AICPU 与 host 归一化调用 | 调用级窗口归一化、逐样本 band 范围/空行和完整 M 分核，见 6.2.6。分别适用 `LICENSE.cann` 和根目录 `LICENSE` |
 | `op_host/fused_infer_attention_score_tiling.h`；`op_kernel/arch22/fia_public_define.h`：`ConstInfo`、`RunInfo` | 调度字段与 Kernel 运行时参数 | 明确字段宽度、单位、端点语义和运行时状态，见 6.2 |
 | `op_kernel/arch22/fused_infer_attention_score_v3.cpp`：`INVOKE_FIA_OP_GENERAL_IMPL` 的 `BSH_KVBSH_MLA_TILING` 分支 | 独立实例化单元、launcher 和生成器 | FP16/BF16、无 PA、无 FD、BSND 输入输出、C1V1/C1V2；不带入 FIA 注册与大签名 |
 | `op_kernel/arch22/fia_kernel_nonquant_mla.h`：`Init`、`InitCalcParamsEach`、`CalcParams`、`FlashAttention`、`ExecuteTask` | `mla_kernel.hpp` | 核区间解析、三项任务环、两级延迟流水、初始化及排空 |
@@ -668,7 +668,7 @@ MLA 参照本仓普通 FA3 的 `fwd_dispatch.hpp` / `fwd_dispatch_impl.hpp`、`f
 | `op_kernel/arch22/memory_copy.h`：`CopyAttenOutUbToGm`、`DataCopySoftmaxLseBSND` | `mla_vector_block.hpp` 的 dense 写回 | 保留 O 的 query/head 首段、中段和尾段复制，以及 LSE 的 `[B,Hq,Sq]` 寻址 |
 | `../common/op_kernel/vector_common.h`：`RowDivs`、`RowMuls`、`ComputeSoftMaxLse` | `mla_vector_ops_tile.hpp` | 保留行列 repeat 选择、广播布局、向量指令及 barrier 顺序 |
 
-对应 C1V2 dense 非 FD key 为 FP16 `105000000010000001`、BF16 `105000000010022221`；C1V1 分别为 `105000000110000001`、`105000000110022221`。key 只用于核对来源，FA3 不暴露 CANN key。源 `FiaKernelNonQuantMla::FlashDecode` 与 `fia_block_vec_flashdecode_arch22.h` 对应的 partial/归并及生产适配见 6.2.8–6.2.12；192/128 的通用数值组件见 [6.5.1](#651-192128-通用非量化数值组件)，公开接入状态见 status，不混入 512+64 分派。
+对应 C1V2 dense 非 FD key 为 FP16 `105000000010000001`、BF16 `105000000010022221`；C1V1 分别为 `105000000110000001`、`105000000110022221`。key 只用于核对来源，FA3 不暴露 CANN key。源 `FiaKernelNonQuantMla::FlashDecode` 与 `fia_block_vec_flashdecode_arch22.h` 对应的 partial/归并及生产适配见 6.2.8–6.2.12；192/128 的通用数值组件见 [6.5.1](#651-192128-通用非量化数值组件)，公开组合见 [第 2 节](#2-fa3-入口与后端边界)，不混入 512+64 分派。
 
 ### 6.2 调度字段与边界
 
@@ -716,7 +716,7 @@ MLA 参照本仓普通 FA3 的 `fwd_dispatch.hpp` / `fwd_dispatch_impl.hpp`、`f
 
 任务环按每个 M 块最后一个 query 和有效 `Sk-Sq` 计算 S2 半开范围，边界 tile 保留实际 KV 尾长度，逐行 mask 在 Vector 中执行。完全没有可见 key 的 M 块不消耗任务环槽位，O/LSE 初始化覆盖这些行；部分遮罩块保留 Cube/Vector 的原事件、softmax/aMLA、双缓冲与排空顺序。任务描述保存有效长度差，不能用容量或其他样本的长度。迁移侧生成隐式 causal mask，沿用固定源的有限负值哨兵；最终全遮罩行显式写 O=0、LSE=-inf，全局空非 PA KV 容量仍为 +inf。
 
-独立设备 probe 从固定 Git blob 编译原 CANN Kernel，传真实 2048×2048 bool 三角 mask、sparse mode 3 和原始 int64 有效 KV 长度，双方使用同一非 FD 调度。数学对照按原始长度切片并传 causal=True，不读取迁移调度或长度快照。源全遮罩 LSE=+inf 与 FA3 的符号差异单独检查；非空行 O/LSE 逐元素源一致，并接受双数学精度检查；源精度冲突按第 7 节优先级记录。组件验收状态只在 status 记录，不能把实现代码或 CPU 证据写成已通过实机验收。
+独立设备 probe 从固定 Git blob 编译原 CANN Kernel，传真实 2048×2048 bool 三角 mask、sparse mode 3 和原始 int64 有效 KV 长度，双方使用同一非 FD 调度。数学对照按原始长度切片并传 causal=True，不读取迁移调度或长度快照。源全遮罩 LSE=+inf 与 FA3 的符号差异单独检查；非空行 O/LSE 逐元素源一致，并接受双数学精度检查；源精度冲突按第 7 节优先级记录。组件实现或 CPU 证据不能替代实机验收。
 
 #### 6.2.6 独立 CPU window 归一化与范围
 
@@ -736,7 +736,7 @@ MLA 参照本仓普通 FA3 的 `fwd_dispatch.hpp` / `fwd_dispatch_impl.hpp`、`f
 
 [`WindowMask`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_vector_ops_tile.hpp) 对齐 S1G 行，在既有右界遮罩上增加左界遮罩；沿用源 `ElewiseCompute` 的有限负值哨兵和原 softmax/aMLA 舍入。规范窗口没有额外空尾行，前导全遮罩行复用 causal epilogue：O=0、LSE=-inf；全局空非 PA KV 容量仍为 +inf。归一化为 causal/无 mask 的情况由同一组件显式分类处理，不将调用级上界替换成当前 used 长度。窗口数值特化不改变共享 Cube、Copy、地址或 CPU 调度算法；v12 的 metadata 接入另见 [5.9](#59-causal--window-记录)。
 
-`tests/mla/support/mla_window_attention_probe.cpp` 编译未修改的固定 CANN Kernel，传真实 2048×2048 bool 压缩三角 mask、band sparse mode 4 和独立归一化的 pre/next；causal/无 mask 分别使用 3/0。双方使用同一非 FD 完整 M 调度，源的 int64 KV 长度直接来自原始用例。双数学 reference 从原始有效长度切片、按调用级参数独立归一化，并复用内容缓存；不读取迁移后的范围或任务描述。检查非空 O/LSE 逐元素源一致，空行先单独验源 +inf 与 FA3 符号适配，源精度限制仍按第 7 节记录。组件性能只比较同调度固定源与迁移 Kernel 和预分配 probe 调用，不称公开 E2E。验收结果只在 status 维护。
+`tests/mla/support/mla_window_attention_probe.cpp` 编译未修改的固定 CANN Kernel，传真实 2048×2048 bool 压缩三角 mask、band sparse mode 4 和独立归一化的 pre/next；causal/无 mask 分别使用 3/0。双方使用同一非 FD 完整 M 调度，源的 int64 KV 长度直接来自原始用例。双数学 reference 从原始有效长度切片、按调用级参数独立归一化，并复用内容缓存；不读取迁移后的范围或任务描述。检查非空 O/LSE 逐元素源一致，空行先单独验源 +inf 与 FA3 符号适配，源精度限制仍按第 7 节记录。组件性能只比较同调度固定源与迁移 Kernel 和预分配 probe 调用，不称公开 E2E。组件对照与公开验收分别记录结果。
 
 #### 6.2.8 显式 split 分区与持久任务
 
@@ -855,7 +855,7 @@ KV token 起点固定为 `uint64(b)*Sk`，短长度和零长度不压缩 cache�
 
 ### 6.4 输入 stride 与地址校验
 
-长度调度产生逻辑 token 起点，输入描述把它换算成真实元素地址。Q、qv、K、V 各有自己的 `data_ptr()`、stride 与 storage offset；metadata 不保存这些地址或 stride。下述 CPU 地址校验、设备消费及生产接入是不同验收层次，当前层次见 [status](status.md)。
+长度调度产生逻辑 token 起点，输入描述把它换算成真实元素地址。Q、qv、K、V 各有自己的 `data_ptr()`、stride 与 storage offset；metadata 不保存这些地址或 stride。下述 CPU 地址校验、设备消费及生产接入分别检查，不能互相替代。
 
 #### 6.4.1 BSND 输入 stride 与地址校验
 
@@ -908,7 +908,7 @@ Q/qv 复用 BSND/TND stride 描述；512+64 cache 为 `k:[Np,P,1,64]`、`v:[Np,P
 | `tests/pytest/test_fia_mla_d512_pa_dim0_noncontiguous.py` 的 `_build_block_table` / `STRIDE_PROFILES` / `_cpu_golden` | 源覆盖乱序页、尾页、无关物理页、未用列 -1 和三路独立 dim0 padding；golden 的内容 K/V 独立。迁移重构为共享内容 KV 后保留独立 RoPE/内容 stride，不把源独立 K/V 数据原样当成 FA3 可表达用例 |
 | 官方 `flash_api.cpp::mha_fwd` / `mha_fwd_get_scheduler_metadata` | 页表末维连续且保存 `page_table_batch_stride`，K/V 保存各自 stride；前向由页表列数和 P 推导容量，生成器仅收到 P 与逻辑长度。metadata 不绑定页号与物理 cache 地址，不能在公开签名之外增加页表参数 |
 
-CANN 表内路径仍相对于第 1 节 FIA 根目录，标明 `attention/common/` 的路径相对于源仓根目录。页大小/分派的源码可表达性与实机正确性分开验收；源测试仅提供用例依据，实际运行证据见 status。
+CANN 表内路径仍相对于第 1 节 FIA 根目录，标明 `attention/common/` 的路径相对于源仓根目录。页大小/分派的源码可表达性与实机正确性分开验收；源测试仅提供用例依据，不构成实机通过声明。
 
 ##### 地址与有效页
 
@@ -966,7 +966,7 @@ QK 的 L1 循环顺序为 N→K→M，M/N 子块均为 128。576 维并非先算
 
 Vector 保留 `SoftmaxFlashV2<float,...WITHOUT_BRC>` 和其动态 tiling；随后执行 `AmlaVecCompute`：计算 `round(-max/ln2)`、指数缩放因子、FP16/BF16 因子往返转换及 `cof/eps` 修正。P 在缩放后以 `CAST_ROUND` 转成输入 dtype。跨 S2 块的 `nUpdate` 含 `-30` 截断、`1.5` 修正、`1e-6` 和 `2^23`，按 int32 加法更新 FP32 PV 缓冲的位表示；不能替换为常规 `O *= exp(old_max-new_max)`。
 
-R5 修复这一位修正的零值边界：块内 PV 恰好抵消为 0 时，固定源的负 int32 原子加可将零位模式变成 NaN，随后丢失后续块贡献并在输出端清零。用户已授权修复此数值问题；目标在现有 Cube/Vector 握手之间读回 PV，在 UB 执行同一 int32 加法，但对原零值保留 0，再写回。复用原 tmp1/mask 缓冲，读前等待 Vector、写前等待 Vector、写后等待 MTE3，避免与下一组或 LSE 复用冲突；不增加 workspace 或改协议。非零值的位运算保持源顺序，数值阈值不变。此边界是已实测、明确修复的固定源缺陷，不适用“源逐元素一致即可豁免数学失败”；公开 `test_mla_block_cancellation` 用解析输入覆盖五布局、双 dtype、三 split 和 softcap 开/关。
+这一位修正存在需要处理的零值边界：块内 PV 恰好抵消为 0 时，固定源的负 int32 原子加可将零位模式变成 NaN，随后丢失后续块贡献并在输出端清零。目标在现有 Cube/Vector 握手之间读回 PV，在 UB 执行同一 int32 加法，但对原零值保留 0，再写回。复用原 tmp1/mask 缓冲，读前等待 Vector、写前等待 Vector、写后等待 MTE3，避免与下一组或 LSE 复用冲突；不增加 workspace 或改协议。非零值的位运算保持源顺序，数值阈值不变。此边界是已实测、明确修复的固定源缺陷，不适用“源逐元素一致即可豁免数学失败”；公开 `test_mla_block_cancellation` 用解析输入覆盖五布局、双 dtype、三 split 和 softcap 开/关。
 
 非零 softcap 的输出分母使用实际送入 Cube 的输入 dtype P 总和，避免 P 的舍入偏差被近常量 V 放大。`Tile::RowSum` 复用固定源 `vector_common.h` 的行归约，在原 FP32 score 缓冲中归约 Cast 回 FP32 的 P；`aMlaSumUb` 保存各块总和，前块按相同 nUpdate 位修正后累加，零总和仍保留 0。LSE 和 split 归并权重继续使用未量化的 softmax sum/max；cap=0 保留源分母。此变更不增加 UB 或 GM 分配，公开 `test_mla_softcap_normalization` 用非均匀 logits 与常量 V 通道看护五布局、双 dtype 和三 split。
 
@@ -991,7 +991,7 @@ PV 同样按 N→K→M 循环，M/N 为 128、K 的 L1/L0 片分别为 256/128�
 
 组件当前接受 M≤512，N≤8192；非 BRC 限 N≤1024，保证 softmax 的 UB 行对齐。mask 复用逐行 `WindowMask`；宽行单独发射 repeat，避免 uint8 repeat stride 溢出。direct 的 O/LSE 写 BSND / `[B,Hq,Sq]`，全遮罩行显式为 0/-inf。partial 保留源 FP32 O 和八路 sum/max；无 tile 的片由设备写 0/0/-inf，有 tile 的全遮罩行保留源原始统计。归并复用 [`MlaSplitKvMerge`](../../csrc/ascend910/flash_attn_npu_3/mla/mla_split_kv_merge_block.hpp) 的 `HeadDim=128` 特化，默认 512 不变；无贡献行、accumulator 和 193..256 片的源缓冲域外数学验收沿用 [6.2.10](#6210-独立-bsnd-fd-归并与-accumulator-适配)。组件测试将 KV head 映射为虚拟 batch 验证归并，公开头布局和生产协议不属于该组件的验收边界。
 
-`tests/mla/unit/prefill_attention/test_attention.py` 与 `tests/mla/support/mla_prefill_reference.py` 从原始独立 Q/K/V 和窗口枚举可见键，验证分组、stride、尾块/空行、direct/partial/merge、重复执行及 guard；FP64/输入 dtype 结果使用既有内容缓存。oracle 由固定 Git blob 的通用 Kernel/Cube/Vector 编译，原始数值头不改，片段夹具只提供端点和缓冲地址；原生预检查要求实际分派属于通用 template 3/4，已观测模板与结果只在 status 记录。实际加载、构建依赖和原始证据由统一驱动校验；组件通过不能替代各布局的公开 real/fake/compile/E2E。
+`tests/mla/unit/prefill_attention/test_attention.py` 与 `tests/mla/support/mla_prefill_reference.py` 从原始独立 Q/K/V 和窗口枚举可见键，验证分组、stride、尾块/空行、direct/partial/merge、重复执行及 guard；FP64/输入 dtype 结果使用既有内容缓存。oracle 由固定 Git blob 的通用 Kernel/Cube/Vector 编译，原始数值头不改，片段夹具只提供端点和缓冲地址；原生预检查要求实际分派属于通用 template 3/4，实测须记录实际模板和结果。实际加载、构建依赖和原始证据由统一驱动校验；组件通过不能替代各布局的公开 real/fake/compile/E2E。
 
 #### 6.5.2 prefill 共用生产接入
 
@@ -1157,11 +1157,7 @@ kernel 时间及无 metadata 调用时间用于已迁移组件的源行为对照
 
 **当前图验收边界：** MLA 使用普通调用路径，图专用适配与测试已按用户要求移除；当前只验收普通调用性能，不再采样捕获/重放。删除前的图性能仍按当时口径记为失败，不并入当前 eager 均值，不将移除特殊处理称为图性能达标。
 
-**M17 收尾验收例外：** 2026-10-18 完整实测与文档/质量检查完成后，用户明确确认“接受已知限制并提交”，允许 M17 在图性能未达平均门槛时完成收尾提交。图性能实测失败、退化明细和证据位置从 `git show ebdf3eb:docs/mla/status.md` 查询；当时的工具报告失败，默认 `mean_ratio <= 1.0` 不变。该例外只适用于 M17 收尾，不扩展到正确性、eager 或后续改动，也不表示已达到源 CANN 等速。此前 M16 的单次授权及证据由 Git 保留。
-
-INT8 图专项验收调整与历史暂缓授权的关系见 [3.4](#34-int8-压缩-mla-扩展)。
-
-**R5 收尾验收例外：** 2026-10-19 用户在复核同输入、同设备的修复前后及 CANN 对照后，明确确认“记录既有性能差距，提交本轮改动”。原调度/eager 固定矩阵复测通过；新增的 10 个压缩 MLA 默认路径配置在修复前后均超过公开平均门槛，该既有差距按本次授权接受后收尾。保留所有实测结果、退化明细和原始证据，不将未达标写成通过，不混合不同集合的平均。该例外只适用于 R5 测试精简与数值修复提交，不扩大到后续改动；默认 `mean_ratio <= 1.0` 和正确性要求不变，具体结果见 [status](status.md)。
+**已知性能限制：** 历史 MLA 图性能未达到平均门槛；10 个压缩 MLA 默认路径配置也曾在修复前后均超过公开平均门槛。保留这些未达标结论，不能用正确性通过或移除图专项替代性能通过，不宣称所有配置均达到源 CANN 等速。后续性能变更仍按 `mean_ratio <= 1.0` 验收，具体结果须绑定当次实现、配置和原始采样。
 
 **覆盖：** 非量化为两种表示 × FP16/BF16 × dense/TND/PA × mask × 长短 KV × 单/多 query × 分组/尾块/stride；加 metadata 有无、重复使用、不同 scale、长度变更、split 自动/显式。可采用代表性组合加针对性边界测试，不要求机械的全笛卡尔积，但每项源能力都要能追溯到用例或明确排除理由。INT8 按 3.4 的混合 dtype、两布局及源有效组合单列覆盖，不套用非量化的全部选项。
 
@@ -1211,7 +1207,7 @@ python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py -k int8
 
 设备选择沿用 `ASCEND_RT_VISIBLE_DEVICES`，例如设为 `7` 后测试使用逻辑设备 0。常规 FA3 回归继续用原来的 `test_flash_attn_npu_v3*.py`、`test_torch_compile_fa3.py`；无需 MLA 自定义 pytest 插件或环境包装器。测试结果可通过标准 `--junitxml=<仓库外路径>` 保存；构建和 golden 缓存沿用仓库公共入口。既有全量 CI 可直接选择该文件；非 910B/C 设备跳过本文件。
 
-旧 `python3 -m tests.mla` 和 `python3 -m tests.mla_validation` 已删除。需要复现历史迁移验收时，在独立 checkout 检出对应提交，并按其 status 的环境及证据说明操作，不在当前树运行已删除的命令。
+公开测试统一使用上述 pytest 入口，性能和组件对照须另行准备与实际源码匹配的环境。
 
 ### 7.5 512+64 组合覆盖
 
@@ -1246,7 +1242,7 @@ python3 -m pytest -q tests/test_flash_attn_npu_v3_mla.py -k int8
 | 无 host readback | `test_mla_metadata_device_only` |
 | 非法输入、选项、grad、append/rotary、长度和记录描述 | `test_mla_invalid_inputs`、`test_mla_unsupported_options`、`test_mla_grad_rejected`、`test_mla_cache_update_rejected`、`test_mla_metadata_and_length_rejections`、`test_mla_prefix_rejections` |
 
-以上不构成 910C 实机或性能通过声明，当前实测环境见 status。
+以上不构成 910C 实机或性能通过声明；实机验收使用 910B。
 
 ### 7.8 INT8 收尾映射
 

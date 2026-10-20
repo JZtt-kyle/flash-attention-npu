@@ -903,7 +903,7 @@ bool BuildCausalPagedTndMetadata(const MlaPagedShape& shape, const MlaPlatformIn
 } // namespace flash_attn::mla
 
 // BSND/TND PA window adapters. Pinned CANN/FA3 algorithms and licenses remain in
-// mla_tiling.cpp, mla_tiling.cpp, LICENSE.cann and LICENSE.fa3; page Copy is unchanged.
+// mla_tiling.cpp, LICENSE.cann and root LICENSE; page Copy is unchanged.
 
 namespace flash_attn::mla {
 namespace {

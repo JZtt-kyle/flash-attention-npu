@@ -34,6 +34,3 @@ venv
 
 # compile-time generated file
 flash_attn_config.py
-
-# Ascend runtime scratch logs; MLA build/cache/evidence lives in external MLA_WORK_DIR.
-/kernel_meta/

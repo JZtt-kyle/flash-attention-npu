@@ -471,7 +471,7 @@ MlaCausalStatus BuildCausalSchedule(const MlaCausalScheduleInput& input, MlaCaus
 
 // Source: CANN ca18aee610729ca5270a44e2d84c751bc687fbf0 split_core.cpp
 // and official FA3 d15f1531a460ba456f41b01a774f33ab2db8febf hopper/flash_api.cpp.
-// Licenses: mla/LICENSE.cann and mla/LICENSE.fa3.
+// Licenses: mla/LICENSE.cann and root LICENSE.
 
 namespace flash_attn::mla {
 

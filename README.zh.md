@@ -399,8 +399,8 @@ func/varlen 的 `num_splits` 默认 1，cache 默认 0（自动）；五种布�
 
 后端使用 CANN 的 910B 和 `Ascend910_93`（910C）平台资源，并检查 C1V2 与内存容量。
 实机验收使用 910B；910C 核对 CANN 平台配置兼容，不宣称已完成 910C 实机验收。
-布局、页大小、长度和空值规则见 [MLA 契约](docs/mla/design.md#2-fa3-入口与后端边界)，
-实测边界见 [status](docs/mla/status.md)。下文通用约束用于普通 attention，MLA 以此契约为准。
+布局、页大小、长度、空值规则和验收边界见 [MLA 契约](docs/mla/design.md#2-fa3-入口与后端边界)。
+下文通用约束用于普通 attention，MLA 以此契约为准。
 
 ```python
 import torch
@@ -425,7 +425,7 @@ ND 分页 cache 为 `[num_pages, page_size, Hkv, D]`，页大小是 `[16, 1024]`
 逻辑容量不超过 16384，页表为 int32。
 
 MLA 使用普通调用路径，不按捕获状态增加特殊处理。当前验收覆盖普通调用与多 stream，
-范围见 [验收边界](docs/mla/design.md#22-后端选项与返回值)，实测见 [当前证据](docs/mla/status.md)。
+范围见 [验收边界](docs/mla/design.md#22-后端选项与返回值)。
 
 [MLA E2E 测试](tests/test_flash_attn_npu_v3_mla.py) 覆盖公开 dense、varlen、分页接口、
 metadata 复用、fake/compile 和 stream 生命周期。构建 v3 并加载 CANN 环境后，使用仓库原有 pytest 入口：

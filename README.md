@@ -416,7 +416,7 @@ The backend uses CANN's 910B and `Ascend910_93` (910C) platform resources, with
 C1V2 and memory checks. Device validation runs on 910B; 910C compatibility is
 checked against CANN platform configurations without a 910C hardware claim.
 See the [MLA contract](docs/mla/design.md#2-fa3-入口与后端边界) for layout, page-size,
-length and empty-output rules, and [status](docs/mla/status.md) for validation limits.
+length, empty-output rules and validation limits.
 The general attention constraints below apply to ordinary attention; MLA uses this contract.
 
 ```python
@@ -445,8 +445,7 @@ are `[num_pages, page_size, Hkv, D]`; page size must be a multiple of 16 in
 
 MLA uses the ordinary call path without capture-specific handling. Current
 validation covers ordinary calls and multiple streams; see the
-[validation scope](docs/mla/design.md#22-后端选项与返回值) and
-[current evidence](docs/mla/status.md).
+[validation scope](docs/mla/design.md#22-后端选项与返回值).
 
 The [MLA E2E tests](tests/test_flash_attn_npu_v3_mla.py) cover the public dense,
 varlen and paged APIs, metadata reuse, fake/compile and stream lifetimes. After building

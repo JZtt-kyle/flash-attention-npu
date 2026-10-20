@@ -607,7 +607,7 @@ bool BuildCausalMixedMetadata(const MlaUsedShape& shape, const MlaPlatformInfo& 
                               bool queryTotalFromPrefix = false);
 } // namespace flash_attn::mla
 
-// Nonpaged window protocols; source/license: mla_tiling.cpp and LICENSE.cann / LICENSE.fa3.
+// Nonpaged window protocols; source/license: mla_tiling.cpp and LICENSE.cann / root LICENSE.
 namespace flash_attn::mla {
 constexpr uint32_t kMlaWindowBsndMetadataVersion = 12;
 constexpr uint32_t kMlaMetadataWindowBsnd = 12;

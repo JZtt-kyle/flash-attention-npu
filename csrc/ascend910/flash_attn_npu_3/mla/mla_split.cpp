@@ -24,9 +24,9 @@
 #include "mla_split_metadata_consumer.h"
 
 // Adapted from the fixed sources listed in mla_split.h. Native algorithms
-// remain in detail/cann_split_core; checked CPU layout/FA3 adaptation is local.
+// remain in cann_split_core.cpp; checked CPU layout/FA3 adaptation is local.
 // FA3 portions: Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang,
-// Vijay Thakkar, Pradeep Ramani, Tri Dao; BSD 3-Clause (LICENSE.fa3).
+// Vijay Thakkar, Pradeep Ramani, Tri Dao; BSD 3-Clause (root LICENSE).
 
 namespace flash_attn::mla {
 namespace {

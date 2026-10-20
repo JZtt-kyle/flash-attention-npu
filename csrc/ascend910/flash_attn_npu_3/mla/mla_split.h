@@ -14,7 +14,7 @@
 
 // Sources: CANN ca18aee610729ca5270a44e2d84c751bc687fbf0 SplitCore and
 // fia_tiling_nonquant_mla.cpp; FA3 d15f1531a460ba456f41b01a774f33ab2db8febf
-// hopper/flash_api.cpp and block.h. See LICENSE.cann and LICENSE.fa3.
+// hopper/flash_api.cpp and block.h. See LICENSE.cann and root LICENSE.
 
 namespace flash_attn::mla {
 
@@ -107,7 +107,7 @@ MlaScheduleStatus GetSplitAccumulatorOffsets(const MlaAccumulatorInput& input, i
 // Source arithmetic: CANN ca18aee610729ca5270a44e2d84c751bc687fbf0
 // split_core.cpp / fia_tiling_nonquant_mla.cpp and FA3
 // d15f1531a460ba456f41b01a774f33ab2db8febf hopper/block.h / flash_api.cpp.
-// FA3 portions are BSD 3-Clause; see LICENSE.fa3.
+// FA3 portions are BSD 3-Clause; see root LICENSE.
 namespace flash_attn::mla {
 
 struct MlaSplitKvPlanConfig {
@@ -206,7 +206,7 @@ MlaScheduleStatus BuildSplitKvPlan(const MlaSplitKvPlanConfig& config, const Mla
 
 // CANN ca18aee610729ca5270a44e2d84c751bc687fbf0 range/workspace arithmetic;
 // FA3 d15f1531a460ba456f41b01a774f33ab2db8febf split/accumulator convention.
-// FA3 portions are BSD 3-Clause; see LICENSE.fa3.
+// FA3 portions are BSD 3-Clause; see root LICENSE.
 namespace flash_attn::mla {
 
 struct MlaSplitTndPlanConfig {
@@ -337,7 +337,7 @@ MlaScheduleStatus BuildSplitMixedPlan(const MlaSplitMixedPlanConfig&, const MlaW
 } // namespace flash_attn::mla
 
 // Pinned source geometry: mla_tiling.h / mla_tiling.cpp.
-// Explicit split and accumulator provenance: mla_split.h (LICENSE.fa3).
+// Explicit split and accumulator provenance: mla_split.h (root LICENSE).
 namespace flash_attn::mla {
 // Independent bounds: M can be any source divisor in [128,256], or 256
 // with a tail. maxGroups*256 is NOT the persistent row bound.
@@ -366,7 +366,7 @@ MlaScheduleStatus BuildSplitPagedBsndPlan(const MlaPagedShape&, const MlaPlatfor
 } // namespace flash_attn::mla
 
 // Pinned PA geometry: mla_tiling.h / mla_tiling.cpp.
-// FA3 split/accumulator provenance: mla_split.h (LICENSE.fa3).
+// FA3 split/accumulator provenance: mla_split.h (root LICENSE).
 namespace flash_attn::mla {
 struct MlaSplitPagedTndBudget {
     uint64_t maxGroups, maxTasks, partialRows, scratchBytes, userBytes, totalBytes;
@@ -433,7 +433,7 @@ MlaScheduleStatus BuildSplitPagedTndPlan(const MlaPagedShape&, const MlaPlatform
 // Source partition/FD arithmetic: CANN ca18aee610729ca5270a44e2d84c751bc687fbf0
 // attention/common/op_host/split_core.cpp and fia_tiling_nonquant_mla.cpp.
 // FA3 accumulator layout: d15f1531a460ba456f41b01a774f33ab2db8febf
-// hopper/flash_api.cpp, BSD 3-Clause; see LICENSE.fa3.
+// hopper/flash_api.cpp, BSD 3-Clause; see root LICENSE.
 namespace flash_attn::mla {
 
 struct MlaAutoSplitKvConfig {
@@ -618,7 +618,7 @@ MlaScheduleStatus BuildAutoSplitTndPlan(const MlaAutoSplitTndPlanConfig& config,
 
 // CANN ca18aee610729ca5270a44e2d84c751bc687fbf0 native AIC/FD partition;
 // FA3 d15f1531a460ba456f41b01a774f33ab2db8febf accumulator convention.
-// FA3 portions are BSD 3-Clause; see LICENSE.fa3.
+// FA3 portions are BSD 3-Clause; see root LICENSE.
 namespace flash_attn::mla {
 struct MlaAutoSplitMixedPlanConfig {
     MlaTndBsndShape shape;
@@ -640,7 +640,7 @@ MlaScheduleStatus BuildAutoSplitMixedPlan(const MlaAutoSplitMixedPlanConfig&, co
 } // namespace flash_attn::mla
 
 // Pinned source geometry: mla_tiling.h / mla_tiling.cpp.
-// Native split and accumulator provenance: mla_split.h (LICENSE.fa3).
+// Native split and accumulator provenance: mla_split.h (root LICENSE).
 namespace flash_attn::mla {
 // Static bounds retain native variable partitions: at most 2*AIC FD slots,
 // each at most 256 rows. No uniform explicit split or per-M allocation.
@@ -704,7 +704,7 @@ MlaScheduleStatus BuildAutoSplitPagedTndPlan(const MlaPagedShape&, const MlaPlat
 // CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
 // Source scheduling: CANN ca18aee610729ca5270a44e2d84c751bc687fbf0 SplitCore.
 // FA3 pack/resource semantics: d15f1531a460ba456f41b01a774f33ab2db8febf
-// hopper/flash_api.cpp, BSD 3-Clause; see LICENSE.fa3.
+// hopper/flash_api.cpp, BSD 3-Clause; see root LICENSE.
 
 namespace flash_attn::mla {
 struct MlaGqaOptions {

@@ -3896,7 +3896,7 @@ def flash_attn_func(
     512-dimensional query content, and v is shared content K/V with one head.
     Prefill MLA uses q/k dimensions 192 and independent v dimension 128 with qv=None.
     Both representations support nonnegative finite softcap and num_splits=0..256.
-    MLA contracts are in docs/mla/design.md; current acceptance is in docs/mla/status.md.
+    MLA contracts and validation limits are in docs/mla/design.md.
 
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
@@ -4022,7 +4022,7 @@ def flash_attn_varlen_func(
     and nonnegative finite softcap. Metadata is generated internally on every call;
     record selection is documented in docs/mla/design.md, section 2.1.
     There is no explicit metadata or page-table parameter; paged MLA uses
-    flash_attn_with_kvcache. Current acceptance is in docs/mla/status.md.
+    flash_attn_with_kvcache.
     """
     if q.device.type == "npu" and (
         qv is not None
@@ -4318,8 +4318,7 @@ def flash_attn_with_kvcache(
     and paged layouts accept nonnegative finite softcap.
     Automatic requests return 26 FP32
     accumulator slots; the native partition determines the actual splits per M
-    block and unused slots are 0/-inf. Contracts are in docs/mla/design.md;
-    current acceptance is in docs/mla/status.md.
+    block and unused slots are 0/-inf. Contracts are in docs/mla/design.md.
     Generic FA3 append and rotary options below remain unsupported for MLA.
 
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from

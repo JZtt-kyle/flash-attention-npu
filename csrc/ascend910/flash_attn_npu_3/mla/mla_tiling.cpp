@@ -1497,7 +1497,7 @@ bool BuildCausalFullSchedule(const MlaUsedShape& shape, const MlaPlatformInfo& p
 // FA3 normalization follows Dao-AILab/flash-attention
 // d15f1531a460ba456f41b01a774f33ab2db8febf hopper/flash_api.cpp.
 // Copyright (c) 2024, Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar,
-// Pradeep Ramani, Tri Dao. BSD 3-Clause license reproduced in LICENSE.fa3.
+// Pradeep Ramani, Tri Dao. BSD 3-Clause license reproduced in root LICENSE.
 // Changes: checked bounds, explicit empty rows, no tensor/runtime dependency.
 
 namespace flash_attn::mla {
