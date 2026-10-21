@@ -1,9 +1,11 @@
 # Copyright (c) 2026, Minghua Shen.
+import inspect
 import math
 
 import pytest
 import torch
 import torch_npu
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 from flash_attn_npu_3 import (
     flash_attn_func,
@@ -34,6 +36,75 @@ def _is_ascend950():
 WINDOW_SIZE = (-1, -1)
 SMALL_RANGE = (-1.0, 1.0)
 WIDE_RANGE = (-5.0, 5.0)
+
+
+def test_flash_attn_metadata_signature():
+    # Fixed FA3 source: hopper/flash_attn_interface.py at d15f1531a460ba456f41b01a774f33ab2db8febf.
+    parameters = inspect.signature(get_scheduler_metadata).parameters
+    assert tuple(parameters) == (
+        "batch_size",
+        "max_seqlen_q",
+        "max_seqlen_k",
+        "num_heads_q",
+        "num_heads_kv",
+        "headdim",
+        "cache_seqlens",
+        "qkv_dtype",
+        "headdim_v",
+        "cu_seqlens_q",
+        "cu_seqlens_k_new",
+        "cache_leftpad",
+        "page_size",
+        "max_seqlen_k_new",
+        "causal",
+        "window_size",
+        "attention_chunk",
+        "has_softcap",
+        "num_splits",
+        "pack_gqa",
+        "sm_margin",
+    )
+    assert all(p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD for p in parameters.values())
+
+
+@pytest.mark.skipif(not _is_ascend910(), reason="Ascend910 only")
+@pytest.mark.parametrize("data_type", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("has_softcap", [False, True])
+def test_flash_attn_metadata_real_fake_contract(data_type, has_softcap):
+    lengths = torch.full((2,), 128, dtype=torch.int32, device="npu")
+    args = (
+        2,
+        3,
+        128,
+        4,
+        2,
+        128,
+        lengths,
+        data_type,
+        128,
+        None,
+        None,
+        None,
+        None,
+        0,
+        False,
+        WINDOW_SIZE,
+        0,
+        has_softcap,
+        1,
+        None,
+        0,
+    )
+    actual = get_scheduler_metadata(*args)
+    with FakeTensorMode(allow_non_fake_inputs=True):
+        fake = get_scheduler_metadata(*args)
+    assert actual.shape == fake.shape == (2376,)
+    assert actual.dtype == fake.dtype == torch.uint8
+    assert actual.device == fake.device == lengths.device
+    assert actual.stride() == fake.stride() == (1,)
+    for keyword in ("softcap", "softmax_scale"):
+        with pytest.raises(TypeError, match=keyword):
+            get_scheduler_metadata(*args, **{keyword: 0.23})
 
 
 def _rand_npu(shape, data_type, value_range):
