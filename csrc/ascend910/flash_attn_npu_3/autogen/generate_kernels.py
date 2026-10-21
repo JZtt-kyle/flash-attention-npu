@@ -31,7 +31,7 @@ DTYPE_MAP = {
 # layout key -> (display name, fwd IS_TND bool token, bwd layout constant token)
 LAYOUTS = [
     ("bsnd", "BSND", "false", "BSND"),
-    ("tnd",  "TND",  "true",  "TND"),
+    ("tnd", "TND", "true", "TND"),
 ]
 
 PRELUDE = (
@@ -44,8 +44,7 @@ PRELUDE = (
 
 def _header(family_desc: str, layout_display: str) -> str:
     return (
-        PRELUDE
-        + f"// v3 {family_desc}, {layout_display} variant. One explicit instantiation per\n"
+        PRELUDE + f"// v3 {family_desc}, {layout_display} variant. One explicit instantiation per\n"
         "// translation unit so the kernel templates compile in parallel across\n"
         "// cores; head_dim is a runtime axis (switch/tiling inside the impl), not a\n"
         "// template parameter, so it is not a generation axis.\n\n"
@@ -97,12 +96,116 @@ class Kernel:
     content: str
 
 
+def mla_kernel(dtype: str, layout: str, implementation: str, defines: dict) -> Kernel:
+    """One dtype/layout instantiation; numerical code stays in the shared layers."""
+    values = dict(dtype=dtype, title=dtype.title(), ctype=DTYPE_MAP[dtype])
+    body = PRELUDE + (
+        "// Generated MLA instantiation. CANN source copyrights and licenses\n"
+        "// are retained in the shared implementation and mla/LICENSE.cann.\n"
+    )
+    for name, value in defines.items():
+        body += f"#define {name} {value.format(**values)}\n"
+    body += f'#include "../mla/{implementation}"\n'
+    return Kernel("mla", dtype, layout, f"mla_dispatch_{dtype}_{layout}.cpp", body)
+
+
 def get_all_kernels() -> List[Kernel]:
     kernels: List[Kernel] = []
     for dtype in DTYPE_MAP:
         for layout in LAYOUTS:
             kernels.append(fwd_kernel(dtype, layout))
             kernels.append(bwd_kernel(dtype, layout))
+
+    # Preserve separate compiler instantiations, with one declaration of each
+    # supported family instead of maintaining two copies of every wrapper.
+    direct = [
+        ("bsnd", "DENSE", "dense", "Dense"),
+        ("tnd", "TND", "tnd", "Tnd"),
+        ("tnd_bsnd", "MIXED", "tnd_bsnd", "TndBsnd"),
+        ("bsnd_used", "USED", "bsnd_used", "BsndUsed"),
+        ("tnd_used", "USED", "tnd_used", "TndUsed"),
+        ("paged_bsnd", "PAGED", "paged_bsnd", "PagedBsnd"),
+        ("paged_tnd", "PAGED", "paged_tnd", "PagedTnd"),
+    ]
+    split_layouts = [
+        ("bsnd", "Bsnd"),
+        ("tnd", "Tnd"),
+        ("mixed", "Mixed"),
+        ("paged_bsnd", "PagedBsnd"),
+        ("paged_tnd", "PagedTnd"),
+    ]
+    for dtype in DTYPE_MAP:
+        for layout, prefix, entry, launch in direct:
+            defines = {
+                f"MLA_{prefix}_TYPE": "{ctype}",
+                f"MLA_{prefix}_ENTRY": f"mla_{entry}_{{dtype}}",
+                f"MLA_{prefix}_LAUNCH": f"Launch{launch}{{title}}",
+            }
+            if prefix in ("USED", "PAGED"):
+                defines[f"MLA_{prefix}_TND"] = str(int("tnd" in layout))
+            kernels.append(
+                mla_kernel(
+                    dtype,
+                    layout,
+                    "mla_dispatch_impl.hpp",
+                    defines,
+                )
+            )
+        for layout, launch in split_layouts:
+            defines = {
+                "MLA_SPLIT_TYPE": "{ctype}",
+                "MLA_SPLIT_PARTIAL": f"mla_split_{layout}_partial_{{dtype}}",
+                "MLA_SPLIT_MERGE": f"mla_split_{layout}_merge_{{dtype}}",
+                "MLA_SPLIT_LAUNCH": f"LaunchSplit{launch}{{title}}",
+                f"MLA_SPLIT_{layout.upper()}": "1",
+            }
+            if layout == "paged_tnd":
+                defines["MLA_SPLIT_INIT"] = "mla_split_paged_tnd_init_{dtype}"
+            kernels.append(
+                mla_kernel(dtype, f"split_{layout}", "mla_split_dispatch_impl.hpp", defines)
+            )
+
+            defines = {
+                "MLA_AUTO_TYPE": "{ctype}",
+                "MLA_AUTO_INIT": f"mla_auto_split_{layout}_init_{{dtype}}",
+                "MLA_AUTO_PARTIAL": f"mla_auto_split_{layout}_partial_{{dtype}}",
+                "MLA_AUTO_MERGE": f"mla_auto_split_{layout}_merge_{{dtype}}",
+                "MLA_AUTO_LAUNCH": f"LaunchAutoSplit{launch}{{title}}",
+                "MLA_AUTO_PAGED": str(int(layout.startswith("paged_"))),
+                "MLA_AUTO_TND": str(int(layout in ("tnd", "mixed", "paged_tnd"))),
+                "MLA_AUTO_MIXED": str(int(layout == "mixed")),
+            }
+            kernels.append(
+                mla_kernel(
+                    dtype, f"auto_split_{layout}", "mla_auto_split_dispatch_impl.hpp", defines
+                )
+            )
+        kernels.append(
+            mla_kernel(
+                dtype,
+                "prefill_bsnd",
+                "mla_prefill_dispatch_impl.hpp",
+                {
+                    "MLA_PREFILL_TYPE": "{ctype}",
+                    "MLA_PREFILL_INIT": "MlaPrefillTnd{title}Init",
+                    "MLA_PREFILL_ATTENTION": "MlaPrefillBsnd{title}Attention",
+                    "MLA_PREFILL_MERGE": "MlaPrefillBsnd{title}Merge",
+                    "MLA_PREFILL_LAUNCH": "LaunchPrefillBsnd{title}",
+                },
+            )
+        )
+        kernels.append(
+            mla_kernel(
+                dtype,
+                "gqa",
+                "mla_gqa_dispatch_impl.hpp",
+                {
+                    "MLA_GQA_TYPE": "{ctype}",
+                    "MLA_GQA_ATTENTION": "MlaGqa{title}Attention",
+                    "MLA_GQA_LAUNCH": "LaunchGqa{title}",
+                },
+            )
+        )
     return kernels
 
 

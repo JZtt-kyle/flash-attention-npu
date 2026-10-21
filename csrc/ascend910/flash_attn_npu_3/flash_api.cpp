@@ -35,6 +35,8 @@ using namespace KernelCommon;
 #include "fa_split.h"
 #include "fwd_dispatch.hpp"
 #include "bwd_dispatch.hpp"
+#include "mla/mla_validation.h"
+#include "mla/mla_forward.h"
 #include <cmath>
 
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
@@ -174,7 +176,159 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::Tensor> scheduler_metadata_, // (b + 1)
     int64_t num_splits, std::optional<bool> pack_gqa_, int64_t sm_margin)
 {
+    const bool isMla = flash_attn::mla::CheckForwardBoundary(q, k, v, q_v_, cu_seqlens_q_.has_value(),
+                                                             cu_seqlens_k_.has_value(), page_table_.has_value());
     const c10::OptionalDeviceGuard device_guard(device_of(q));
+    if (isMla) {
+        TORCH_CHECK(!k_new_ && !v_new_ && !out_ && !cu_seqlens_k_new_ && (cu_seqlens_q_ || !max_seqlen_q_) &&
+                        (cu_seqlens_k_ || !max_seqlen_k_) && !kv_batch_idx_ && !leftpad_k_ && !rotary_cos_ &&
+                        !rotary_sin_ && !seqlens_rotary_ && !q_descale_ && !k_descale_ && !v_descale_ &&
+                        is_rotary_interleaved,
+                    "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
+        TORCH_CHECK(attention_chunk == 0 && (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 &&
+                                                                 (!cu_seqlens_k_ || cu_seqlens_q_))),
+                    "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
+        TORCH_CHECK(std::isfinite(softcap) && softcap >= 0, "MLA: softcap must be finite and non-negative in FP32");
+        float scale = softmax_scale_.value_or(1.0f / std::sqrt(q_v_ ? 576.0f : 192.0f));
+        TORCH_CHECK(std::isfinite(scale), "MLA: softmax_scale must be finite in FP32");
+        if (sm_margin != 0 || (pack_gqa_.has_value() && !*pack_gqa_ && q.size(-2) != k.size(-2))) {
+            TORCH_CHECK(!cu_seqlens_q_ || (max_seqlen_q_ && (!cu_seqlens_k_ || max_seqlen_k_)),
+                        "MLA: compact TND requires max_seqlen_q/k");
+            return flash_attn::mla::GqaForward(q, k, v, q_v_, num_splits, window_size_left, window_size_right,
+                                               is_causal, scale, seqused_q_, seqused_k_, scheduler_metadata_,
+                                               cu_seqlens_q_, cu_seqlens_k_, max_seqlen_q_.value_or(0),
+                                               max_seqlen_k_.value_or(0), page_table_, softcap, pack_gqa_, sm_margin);
+        }
+        if (!q_v_) {
+            TORCH_CHECK(!cu_seqlens_q_ || (max_seqlen_q_ && (!cu_seqlens_k_ || max_seqlen_k_)),
+                        "MLA: compact TND requires max_seqlen_q/k");
+            return flash_attn::mla::PrefillBsndForward(q, k, v, scale, num_splits, window_size_left, window_size_right,
+                                                       is_causal, seqused_q_, seqused_k_, scheduler_metadata_,
+                                                       cu_seqlens_q_, cu_seqlens_k_, max_seqlen_q_.value_or(0),
+                                                       max_seqlen_k_.value_or(0), page_table_, softcap);
+        }
+        if (num_splits != 1 || softcap > 0) {
+            if (page_table_) {
+                if (cu_seqlens_q_) {
+                    TORCH_CHECK(max_seqlen_q_, "MLA: TND paged split requires max_seqlen_q");
+                    return flash_attn::mla::PagedTndForward(
+                        q, k, v, *q_v_, *page_table_, *cu_seqlens_q_, *max_seqlen_q_, scale, seqused_k_, seqused_q_,
+                        scheduler_metadata_, is_causal, window_size_left, window_size_right, num_splits, softcap);
+                }
+                return flash_attn::mla::PagedBsndForward(q, k, v, *q_v_, *page_table_, scale, seqused_k_, seqused_q_,
+                                                         scheduler_metadata_, is_causal, window_size_left,
+                                                         window_size_right, num_splits, softcap);
+            }
+            if (cu_seqlens_q_ && !cu_seqlens_k_) {
+                TORCH_CHECK(max_seqlen_q_, "MLA: mixed split requires max_seqlen_q");
+                return flash_attn::mla::SplitMixedForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_, scale,
+                                                          window_size_left, window_size_right, is_causal, num_splits,
+                                                          seqused_k_, seqused_q_, scheduler_metadata_, softcap);
+            }
+            if (cu_seqlens_q_) {
+                TORCH_CHECK(max_seqlen_q_ && max_seqlen_k_, "MLA: TND split requires max_seqlen_q/k");
+                return flash_attn::mla::SplitTndForward(q, k, v, *q_v_, *cu_seqlens_q_, *cu_seqlens_k_, *max_seqlen_q_,
+                                                        *max_seqlen_k_, scale, window_size_left, window_size_right,
+                                                        is_causal, num_splits, seqused_q_, seqused_k_,
+                                                        scheduler_metadata_, softcap);
+            }
+            return flash_attn::mla::SplitBsndForward(q, k, v, *q_v_, scale, window_size_left, window_size_right,
+                                                     is_causal, num_splits, seqused_k_, seqused_q_, scheduler_metadata_,
+                                                     softcap);
+        }
+        if (window_size_left != -1 || window_size_right != -1) {
+            if (page_table_) {
+                if (cu_seqlens_q_) {
+                    TORCH_CHECK(max_seqlen_q_, "MLA: TND paged forward requires max_seqlen_q");
+                    return flash_attn::mla::PagedTndForward(
+                        q, k, v, *q_v_, *page_table_, *cu_seqlens_q_, *max_seqlen_q_, scale, seqused_k_, seqused_q_,
+                        scheduler_metadata_, is_causal, window_size_left, window_size_right);
+                }
+                return flash_attn::mla::PagedBsndForward(q, k, v, *q_v_, *page_table_, scale, seqused_k_, seqused_q_,
+                                                         scheduler_metadata_, is_causal, window_size_left,
+                                                         window_size_right);
+            }
+            if (cu_seqlens_q_ && !cu_seqlens_k_) {
+                TORCH_CHECK(max_seqlen_q_, "MLA: mixed TND/BSND requires max_seqlen_q");
+                return flash_attn::mla::WindowMixedForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_, scale,
+                                                           window_size_left, window_size_right, is_causal, seqused_k_,
+                                                           seqused_q_, scheduler_metadata_);
+            }
+            if (cu_seqlens_q_) {
+                TORCH_CHECK(!scheduler_metadata_, "MLA window TND explicit metadata is not implemented yet");
+                TORCH_CHECK(max_seqlen_q_ && max_seqlen_k_, "MLA: window TND requires max_seqlen_q/k");
+                return flash_attn::mla::WindowTndForward(q, k, v, *q_v_, *cu_seqlens_q_, *cu_seqlens_k_, *max_seqlen_q_,
+                                                         *max_seqlen_k_, scale, window_size_left, window_size_right,
+                                                         is_causal, seqused_q_, seqused_k_);
+            }
+            return flash_attn::mla::WindowBsndForward(q, k, v, *q_v_, scale, window_size_left, window_size_right,
+                                                      is_causal, seqused_k_, seqused_q_, scheduler_metadata_);
+        }
+        if (is_causal) {
+            if (page_table_) {
+                if (cu_seqlens_q_) {
+                    TORCH_CHECK(max_seqlen_q_, "MLA: TND paged forward requires max_seqlen_q");
+                    return flash_attn::mla::PagedTndForward(q, k, v, *q_v_, *page_table_, *cu_seqlens_q_,
+                                                            *max_seqlen_q_, scale, seqused_k_, seqused_q_,
+                                                            scheduler_metadata_, true);
+                }
+                return flash_attn::mla::PagedBsndForward(q, k, v, *q_v_, *page_table_, scale, seqused_k_, seqused_q_,
+                                                         scheduler_metadata_, true);
+            }
+            if (cu_seqlens_q_ && !cu_seqlens_k_) {
+                TORCH_CHECK(max_seqlen_q_, "MLA: mixed TND/BSND requires max_seqlen_q");
+                return flash_attn::mla::CausalMixedForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_, scale,
+                                                           seqused_k_, seqused_q_, scheduler_metadata_);
+            }
+            if (cu_seqlens_q_) {
+                TORCH_CHECK(!scheduler_metadata_, "MLA causal TND explicit metadata is not implemented yet");
+                TORCH_CHECK(max_seqlen_q_ && max_seqlen_k_, "MLA: causal TND requires max_seqlen_q/k");
+                return flash_attn::mla::TndForward(q, k, v, *q_v_, *cu_seqlens_q_, *cu_seqlens_k_, *max_seqlen_q_,
+                                                   *max_seqlen_k_, scale, seqused_q_, seqused_k_, true);
+            }
+            return flash_attn::mla::CausalBsndForward(q, k, v, *q_v_, scale, seqused_k_, seqused_q_,
+                                                      scheduler_metadata_);
+        }
+        if (page_table_) {
+            if (cu_seqlens_q_) {
+                TORCH_CHECK(max_seqlen_q_, "MLA: TND paged forward requires max_seqlen_q");
+                return flash_attn::mla::PagedTndForward(q, k, v, *q_v_, *page_table_, *cu_seqlens_q_, *max_seqlen_q_,
+                                                        scale, seqused_k_, seqused_q_, scheduler_metadata_);
+            }
+            return flash_attn::mla::PagedBsndForward(q, k, v, *q_v_, *page_table_, scale, seqused_k_, seqused_q_,
+                                                     scheduler_metadata_);
+        }
+        if (cu_seqlens_q_) {
+            if (!cu_seqlens_k_) {
+                TORCH_CHECK(max_seqlen_q_, "MLA: mixed TND/BSND requires max_seqlen_q");
+                if (seqused_q_) {
+                    TORCH_CHECK(!scheduler_metadata_,
+                                "MLA compressed forward is not implemented yet for Q-used with explicit metadata");
+                    return flash_attn::mla::TndBsndUsedForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_,
+                                                               *seqused_q_, seqused_k_, scale);
+                }
+                return flash_attn::mla::TndBsndForward(q, k, v, *q_v_, *cu_seqlens_q_, *max_seqlen_q_, scale,
+                                                       seqused_k_, scheduler_metadata_);
+            }
+            TORCH_CHECK(!scheduler_metadata_,
+                        "MLA compressed forward is not implemented yet for TND explicit metadata");
+            TORCH_CHECK(max_seqlen_q_ && max_seqlen_k_, "MLA: compact TND requires max_seqlen_q/k");
+            return flash_attn::mla::TndForward(q, k, v, *q_v_, *cu_seqlens_q_, *cu_seqlens_k_, *max_seqlen_q_,
+                                               *max_seqlen_k_, scale, seqused_q_, seqused_k_);
+        }
+        if (seqused_q_) {
+            TORCH_CHECK(!scheduler_metadata_,
+                        "MLA compressed forward is not implemented yet for Q-used with explicit metadata");
+            return flash_attn::mla::BsndUsedForward(q, k, v, *q_v_, *seqused_q_, seqused_k_, scale);
+        }
+        if (seqused_k_) {
+            flash_attn::mla::CheckCacheLengths(*seqused_k_, q.size(0), q.device());
+        }
+        if (scheduler_metadata_) {
+            flash_attn::mla::CheckDenseMetadataTensor(*scheduler_metadata_, q.device(), q.size(0));
+        }
+        return flash_attn::mla::DenseForward(q, k, v, *q_v_, scale, seqused_k_, scheduler_metadata_);
+    }
     auto hostStart = std::chrono::steady_clock::now();
 
     if (cu_seqlens_q_.has_value()) {
@@ -697,6 +851,7 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   int64_t window_size_right, int64_t attention_chunk, bool has_softcap,
                                   int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin)
 {
+    TORCH_CHECK(headdim == headdim_v, "MLA metadata requires the public get_scheduler_metadata entry");
     const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
     const bool is_varlen_q = seqlens_q.has_value();
     void* seqlensQDev = nullptr;
