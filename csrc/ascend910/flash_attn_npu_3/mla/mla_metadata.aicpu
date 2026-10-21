@@ -1,0 +1,128 @@
+// Copyright (c) 2025 Huawei Technologies Co., Ltd.
+// CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
+// Nonquantized FIA producers share the same tiling and metadata implementation.
+#include "aicpu_api.h"
+#include "mla_split.cpp"
+#include "mla_metadata.cpp"
+#include "mla_tiling.cpp"
+#include "cann_split_core.cpp"
+// Compile the SAME scheduler for AICPU; do not duplicate its formulas or depend
+// on an installed CANN operator. Source attribution is retained in these files.
+
+__global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaMetadataArgs*>(args);
+    if (input.outputAddr == 0 || input.outputAddr % alignof(int32_t) != 0 ||
+        input.outputWords != kMlaDenseMetadataWords) {
+        return 1;
+    }
+    MlaDenseMetadata metadata;
+    BuildDenseMetadata(input.shape, input.platform, input.dtype, metadata,
+                       reinterpret_cast<const int32_t*>(input.cacheSeqlensAddr), input.cacheSeqlensCount);
+    std::memcpy(reinterpret_cast<void*>(input.outputAddr), &metadata, sizeof(metadata));
+    AscendC::DataStoreBarrier();
+    // Invalid schedule inputs are represented by the header, never by a stale
+    // usable schedule. A consumer must check status before reading the payload.
+    return 0;
+}
+
+// Dedicated entry for v2 BSND lengths. Compile the same source algorithm;
+// no installed CANN operator or host copy of device lengths is involved.
+
+__global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaMetadataArgs*>(args);
+    if (!BuildBsndKvLengthMetadata(input.shape, input.platform, input.dtype,
+                                   reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
+                                   reinterpret_cast<const int32_t*>(input.cacheSeqlensAddr), input.cacheSeqlensCount)) {
+        return 1;
+    }
+    AscendC::DataStoreBarrier();
+    return 0;
+}
+
+// Dedicated v3 producer. The sequence parser/scheduler runs on AICPU;
+// no host readback of prefixes or installed CANN attention operator.
+
+__global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaTndMetadataArgs*>(args);
+    if (!BuildTndMetadata(input.shape, input.platform, input.dtype,
+                          reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
+                          reinterpret_cast<const int32_t*>(input.cuQueryAddr), input.queryCount,
+                          reinterpret_cast<const int32_t*>(input.cuKvAddr), input.kvCount)) {
+        return 1;
+    }
+    AscendC::DataStoreBarrier();
+    return 0;
+}
+
+// Dedicated v4 producer. Shared mixed-layout parser/scheduler on AICPU;
+// no host readback of lengths or installed CANN attention operator.
+
+static uint32_t ComputeMetadata(void* args, bool fromQueryPrefix)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaTndBsndMetadataArgs*>(args);
+    if (!BuildTndBsndMetadata(input.shape, input.platform, input.dtype,
+                             reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
+                             reinterpret_cast<const int32_t*>(input.cuQueryAddr), input.queryCount,
+                             reinterpret_cast<const int32_t*>(input.kvLengthsAddr), input.kvCount, fromQueryPrefix)) {
+        return 1;
+    }
+    AscendC::DataStoreBarrier();
+    return 0;
+}
+
+__global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadataFromPrefix(void* args)
+{
+    return ComputeMetadata(args, true);
+}
+
+__global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args)
+{
+    if (!args) return 1;
+    const bool ok = flash_attn::mla::BuildUsedMetadata(*static_cast<const flash_attn::mla::MlaScheduledUsedMetadataArgs*>(args));
+    AscendC::DataStoreBarrier();
+    return ok ? 0 : 1;
+}
+
+__global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args)
+{
+    if (!args) return 1;
+    const bool ok = flash_attn::mla::BuildPagedMetadata(*static_cast<const flash_attn::mla::MlaScheduledPagedMetadataArgs*>(args));
+    AscendC::DataStoreBarrier();
+    return ok ? 0 : 1;
+}
+
+__global__ __aicpu__ uint32_t ComputeMlaPrefillBsndMetadata(void* args)
+{
+    if (!args || !flash_attn::mla::BuildPrefillBsndMetadata(
+                     *static_cast<const flash_attn::mla::MlaPrefillBsndMetadataArgs*>(args))) return 1;
+    AscendC::DataStoreBarrier();
+    return 0;
+}
+
+// Source copyrights/licenses are retained in the included files.
+__global__ __aicpu__ uint32_t ComputeMlaGqaMetadata(void* args)
+{
+    if (!args || !flash_attn::mla::BuildGqaMetadata(*static_cast<const flash_attn::mla::MlaGqaMetadataArgs*>(args)))
+        return 1;
+    AscendC::DataStoreBarrier();
+    return 0;
+}
