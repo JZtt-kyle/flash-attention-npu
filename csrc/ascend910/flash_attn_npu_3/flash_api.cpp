@@ -35,6 +35,8 @@ using namespace KernelCommon;
 #include "fa_split.h"
 #include "fwd_dispatch.hpp"
 #include "bwd_dispatch.hpp"
+#include "mla/mla_forward.h"
+#include <torch/library.h>
 #include <cmath>
 
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
@@ -168,12 +170,23 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::Tensor> q_descale_,      // (b, h_k), not (b, h)
     std::optional<at::Tensor> k_descale_,      // (b, h_k)
     std::optional<at::Tensor> v_descale_,      // (b, h_k)
-    std::optional<float> softmax_scale_, bool is_causal, int64_t window_size_left, int64_t window_size_right,
-    int64_t attention_chunk, float softcap,
+    std::optional<double> softmax_scale_, bool is_causal, int64_t window_size_left, int64_t window_size_right,
+    int64_t attention_chunk, double softcap_option,
     bool is_rotary_interleaved, // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
     std::optional<at::Tensor> scheduler_metadata_, // (b + 1)
-    int64_t num_splits, std::optional<bool> pack_gqa_, int64_t sm_margin)
+    int64_t num_splits, std::optional<bool> pack_gqa_, int64_t sm_margin,
+    std::optional<at::Tensor> mla_q_scale = std::nullopt, std::optional<at::Tensor> mla_k_scale = std::nullopt,
+    std::optional<at::Tensor> mla_v_scale = std::nullopt, bool return_accumulators = true)
 {
+    if (auto result = flash_attn::mla::TryForward(
+            q, k, v, k_new_, v_new_, q_v_, out_, cu_seqlens_q_, cu_seqlens_k_, cu_seqlens_k_new_, seqused_q_,
+            seqused_k_, max_seqlen_q_, max_seqlen_k_, page_table_, kv_batch_idx_, leftpad_k_, rotary_cos_, rotary_sin_,
+            seqlens_rotary_, q_descale_, k_descale_, v_descale_, softmax_scale_, is_causal, window_size_left,
+            window_size_right, attention_chunk, softcap_option, is_rotary_interleaved, scheduler_metadata_, num_splits,
+            pack_gqa_, sm_margin, mla_q_scale, mla_k_scale, mla_v_scale, return_accumulators)) {
+        return std::move(*result);
+    }
+    const float softcap = static_cast<float>(softcap_option);
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto hostStart = std::chrono::steady_clock::now();
 
@@ -686,7 +699,7 @@ std::vector<at::Tensor> mha_fwd(
 }
 
 at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k, int64_t num_heads_q,
-                                  int64_t num_heads_kv, int64_t headdim, int64_t headdim_v, pybind11::object qkv_dtype,
+                                  int64_t num_heads_kv, int64_t headdim, int64_t headdim_v, at::ScalarType qkv_dtype,
                                   at::Tensor cache_seqlens, std::optional<at::Tensor> seqlens_q,
                                   std::optional<at::Tensor> cu_seqlens_k, std::optional<at::Tensor> cu_seqlens_k_new,
                                   std::optional<at::Tensor> cache_leftpad, std::optional<int64_t> page_size,
@@ -694,6 +707,12 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   int64_t window_size_right, int64_t attention_chunk, bool has_softcap,
                                   int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin)
 {
+    if (headdim != headdim_v || qkv_dtype == at::kChar) {
+        return flash_attn::mla::SchedulerMetadataOp(
+            batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv, headdim, headdim_v, qkv_dtype,
+            cache_seqlens, seqlens_q, cu_seqlens_k, cu_seqlens_k_new, cache_leftpad, page_size, max_seqlen_k_new,
+            causal, window_size_left, window_size_right, attention_chunk, has_softcap, num_splits, pack_gqa, sm_margin);
+    }
     const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
     const bool is_varlen_q = seqlens_q.has_value();
     void* seqlensQDev = nullptr;
@@ -1067,7 +1086,48 @@ std::vector<at::Tensor> mha_bwd(
 PYBIND11_MODULE(flash_attn_npu_3, m)
 {
     m.doc() = "FlashAttention";
-    m.def("fwd", &mha_fwd, "Forward pass, with KV-cache");
+    m.def("fwd", &mha_fwd, "Forward pass, with KV-cache", pybind11::arg("q"), pybind11::arg("k"), pybind11::arg("v"),
+          pybind11::arg("k_new"), pybind11::arg("v_new"), pybind11::arg("qv"), pybind11::arg("out_"),
+          pybind11::arg("cu_seqlens_q"), pybind11::arg("cu_seqlens_k"), pybind11::arg("cu_seqlens_k_new"),
+          pybind11::arg("seqused_q"), pybind11::arg("seqused_k"), pybind11::arg("max_seqlen_q"),
+          pybind11::arg("max_seqlen_k"), pybind11::arg("page_table"), pybind11::arg("kv_batch_idx"),
+          pybind11::arg("leftpad_k"), pybind11::arg("rotary_cos"), pybind11::arg("rotary_sin"),
+          pybind11::arg("seqlens_rotary"), pybind11::arg("q_descale"), pybind11::arg("k_descale"),
+          pybind11::arg("v_descale"), pybind11::arg("softmax_scale"), pybind11::arg("causal"),
+          pybind11::arg("window_size_left"), pybind11::arg("window_size_right"), pybind11::arg("attention_chunk"),
+          pybind11::arg("softcap"), pybind11::arg("rotary_interleaved"), pybind11::arg("scheduler_metadata"),
+          pybind11::arg("num_splits"), pybind11::arg("pack_gqa"), pybind11::arg("sm_margin"),
+          pybind11::arg("mla_q_scale") = pybind11::none(), pybind11::arg("mla_k_scale") = pybind11::none(),
+          pybind11::arg("mla_v_scale") = pybind11::none(), pybind11::arg("return_accumulators") = true);
     m.def("bwd", &mha_bwd, "Backward pass");
     m.def("get_scheduler_metadata", &get_scheduler_metadata, "Precompute scheduler metadata (tiling) on AICPU");
+}
+
+TORCH_LIBRARY_FRAGMENT(flash_attn_npu_3, m)
+{
+    m.def(
+        "fwd(Tensor q, Tensor k, Tensor v, Tensor? k_new, Tensor? v_new, Tensor? qv, Tensor? out_, "
+        "Tensor? cu_seqlens_q, Tensor? cu_seqlens_k, Tensor? cu_seqlens_k_new, Tensor? seqused_q, Tensor? seqused_k, "
+        "int? max_seqlen_q, int? max_seqlen_k, Tensor? page_table, Tensor? kv_batch_idx, Tensor? leftpad_k, "
+        "Tensor? rotary_cos, Tensor? rotary_sin, Tensor? seqlens_rotary, Tensor? q_descale, Tensor? k_descale, "
+        "Tensor? v_descale, float? softmax_scale, bool causal, int window_size_left, int window_size_right, "
+        "int attention_chunk, float softcap, bool rotary_interleaved, Tensor? scheduler_metadata, int num_splits, "
+        "bool? pack_gqa, int sm_margin, Tensor? mla_q_scale=None, Tensor? mla_k_scale=None, Tensor? mla_v_scale=None, "
+        "bool return_accumulators=True) -> Tensor[]");
+    m.def(
+        "get_scheduler_metadata(int batch_size, int max_seqlen_q, int max_seqlen_k, int num_heads_q, int num_heads_kv, "
+        "int headdim, int headdim_v, ScalarType qkv_dtype, Tensor cache_seqlens, Tensor? seqlens_q, "
+        "Tensor? cu_seqlens_k, Tensor? cu_seqlens_k_new, Tensor? cache_leftpad, int? page_size, int max_seqlen_k_new, "
+        "bool causal, int window_size_left, int window_size_right, int attention_chunk, bool has_softcap, "
+        "int num_splits, bool? pack_gqa, int sm_margin) -> Tensor");
+}
+TORCH_LIBRARY_IMPL(flash_attn_npu_3, PrivateUse1, m)
+{
+    m.impl("fwd", &mha_fwd);
+    m.impl("get_scheduler_metadata", &get_scheduler_metadata);
+}
+TORCH_LIBRARY_IMPL(flash_attn_npu_3, Meta, m)
+{
+    m.impl("fwd", &mha_fwd);
+    m.impl("get_scheduler_metadata", &get_scheduler_metadata);
 }
