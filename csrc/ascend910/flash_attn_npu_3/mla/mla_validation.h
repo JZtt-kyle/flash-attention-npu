@@ -3,7 +3,7 @@
 #include <torch/extension.h>
 #include "mla_metadata.h"
 #include "mla_layout.h"
-// Host-only boundary for the two representations in docs/mla/design.md.
+// Host-only validation for compressed and expanded MLA inputs.
 // Contract: TriDao FA3 d15f1531a460ba456f41b01a774f33ab2db8febf,
 // hopper/flash_api.cpp::mha_fwd. No CANN kernel or scheduling code is used here.
 // Keep the corresponding Python/fake checks in _check_mla_inputs in sync.

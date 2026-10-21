@@ -399,8 +399,7 @@ func/varlen 的 `num_splits` 默认 1，cache 默认 0（自动）；五种布�
 
 后端使用 CANN 的 910B 和 `Ascend910_93`（910C）平台资源，并检查 C1V2 与内存容量。
 实机验收使用 910B；910C 核对 CANN 平台配置兼容，不宣称已完成 910C 实机验收。
-布局、页大小、长度、空值规则和验收边界见 [MLA 契约](docs/mla/design.md#2-fa3-入口与后端边界)。
-下文通用约束用于普通 attention，MLA 以此契约为准。
+下文通用约束用于普通 attention，MLA 使用本节说明的约束。
 
 ```python
 import torch
@@ -424,8 +423,7 @@ mask、split 和调度选项；这些条件变化后须重新生成，匹配条�
 ND 分页 cache 为 `[num_pages, page_size, Hkv, D]`，页大小是 `[16, 1024]` 内的 16 倍数，
 逻辑容量不超过 16384，页表为 int32。
 
-MLA 使用普通调用路径，不按捕获状态增加特殊处理。当前验收覆盖普通调用与多 stream，
-范围见 [验收边界](docs/mla/design.md#22-后端选项与返回值)。
+MLA 使用普通调用路径，不按捕获状态增加特殊处理。当前验收覆盖普通调用与多 stream。
 
 [MLA E2E 测试](tests/test_flash_attn_npu_v3_mla.py) 覆盖公开 dense、varlen、分页接口、
 metadata 复用、fake/compile 和 stream 生命周期。构建 v3 并加载 CANN 环境后，使用仓库原有 pytest 入口：
@@ -463,9 +461,9 @@ causal，多 query 须设置右下对齐的 `causal=True`。选项为 `num_split
 和混合量化模式均明确拒绝。
 
 数值保留固定 CANN INT8 算法及动态概率量化；源的 Q/K scale 作用于内容与 **RoPE 合并后**
-的分数，与仅反量化内容点积的数学公式不同。固定源逐元素一致和独立 FP32/FP64 的精度限制
-分别记录，见 [INT8 契约](docs/mla/design.md#34-int8-压缩-mla-扩展) 和
-[覆盖映射](docs/mla/design.md#78-int8-收尾映射)。
+的分数，与仅反量化内容点积的数学公式不同。独立 FP32/FP64 数值测试使用均匀 logits
+或相同 key 的输入，并保留这一 scale 语义。随机 INT8 输入的一致性测试不代表一般量化
+数学精度通过；动态概率量化和上述 scale 语义的精度限制仍然存在。
 
 同一文件覆盖 INT8 两种布局、metadata 复用、scale 更新及普通调用间的 KV 长度变化。
 只运行 INT8 E2E：

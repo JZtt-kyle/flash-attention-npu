@@ -3896,7 +3896,7 @@ def flash_attn_func(
     512-dimensional query content, and v is shared content K/V with one head.
     Prefill MLA uses q/k dimensions 192 and independent v dimension 128 with qv=None.
     Both representations support nonnegative finite softcap and num_splits=0..256.
-    MLA contracts and validation limits are in docs/mla/design.md.
+    MLA is forward-only on Ascend 910B/C and requires FP16/BF16 inputs here.
 
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in KV with fewer heads
     than Q. Note that the number of heads in Q must be divisible by the number of heads in KV.
@@ -4019,8 +4019,7 @@ def flash_attn_varlen_func(
     Prefill MLA uses q/k dimensions 192 and independent v dimension 128 with qv=None;
     compressed MLA uses q/k dimensions 64 and qv/v dimensions 512 with one KV head.
     Both support allocation/used lengths, causal/window masks, num_splits=0..256
-    and nonnegative finite softcap. Metadata is generated internally on every call;
-    record selection is documented in docs/mla/design.md, section 2.1.
+    and nonnegative finite softcap. Metadata is generated internally on every call.
     There is no explicit metadata or page-table parameter; paged MLA uses
     flash_attn_with_kvcache.
     """
@@ -4318,7 +4317,7 @@ def flash_attn_with_kvcache(
     and paged layouts accept nonnegative finite softcap.
     Automatic requests return 26 FP32
     accumulator slots; the native partition determines the actual splits per M
-    block and unused slots are 0/-inf. Contracts are in docs/mla/design.md.
+    block and unused slots are 0/-inf.
     Generic FA3 append and rotary options below remain unsupported for MLA.
 
     If k and v are not None, k_cache and v_cache will be updated *inplace* with the new values from
@@ -4412,7 +4411,7 @@ def flash_attn_with_kvcache(
             softmax_scale and the numerical softcap value come from this forward
             call and may change when reusing metadata with the same has_softcap.
             MLA uses int32 records selected by representation, layout, mask, split
-            and softcap activation; see docs/mla/design.md, sections 2.1 and 5.
+            and softcap activation.
             The device checks current lengths, TND query prefixes and all used pages.
             MLA records may be cloned or passed as contiguous offset views;
             scale and positive softcap values may change without regenerating a
@@ -4427,8 +4426,9 @@ def flash_attn_with_kvcache(
             the prefix describes the full original query allocation.
             Sq<=32, power-of-two Hq<=128, Hkv=1; multi-query requires causal=True.
             Only num_splits=0/1 and the default effective GQA options are supported.
-            Scale values may change while reusing metadata. See design section 3.4
-            for the fixed source's RoPE scaling semantics and rejected combinations.
+            Scale values may change while reusing metadata. Q/K scales multiply the
+            combined content and RoPE score, following the fixed CANN source.
+            Finite windows, softcap, nonpaged caches, offsets and postquant are unsupported.
 
     Return:
         out: query layout with last dimension v_cache.shape[-1].
@@ -5109,7 +5109,6 @@ def get_scheduler_metadata(
     GQA. Both accept BSND/TND queries, nonpaged or ND paged caches, all masks
     and num_splits=0..256. The default num_splits=0 selects automatic splitting.
     Nonpaged and paged layouts accept has_softcap=True.
-    Record versions and sizes are specified in docs/mla/design.md, sections 2.1 and 5.
 
     cache_seqlens must be a same-device contiguous int32 tensor of shape
     (batch_size,); None/integer lengths are kvcache conveniences only.
