@@ -1,0 +1,256 @@
+// Copyright (c) 2025 Huawei Technologies Co., Ltd.
+// CANN Open Software License Agreement Version 2.0; see LICENSE.cann.
+// Nonquantized FIA producers share the same tiling and metadata implementation.
+#include "aicpu_api.h"
+#include "mla_split.cpp"
+#include "mla_metadata.cpp"
+#include "mla_tiling.cpp"
+#include "cann_split_core.cpp"
+#include "mla_split_metadata_consumer.h"
+// Compile the SAME scheduler for AICPU; do not duplicate its formulas or depend
+// on an installed CANN operator. Source attribution is retained in these files.
+
+namespace flash_attn::mla {
+namespace {
+struct MetadataWords {
+    uint64_t address;
+    uint32_t operator()(uint64_t word) const
+    {
+        return reinterpret_cast<const uint32_t*>(address)[word];
+    }
+};
+struct MetadataArrays {
+    uint64_t addresses[4]{};
+    uint32_t operator()(uint32_t axis, uint32_t word) const
+    {
+        return MetadataWords{addresses[axis]}(word);
+    }
+};
+
+void StoreChecked(uint64_t output, const MlaCheckedAutoSplitSchedule& checked)
+{
+    std::memcpy(reinterpret_cast<void*>(output), &checked, sizeof(checked));
+}
+
+MlaMetadataReadStatus CheckAutoSplit(const MlaScheduledUsedMetadataArgs& a, MlaAutoSplitBsndSchedule& s)
+{
+    const auto& c = a.context;
+    const auto& input = a.input;
+    MetadataWords read{input.outputAddr};
+    const MlaUsedMetadataInputs inputs{input.cuQuery, input.cuKv, input.usedQuery, input.usedKv};
+    const MetadataArrays arrays{{input.cuQuery.address, input.cuKv.address, input.usedQuery.address,
+                                 input.usedKv.address}};
+    if (!ValidUsedMetadataAddress(input.outputAddr, input.outputWords) ||
+        c.used.batch > (UINT32_MAX - kMlaAutoSplitFixedWords) / 10)
+        return MlaMetadataReadStatus::InvalidBuffer;
+    if (c.used.query.layout == uint32_t(MlaSequenceLayout::Tnd)) {
+        if (c.used.kv.layout == uint32_t(MlaSequenceLayout::Bsnd))
+            return ReadAutoSplitMetadata<true, kMlaAutoSplitMixedVersion, false, kMlaSoftcapAutoSplitMixedVersion>(
+                read, input.outputWords, c, inputs, arrays, s);
+        return ReadAutoSplitMetadata<true, kMlaAutoSplitTndVersion, true, kMlaSoftcapAutoSplitTndVersion>(
+            read, input.outputWords, c, inputs, arrays, s);
+    }
+    return ReadAutoSplitMetadata<false, kMlaAutoSplitBsndVersion, false, kMlaSoftcapAutoSplitBsndVersion>(
+        read, input.outputWords, c, inputs, arrays, s);
+}
+
+MlaMetadataReadStatus CheckAutoSplit(const MlaScheduledPagedMetadataArgs& a, MlaAutoSplitBsndSchedule& s)
+{
+    const auto& input = a.input;
+    const MlaPagedMetadataInputs inputs{input.cuQuery, input.usedQuery, input.kvLengths};
+    const MetadataArrays arrays{{input.cuQuery.address, input.usedQuery.address, input.kvLengths.address}};
+    if (!ValidUsedMetadataAddress(input.outputAddr, input.outputWords) ||
+        a.context.paged.batch > (UINT32_MAX - kMlaAutoSplitPagedBsndFixedWords) / 7)
+        return MlaMetadataReadStatus::InvalidBuffer;
+    const MetadataWords read{input.outputAddr}, pages{a.cache.table.address};
+    MlaAutoSplitPagedSchedule paged{};
+    const auto status =
+        a.context.paged.query.layout == uint32_t(MlaSequenceLayout::Tnd)
+            ? ReadAutoSplitPagedMetadata<true>(read, input.outputWords, a.context, inputs, arrays, a.cache, pages, paged)
+            : ReadAutoSplitPagedMetadata<false>(read, input.outputWords, a.context, inputs, arrays, a.cache, pages, paged);
+    if (status == MlaMetadataReadStatus::Success)
+        s = paged.native;
+    return status;
+}
+
+MlaMetadataReadStatus CheckPrefill(const MlaPrefillBsndMetadataArgs& a, MlaAutoSplitBsndSchedule& s)
+{
+    const auto& c = a.context;
+    MlaPrefillBsndLayout layout{};
+    if (!PrefillBsndLayout(c, layout) || a.words != layout.words || !ValidUsedMetadataAddress(a.output, layout.words) ||
+        (a.usedQuery && !ValidUsedMetadataAddress(a.usedQuery, c.batch)) ||
+        (a.usedKv && !ValidUsedMetadataAddress(a.usedKv, c.batch)) ||
+        (c.tnd && (!ValidUsedMetadataAddress(a.cuQuery, uint64_t(c.batch) + 1) ||
+                   (c.tnd == 1 && !ValidUsedMetadataAddress(a.cuKv, uint64_t(c.batch) + 1)))) ||
+        (c.batch && (bool(c.usedFlags & 1) != bool(a.usedQuery) || bool(c.usedFlags & 2) != bool(a.usedKv))))
+        return MlaMetadataReadStatus::InvalidBuffer;
+    const MetadataWords read{a.output};
+    MetadataArrays arrays;
+    const uint32_t usedIndex = c.tnd ? 2 : 0;
+    if (c.tnd) {
+        arrays.addresses[0] = a.cuQuery;
+        arrays.addresses[1] = a.cuKv;
+    }
+    arrays.addresses[usedIndex] = a.usedQuery;
+    arrays.addresses[usedIndex + 1] = a.usedKv;
+    const auto status = ReadPrefillBsndMetadata(read, a.words, c, arrays, s);
+    return status == MlaMetadataReadStatus::Success && c.pageSize
+               ? ReadPrefillPagedCache(read, c, a.cache, MetadataWords{a.cache.table.address})
+               : status;
+}
+} // namespace
+} // namespace flash_attn::mla
+
+__global__ __aicpu__ uint32_t ComputeMlaDenseMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaMetadataArgs*>(args);
+    if (input.outputAddr == 0 || input.outputAddr % alignof(int32_t) != 0 ||
+        input.outputWords != kMlaDenseMetadataWords) {
+        return 1;
+    }
+    MlaDenseMetadata metadata;
+    BuildDenseMetadata(input.shape, input.platform, input.dtype, metadata,
+                       reinterpret_cast<const int32_t*>(input.cacheSeqlensAddr), input.cacheSeqlensCount);
+    std::memcpy(reinterpret_cast<void*>(input.outputAddr), &metadata, sizeof(metadata));
+    AscendC::DataStoreBarrier();
+    // Invalid schedule inputs are represented by the header, never by a stale
+    // usable schedule. A consumer must check status before reading the payload.
+    return 0;
+}
+
+// Dedicated entry for v2 BSND lengths. Compile the same source algorithm;
+// no installed CANN operator or host copy of device lengths is involved.
+
+__global__ __aicpu__ uint32_t ComputeMlaBsndKvLengthMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaMetadataArgs*>(args);
+    if (!BuildBsndKvLengthMetadata(input.shape, input.platform, input.dtype,
+                                   reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
+                                   reinterpret_cast<const int32_t*>(input.cacheSeqlensAddr), input.cacheSeqlensCount)) {
+        return 1;
+    }
+    AscendC::DataStoreBarrier();
+    return 0;
+}
+
+// Dedicated v3 producer. The sequence parser/scheduler runs on AICPU;
+// no host readback of prefixes or installed CANN attention operator.
+
+__global__ __aicpu__ uint32_t ComputeMlaTndMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaTndMetadataArgs*>(args);
+    if (!BuildTndMetadata(input.shape, input.platform, input.dtype,
+                          reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
+                          reinterpret_cast<const int32_t*>(input.cuQueryAddr), input.queryCount,
+                          reinterpret_cast<const int32_t*>(input.cuKvAddr), input.kvCount)) {
+        return 1;
+    }
+    AscendC::DataStoreBarrier();
+    return 0;
+}
+
+// Dedicated v4 producer. Shared mixed-layout parser/scheduler on AICPU;
+// no host readback of lengths or installed CANN attention operator.
+
+static uint32_t ComputeMetadata(void* args, bool fromQueryPrefix)
+{
+    using namespace flash_attn::mla;
+    if (args == nullptr) {
+        return 1;
+    }
+    const auto& input = *static_cast<const MlaTndBsndMetadataArgs*>(args);
+    if (!BuildTndBsndMetadata(input.shape, input.platform, input.dtype,
+                             reinterpret_cast<uint32_t*>(input.outputAddr), input.outputWords,
+                             reinterpret_cast<const int32_t*>(input.cuQueryAddr), input.queryCount,
+                             reinterpret_cast<const int32_t*>(input.kvLengthsAddr), input.kvCount, fromQueryPrefix)) {
+        return 1;
+    }
+    AscendC::DataStoreBarrier();
+    return 0;
+}
+
+__global__ __aicpu__ uint32_t ComputeMlaTndBsndMetadataFromPrefix(void* args)
+{
+    return ComputeMetadata(args, true);
+}
+
+__global__ __aicpu__ uint32_t ComputeMlaUsedMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (!args) {
+        return 1;
+    }
+    const auto& a = *static_cast<const MlaScheduledUsedMetadataArgs*>(args);
+    const bool ok = !a.generate || BuildUsedMetadata(a);
+    if (a.checked) {
+        MlaCheckedAutoSplitSchedule checked;
+        checked.blockDim = a.context.used.blockDim;
+        checked.dtype = a.context.used.dtype;
+        if (ok)
+            checked.status = CheckAutoSplit(a, checked.schedule);
+        StoreChecked(a.checked, checked);
+    }
+    AscendC::DataStoreBarrier();
+    return ok ? 0 : 1;
+}
+
+__global__ __aicpu__ uint32_t ComputeMlaPagedMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (!args) {
+        return 1;
+    }
+    const auto& a = *static_cast<const MlaScheduledPagedMetadataArgs*>(args);
+    const bool ok = !a.generate || BuildPagedMetadata(a);
+    if (a.checked) {
+        MlaCheckedAutoSplitSchedule checked;
+        checked.blockDim = a.context.paged.blockDim;
+        checked.dtype = a.context.paged.dtype;
+        if (ok)
+            checked.status = CheckAutoSplit(a, checked.schedule);
+        StoreChecked(a.checked, checked);
+    }
+    AscendC::DataStoreBarrier();
+    return ok ? 0 : 1;
+}
+
+__global__ __aicpu__ uint32_t ComputeMlaPrefillBsndMetadata(void* args)
+{
+    using namespace flash_attn::mla;
+    if (!args) {
+        return 1;
+    }
+    const auto& a = *static_cast<const MlaPrefillBsndMetadataArgs*>(args);
+    const bool ok = !a.generate || BuildPrefillBsndMetadata(a);
+    if (a.checked) {
+        MlaCheckedAutoSplitSchedule checked;
+        checked.blockDim = a.context.cores;
+        checked.dtype = a.context.dtype;
+        if (ok)
+            checked.status = CheckPrefill(a, checked.schedule);
+        StoreChecked(a.checked, checked);
+    }
+    AscendC::DataStoreBarrier();
+    return ok ? 0 : 1;
+}
+
+// Source copyrights/licenses are retained in the included files.
+__global__ __aicpu__ uint32_t ComputeMlaGqaMetadata(void* args)
+{
+    if (!args || !flash_attn::mla::BuildGqaMetadata(*static_cast<const flash_attn::mla::MlaGqaMetadataArgs*>(args)))
+        return 1;
+    AscendC::DataStoreBarrier();
+    return 0;
+}

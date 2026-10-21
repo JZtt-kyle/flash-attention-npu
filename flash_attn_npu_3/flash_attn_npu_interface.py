@@ -1,6 +1,7 @@
 # Copyright (c) 2023, Tri Dao.
 # Modified by Minghua Shen, 2026
 
+from contextlib import nullcontext
 from typing import Optional, Union, Tuple
 
 import torch
@@ -34,6 +35,25 @@ else:
 
     _torch_custom_op_wrapper = noop_custom_op_wrapper
     _torch_register_fake_wrapper = noop_register_fake_wrapper
+
+
+def _is_mla(q, v, qv, cu_seqlens_q=None):
+    return qv is not None or (
+        (cu_seqlens_q is None or q.ndim == 3)
+        and q.ndim > 0
+        and v.ndim > 0
+        and q.shape[-1] != v.shape[-1]
+    )
+
+
+def _check_forward_devices(q, *, context="MLA", **tensors):
+    # Fake tensors expose their logical device in Python, while the native
+    # shape checks see their underlying Meta tensors.
+    for name, tensor in tensors.items():
+        if tensor is not None and not isinstance(tensor, torch.Tensor):
+            raise RuntimeError(f"{context}: {name} must be a Tensor")
+        if tensor is not None and tensor.device != q.device:
+            raise RuntimeError(f"{context}: {name} must be on the same NPU device")
 
 
 def maybe_contiguous(x):
@@ -106,9 +126,48 @@ def round_up_headdim(head_size: int) -> int:
     return round_multiple(head_size, _HEADDIM_BWD_ALIGN)
 
 
-@_torch_custom_op_wrapper(
-    "flash_attn_npu_3::_flash_attn_forward", mutates_args=(), device_types="npu"
-)
+def _check_mla_forward(q, k, v, **kwargs):
+    _check_forward_devices(
+        q,
+        k=k,
+        v=v,
+        qv=kwargs.get("qv"),
+        cu_seqlens_q=kwargs.get("cu_seqlens_q"),
+        cu_seqlens_k=kwargs.get("cu_seqlens_k"),
+        seqused_q=kwargs.get("seqused_q"),
+        cache_seqlens=kwargs.get("seqused_k"),
+        page_table=kwargs.get("page_table"),
+        scheduler_metadata=kwargs.get("scheduler_metadata"),
+        q_descale=kwargs.get("q_descale"),
+        k_descale=kwargs.get("k_descale"),
+        v_descale=kwargs.get("v_descale"),
+    )
+    if q.device.type != "npu":
+        raise RuntimeError("MLA: inputs must be NPU tensors")
+    if any(
+        t is not None and t.requires_grad
+        for t in (
+            q,
+            k,
+            v,
+            *(kwargs.get(name) for name in ("qv", "q_descale", "k_descale", "v_descale")),
+        )
+    ):
+        raise RuntimeError("MLA forward does not support gradients")
+
+
+def _native_fake(op, reference, *args):
+    from torch._subclasses.fake_tensor import FakeTensor, in_kernel_invocation_manager
+
+    mode, device = reference.fake_mode, reference.device
+    # Reuse native validation with the original tensors' Meta storage and strides.
+    with in_kernel_invocation_manager(mode):
+        outputs = op(*args)
+    if isinstance(outputs, torch.Tensor):
+        return FakeTensor(mode, outputs, device)
+    return tuple(FakeTensor(mode, output, device) for output in outputs)
+
+
 def _flash_attn_forward(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -145,17 +204,18 @@ def _flash_attn_forward(
     pack_gqa: Optional[bool] = None,
     sm_margin: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
-    v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
-    cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new = [
-        maybe_contiguous(x) for x in (cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new)
-    ]
-    seqused_q, seqused_k = [maybe_contiguous(x) for x in (seqused_q, seqused_k)]
-    page_table, kv_batch_idx, leftpad_k = [
-        maybe_contiguous(x) for x in (page_table, kv_batch_idx, leftpad_k)
-    ]
-    rotary_cos, rotary_sin = [maybe_contiguous(x) for x in (rotary_cos, rotary_sin)]
-    seqlens_rotary = maybe_contiguous(seqlens_rotary)
+    if not _is_mla(q, v, qv, cu_seqlens_q):
+        q, k, k_new, v_new = [maybe_contiguous(x) for x in (q, k, k_new, v_new)]
+        v = v.contiguous() if v.stride(-1) != 1 and v.stride(-3) != 1 else v
+        cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new = [
+            maybe_contiguous(x) for x in (cu_seqlens_q, cu_seqlens_k, cu_seqlens_k_new)
+        ]
+        seqused_q, seqused_k = [maybe_contiguous(x) for x in (seqused_q, seqused_k)]
+        page_table, kv_batch_idx, leftpad_k = [
+            maybe_contiguous(x) for x in (page_table, kv_batch_idx, leftpad_k)
+        ]
+        rotary_cos, rotary_sin = [maybe_contiguous(x) for x in (rotary_cos, rotary_sin)]
+        seqlens_rotary = maybe_contiguous(seqlens_rotary)
     out, softmax_lse, out_accum, softmax_lse_accum = flash_attn_npu_3.fwd(
         q,
         k,
@@ -199,10 +259,13 @@ def _flash_attn_forward(
     if softmax_lse_accum is None:
         softmax_lse_accum = torch.tensor([], device=out.device)
 
+    # Native returns own storage except for out_. Preserve the registered
+    # operator's alias rejection after native validation and execution.
+    if out_ is not None and hasattr(torch.library, "infer_schema"):
+        raise RuntimeError("_flash_attn_forward: outputs may not alias any inputs or other returns")
     return out, softmax_lse, out_accum, softmax_lse_accum
 
 
-@_torch_register_fake_wrapper("flash_attn_npu_3::_flash_attn_forward")
 def _flash_attn_forward_fake(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -243,6 +306,10 @@ def _flash_attn_forward_fake(
     Symbolic fake implementation of flash attention forward.
     Returns tensors with the correct shapes and dtypes without actual computation.
     """
+
+    if _is_mla(q, v, qv, cu_seqlens_q):
+        _check_mla_forward(**locals())
+        return _native_fake(flash_attn_npu_3.fwd, q, *locals().values())
 
     # Determine if we're in varlen mode
     is_varlen_q = cu_seqlens_q is not None
@@ -467,6 +534,40 @@ def _flash_attn_backward_fake(
     return softmax_d
 
 
+# Reuse custom_op defaults from the unchanged backward registration; tags
+# differ across torch versions. Keep the existing schema and fake dispatch.
+if hasattr(torch.library, "infer_schema"):
+    torch.library.define(
+        "flash_attn_npu_3::_flash_attn_forward",
+        torch.library.infer_schema(_flash_attn_forward, mutates_args=()),
+        tags=torch.ops.flash_attn_npu_3._flash_attn_backward.default.tags,
+    )
+    torch.library.impl("flash_attn_npu_3::_flash_attn_forward", "npu", _flash_attn_forward)
+
+    def _flash_attn_forward_no_backward(ctx, *grads):
+        # Training uses the existing outer autograd.Function; the cache and
+        # low-level forward APIs have no backward formula.
+        raise RuntimeError(
+            "Trying to backward through flash_attn_npu_3._flash_attn_forward.default "
+            "but no autograd formula was registered. Please use register_autograd to add one."
+        )
+
+    torch.library.register_autograd(
+        "flash_attn_npu_3::_flash_attn_forward", _flash_attn_forward_no_backward
+    )
+    _flash_attn_forward = torch.ops.flash_attn_npu_3._flash_attn_forward.default
+else:
+    _flash_attn_forward = _torch_custom_op_wrapper(
+        "flash_attn_npu_3::_flash_attn_forward",
+        _flash_attn_forward,
+        mutates_args=(),
+        device_types="npu",
+    )
+
+
+_torch_register_fake_wrapper("flash_attn_npu_3::_flash_attn_forward")(_flash_attn_forward_fake)
+
+
 def setup_context(ctx, inputs, output):
     q, k, v = inputs[:3]
     out, softmax_lse, _, _ = output
@@ -655,28 +756,30 @@ class FlashAttnFunc(torch.autograd.Function):
     ):
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
-        # Training interfaces do not expose scheduler_metadata (aligned with
-        # official flash-attn); the scheduler metadata is computed internally on
-        # the AICPU so no D2H/H2D sync breaks the pipeline.
-        batch_size, seqlen_q, num_heads, head_size = q.shape
-        seqlen_k, num_heads_k = k.shape[1], k.shape[2]
-        cache_seqlens = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
-        scheduler_metadata = get_scheduler_metadata(
-            batch_size,
-            seqlen_q,
-            seqlen_k,
-            num_heads,
-            num_heads_k,
-            head_size,
-            cache_seqlens,
-            qkv_dtype=q.dtype,
-            causal=causal,
-            window_size=window_size,
-            has_softcap=softcap > 0.0,
-            num_splits=num_splits,
-            sm_margin=sm_margin,
-        )
-        # out, q, k, v, out_padded, softmax_lse = _flash_attn_forward(
+        scheduler_metadata = None
+        if not _is_mla(q, v, qv):
+            # Training interfaces do not expose scheduler_metadata (aligned with
+            # official flash-attn); the scheduler metadata is computed internally on
+            # the AICPU so no D2H/H2D sync breaks the pipeline.
+            batch_size, seqlen_q, num_heads, head_size = q.shape
+            seqlen_k, num_heads_k = k.shape[1], k.shape[2]
+            cache_seqlens = torch.full((batch_size,), seqlen_k, dtype=torch.int32, device=q.device)
+            scheduler_metadata = get_scheduler_metadata(
+                batch_size,
+                seqlen_q,
+                seqlen_k,
+                num_heads,
+                num_heads_k,
+                head_size,
+                cache_seqlens,
+                qkv_dtype=q.dtype,
+                causal=causal,
+                window_size=window_size,
+                has_softcap=softcap > 0.0,
+                num_splits=num_splits,
+                sm_margin=sm_margin,
+            )
+            # out, q, k, v, out_padded, softmax_lse = _flash_attn_forward(
         out, softmax_lse, *rest = _flash_attn_forward(
             q,
             k,
@@ -806,51 +909,54 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         sm_margin=0,
         return_softmax=False,
     ):
-        _validate_varlen_query(q, cu_seqlens_q)
+        is_mla = _is_mla(q, v, qv, cu_seqlens_q)
+        if not is_mla:
+            _validate_varlen_query(q, cu_seqlens_q)
         if softmax_scale is None:
             softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
-        # Training interfaces do not expose scheduler_metadata (aligned with
-        # official flash-attn); the scheduler metadata is computed internally on
-        # the AICPU so no D2H/H2D sync breaks the pipeline. cache_seqlens holds
-        # the per-batch KV lengths and stays on device.
-        batch_size = cu_seqlens_q.shape[0] - 1
-        num_heads, head_size = q.shape[1], q.shape[2]
-        num_heads_k = k.shape[1]
-        if seqused_k is not None:
-            cache_seqlens = seqused_k
-        else:
-            cache_seqlens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
-        if seqused_q is not None:
-            seqlens_q = seqused_q
-        else:
-            seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
-        # Pass the per-batch used lengths directly to the internal scheduler.
-        scheduler_metadata = _get_scheduler_metadata_op(
-            batch_size,
-            max_seqlen_q,
-            max_seqlen_k,
-            num_heads,
-            num_heads_k,
-            head_size,
-            headdim_v=head_size,
-            qkv_dtype=q.dtype,
-            cache_seqlens=maybe_contiguous(cache_seqlens),
-            seqlens_q=seqlens_q,
-            cu_seqlens_k=None,
-            cu_seqlens_k_new=None,
-            cache_leftpad=None,
-            page_size=None,
-            max_seqlen_k_new=0,
-            causal=causal,
-            window_size_left=window_size[0],
-            window_size_right=window_size[1],
-            attention_chunk=0,
-            has_softcap=softcap > 0.0,
-            num_splits=num_splits,
-            pack_gqa=None,
-            sm_margin=sm_margin,
-        )
-        # out, q, k, v, out_padded, softmax_lse = _flash_attn_varlen_forward(
+        scheduler_metadata = None
+        if not is_mla:
+            # Training interfaces do not expose scheduler_metadata (aligned with
+            # official flash-attn); the scheduler metadata is computed internally on
+            # the AICPU so no D2H/H2D sync breaks the pipeline. cache_seqlens holds
+            # the per-batch KV lengths and stays on device.
+            batch_size = cu_seqlens_q.shape[0] - 1
+            num_heads, head_size = q.shape[1], q.shape[2]
+            num_heads_k = k.shape[1]
+            if seqused_k is not None:
+                cache_seqlens = seqused_k
+            else:
+                cache_seqlens = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
+            if seqused_q is not None:
+                seqlens_q = seqused_q
+            else:
+                seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+            # Pass the per-batch used lengths directly to the internal scheduler.
+            scheduler_metadata = _get_scheduler_metadata_op(
+                batch_size,
+                max_seqlen_q,
+                max_seqlen_k,
+                num_heads,
+                num_heads_k,
+                head_size,
+                headdim_v=head_size,
+                qkv_dtype=q.dtype,
+                cache_seqlens=maybe_contiguous(cache_seqlens),
+                seqlens_q=seqlens_q,
+                cu_seqlens_k=None,
+                cu_seqlens_k_new=None,
+                cache_leftpad=None,
+                page_size=None,
+                max_seqlen_k_new=0,
+                causal=causal,
+                window_size_left=window_size[0],
+                window_size_right=window_size[1],
+                attention_chunk=0,
+                has_softcap=softcap > 0.0,
+                num_splits=num_splits,
+                pack_gqa=None,
+                sm_margin=sm_margin,
+            )
         out, softmax_lse, *rest = _flash_attn_forward(
             q,
             k,
@@ -1088,6 +1194,14 @@ def flash_attn_func(
         softmax_lse [optional, if return_attn_probs=True]: (batch_size, nheads, seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
+
+    MLA on Ascend 910B/C is forward-only with FP16/BF16 inputs. Compressed MLA
+    uses q/k RoPE dimension 64, qv/v content dimension 512 and one KV head;
+    prefill MLA uses q/k dimension 192, independent v dimension 128 and qv=None.
+    Both support causal/window masks, num_splits=0..256 and finite nonnegative
+    softcap. Output uses v.shape[-1]. With qv, scores include qv @ v.T and
+    softmax_scale defaults to 1 / sqrt(q.shape[-1] + qv.shape[-1]).
+    return_attn_probs=True returns (out, FP32 softmax_lse) for MLA.
     """
     return FlashAttnFunc.apply(
         q,
@@ -1135,6 +1249,22 @@ def flash_attn_varlen_func(
     sm_margin=0,
     return_attn_probs=False,
 ):
+    """Compute attention for TND inputs with int32 allocation prefixes.
+
+    cu_seqlens_q/k have shape (batch_size + 1,) and start at zero;
+    max_seqlen_q/k bound each allocated segment. Optional int32 seqused_q/k
+    have shape (batch_size,) and limit the used prefix without moving the
+    next sample's allocation. Output keeps the allocated query shape with
+    last dimension v.shape[-1]; unused query slots have no value guarantee.
+    return_attn_probs=True returns (out, lse), with FP32 lse shaped (nheads, total_q).
+
+    Prefill MLA uses q/k dimensions 192 and independent v dimension 128 with qv=None;
+    compressed MLA uses q/k dimensions 64 and qv/v dimensions 512 with one KV head.
+    Both support allocation/used lengths, causal/window masks, num_splits=0..256
+    and nonnegative finite softcap. Metadata is generated internally on every call.
+    There is no explicit metadata or page-table parameter; paged MLA uses
+    flash_attn_with_kvcache.
+    """
     return FlashAttnVarlenFunc.apply(
         q,
         k,
@@ -1293,17 +1423,65 @@ def flash_attn_with_kvcache(
         softmax_lse [optional, if return_softmax_lse=True]: (batch_size, nheads, seqlen). The
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
+
+    MLA on Ascend 910B/C supports compressed 64/512 inputs with qv and prefill
+    192/128 inputs with qv=None, as described in flash_attn_func. Caches are
+    read-only BSND or ND paged; BSND/TND queries support causal/window masks,
+    num_splits=0..256 and finite nonnegative softcap. Append and rotary options
+    are unsupported for MLA. Examples are in tests/test_flash_attn_npu_v3_mla.py.
+
+    For MLA TND queries, q/qv have shape (total_q, nheads, headdim/headdim_v)
+    and require cu_seqlens_q/max_seqlen_q. None cache_seqlens uses full logical
+    capacity; integers broadcast over logical batches. Paged capacity is
+    page_table.shape[1] * k_cache.shape[1], at most 16384; page_block_size must
+    be a multiple of 16 in [16, 1024]. Output follows q with v_cache.shape[-1].
+    With qv, scores include qv @ v.T and the default scale uses both dimensions.
+
+    MLA scheduler_metadata uses int32 records bound to representation, layout,
+    mask, split and softcap activation. The device validates current lengths,
+    query prefixes and used pages. Records may be cloned or contiguous offset
+    views; scale and positive softcap values may change during reuse. Changed
+    lengths or softcap activation require regeneration. Reuse skips AICPU
+    generation; host workspace budgeting still runs.
+
+    MLA return_softmax_lse=True returns (out, softmax_lse, out_accum, lse_accum).
+    LSE is FP32, [B,Hq,Sq] for BSND or [Hq,Tq] for TND, including qv scores.
+    num_splits=1 returns empty accumulators. Automatic splitting returns 26 FP32
+    slots, with unused slots 0/-inf; the native partition selects actual splits.
+
+    INT8 MLA is an NPU extension using the same signature: q/k_cache hold BF16
+    RoPE (64), qv/v_cache hold INT8 content (512), and output is BF16. It requires
+    ND paged caches with page size 128, one KV head, power-of-two query heads
+    up to 128, at most 32 queries per sequence, and causal=True for multi-query.
+    num_splits is 0 or 1; window, softcap, sm_margin and nondefault GQA packing
+    are unsupported. All three same-device FP32 descales are required:
+    q_descale is (B,Sq,Hq) or (Tq,Hq), and k_descale/v_descale are (1,).
+    These follow CANN INT8 semantics: Q/K scales multiply the combined content
+    and RoPE logits; V scale multiplies the value result. Their shapes differ
+    from official FP8 descales. Metadata uses qkv_dtype=torch.int8; scales may
+    change during record reuse. INT8 logical KV capacity may exceed 16384.
     """
-    assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
-    assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
+    is_mla = _is_mla(q, v_cache, qv, cu_seqlens_q)
+    if not is_mla:
+        assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
+        assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
     if softmax_scale is None:
         softmax_scale = (q.shape[-1] + (qv.shape[-1] if qv is not None else 0)) ** (-0.5)
     if cache_seqlens is not None and isinstance(cache_seqlens, int):
+        batch = (
+            (page_table.shape[0] if page_table is not None else k_cache.shape[0])
+            if is_mla
+            else q.shape[0]
+        )
+        if is_mla and not 0 <= cache_seqlens <= k_cache.shape[1] * (
+            page_table.shape[1] if page_table is not None else 1
+        ):
+            raise RuntimeError("MLA: cache_seqlens must be between zero and KV capacity")
         cache_seqlens = torch.full(
-            (q.shape[0],), cache_seqlens, dtype=torch.int32, device=k_cache.device
+            (batch,), cache_seqlens, dtype=torch.int32, device=k_cache.device
         )
         cache_seqlens = maybe_contiguous(cache_seqlens)
-    if scheduler_metadata is not None:
+    if scheduler_metadata is not None and not is_mla:
         _validate_scheduler_metadata(
             scheduler_metadata,
             causal=causal,
@@ -1316,42 +1494,44 @@ def flash_attn_with_kvcache(
             k_cache=k_cache,
             cache_seqlens=cache_seqlens,
         )
-    out, softmax_lse, *rest = _flash_attn_forward(
-        q,
-        k_cache,
-        v_cache,
-        k,
-        v,
-        qv,
-        None,  # out
-        cu_seqlens_q,
-        None,  # cu_seqlens_k
-        cu_seqlens_k_new,
-        None,  # seqused_q
-        cache_seqlens,
-        max_seqlen_q,
-        None,  # max_seqlen_k
-        page_table,
-        cache_batch_idx,
-        cache_leftpad,
-        rotary_cos,
-        rotary_sin,
-        rotary_seqlens,
-        q_descale,
-        k_descale,
-        v_descale,
-        softmax_scale,
-        causal=causal,
-        window_size_left=window_size[0],
-        window_size_right=window_size[1],
-        attention_chunk=attention_chunk,
-        softcap=softcap,
-        rotary_interleaved=rotary_interleaved,
-        scheduler_metadata=scheduler_metadata,
-        num_splits=num_splits,
-        pack_gqa=pack_gqa,
-        sm_margin=sm_margin,
-    )
+    # The native and fake MLA entries reject gradients, including under no_grad.
+    with torch.no_grad() if is_mla else nullcontext():
+        out, softmax_lse, *rest = _flash_attn_forward(
+            q,
+            k_cache,
+            v_cache,
+            k,
+            v,
+            qv,
+            None,  # out
+            cu_seqlens_q,
+            None,  # cu_seqlens_k
+            cu_seqlens_k_new,
+            None,  # seqused_q
+            cache_seqlens,
+            max_seqlen_q,
+            None,  # max_seqlen_k
+            page_table,
+            cache_batch_idx,
+            cache_leftpad,
+            rotary_cos,
+            rotary_sin,
+            rotary_seqlens,
+            q_descale,
+            k_descale,
+            v_descale,
+            softmax_scale,
+            causal=causal,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+            attention_chunk=attention_chunk,
+            softcap=softcap,
+            rotary_interleaved=rotary_interleaved,
+            scheduler_metadata=scheduler_metadata,
+            num_splits=num_splits,
+            pack_gqa=pack_gqa,
+            sm_margin=sm_margin,
+        )
     # return (out, softmax_lse) if return_softmax_lse else out
     return (out, softmax_lse, *rest) if return_softmax_lse else out
 
@@ -1411,22 +1591,6 @@ def _validate_scheduler_metadata(
         )
 
 
-# Real metadata contract (sizeof(FAInferTilingData)):
-#   all mask types:
-#       shape = (2376,)
-#   dtype  = torch.uint8
-#   device = NPU
-#   stride = (1,)
-# The custom op prevents TorchDynamo from tracing into the raw pybind
-# get_scheduler_metadata() implementation. Schema matches the V3 910
-# pybind signature in flash_api.cpp (not the V4 parameter list).
-_SCHEDULER_METADATA_TILING_BYTES = 2376
-
-
-@torch.library.custom_op(
-    "flash_attn_npu_3::_get_scheduler_metadata",
-    mutates_args=(),
-)
 def _get_scheduler_metadata_op(
     batch_size: int,
     max_seqlen_q: int,
@@ -1477,6 +1641,8 @@ def _get_scheduler_metadata_op(
         pack_gqa,
         sm_margin,
     )
+    if scheduler_metadata.dtype != torch.uint8:
+        return scheduler_metadata
     # Keep this side effect inside the opaque custom op so Dynamo does not
     # trace the setattr while still attaching the runtime fingerprint.
     scheduler_metadata._fa_scheduler_params = {
@@ -1490,6 +1656,24 @@ def _get_scheduler_metadata_op(
         "num_splits": int(num_splits),
     }
     return scheduler_metadata
+
+
+if hasattr(torch.library, "infer_schema"):
+    # Metadata owns fresh integer storage, so it needs no autograd or alias
+    # checks. Keep the same schema, compile tags and fake dispatch.
+    torch.library.define(
+        "flash_attn_npu_3::_get_scheduler_metadata",
+        torch.library.infer_schema(_get_scheduler_metadata_op, mutates_args=()),
+        tags=torch.ops.flash_attn_npu_3._flash_attn_forward.default.tags,
+    )
+    torch.library.impl(
+        "flash_attn_npu_3::_get_scheduler_metadata", "default", _get_scheduler_metadata_op
+    )
+    _get_scheduler_metadata_op = torch.ops.flash_attn_npu_3._get_scheduler_metadata.default
+else:
+    _get_scheduler_metadata_op = torch.library.custom_op(
+        "flash_attn_npu_3::_get_scheduler_metadata", _get_scheduler_metadata_op, mutates_args=()
+    )
 
 
 @_torch_register_fake_wrapper("flash_attn_npu_3::_get_scheduler_metadata")
@@ -1518,11 +1702,14 @@ def _get_scheduler_metadata_fake(
     pack_gqa: Optional[bool],
     sm_margin: int,
 ) -> torch.Tensor:
-    return torch.empty(
-        (_SCHEDULER_METADATA_TILING_BYTES,),
-        dtype=torch.uint8,
-        device=cache_seqlens.device,
+    if cache_seqlens.device.type != "npu":
+        raise RuntimeError("cache_seqlens must be an NPU tensor")
+    _check_forward_devices(
+        cache_seqlens,
+        seqlens_q=seqlens_q,
+        context="MLA" if headdim != headdim_v else "FlashAttention",
     )
+    return _native_fake(flash_attn_npu_3.get_scheduler_metadata, cache_seqlens, *locals().values())
 
 
 def get_scheduler_metadata(
@@ -1548,35 +1735,71 @@ def get_scheduler_metadata(
     pack_gqa=None,  # Can be tuned for speed
     sm_margin=0,  # Can be tuned if some SMs are used for communication
 ):
-    cache_seqlens = maybe_contiguous(cache_seqlens)
-    seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1] if cu_seqlens_q is not None else None
+    """Precompute NPU scheduling metadata with the official FA3 argument order.
+
+    Ordinary FA3 returns byte scheduling metadata. Numerical softcap and scale
+    are supplied by each forward call; has_softcap selects the scheduling feature.
+    MLA uses device int32 records for compressed headdim=64/headdim_v=512
+    with one KV head, or independent prefill headdim=192/headdim_v=128 with
+    GQA. Both accept BSND/TND queries, nonpaged or ND paged caches, all masks
+    and num_splits=0..256. The default num_splits=0 selects automatic splitting.
+    Nonpaged and paged layouts accept has_softcap=True.
+
+    For INT8 MLA, pass qkv_dtype=torch.int8, headdim=64, headdim_v=512,
+    num_heads_kv=1 and page_size=128. Query/mask/split limits are described in
+    flash_attn_with_kvcache. max_seqlen_k is a multiple of 128 up to INT32_MAX;
+    scale values are supplied only to forward and are not stored in metadata.
+
+    cache_seqlens must be a same-device contiguous int32 tensor of shape
+    (batch_size,); None/integer lengths are kvcache conveniences only.
+    With cu_seqlens_q, queries use TND allocation segments and max_seqlen_q
+    bounds each segment; otherwise it is the BSND query capacity. Without
+    page_size, max_seqlen_k is BSND cache capacity. With page_size, it is logical
+    capacity. For FP16/BF16, it is divisible by page_size and at most 16384;
+    page_size must be a multiple of 16 in [16, 1024]. This generator does not
+    inspect a page table or physical cache. Forward validates current lengths,
+    query prefixes and all used pages on device, including when reusing a record.
+
+    Records bind shape, lengths, dtype, normalized mask, split, platform and
+    softcap activation, but not scale, positive cap values, addresses or strides.
+    Regenerate after lengths, prefixes or other bound conditions change.
+    Supply numerical softcap and softmax_scale values to forward. There is no
+    Q-used or KV allocation-prefix parameter here; compact TND Q/KV uses
+    flash_attn_varlen_func and generates metadata internally.
+    """
     if headdim_v is None:
         headdim_v = headdim
+    if headdim != headdim_v:
+        seqlens_q = cu_seqlens_q
+    else:
+        cache_seqlens = maybe_contiguous(cache_seqlens)
+        seqlens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1] if cu_seqlens_q is not None else None
     # Route through the custom op so torch.compile / FakeTensor can use the
     # registered fake instead of tracing into the raw pybind extension.
-    scheduler_metadata = _get_scheduler_metadata_op(
-        batch_size,
-        max_seqlen_q,
-        max_seqlen_k,
-        num_heads_q,
-        num_heads_kv,
-        headdim,
-        headdim_v,
-        qkv_dtype,
-        cache_seqlens,
-        seqlens_q,
-        None,  # cu_seqlens_k
-        cu_seqlens_k_new,
-        cache_leftpad,
-        page_size,
-        max_seqlen_k_new,
-        causal,
-        window_size[0],
-        window_size[1],
-        attention_chunk,
-        has_softcap,
-        num_splits,
-        pack_gqa,
-        sm_margin,
-    )
+    with torch.no_grad() if headdim != headdim_v else nullcontext():
+        scheduler_metadata = _get_scheduler_metadata_op(
+            batch_size,
+            max_seqlen_q,
+            max_seqlen_k,
+            num_heads_q,
+            num_heads_kv,
+            headdim,
+            headdim_v,
+            qkv_dtype,
+            cache_seqlens,
+            seqlens_q,
+            None,  # cu_seqlens_k
+            cu_seqlens_k_new,
+            cache_leftpad,
+            page_size,
+            max_seqlen_k_new,
+            causal,
+            window_size[0],
+            window_size[1],
+            attention_chunk,
+            has_softcap,
+            num_splits,
+            pack_gqa,
+            sm_margin,
+        )
     return scheduler_metadata
