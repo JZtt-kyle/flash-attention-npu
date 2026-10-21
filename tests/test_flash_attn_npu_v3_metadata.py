@@ -1,9 +1,11 @@
 # Copyright (c) 2026, Minghua Shen.
+from contextlib import nullcontext
 import math
 
 import pytest
 import torch
 import torch_npu
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 from flash_attn_npu_3 import (
     flash_attn_func,
@@ -1912,3 +1914,104 @@ def test_flash_attn_kvcache_metadata_950_short_kv_swa():
         rtol=0,
         atol=1e-6,
     )
+
+
+@pytest.mark.parametrize("fake", [False, True], ids=["real", "fake"])
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "length-dtype",
+        "length-rank",
+        "length-size",
+        "length-device",
+        "prefix-dtype",
+        "prefix-size",
+        "prefix-device",
+        "negative-batch",
+        "negative-query",
+        "large-kv",
+        "zero-heads",
+        "kv-heads",
+        "head-dim",
+        "dtype",
+        "page-zero",
+        "page-negative",
+        "split",
+    ],
+)
+def test_metadata_input_rejections(fake, fault):
+    if not _is_ascend910():
+        pytest.skip("FA3 910 metadata validation")
+    args = dict(
+        batch_size=2,
+        max_seqlen_q=1,
+        max_seqlen_k=128,
+        num_heads_q=4,
+        num_heads_kv=1,
+        headdim=64,
+        cache_seqlens=torch.full((2,), 128, dtype=torch.int32, device="npu"),
+        cu_seqlens_q=torch.tensor([0, 1, 2], dtype=torch.int32, device="npu"),
+        num_splits=1,
+    )
+    if fault.startswith(("length-", "prefix-")):
+        key = "cache_seqlens" if fault.startswith("length-") else "cu_seqlens_q"
+        tensor = args[key]
+        args[key] = (
+            tensor.float()
+            if fault.endswith("dtype")
+            else tensor[None]
+            if fault.endswith("rank")
+            else tensor[:-1]
+            if fault.endswith("size")
+            else tensor.cpu()
+        )
+    else:
+        name, value = {
+            "negative-batch": ("batch_size", -1),
+            "negative-query": ("max_seqlen_q", -1),
+            "large-kv": ("max_seqlen_k", 2**32),
+            "zero-heads": ("num_heads_q", 0),
+            "kv-heads": ("num_heads_kv", 3),
+            "head-dim": ("headdim", 0),
+            "dtype": ("qkv_dtype", torch.float32),
+            "page-zero": ("page_size", 0),
+            "page-negative": ("page_size", -1),
+            "split": ("num_splits", -1),
+        }[fault]
+        args[name] = value
+    with FakeTensorMode() if fake else nullcontext() as mode:
+        if fake:
+            args = {
+                name: mode.from_tensor(value) if isinstance(value, torch.Tensor) else value
+                for name, value in args.items()
+            }
+        with pytest.raises(RuntimeError):
+            get_scheduler_metadata(**args)
+
+
+@pytest.mark.parametrize("varlen", [False, True], ids=["bsnd", "tnd"])
+def test_metadata_fake_matches_real(varlen):
+    if not _is_ascend910():
+        pytest.skip("FA3 910 metadata validation")
+    lengths = torch.full((2,), 128, dtype=torch.int32, device="npu")
+    prefix = torch.tensor([0, 1, 2], dtype=torch.int32, device="npu") if varlen else None
+    expected = get_scheduler_metadata(
+        2, 1, 128, 4, 1, 64, lengths, cu_seqlens_q=prefix, num_splits=1
+    )
+    with FakeTensorMode() as mode:
+        actual = get_scheduler_metadata(
+            2,
+            1,
+            128,
+            4,
+            1,
+            64,
+            mode.from_tensor(lengths),
+            cu_seqlens_q=mode.from_tensor(prefix) if varlen else None,
+            num_splits=1,
+        )
+        assert (actual.shape, actual.dtype, actual.device) == (
+            expected.shape,
+            expected.dtype,
+            expected.device,
+        )

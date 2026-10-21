@@ -31,10 +31,12 @@ using namespace KernelCommon;
 
 #include "fag_tiling.cpp"
 #include "fa_metadata_args.h"
+#include "fa_validation.h"
 #include "device_triu_mask.h"
 #include "fa_split.h"
 #include "fwd_dispatch.hpp"
 #include "bwd_dispatch.hpp"
+#include "mla/mla_forward.h"
 #include <cmath>
 
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
@@ -168,12 +170,21 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::Tensor> q_descale_,      // (b, h_k), not (b, h)
     std::optional<at::Tensor> k_descale_,      // (b, h_k)
     std::optional<at::Tensor> v_descale_,      // (b, h_k)
-    std::optional<float> softmax_scale_, bool is_causal, int64_t window_size_left, int64_t window_size_right,
-    int64_t attention_chunk, float softcap,
+    std::optional<double> softmax_scale_, bool is_causal, int64_t window_size_left, int64_t window_size_right,
+    int64_t attention_chunk, double softcap_option,
     bool is_rotary_interleaved, // if true, rotary combines indices 0 & 1, else indices 0 & rotary_dim / 2
     std::optional<at::Tensor> scheduler_metadata_, // (b + 1)
     int64_t num_splits, std::optional<bool> pack_gqa_, int64_t sm_margin)
 {
+    if (auto result = flash_attn::mla::TryForward(
+            q, k, v, k_new_, v_new_, q_v_, out_, cu_seqlens_q_, cu_seqlens_k_, cu_seqlens_k_new_, seqused_q_,
+            seqused_k_, max_seqlen_q_, max_seqlen_k_, page_table_, kv_batch_idx_, leftpad_k_, rotary_cos_, rotary_sin_,
+            seqlens_rotary_, q_descale_, k_descale_, v_descale_, softmax_scale_, is_causal, window_size_left,
+            window_size_right, attention_chunk, softcap_option, is_rotary_interleaved, scheduler_metadata_, num_splits,
+            pack_gqa_, sm_margin)) {
+        return std::move(*result);
+    }
+    const float softcap = static_cast<float>(softcap_option);
     const c10::OptionalDeviceGuard device_guard(device_of(q));
     auto hostStart = std::chrono::steady_clock::now();
 
@@ -375,9 +386,6 @@ std::vector<at::Tensor> mha_fwd(
 
     if (scheduler_metadata_.has_value()) {
         auto schedMd = scheduler_metadata_.value();
-        TORCH_CHECK(schedMd.dtype() == at::kByte, "scheduler_metadata must be a byte tensor");
-        TORCH_CHECK(schedMd.is_contiguous(), "scheduler_metadata must be contiguous");
-        TORCH_CHECK(schedMd.device().type() == at::kPrivateUse1, "scheduler_metadata must be an NPU tensor");
         // Derive the mask axes (causal/SWA) from this call's arguments the same
         // way get_scheduler_metadata did when producing the buffer, so that the
         // template selection and the tiling offset match the AICPU-written
@@ -397,9 +405,8 @@ std::vector<at::Tensor> mha_fwd(
         is_causal = maskDer.is_causal;
         is_local = maskDer.is_local;
         const bool hasMask = maskDer.maskType != static_cast<uint32_t>(FaiKenel::MaskType::NO_MASK);
-        TORCH_CHECK(static_cast<uint64_t>(schedMd.nbytes()) == fa_metadata::MetadataBytes(hasMask),
-                    "scheduler_metadata buffer size must exactly match this call's "
-                    "causal/window-derived layout");
+        flash_attn::CheckMetadataTensor(schedMd, q.device(), fa_metadata::MetadataBytes(hasMask), "scheduler_metadata",
+                                        at::kByte);
         auto metaBase = static_cast<uint8_t*>(schedMd.data_ptr());
         tilingDevice = metaBase + fa_metadata::TilingOffset(hasMask);
         if (hasMask) {
@@ -637,8 +644,7 @@ std::vector<at::Tensor> mha_fwd(
         blockTableDevice = static_cast<uint8_t*>(block_table.data_ptr());
     }
     auto oDevice = static_cast<uint8_t*>(out.data_ptr());
-    auto qSeqDevice = is_varlen_q
-    ? static_cast<uint8_t*>(seqlenq_gpu_tensor.data_ptr()) : nullptr;
+    auto qSeqDevice = is_varlen_q ? static_cast<uint8_t*>(seqlenq_gpu_tensor.data_ptr()) : nullptr;
     auto kvSeqDevice = static_cast<uint8_t*>(seqlenk_gpu_tensor.data_ptr());
     auto workspaceDevice = static_cast<uint8_t*>(workspace_tensor.data_ptr());
     auto softmaxLseDevice = static_cast<uint8_t*>(softmaxlse.data_ptr());
@@ -694,15 +700,34 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   int64_t window_size_right, int64_t attention_chunk, bool has_softcap,
                                   int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin)
 {
-    const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
+    const bool is_mla = headdim != headdim_v;
+    const auto dtype = pybind11::cast<at::ScalarType>(qkv_dtype);
+    TORCH_CHECK(batch_size >= 0 && batch_size <= UINT32_MAX && max_seqlen_q >= 0 && max_seqlen_q <= INT32_MAX &&
+                    max_seqlen_k >= 0 && max_seqlen_k <= INT32_MAX && max_seqlen_k_new >= 0 &&
+                    max_seqlen_k_new <= INT32_MAX && num_heads_q > 0 && num_heads_q <= INT32_MAX && num_heads_kv > 0 &&
+                    num_heads_kv <= INT32_MAX && num_heads_q % num_heads_kv == 0 && headdim > 0 &&
+                    headdim <= INT32_MAX && headdim_v > 0 && headdim_v <= INT32_MAX,
+                "FlashAttention: metadata shape bounds exceeded; KV heads must divide query heads");
+    TORCH_CHECK(dtype == at::kHalf || dtype == at::kBFloat16 || (is_mla && dtype == at::kChar),
+                "FlashAttention: qkv_dtype must be FP16 or BF16, or INT8 for MLA");
+    TORCH_CHECK(!page_size || (*page_size > 0 && *page_size <= INT32_MAX), "page_size must be positive and fit int32");
+    flash_attn::CheckMetadataTensor(cache_seqlens, cache_seqlens.device(), batch_size,
+                                    is_mla ? "MLA: cache_seqlens" : "cache_seqlens");
     const bool is_varlen_q = seqlens_q.has_value();
-    void* seqlensQDev = nullptr;
     if (is_varlen_q) {
-        auto seqlens_q_t = seqlens_q.value();
-        TORCH_CHECK(seqlens_q_t.dtype() == torch::kInt32, "seqlens_q must have dtype int32");
-        seqlensQDev = seqlens_q_t.data_ptr();
+        flash_attn::CheckMetadataTensor(*seqlens_q, cache_seqlens.device(), batch_size + int64_t(is_mla),
+                                        is_mla ? "MLA: cu_seqlens_q" : "seqlens_q");
     }
-    TORCH_CHECK(cache_seqlens.dtype() == torch::kInt32, "cache_seqlens must have dtype int32");
+    const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
+    if (is_mla) {
+        TORCH_CHECK(!cu_seqlens_k && !cu_seqlens_k_new && !cache_leftpad && max_seqlen_k_new == 0 &&
+                        attention_chunk == 0,
+                    "MLA: metadata append, leftpad and attention_chunk are unsupported");
+        return flash_attn::mla::SchedulerMetadata(batch_size, max_seqlen_q, max_seqlen_k, num_heads_q, num_heads_kv,
+                                                  headdim, headdim_v, dtype, cache_seqlens, seqlens_q, page_size,
+                                                  window_size_left, window_size_right, causal, has_softcap, num_splits,
+                                                  pack_gqa, sm_margin);
+    }
     const bool is_varlen_kv = cu_seqlens_k.has_value();
     const uint32_t ps = page_size.has_value() ? static_cast<uint32_t>(page_size.value()) : 128;
     const uint32_t blockDim = platform_ascendc::PlatformAscendCManager::GetInstance()->GetCoreNumAic();
@@ -711,12 +736,15 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                 "] (0 = auto; upper bound = number of AI cores). ");
     TORCH_CHECK(num_splits <= 1 || (page_size.has_value() && is_varlen_q),
                 "NPU FlashAttention num_splits>1 currently requires paged KV cache and varlen-q (TND) layout");
+    if (cache_seqlens.is_meta()) {
+        return at::empty({static_cast<int64_t>(sizeof(FAInferTilingData))}, cache_seqlens.options().dtype(at::kByte));
+    }
     // Mask *layout* (buffer size / kernel template) is derived on host from
     // the declared seqlen bounds / cache capacity (no D2H). AICPU re-derives
     // tiling maskType / windows against the actual max KV length.
     FwdMaskDerivation maskDer = DeriveFwdMask(causal, window_size_left, window_size_right, max_seqlen_q, max_seqlen_k);
     FAMetadataArgs args{};
-    args.seqlensQAddr = is_varlen_q ? reinterpret_cast<uint64_t>(seqlensQDev) : 0ULL;
+    args.seqlensQAddr = is_varlen_q ? reinterpret_cast<uint64_t>(seqlens_q->data_ptr()) : 0ULL;
     args.cacheSeqlensAddr = reinterpret_cast<uint64_t>(cache_seqlens.data_ptr());
     args.metaOutAddr = 0; // set by GetSchedulerMetadataImpl
     args.batch = static_cast<uint32_t>(batch_size);
