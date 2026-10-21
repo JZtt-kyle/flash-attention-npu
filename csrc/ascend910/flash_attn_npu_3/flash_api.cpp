@@ -35,6 +35,8 @@ using namespace KernelCommon;
 #include "fa_split.h"
 #include "fwd_dispatch.hpp"
 #include "bwd_dispatch.hpp"
+#include "mla/mla_validation.h"
+#include "mla/mla_forward.h"
 #include <cmath>
 
 #define CHECK_CONTIGUOUS(x) TORCH_CHECK(x.is_contiguous(), #x " must be contiguous")
@@ -174,7 +176,23 @@ std::vector<at::Tensor> mha_fwd(
     std::optional<at::Tensor> scheduler_metadata_, // (b + 1)
     int64_t num_splits, std::optional<bool> pack_gqa_, int64_t sm_margin)
 {
+    const bool isMla = flash_attn::mla::CheckForwardBoundary(q, k, v, q_v_, cu_seqlens_q_.has_value(),
+                                                             cu_seqlens_k_.has_value(), page_table_.has_value());
     const c10::OptionalDeviceGuard device_guard(device_of(q));
+    if (isMla) {
+        TORCH_CHECK(!k_new_ && !v_new_ && !out_ && !cu_seqlens_k_new_ && (cu_seqlens_q_ || !max_seqlen_q_) &&
+                        (cu_seqlens_k_ || !max_seqlen_k_) && !kv_batch_idx_ && !leftpad_k_ && !rotary_cos_ &&
+                        !rotary_sin_ && !seqlens_rotary_ && !q_descale_ && !k_descale_ && !v_descale_ &&
+                        is_rotary_interleaved,
+                    "MLA compressed forward is not implemented yet for optional tensors or length/rotary options");
+        TORCH_CHECK(attention_chunk == 0 && (num_splits == 1 || (num_splits >= 0 && num_splits <= 256 &&
+                                                                 (!cu_seqlens_k_ || cu_seqlens_q_))),
+                    "MLA compressed forward is not implemented yet for mask, split, softcap or scheduling options");
+        return flash_attn::mla::Forward(q, k, v, q_v_, cu_seqlens_q_, cu_seqlens_k_, seqused_q_, seqused_k_,
+                                        max_seqlen_q_, max_seqlen_k_, page_table_, softmax_scale_, is_causal,
+                                        window_size_left, window_size_right, softcap, scheduler_metadata_, num_splits,
+                                        pack_gqa_, sm_margin);
+    }
     auto hostStart = std::chrono::steady_clock::now();
 
     if (cu_seqlens_q_.has_value()) {
@@ -694,6 +712,7 @@ at::Tensor get_scheduler_metadata(int64_t batch_size, int64_t max_seqlen_q, int6
                                   int64_t window_size_right, int64_t attention_chunk, bool has_softcap,
                                   int64_t num_splits, std::optional<bool> pack_gqa, int64_t sm_margin)
 {
+    TORCH_CHECK(headdim == headdim_v, "MLA metadata requires the public get_scheduler_metadata entry");
     const c10::OptionalDeviceGuard device_guard(device_of(cache_seqlens));
     const bool is_varlen_q = seqlens_q.has_value();
     void* seqlensQDev = nullptr;

@@ -320,6 +320,9 @@ class BishengBuildExt(build_ext):
             "-ltiling_api",
             "-lplatform",
         ]
+        if ext_name == "flash_attn_npu_3.flash_attn_npu_3":
+            # Scope is thread-local and active only around MLA's ASC launch.
+            link_flags.append("-Wl,--wrap=aclrtLaunchKernelWithHostArgs")
 
         # NOTE: ccache is intentionally NOT supported. bisheng requires `-x asc`
         # to enter ASC/device-compile mode (without it, kernel_operator.h and the
@@ -368,15 +371,7 @@ class BishengBuildExt(build_ext):
         )
 
     def _build_aicpu_metadata(self, ext_fullpath, ext_name):
-        """Compile fa_metadata.aicpu (host AICPU object) for the extensions
-        that carry the scheduler-metadata feature (910 v2/v3/v4 and 950 v3/v4). This
-        is a separate `bisheng -x aicpu` invocation (host CPU code
-        cross-compiled with hcc, not ASC device code); the resulting object is
-        linked into the extension alongside the ASC device objects. Returns the
-        .o path, or None if there is no aicpu source."""
-        ascend_home = os.getenv(
-            "ASCEND_TOOLKIT_HOME", os.getenv("ASCEND_HOME_PATH", "/usr/local/Ascend")
-        )
+        """Compile scheduler AICPU objects separately from ASC device objects."""
         aicpu_src_dirs = {
             "flash_attn_npu.flash_attn_npu": os.path.join(
                 this_dir, "csrc/ascend910", "flash_attn_npu"
@@ -392,47 +387,32 @@ class BishengBuildExt(build_ext):
         }
         src_dir = aicpu_src_dirs.get(ext_name)
         if src_dir is None:
-            return None
-        aicpu_src = os.path.join(src_dir, "fa_metadata.aicpu")
-        if not os.path.exists(aicpu_src):
-            return None
-        aicpu_obj = os.path.join(
-            os.path.dirname(ext_fullpath),
-            # All extensions share the build output directory.  Keep the
-            # AICPU objects per extension; otherwise the later 950 build
-            # overwrites the object already queued for the earlier one.
-            f"fa_metadata_{ext_name.replace('.', '_')}.o",
+            return []
+        sources = [os.path.join(src_dir, "fa_metadata.aicpu")]
+        if ext_name == "flash_attn_npu_3.flash_attn_npu_3":
+            # Keep the independent FIA and quantized IFA scheduler binaries separate.
+            sources.append(os.path.join(src_dir, "mla", "mla_metadata.aicpu"))
+            sources.append(os.path.join(src_dir, "mla", "mla_int8_metadata.aicpu"))
+        return [self._build_aicpu_object(ext_fullpath, src) for src in sources]
+
+    def _build_aicpu_object(self, ext_fullpath, aicpu_src):
+        ascend_home = os.getenv(
+            "ASCEND_TOOLKIT_HOME", os.getenv("ASCEND_HOME_PATH", "/usr/local/Ascend")
         )
-        # Incremental AICPU compilation must also track the local headers. In
-        # particular, fa_metadata.aicpu includes tilingdata.h and metadata
-        # helpers whose changes otherwise leave a stale object after a branch
-        # switch or stash re-apply.
-        aicpu_stamp = aicpu_obj + ".inputs"
-        aicpu_inputs = [aicpu_src]
-        for name in ("tilingdata.h", "fa_metadata_args.h"):
-            header = os.path.join(src_dir, name)
-            if os.path.exists(header):
-                aicpu_inputs.append(header)
-        expected_signature = _inputs_signature(aicpu_inputs)
-        try:
-            with open(aicpu_stamp) as stamp:
-                current_signature = stamp.read().strip()
-        except OSError:
-            current_signature = ""
-        if (
-            not self._force_rebuild()
-            and os.path.exists(aicpu_obj)
-            and current_signature == expected_signature
-        ):
-            print("[compile-aicpu-skip]", aicpu_src, "(obj up-to-date)")
-            return aicpu_obj
+        src_dir = os.path.dirname(aicpu_src)
+        stem = Path(aicpu_src).stem
+        aicpu_obj = os.path.join(
+            os.path.dirname(ext_fullpath), f"{Path(ext_fullpath).name}.{stem}.o"
+        )
+        depfile = aicpu_obj + ".d"
+        cmdhash_file = aicpu_obj + ".cmdhash"
         cann_arch_dir = get_cann_arch_dir()
         aicpu_inc = os.path.join(ascend_home, cann_arch_dir, "asc/include/aicpu_api")
         aicpu_lib = os.path.join(ascend_home, cann_arch_dir, "lib64/device/lib64")
         hcc = os.path.join(ascend_home, "toolkit/toolchain/hcc")
         hcc_isys = os.path.join(hcc, "aarch64-target-linux-gnu/include")
         hcc_cpp = _get_hcc_cpp_include(hcc)
-        aicpu_cmd = [
+        compile_common = [
             "bisheng",
             "-O2",
             "-std=c++17",
@@ -455,21 +435,32 @@ class BishengBuildExt(build_ext):
             os.path.join(hcc_cpp, "aarch64-target-linux-gnu"),
             "-isystem",
             os.path.join(hcc_cpp, "backward"),
-            "-c",
-            "-o",
-            aicpu_obj,
             "-x",
             "aicpu",
-            aicpu_src,
         ]
+        # Both AICPU preprocessing passes include the shared scheduler .cpp
+        # files. Track their real include graph and compiler options, including
+        # metadata headers; source-only mtimes silently reused stale objects.
+        if (
+            not self._force_rebuild()
+            and os.path.exists(depfile)
+            and _obj_is_fresh(aicpu_obj, aicpu_src, depfile, cmdhash_file, compile_common)
+        ):
+            print("[compile-aicpu-skip]", aicpu_src, "(obj up-to-date)")
+            return aicpu_obj
+        aicpu_cmd = [*compile_common, "-c", "-o", aicpu_obj, aicpu_src]
         print("[compile-aicpu]", aicpu_src)
         print("[compile-aicpu-cmd]", " ".join(aicpu_cmd))
         try:
             result = subprocess.run(aicpu_cmd, capture_output=True, text=True, check=True)
             if result.stdout:
                 print(result.stdout)
-            with open(aicpu_stamp, "w") as stamp:
-                stamp.write(expected_signature)
+            if result.stderr:
+                print(result.stderr)
+            deps_cmd = [*compile_common, "-M", "-MF", depfile, aicpu_src]
+            print("[aicpu-deps-cmd]", " ".join(deps_cmd))
+            subprocess.run(deps_cmd, capture_output=True, text=True, check=True)
+            Path(cmdhash_file).write_text(_cmdhash(compile_common))
             print(f"AICPU compilation successful! output: {aicpu_obj}")
         except subprocess.CalledProcessError as e:
             print(f"AICPU compilation failed! Error output:\n{e.stderr}")
@@ -497,7 +488,19 @@ class BishengBuildExt(build_ext):
             _compiler, compile_common, _la, _lf = toolchains[ext_name]
             depfile = obj + ".d"
             cmdhash_file = obj + ".cmdhash"
-            if not force and _obj_is_fresh(obj, src, depfile, cmdhash_file, compile_common):
+            mla_device = ext_name == "flash_attn_npu_3.flash_attn_npu_3" and os.path.basename(
+                src
+            ).startswith("mla_dispatch_")
+            device_depfile = obj + ".device.d"
+            device_fresh = not mla_device or (
+                os.path.exists(device_depfile)
+                and _obj_is_fresh(obj, src, device_depfile, cmdhash_file, compile_common)
+            )
+            if (
+                not force
+                and device_fresh
+                and _obj_is_fresh(obj, src, depfile, cmdhash_file, compile_common)
+            ):
                 print("[compile-skip]", ext_name, os.path.basename(src), "(obj up-to-date)")
                 return (ext_name, obj)
             cmd = [*compile_common, "-c", src, "-o", obj, "-MMD", "-MF", depfile]
@@ -507,6 +510,19 @@ class BishengBuildExt(build_ext):
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True)
                 if result.stdout:
                     print(result.stdout)
+                if mla_device:
+                    # Bisheng's final host pass overwrites -MMD and omits headers
+                    # under __NPU_ARCH__. Track the actual device include graph.
+                    deps_cmd = [
+                        *compile_common,
+                        "--offload-device-only",
+                        "-M",
+                        src,
+                        "-MF",
+                        device_depfile,
+                    ]
+                    print("[device-deps-cmd]", " ".join(deps_cmd))
+                    subprocess.run(deps_cmd, capture_output=True, text=True, check=True)
                 with open(cmdhash_file, "w") as f:
                     f.write(_cmdhash(compile_common))
                 return (ext_name, obj)
@@ -532,9 +548,7 @@ class BishengBuildExt(build_ext):
         # after the parallel ASC compiles, before linking.
         for ext in self.extensions:
             ext_fullpath = self.get_ext_fullpath(ext.name)
-            aicpu_obj = self._build_aicpu_metadata(ext_fullpath, ext.name)
-            if aicpu_obj is not None:
-                objs_by_ext[ext.name].append(aicpu_obj)
+            objs_by_ext[ext.name].extend(self._build_aicpu_metadata(ext_fullpath, ext.name))
 
         # Link each extension from its own object files (serial; link is cheap
         # relative to compile - measured ~1s/ext - so parallelizing would save
@@ -640,6 +654,21 @@ src_ascend910_v3 = glob.glob(
 src_ascend910_v3 += glob.glob(
     os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3", "autogen", "*.cpp"), recursive=True
 )
+# MLA numerical instantiations are generated with the ordinary v3 dispatch.
+# These are host adapters/schedulers plus the mixed-dtype INT8 implementation.
+src_ascend910_v3 += [
+    os.path.join(this_dir, "csrc/ascend910/flash_attn_npu_3/mla", name)
+    for name in (
+        "mla_forward.cpp",
+        "mla_dispatch_int8.cpp",
+        "mla_layout.cpp",
+        "mla_dispatch.cpp",
+        "mla_tiling.cpp",
+        "mla_split.cpp",
+        "cann_split_core.cpp",
+    )
+]
+
 src_ascend950_v3 = glob.glob(
     os.path.join(this_dir, "csrc/ascend950/flash_attn_npu_3", "flash_api.cpp"), recursive=True
 )
