@@ -391,9 +391,16 @@ std::vector<at::Tensor> mha_fwd_kvcache(
         // The AICPU may trigger flash-decode split-KV on device; reserve the
         // split workspace upper bound since the host no longer knows it.
         if (paged_KV && !is_local && seqlen_q * (num_heads / num_heads_k) <= 128 && seqlen_q <= 16) {
-            int64_t kvSegUpper = kvSeqlenBound / 512 + 1;
-            int64_t lseTasksUpper = static_cast<int64_t>(batch_size) * num_heads * seqlen_q * kvSegUpper * 2;
-            wsSplit = lseTasksUpper * 4 + lseTasksUpper * head_size_og * 4;
+            // Each batch/KV-head group contributes at most Q_TILE_CEIL
+            // partial rows, and each interior core boundary adds at most
+            // another tile. Independently, a core has at most two partial
+            // tiles. Bound rows rather than records to cover odd GQA tiles.
+            const int64_t coreNum = blockDim;
+            const int64_t kvGroups = static_cast<int64_t>(batch_size) * num_heads_k;
+            const int64_t rowBlocksUpper =
+                (coreNum == 0 || kvGroups == 0) ? 0 : std::min(2 * coreNum, kvGroups + coreNum - 1);
+            const int64_t partialRowsUpper = fa_split::Q_TILE_CEIL * rowBlocksUpper;
+            wsSplit = partialRowsUpper * (static_cast<int64_t>(head_size_og) + 1) * sizeof(float);
         }
         workspace_tensor = at::empty({wsBase + wsSplit}, at::device(at::kPrivateUse1).dtype(at::kByte));
         launchBlockDim = blockDim;
@@ -705,9 +712,9 @@ std::vector<at::Tensor> mha_fwd(at::Tensor& q,                   // batch_size x
     }
 
     // init softmax lse — head-major BNS: {batch, num_heads, seqlen_q} (matches v3).
-    at::Tensor softmaxlse = at::empty({batch_size, num_heads, seqlen_q},
-        at::device(at::kPrivateUse1).dtype(at::kFloat));
-    auto softmaxLseDevice = static_cast<uint8_t *>(const_cast<void *>(softmaxlse.data_ptr()));
+    at::Tensor softmaxlse =
+        at::empty({batch_size, num_heads, seqlen_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
+    auto softmaxLseDevice = static_cast<uint8_t*>(const_cast<void*>(softmaxlse.data_ptr()));
 
     AlibiSlopes alibi = set_params_alibi(alibi_slopes_, batch_size, num_heads);
 
@@ -822,14 +829,14 @@ std::vector<at::Tensor> mha_fwd(at::Tensor& q,                   // batch_size x
     }
 
     // device ptrs
-    auto qDevice = static_cast<uint8_t *>(const_cast<void *>(q.data_ptr()));
-    auto kDevice = static_cast<uint8_t *>(const_cast<void *>(k.data_ptr()));
-    auto vDevice = static_cast<uint8_t *>(const_cast<void *>(v.data_ptr()));
-    uint8_t*  qSeqDevice = nullptr;
+    auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
+    auto kDevice = static_cast<uint8_t*>(const_cast<void*>(k.data_ptr()));
+    auto vDevice = static_cast<uint8_t*>(const_cast<void*>(v.data_ptr()));
+    uint8_t* qSeqDevice = nullptr;
     uint8_t* kvSeqDevice = nullptr;
-    auto workspaceDevice = static_cast<uint8_t *>(const_cast<void *>(workspace_tensor.data_ptr()));
-    auto oDevice = static_cast<uint8_t *>(const_cast<void *>(out.data_ptr()));
-    uint8_t * blockTableDevice = nullptr; // will not be used in non-kvcahce fwd api
+    auto workspaceDevice = static_cast<uint8_t*>(const_cast<void*>(workspace_tensor.data_ptr()));
+    auto oDevice = static_cast<uint8_t*>(const_cast<void*>(out.data_ptr()));
+    uint8_t* blockTableDevice = nullptr; // will not be used in non-kvcahce fwd api
 
     // run kernel
     // BSND, non-paged forward (IS_TND=false, paged_KV=false, no flash-decode).
