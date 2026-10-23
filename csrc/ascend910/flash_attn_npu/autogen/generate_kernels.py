@@ -14,7 +14,8 @@ from typing import List, Optional
 # (FAGGeneral) selects head_dim at runtime via a switch() inside the impl
 # (fag_general_dispatch_impl.hpp). So head_dim is deliberately dropped here.
 #
-# The real compile-time axes are dtype and input layout (TND / BSND). Each
+# The real compile-time axes are dtype and input layout (the forward supports
+# BSND / TND / BNSD; the backward stays at BSND / TND). Each
 # generated .cpp holds exactly ONE explicit instantiation of the per-family
 # launch wrapper, so the heavy kernel templates land in separate, parallel-
 # compiled translation units. The impl bodies live in the shared *_impl.hpp
@@ -40,10 +41,19 @@ DTYPE_MAP = {
     "bf16": ("bfloat16_t", "bf16"),
 }
 
-# layout key -> (display name, fwd IS_TND bool token, fag layout enum token)
-LAYOUTS = [
-    ("bsnd", "BSND", "false", "BSND"),
-    ("tnd",  "TND",  "true",  "TND"),
+# layout key -> display name. The forward supports three input layouts
+# (BSND / TND / BNSD); the backward (FAG) stays at two because BNSD is
+# forward-only, so the two generation axes are kept separate.
+FWD_LAYOUTS = [
+    ("bsnd", "BSND"),
+    ("tnd", "TND"),
+    ("bnsd", "BNSD"),
+]
+
+# layout key -> (layout key, display name, fag layout enum token from fag_layout.hpp)
+FAG_LAYOUTS = [
+    ("bsnd", "BSND", "BSND"),
+    ("tnd", "TND", "TND"),
 ]
 
 # headdim values of the FAGGeneral runtime switch (v2 fag variant axis)
@@ -67,8 +77,7 @@ def _feature_suffix(*features: tuple) -> str:
 def _header(family_desc: str, dtype_key: str, layout_display: Optional[str]) -> str:
     layout_note = f", {layout_display} variant" if layout_display else " variant (always TND)"
     return (
-        PRELUDE
-        + f"// v2 {family_desc}{layout_note}. One explicit instantiation per\n"
+        PRELUDE + f"// v2 {family_desc}{layout_note}. One explicit instantiation per\n"
         "// translation unit so the kernel templates compile in parallel across\n"
         "// cores; head_dim is a runtime axis (switch inside the impl), not a\n"
         "// template parameter, so it is not a generation axis.\n\n"
@@ -77,11 +86,12 @@ def _header(family_desc: str, dtype_key: str, layout_display: Optional[str]) -> 
 
 def fwd_kernel(dtype_key: str, layout: tuple) -> "Kernel":
     ctype, _ = DTYPE_MAP[dtype_key]
-    layout_key, display, is_tnd, _ = layout
+    layout_key, display = layout
     body = (
         _header("forward FAInfer dispatch", dtype_key, display)
         + '#include "../fwd_dispatch_impl.hpp"\n\n'
-        + f"template void launch_fwd_impl<{ctype}, {is_tnd}>(const FwdLaunchArgs &);"
+        + f"template void launch_fwd_impl<{ctype}, "
+        + f"KernelCommon::FaiKenel::inputLayout::{display}>(const FwdLaunchArgs &);"
         f"  // {display}\n"
     )
     return Kernel(
@@ -93,9 +103,11 @@ def fwd_kernel(dtype_key: str, layout: tuple) -> "Kernel":
     )
 
 
-def fwd_combo(dtype_key: str, layout: tuple, softcap: int, return_softmax: int, dropout: int) -> "Kernel":
+def fwd_combo(
+    dtype_key: str, layout: tuple, softcap: int, return_softmax: int, dropout: int
+) -> "Kernel":
     ctype, _ = DTYPE_MAP[dtype_key]
-    layout_key, display, _, _ = layout
+    layout_key, display = layout
     layout_token = f"FaiKenel::inputLayout::{display}"
     sc, rs, do = BOOL_TOKEN[softcap], BOOL_TOKEN[return_softmax], BOOL_TOKEN[dropout]
     suffix = _feature_suffix(
@@ -105,8 +117,7 @@ def fwd_combo(dtype_key: str, layout: tuple, softcap: int, return_softmax: int, 
     )
     symbol = f"fwd_combo_{dtype_key}_{layout_key}{suffix}"
     body = (
-        PRELUDE
-        + f"// v2 forward FAInfer combo, {display} variant, softcap={sc} "
+        PRELUDE + f"// v2 forward FAInfer combo, {display} variant, softcap={sc} "
         f"return_softmax={rs} dropout={do}.\n"
         + "// Fixes the (softcap, return_softmax, dropout) triple at compile time and\n"
         + "// switches over paged x mask (6 FAInfer instantiations) so the 48 variants\n"
@@ -133,7 +144,7 @@ def fwd_combo(dtype_key: str, layout: tuple, softcap: int, return_softmax: int, 
 
 def fag_kernel(dtype_key: str, layout: tuple) -> "Kernel":
     _, suffix = DTYPE_MAP[dtype_key]
-    layout_key, display, _, enum = layout
+    layout_key, display, enum = layout
     body = (
         _header("FAGGeneral backward dispatch", dtype_key, display)
         + '#include "../fag_general_dispatch_impl.hpp"\n\n'
@@ -151,7 +162,7 @@ def fag_kernel(dtype_key: str, layout: tuple) -> "Kernel":
 
 def fag_kernel_variant(dtype_key: str, layout: tuple, headdim: int, softcap: int) -> "Kernel":
     ctype, _ = DTYPE_MAP[dtype_key]
-    layout_key, display, _, enum = layout
+    layout_key, display, enum = layout
     sc = BOOL_TOKEN[softcap]
     suffix = _feature_suffix((softcap, "softcap"))
     symbol = f"fag_{dtype_key}_{layout_key}_headdim{headdim}{suffix}"
@@ -170,7 +181,8 @@ def fag_kernel_variant(dtype_key: str, layout: tuple, headdim: int, softcap: int
         + "            FAG_BOOL_SWITCH(a.deterministic, IsDtm, {\n"
         + "                FAG_BOOL_SWITCH(a.has_dropout, IsDrop, {\n"
         + f"                    FAG_KERNEL_LAUNCH({ctype}, {enum}, Aligned{headdim}, "
-        + "IsAttenMask, IsDrop, IsDtm, " + f"{sc});\n"
+        + "IsAttenMask, IsDrop, IsDtm, "
+        + f"{sc});\n"
         + "                });\n"
         + "            });\n"
         + "        });\n"
@@ -207,7 +219,7 @@ def varlen_bwd_kernel(dtype_key: str) -> "Kernel":
 def fwd_combo_decls() -> str:
     decls = []
     for dtype_key in DTYPE_MAP:
-        for layout in LAYOUTS:
+        for layout in FWD_LAYOUTS:
             for softcap in (0, 1):
                 for return_softmax in (0, 1):
                     for dropout in (0, 1):
@@ -239,7 +251,7 @@ def fwd_combo_decls() -> str:
         + "#pragma once\n\n"
         + "// Generated by autogen/generate_kernels.py - do not edit by hand.\n"
         + "//\n"
-        + "// Declarations of the 32 v2 forward combo launchers (dtype x layout x\n"
+        + "// Declarations of the 48 v2 forward combo launchers (dtype x layout x\n"
         + "// softcap x return_softmax x dropout; each combo TU instantiates the 6\n"
         + "// paged x mask FAInfer variants) plus the dispatcher macro used by\n"
         + "// fwd_dispatch_impl.hpp. The macro `return`s out of the enclosing void\n"
@@ -254,7 +266,7 @@ def fwd_combo_decls() -> str:
 def fag_decls() -> str:
     decls = []
     for dtype_key in DTYPE_MAP:
-        for layout in LAYOUTS:
+        for layout in FAG_LAYOUTS:
             for headdim in FAG_HEADDIMS:
                 for softcap in (0, 1):
                     decls.append(
@@ -312,13 +324,14 @@ class Kernel:
 def get_all_kernels() -> List[Kernel]:
     kernels: List[Kernel] = []
     for dtype in DTYPE_MAP:
-        for layout in LAYOUTS:
+        for layout in FWD_LAYOUTS:
             kernels.append(fwd_kernel(dtype, layout))
-            kernels.append(fag_kernel(dtype, layout))
             for softcap in (0, 1):
                 for return_softmax in (0, 1):
                     for dropout in (0, 1):
                         kernels.append(fwd_combo(dtype, layout, softcap, return_softmax, dropout))
+        for layout in FAG_LAYOUTS:
+            kernels.append(fag_kernel(dtype, layout))
             for headdim in FAG_HEADDIMS:
                 for softcap in (0, 1):
                     kernels.append(fag_kernel_variant(dtype, layout, headdim, softcap))

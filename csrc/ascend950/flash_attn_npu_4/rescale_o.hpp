@@ -253,7 +253,8 @@ class BlockEpilogue<EpilogueFARescaleO, ElementO_, ElementOTmp_, ElementS_, Tile
     template <class TensorDst>
     __aicore__ inline void ScatterGroupedOutput(TensorDst& gOTensor, uint32_t qSBlockSize, uint32_t rowStart,
                                                 uint32_t rowCount, uint32_t embedV, uint32_t outputStride,
-                                                uint32_t colStride, uint32_t fullyMaskedRowsPerHead)
+                                                uint32_t oHeadStride, uint32_t colStride,
+                                                uint32_t fullyMaskedRowsPerHead)
     {
         auto gO = gOTensor.data();
         // zero fully-masked Q rows in UB (causal Sq>Sk).
@@ -287,7 +288,7 @@ class BlockEpilogue<EpilogueFARescaleO, ElementO_, ElementOTmp_, ElementS_, Tile
             uint32_t localS = groupRow % qSBlockSize;
             uint32_t rowsThisHead = qSBlockSize - localS;
             rowsThisHead = rowsThisHead < remainingRows ? rowsThisHead : remainingRows;
-            AscendC::DataCopyPad(gO[head * embedV + localS * outputStride], goUbTensor16[ubRowOffset * colStride],
+            AscendC::DataCopyPad(gO[head * oHeadStride + localS * outputStride], goUbTensor16[ubRowOffset * colStride],
                                  AscendC::DataCopyExtParams(rowsThisHead, embedV * sizeof(ElementO), 0,
                                                             (outputStride - embedV) * sizeof(ElementO), 0));
             groupRow += rowsThisHead;
@@ -829,14 +830,15 @@ class BlockEpilogue<EpilogueFARescaleO, ElementO_, ElementOTmp_, ElementS_, Tile
     }
 
     template <bool LseMode, class TensorDst>
-    __aicore__ inline void
-    operator()(TensorDst& gOTensor, AscendC::GlobalTensor<float> gLse, GemmCoord actualOriShape, uint32_t curTileMod,
-               uint32_t gatheredKvSTileIdx, bool isFirstKvSTile, bool isLastKvSTile, Arch::CrossCoreFlag pvReadyFlag,
-               bool isDN, uint32_t fullyMaskedRowsPerHead, uint32_t qSBlockSize, uint32_t qNBlockSize,
-               uint32_t lseHeadStride, uint32_t outputStride, int32_t delStartRow = 0, int32_t delEndRow = 0,
-               uint32_t qSeqlen = 0, uint32_t qSTileStart = 0, AscendC::GlobalTensor<float> gPartialO = {},
-               AscendC::GlobalTensor<float> gPartialLse = {}, bool writePartial = false, uint32_t partialId = 0,
-               uint32_t fdRowCapacity = 0, uint32_t fdLseSubStride = 0)
+    __aicore__ inline void operator()(TensorDst& gOTensor, AscendC::GlobalTensor<float> gLse, GemmCoord actualOriShape,
+                                      uint32_t curTileMod, uint32_t gatheredKvSTileIdx, bool isFirstKvSTile,
+                                      bool isLastKvSTile, Arch::CrossCoreFlag pvReadyFlag, bool isDN,
+                                      uint32_t fullyMaskedRowsPerHead, uint32_t qSBlockSize, uint32_t qNBlockSize,
+                                      uint32_t lseHeadStride, uint32_t outputStride, uint32_t oHeadStride,
+                                      int32_t delStartRow = 0, int32_t delEndRow = 0, uint32_t qSeqlen = 0,
+                                      uint32_t qSTileStart = 0, AscendC::GlobalTensor<float> gPartialO = {},
+                                      AscendC::GlobalTensor<float> gPartialLse = {}, bool writePartial = false,
+                                      uint32_t partialId = 0, uint32_t fdRowCapacity = 0, uint32_t fdLseSubStride = 0)
     {
         uint32_t rowNumOri = actualOriShape[0];
         uint32_t colNumOri = actualOriShape[1];
@@ -930,7 +932,7 @@ class BlockEpilogue<EpilogueFARescaleO, ElementO_, ElementOTmp_, ElementS_, Tile
         if (!writePartial && qNBlockSize > 1U && rowNumCurSubCore > 0U && isLastKvSTile) {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
             ScatterGroupedOutput(gOTensor, qSBlockSize, rowOffsetCurSubCore, rowNumCurSubCore, colNumOri, outputStride,
-                                 colStrideCurSubCore, fullyMaskedRowsPerHead);
+                                 oHeadStride, colStrideCurSubCore, fullyMaskedRowsPerHead);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
         }
         if constexpr (LseMode) {
