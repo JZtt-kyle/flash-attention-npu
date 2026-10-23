@@ -53,8 +53,7 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
                                 std::optional<float> softmax_scale_, bool is_causal, int64_t window_size_left,
                                 int64_t window_size_right, float softcap, int64_t num_splits,
                                 std::optional<bool> pack_gqa_, std::optional<at::Tensor> learnable_sink_,
-                                bool return_lse, std::optional<at::Tensor> scheduler_metadata_,
-                                int64_t layout)
+                                bool return_lse, std::optional<at::Tensor> scheduler_metadata_, int64_t layout)
 {
     // ============================================================
     // 0. Device guard + stream + AIC core count
@@ -175,8 +174,7 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     }
 
     // 5b. Layout (FwdLayout, resolved by the Python caller; Q/K/V share one layout)
-    TORCH_CHECK(layout >= static_cast<int64_t>(FwdLayout::TND) &&
-                    layout <= static_cast<int64_t>(FwdLayout::BNSD),
+    TORCH_CHECK(layout >= static_cast<int64_t>(FwdLayout::TND) && layout <= static_cast<int64_t>(FwdLayout::BNSD),
                 "950 backend (v4) received an unsupported layout code (", layout, ")");
     const FwdLayout layout_enum = static_cast<FwdLayout>(layout);
     TORCH_CHECK((layout_enum == FwdLayout::TND) == is_varlen_q,
@@ -254,11 +252,9 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
                   "CPU tiling aggregate must remain trivially copyable");
     // BNSD stores the sequence on dim2 (heads live on dim1), so the KV bound
     // must not be read from dim1 in that case.
-    const int64_t declared_k =
-        max_seqlen_k_.value_or(paged_KV ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
-                                        : (layout_enum == FwdLayout::BNSD
-                                               ? k.size(2)
-                                               : (k.dim() == 4 ? k.size(1) : k.size(0))));
+    const int64_t declared_k = max_seqlen_k_.value_or(
+        paged_KV ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
+                 : (layout_enum == FwdLayout::BNSD ? k.size(2) : (k.dim() == 4 ? k.size(1) : k.size(0))));
     if (declared_k > 0 && window_size_left >= declared_k) {
         window_size_left = -1;
     }
@@ -332,11 +328,9 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     // per-batch lengths on the host just to inspect the AICPU-written flag;
     // use the same declared-shape eligibility here and let the fused kernel
     // guard against a metadata schedule that was disabled by AICPU.
-    const int64_t metadataKvBound =
-        max_seqlen_k_.value_or(paged_KV ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
-                                        : (layout_enum == FwdLayout::BNSD
-                                               ? k.size(2)
-                                               : (k.dim() == 4 ? k.size(1) : k.size(0))));
+    const int64_t metadataKvBound = max_seqlen_k_.value_or(
+        paged_KV ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
+                 : (layout_enum == FwdLayout::BNSD ? k.size(2) : (k.dim() == 4 ? k.size(1) : k.size(0))));
     const uint32_t metadataGroupSize = num_heads_k == 0 ? 1U : static_cast<uint32_t>(num_heads / num_heads_k);
     const uint32_t metadataBaseTaskUpperBound =
         static_cast<uint32_t>(batch_size) * static_cast<uint32_t>(num_heads_k) * ((metadataGroupSize + 4U - 1U) / 4U);
@@ -498,16 +492,16 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
         maskDev = static_cast<uint8_t*>(mask_npu_tensor.data_ptr());
     }
 
-    const bool enableDN = !flashDecodeEnabled && (!is_causal) && (!is_local) && (head_size_q <= 256) &&
-                          (head_size_v <= 256);
+    const bool enableDN =
+        !flashDecodeEnabled && (!is_causal) && (!is_local) && (head_size_q <= 256) && (head_size_v <= 256);
     const uint32_t launchBlockDim = scheduler_metadata_.has_value()
                                         ? (flashDecodeEnabled ? metadataFdCoreCapacity : blockDim)
                                         : (flashDecodeEnabled ? tilingData.fdActiveCoreNum : blockDim);
 
     const FwdLaunchArgs fwdArgs{
-        is_bf16, fmt,      mask_category, paged_KV,     enableDN,       return_lse, is_softcap, launchBlockDim,
-        aclStream, qDev,   kDev,          vDev,         maskDev,        blockTableDev, oDev,    lseDev,
-        qSeqDev,   kvSeqDev, seqUsedQDev, seqUsedKvDev, wsDev,          tilDev,     runtimeDev, kv_seqlen_allocated};
+        is_bf16,   fmt,      mask_category, paged_KV,     enableDN, return_lse,    is_softcap, launchBlockDim,
+        aclStream, qDev,     kDev,          vDev,         maskDev,  blockTableDev, oDev,       lseDev,
+        qSeqDev,   kvSeqDev, seqUsedQDev,   seqUsedKvDev, wsDev,    tilDev,        runtimeDev, kv_seqlen_allocated};
     auto launch_fa_infer = [fwdArgs]() -> int {
         launch_fwd(fwdArgs);
         return 0;

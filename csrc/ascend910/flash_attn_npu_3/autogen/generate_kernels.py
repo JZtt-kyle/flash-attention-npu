@@ -32,7 +32,7 @@ DTYPE_MAP = {
 # Forward layout key -> (display name, FaiKenel::inputLayout token).
 FWD_LAYOUTS = [
     ("bsnd", "BSND", "FaiKenel::inputLayout::BSND"),
-    ("tnd",  "TND",  "FaiKenel::inputLayout::TND"),
+    ("tnd", "TND", "FaiKenel::inputLayout::TND"),
     ("bnsd", "BNSD", "FaiKenel::inputLayout::BNSD"),
 ]
 
@@ -41,7 +41,7 @@ FWD_LAYOUTS = [
 # kernel inputLayout enum.
 BWD_LAYOUTS = [
     ("bsnd", "BSND", "BSND"),
-    ("tnd",  "TND",  "TND"),
+    ("tnd", "TND", "TND"),
 ]
 
 PRELUDE = (
@@ -54,8 +54,7 @@ PRELUDE = (
 
 def _header(family_desc: str, layout_display: str) -> str:
     return (
-        PRELUDE
-        + f"// v3 {family_desc}, {layout_display} variant. One explicit instantiation per\n"
+        PRELUDE + f"// v3 {family_desc}, {layout_display} variant. One explicit instantiation per\n"
         "// translation unit so the kernel templates compile in parallel across\n"
         "// cores; head_dim is a runtime axis (switch/tiling inside the impl), not a\n"
         "// template parameter, so it is not a generation axis.\n\n"

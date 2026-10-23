@@ -801,8 +801,7 @@ class FAInferKernel {
             if (!isSplitKV) {
                 // layoutOInit.shape(1) is the O token stride (the dst row gap source):
                 // qHeads*embedV for BSND/TND, embedV for BNSD (the head plane is dense).
-                LayoutO layoutOInit(qSeqlen,
-                                    (INPUT_LAYOUT == FaiKenel::inputLayout::BNSD) ? embedV : embed * qHeads);
+                LayoutO layoutOInit(qSeqlen, (INPUT_LAYOUT == FaiKenel::inputLayout::BNSD) ? embedV : embed * qHeads);
                 LayoutLse layoutLseInit(qHeads, lseHeadStride);
                 EpilogueInitOut epilogueInitOut(resource);
                 epilogueInitOut(gO[gmOffsetO], gLse[gmOffsetLse], layoutOInit, layoutLseInit, qSBlockSize, qNBlockSize,
@@ -829,8 +828,8 @@ class FAInferKernel {
         LayoutV layoutVTemp(stackSeqTile, strideV);
         if (!isEmptyTask) {
             blockMmadQK.resetBlockStart(kvStart, pagedBlockSize);
-            blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize,
-                                static_cast<int64_t>(qHeadStride), static_cast<uint32_t>(strideQ));
+            blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize, static_cast<int64_t>(qHeadStride),
+                                static_cast<uint32_t>(strideQ));
         }
 #endif
         for (uint32_t kvSIdx = kvStart; kvSIdx < kvEnd + pipelineDrain; kvSIdx++) {
@@ -1214,8 +1213,8 @@ __global__ __aicore__ void FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_A
     using FAInferKernelType = FAInferKernel<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO,
                                             PagedCacheFlag, maskCategory, inLayout, CombineScale>;
 
-    FAIKernelParams params{q,   k,   v,         mask,   blockTables, actualQseqlen, actualKvseqlen,
-                           o, lse, workspace, tiling, alibiSlopes, kNew,          vNew, kvSeqlenAllocated};
+    FAIKernelParams params{q,   k,         v,      mask,        blockTables, actualQseqlen, actualKvseqlen,   o,
+                           lse, workspace, tiling, alibiSlopes, kNew,        vNew,          kvSeqlenAllocated};
     FAInferKernelType flashAttnInfer;
     flashAttnInfer(params);
 }

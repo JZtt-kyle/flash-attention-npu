@@ -779,7 +779,6 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
         ctx.head_size_og = q.size(-1)
-        ctx.layout = layout
         if out_transposed:
             # Report the result in the shape the caller passed in, not the BNSD view.
             out = out.transpose(1, 2)
@@ -787,11 +786,6 @@ class FlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        if ctx.layout == _LAYOUT_BNSD:
-            raise NotImplementedError(
-                "flash_attn_npu_3: 910 backend BNSD layout is forward-only; "
-                "the backward pass is not implemented"
-            )
         q, k, v, out, softmax_lse = ctx.saved_tensors
         assert ctx.attention_chunk == 0, "FA3 backward does not support attention_chunk"
         dout, q, k, v, out, head_size_og = _pad_bwd_headdim(dout, q, k, v, out, ctx.head_size_og)
@@ -969,16 +963,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
         ctx.head_size_og = q.size(-1)
-        ctx.layout = layout
         return (out, softmax_lse) if return_softmax else out
 
     @staticmethod
     def backward(ctx, dout, *args):
-        if ctx.layout == _LAYOUT_BNSD:
-            raise NotImplementedError(
-                "flash_attn_npu_3: 910 backend BNSD layout is forward-only; "
-                "the backward pass is not implemented"
-            )
         q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k = (
             ctx.saved_tensors
         )

@@ -343,10 +343,9 @@ std::vector<at::Tensor> mha_fwd(
     }
 
     const int64_t declared_k = max_seqlen_k_.value_or(
-        paged_KV
-            ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
-            : (k.dim() == 4 ? (is_bnsd_layout ? k.size(2) : k.size(1))
-                            : (use_explicit_metadata ? k.size(0) : static_cast<int64_t>(max_kv_seqlen))));
+        paged_KV ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
+                 : (k.dim() == 4 ? (is_bnsd_layout ? k.size(2) : k.size(1))
+                                 : (use_explicit_metadata ? k.size(0) : static_cast<int64_t>(max_kv_seqlen))));
     NormalizeAttentionWindow(is_causal, declared_k, window_size_left, window_size_right, is_causal, is_local);
 
     // Per-call runtime values (block/scale/mask) never live in the reusable

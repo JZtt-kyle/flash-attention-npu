@@ -651,15 +651,15 @@ class BlockEpilogue<EpilogueFARescaleO, ElementO_, ElementOTmp_, ElementS_, Tile
     }
 
     template <bool LseMode, class TensorDst>
-    __aicore__ inline void
-    operator()(TensorDst& gOTensor, AscendC::GlobalTensor<float> gLse, GemmCoord actualOriShape, uint32_t curTileMod,
-               uint32_t gatheredKvSTileIdx, bool isFirstKvSTile, bool isLastKvSTile, Arch::CrossCoreFlag pvReadyFlag,
-               bool isDN, uint32_t fullyMaskedRowsPerHead, uint32_t qSBlockSize, uint32_t qNBlockSize,
-               uint32_t lseHeadStride, uint32_t outputStride, uint32_t oHeadStride, int32_t delStartRow = 0,
-               int32_t delEndRow = 0, uint32_t qSeqlen = 0, uint32_t qSTileStart = 0,
-               AscendC::GlobalTensor<float> gPartialO = {}, AscendC::GlobalTensor<float> gPartialLse = {},
-               bool writePartial = false, uint32_t partialId = 0, uint32_t fdRowCapacity = 0,
-               uint32_t fdLseSubStride = 0)
+    __aicore__ inline void operator()(TensorDst& gOTensor, AscendC::GlobalTensor<float> gLse, GemmCoord actualOriShape,
+                                      uint32_t curTileMod, uint32_t gatheredKvSTileIdx, bool isFirstKvSTile,
+                                      bool isLastKvSTile, Arch::CrossCoreFlag pvReadyFlag, bool isDN,
+                                      uint32_t fullyMaskedRowsPerHead, uint32_t qSBlockSize, uint32_t qNBlockSize,
+                                      uint32_t lseHeadStride, uint32_t outputStride, uint32_t oHeadStride,
+                                      int32_t delStartRow = 0, int32_t delEndRow = 0, uint32_t qSeqlen = 0,
+                                      uint32_t qSTileStart = 0, AscendC::GlobalTensor<float> gPartialO = {},
+                                      AscendC::GlobalTensor<float> gPartialLse = {}, bool writePartial = false,
+                                      uint32_t partialId = 0, uint32_t fdRowCapacity = 0, uint32_t fdLseSubStride = 0)
     {
         uint32_t rowNumOri = actualOriShape[0];
         uint32_t colNumOri = actualOriShape[1];

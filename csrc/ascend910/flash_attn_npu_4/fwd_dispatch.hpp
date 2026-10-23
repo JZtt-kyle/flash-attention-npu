@@ -32,7 +32,7 @@ struct FwdLaunchArgs {
     aclrtStream aclStream;
     uint64_t fftsAddr;
     KernelCommon::FaiKenel::inputLayout layout; // TND / BSND / BNSD (same for Q, K, V)
-    int64_t kv_seqlen_allocated;  // BNSD only: per-head KV plane length; 0 otherwise
+    int64_t kv_seqlen_allocated;                // BNSD only: per-head KV plane length; 0 otherwise
     bool is_bf16;
     bool paged_KV;
     bool is_causal;

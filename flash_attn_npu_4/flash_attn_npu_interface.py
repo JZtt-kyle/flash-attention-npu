@@ -748,7 +748,6 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.aux_tensors = aux_tensors
         ctx.aux_scalars = aux_scalars
         ctx.head_size_og = q.size(-1)
-        ctx.layout = layout
         if out_transposed:
             # Report the result in the shape the caller passed in, not the BNSD view.
             out = out.transpose(1, 2)
@@ -756,11 +755,6 @@ class FlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        if ctx.layout == _LAYOUT_BNSD:
-            raise NotImplementedError(
-                "flash_attn_npu_4: 910 backend BNSD layout is forward-only; "
-                "the backward pass is not implemented"
-            )
         q, k, v, out, softmax_lse = ctx.saved_tensors
         # torch_npu may pass a zero tensor (not None) for unused LSE grads.
         dlse = args[0] if ctx.return_lse and len(args) > 0 else None
@@ -973,7 +967,6 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.aux_tensors = aux_tensors
         ctx.aux_scalars = aux_scalars
         ctx.head_size_og = q.size(-1)
-        ctx.layout = layout
 
         # Do not materialize unused output gradients as zero tensors.
         # V4 backward does not support dlse; unused LSE gradients
@@ -988,11 +981,6 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        if ctx.layout == _LAYOUT_BNSD:
-            raise NotImplementedError(
-                "flash_attn_npu_4: 910 backend BNSD layout is forward-only; "
-                "the backward pass is not implemented"
-            )
         q, k, v, out, softmax_lse, cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k = (
             ctx.saved_tensors
         )

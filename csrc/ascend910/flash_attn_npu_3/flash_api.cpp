@@ -639,8 +639,7 @@ std::vector<at::Tensor> mha_fwd(
         blockTableDevice = static_cast<uint8_t*>(block_table.data_ptr());
     }
     auto oDevice = static_cast<uint8_t*>(out.data_ptr());
-    auto qSeqDevice = is_varlen_q
-    ? static_cast<uint8_t*>(seqlenq_gpu_tensor.data_ptr()) : nullptr;
+    auto qSeqDevice = is_varlen_q ? static_cast<uint8_t*>(seqlenq_gpu_tensor.data_ptr()) : nullptr;
     auto kvSeqDevice = static_cast<uint8_t*>(seqlenk_gpu_tensor.data_ptr());
     auto workspaceDevice = static_cast<uint8_t*>(workspace_tensor.data_ptr());
     auto softmaxLseDevice = static_cast<uint8_t*>(softmaxlse.data_ptr());
@@ -661,7 +660,7 @@ std::vector<at::Tensor> mha_fwd(
     fwd_args.has_softcap = has_softcap;
     // Host layout codes (0 = TND, 1 = BSND, 2 = BNSD) map onto the kernel enum.
     fwd_args.layout = (layout == 0) ? FaiKenel::inputLayout::TND
-                                     : (is_bnsd ? FaiKenel::inputLayout::BNSD : FaiKenel::inputLayout::BSND);
+                                    : (is_bnsd ? FaiKenel::inputLayout::BNSD : FaiKenel::inputLayout::BSND);
     fwd_args.kv_seqlen_allocated = kv_seqlen_allocated;
     fwd_args.sequsedQDevice = seqused_q_.has_value() ? static_cast<uint8_t*>(seqused_q_.value().data_ptr()) : nullptr;
     fwd_args.sequsedKVDevice = seqused_k_.has_value() ? static_cast<uint8_t*>(seqused_k_.value().data_ptr()) : nullptr;
@@ -681,15 +680,15 @@ std::vector<at::Tensor> mha_fwd(
                        softcap};
     auto launch_fa_infer = [fwd_args, layout]() -> int {
         switch (layout) {
-            case 0:
-                launch_fwd<FaiKenel::inputLayout::TND>(fwd_args);
-                break;
-            case 2:
-                launch_fwd<FaiKenel::inputLayout::BNSD>(fwd_args);
-                break;
-            default:
-                launch_fwd<FaiKenel::inputLayout::BSND>(fwd_args);
-                break;
+        case 0:
+            launch_fwd<FaiKenel::inputLayout::TND>(fwd_args);
+            break;
+        case 2:
+            launch_fwd<FaiKenel::inputLayout::BNSD>(fwd_args);
+            break;
+        default:
+            launch_fwd<FaiKenel::inputLayout::BSND>(fwd_args);
+            break;
         }
         return 0;
     };

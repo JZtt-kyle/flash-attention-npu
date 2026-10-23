@@ -854,8 +854,8 @@ class FAInferKernel {
         LayoutV layoutVTemp(stackSeqTile, strideV);
         if (!isEmptyTask) {
             blockMmadQK.resetBlockStart(kvStart, pagedBlockSize);
-            blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize,
-                                static_cast<uint32_t>(qHeadStride), static_cast<uint32_t>(strideQ));
+            blockMmadQK.loadQGM(gQ[gmOffsetQ], layoutQTemp, rowNum, qNBlockSize, static_cast<uint32_t>(qHeadStride),
+                                static_cast<uint32_t>(strideQ));
         }
 #endif
         for (uint32_t kvSIdx = kvStart; kvSIdx < kvEnd + pipelineDrain; kvSIdx++) {
@@ -1075,12 +1075,11 @@ class FAInferKernel {
                     splitParams.layoutgmLse = &layoutgmLse;
                     splitParams.layoutgmLo = &layoutgmLo;
 
-                    epilogueRescaleO(gO[pvDesc.gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate],
-                                     gLse[pvDesc.gmOffsetLse], layoutO, layoutOTmp, layoutUpdate, layoutLse,
-                                     actualBlockShapePV, pvReady, pvDesc.qSBlockSize, pvDesc.qNBlockSize,
-                                     pvDesc.firstStack, pvDesc.lastStack, pvDesc.slot, pvDesc.taskStateSlot,
-                                     splitParams, 0, 0, 0, 0, 1,
-                                     static_cast<uint32_t>(strideO), static_cast<uint32_t>(oHeadStride));
+                    epilogueRescaleO(
+                        gO[pvDesc.gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate], gLse[pvDesc.gmOffsetLse],
+                        layoutO, layoutOTmp, layoutUpdate, layoutLse, actualBlockShapePV, pvReady, pvDesc.qSBlockSize,
+                        pvDesc.qNBlockSize, pvDesc.firstStack, pvDesc.lastStack, pvDesc.slot, pvDesc.taskStateSlot,
+                        splitParams, 0, 0, 0, 0, 1, static_cast<uint32_t>(strideO), static_cast<uint32_t>(oHeadStride));
                 } else {
                     epilogueRescaleO(
                         gO[pvDesc.gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate], gLse[pvDesc.gmOffsetLse],
@@ -1162,11 +1161,10 @@ template <typename InputDtypeQ = half, typename InputDtypeKv = half, typename In
           bool PagedCacheFlag = false, FaiKenel::MaskType maskCategory = FaiKenel::MaskType::NO_MASK,
           FaiKenel::inputLayout inLayout = FaiKenel::inputLayout::TND,
           Epilogue::LseModeT lseMode = Epilogue::LseModeT::NONE, bool HAS_SOFTCAP = false>
-__global__ __aicore__ void FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask,
-                                   GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse, GM_ADDR actualQseqlen,
-                                   GM_ADDR actualKvseqlen, GM_ADDR workspace, FAInferTilingParams tiling, GM_ADDR kNew,
-                                   GM_ADDR vNew, GM_ADDR seqUsedQ = nullptr, GM_ADDR seqUsedKv = nullptr,
-                                   int64_t kvSeqlenAllocated = 0)
+__global__ __aicore__ void
+FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse,
+        GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, FAInferTilingParams tiling, GM_ADDR kNew,
+        GM_ADDR vNew, GM_ADDR seqUsedQ = nullptr, GM_ADDR seqUsedKv = nullptr, int64_t kvSeqlenAllocated = 0)
 {
     AscendC::SetSyncBaseAddr(fftsAddr);
 
@@ -1225,7 +1223,7 @@ __global__ __aicore__ void FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_A
                                             PagedCacheFlag, maskCategory, inLayout, CombineScale>;
 
     FAIKernelParams params{q,   k,         v,      mask, blockTables, actualQseqlen, actualKvseqlen, o,
-                           lse, workspace, tiling, kNew, vNew,        seqUsedQ,      seqUsedKv,     kvSeqlenAllocated};
+                           lse, workspace, tiling, kNew, vNew,        seqUsedQ,      seqUsedKv,      kvSeqlenAllocated};
     FAInferKernelType flashAttnInfer;
     flashAttnInfer(params);
 }

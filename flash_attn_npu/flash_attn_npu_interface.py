@@ -994,7 +994,6 @@ class FlashAttnFunc(torch.autograd.Function):
             ctx.alibi_slopes = alibi_slopes
             ctx.deterministic = deterministic
             ctx.head_size_og = head_size_og
-            ctx.layout = layout
         out = out_padded[..., :head_size_og]
         if out_transposed:
             # Report the result in the shape the caller passed in, not the BNSD view.
@@ -1003,10 +1002,6 @@ class FlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        if ctx.layout == _LAYOUT_BNSD:
-            raise NotImplementedError(
-                "flash_attn_npu: 910 后端 BNSD 仅支持前向，反向未实现"
-            )
         q, k, v, out, softmax_lse, rng_state = ctx.saved_tensors
         dout, q, k, v, out, head_size_og = _pad_bwd_headdim(dout, q, k, v, out, ctx.head_size_og)
         dq, dk, dv = torch.empty_like(q), torch.empty_like(k), torch.empty_like(v)
@@ -1811,9 +1806,7 @@ def flash_attn_with_kvcache(
     )
     if out_transposed:
         if k is not None or v is not None:
-            raise NotImplementedError(
-                "flash_attn_npu: 910 后端 BNSD 布局不支持 append-KV (k/v)"
-            )
+            raise NotImplementedError("flash_attn_npu: 910 后端 BNSD 布局不支持 append-KV (k/v)")
         if cache_seqlens is not None:
             max_seqlen_k_bound = int(cache_seqlens.max().item())
             if max_seqlen_k_bound > bsnd_seqlen_k:

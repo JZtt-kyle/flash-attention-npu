@@ -607,7 +607,6 @@ class FlashAttnFunc(torch.autograd.Function):
         )
 
         ctx.save_for_backward(q, k, v, out, softmax_lse)
-        ctx.layout = layout
         ctx.softmax_scale = softmax_scale
         ctx.causal = causal
         ctx.window_size = window_size
@@ -634,10 +633,6 @@ class FlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *args):
-        if getattr(ctx, "layout", _LAYOUT_BSND) == _LAYOUT_BNSD:
-            raise NotImplementedError(
-                "flash_attn_npu_4_950: BNSD layout only supports the forward pass"
-            )
         q, k, v, out, softmax_lse = ctx.saved_tensors
         dlse = args[0] if ctx.return_lse and len(args) > 0 else None
         if dlse is not None and torch.is_tensor(dlse) and float(dlse.detach().abs().sum()) == 0.0:

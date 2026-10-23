@@ -63,8 +63,7 @@ struct FAIKernelParams {
         : q(q_), k(k_), v(v_), mask(mask_), blockTables(blockTables_), actualQseqlen(actualQseqlen_),
           actualKvseqlen(actualKvseqlen_), seqUsedQ(seqUsedQ_), seqUsedKv(seqUsedKv_), o(o_), lse(lse_),
           workSpace(workSpace_), tiling(tiling_), scaleValue(scaleValue_), softcapValue(softcapValue_),
-          numBlocks(numBlocks_), maxNumBlocksPerBatch(maxNumBlocksPerBatch_),
-          kvSeqlenAllocated(kvSeqlenAllocated_)
+          numBlocks(numBlocks_), maxNumBlocksPerBatch(maxNumBlocksPerBatch_), kvSeqlenAllocated(kvSeqlenAllocated_)
     {}
 };
 

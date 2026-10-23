@@ -762,9 +762,8 @@ class FAIKernel950 {
                         gmOTensorTla, gLse[lseOffset], actualBlockShapePV, curTileMod, pipelineTileSeqNow,
                         (kvSTileRelIdxNow == 0), (kvSTileRelIdxNow == kvSLoopCount - 1), pvReadyFlag, IsDN,
                         fmRowsPerHead, qSBlockSize, qNBlockSize, lseHeadStride, static_cast<uint32_t>(strideO),
-                        static_cast<uint32_t>(oHeadStride),
-                        swaDelStartRow, swaDelEndRow, swaQSeqlen, swaQSTileStart, gPartialO, gPartialLse,
-                        writePartial && !IsDN, partialId, fdRowCapacity_, fdLseSubStride_);
+                        static_cast<uint32_t>(oHeadStride), swaDelStartRow, swaDelEndRow, swaQSeqlen, swaQSTileStart,
+                        gPartialO, gPartialLse, writePartial && !IsDN, partialId, fdRowCapacity_, fdLseSubStride_);
 #endif
                 }
             }
@@ -1040,9 +1039,24 @@ CATLASS_GLOBAL void FAInfer(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_AD
 
     using Kernel = FAIKernel950<BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, kvFormat,
                                 kvcacheType, kvcacheShape, maskCategory, cacheLayout, false, LseMode>;
-    FAIKernelParams params{
-        q,   k,         v,      mask,       blockTables,  actualQseqlen, actualKvseqlen,      seqUsedQ, seqUsedKv, o,
-        lse, workspace, tiling, scaleValue, softcapValue, numBlocks,     maxNumBlocksPerBatch, kvSeqlenAllocated};
+    FAIKernelParams params{q,
+                           k,
+                           v,
+                           mask,
+                           blockTables,
+                           actualQseqlen,
+                           actualKvseqlen,
+                           seqUsedQ,
+                           seqUsedKv,
+                           o,
+                           lse,
+                           workspace,
+                           tiling,
+                           scaleValue,
+                           softcapValue,
+                           numBlocks,
+                           maxNumBlocksPerBatch,
+                           kvSeqlenAllocated};
     Kernel faInfer;
     faInfer(params);
 }
@@ -1107,9 +1121,24 @@ CATLASS_GLOBAL void FAInferDn(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_
 
     using Kernel = FAIKernel950<BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, kvFormat,
                                 kvcacheType, kvcacheShape, maskCategory, cacheLayout, true, LseMode>;
-    FAIKernelParams params{
-        q,   k,         v,      mask,       blockTables,  actualQseqlen, actualKvseqlen,      seqUsedQ, seqUsedKv, o,
-        lse, workspace, tiling, scaleValue, softcapValue, numBlocks,     maxNumBlocksPerBatch, kvSeqlenAllocated};
+    FAIKernelParams params{q,
+                           k,
+                           v,
+                           mask,
+                           blockTables,
+                           actualQseqlen,
+                           actualKvseqlen,
+                           seqUsedQ,
+                           seqUsedKv,
+                           o,
+                           lse,
+                           workspace,
+                           tiling,
+                           scaleValue,
+                           softcapValue,
+                           numBlocks,
+                           maxNumBlocksPerBatch,
+                           kvSeqlenAllocated};
     Kernel faInfer;
     faInfer(params);
 }

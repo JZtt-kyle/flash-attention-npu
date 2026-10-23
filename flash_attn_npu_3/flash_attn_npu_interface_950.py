@@ -669,7 +669,6 @@ class FlashAttnFunc(torch.autograd.Function):
         ctx.window_size = tuple(window_size)
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
-        ctx.layout = layout
         if out_transposed:
             # Report the result in the shape the caller passed in, not the BNSD view.
             out = out.transpose(1, 2)
@@ -677,10 +676,6 @@ class FlashAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dout, *unused_grads):
-        if ctx.layout == _LAYOUT_BNSD:
-            raise NotImplementedError(
-                "Ascend950 v3 BNSD layout is forward-only; the backward pass is not implemented"
-            )
         if ctx.window_size != (-1, -1):
             raise NotImplementedError(
                 "Ascend950 v3 backward does not support sliding-window attention"
@@ -829,15 +824,10 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.window_size = tuple(window_size)
         ctx.deterministic = deterministic
         ctx.sm_margin = sm_margin
-        ctx.layout = layout
         return (out, softmax_lse.transpose(-1, -2)) if return_softmax else out
 
     @staticmethod
     def backward(ctx, dout, *unused_grads):
-        if ctx.layout == _LAYOUT_BNSD:
-            raise NotImplementedError(
-                "Ascend950 v3 BNSD layout is forward-only; the backward pass is not implemented"
-            )
         if ctx.window_size != (-1, -1):
             raise NotImplementedError(
                 "Ascend950 v3 backward does not support sliding-window attention"

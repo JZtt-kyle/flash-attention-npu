@@ -749,9 +749,9 @@ std::vector<at::Tensor> mha_fwd(at::Tensor& q,                   // batch_size x
     }
 
     // init softmax lse — head-major BNS: {batch, num_heads, seqlen_q} (matches v3).
-    at::Tensor softmaxlse = at::empty({batch_size, num_heads, seqlen_q},
-        at::device(at::kPrivateUse1).dtype(at::kFloat));
-    auto softmaxLseDevice = static_cast<uint8_t *>(const_cast<void *>(softmaxlse.data_ptr()));
+    at::Tensor softmaxlse =
+        at::empty({batch_size, num_heads, seqlen_q}, at::device(at::kPrivateUse1).dtype(at::kFloat));
+    auto softmaxLseDevice = static_cast<uint8_t*>(const_cast<void*>(softmaxlse.data_ptr()));
 
     AlibiSlopes alibi = set_params_alibi(alibi_slopes_, batch_size, num_heads);
 
@@ -866,14 +866,14 @@ std::vector<at::Tensor> mha_fwd(at::Tensor& q,                   // batch_size x
     }
 
     // device ptrs
-    auto qDevice = static_cast<uint8_t *>(const_cast<void *>(q.data_ptr()));
-    auto kDevice = static_cast<uint8_t *>(const_cast<void *>(k.data_ptr()));
-    auto vDevice = static_cast<uint8_t *>(const_cast<void *>(v.data_ptr()));
-    uint8_t*  qSeqDevice = nullptr;
+    auto qDevice = static_cast<uint8_t*>(const_cast<void*>(q.data_ptr()));
+    auto kDevice = static_cast<uint8_t*>(const_cast<void*>(k.data_ptr()));
+    auto vDevice = static_cast<uint8_t*>(const_cast<void*>(v.data_ptr()));
+    uint8_t* qSeqDevice = nullptr;
     uint8_t* kvSeqDevice = nullptr;
-    auto workspaceDevice = static_cast<uint8_t *>(const_cast<void *>(workspace_tensor.data_ptr()));
-    auto oDevice = static_cast<uint8_t *>(const_cast<void *>(out.data_ptr()));
-    uint8_t * blockTableDevice = nullptr; // will not be used in non-kvcahce fwd api
+    auto workspaceDevice = static_cast<uint8_t*>(const_cast<void*>(workspace_tensor.data_ptr()));
+    auto oDevice = static_cast<uint8_t*>(const_cast<void*>(out.data_ptr()));
+    uint8_t* blockTableDevice = nullptr; // will not be used in non-kvcahce fwd api
 
     // run kernel
     // Non-paged forward; the layout is carried by fwd_args.layout (BSND or BNSD).

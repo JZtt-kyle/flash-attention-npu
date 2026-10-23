@@ -42,22 +42,20 @@
 using flash_attn_npu_950_v3::fill_inference_context;
 using flash_attn_npu_950_v3::SeqlenScratch;
 
-std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::optional<at::Tensor> k_new_,
-                                std::optional<at::Tensor> v_new_, std::optional<at::Tensor> q_v_,
-                                std::optional<at::Tensor> out_, std::optional<at::Tensor> cu_seqlens_q_,
-                                std::optional<at::Tensor> cu_seqlens_k_, std::optional<at::Tensor> cu_seqlens_k_new_,
-                                std::optional<at::Tensor> seqused_q_, std::optional<at::Tensor> seqused_k_,
-                                std::optional<int64_t> max_seqlen_q_, std::optional<int64_t> max_seqlen_k_,
-                                std::optional<at::Tensor> page_table_, std::optional<at::Tensor> kv_batch_idx_,
-                                std::optional<at::Tensor> leftpad_k_, std::optional<at::Tensor> rotary_cos_,
-                                std::optional<at::Tensor> rotary_sin_, std::optional<at::Tensor> seqlens_rotary_,
-                                std::optional<at::Tensor> q_descale_, std::optional<at::Tensor> k_descale_,
-                                std::optional<at::Tensor> v_descale_, std::optional<float> softmax_scale_,
-                                bool is_causal, int64_t window_size_left, int64_t window_size_right,
-                                int64_t attention_chunk, float softcap, bool is_rotary_interleaved,
-                                std::optional<at::Tensor> scheduler_metadata_, int64_t num_splits,
-                                std::optional<bool> pack_gqa_, int64_t sm_margin, bool return_softmax_lse,
-                                int64_t layout)
+std::vector<at::Tensor>
+mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::optional<at::Tensor> k_new_, std::optional<at::Tensor> v_new_,
+        std::optional<at::Tensor> q_v_, std::optional<at::Tensor> out_, std::optional<at::Tensor> cu_seqlens_q_,
+        std::optional<at::Tensor> cu_seqlens_k_, std::optional<at::Tensor> cu_seqlens_k_new_,
+        std::optional<at::Tensor> seqused_q_, std::optional<at::Tensor> seqused_k_,
+        std::optional<int64_t> max_seqlen_q_, std::optional<int64_t> max_seqlen_k_,
+        std::optional<at::Tensor> page_table_, std::optional<at::Tensor> kv_batch_idx_,
+        std::optional<at::Tensor> leftpad_k_, std::optional<at::Tensor> rotary_cos_,
+        std::optional<at::Tensor> rotary_sin_, std::optional<at::Tensor> seqlens_rotary_,
+        std::optional<at::Tensor> q_descale_, std::optional<at::Tensor> k_descale_,
+        std::optional<at::Tensor> v_descale_, std::optional<float> softmax_scale_, bool is_causal,
+        int64_t window_size_left, int64_t window_size_right, int64_t attention_chunk, float softcap,
+        bool is_rotary_interleaved, std::optional<at::Tensor> scheduler_metadata_, int64_t num_splits,
+        std::optional<bool> pack_gqa_, int64_t sm_margin, bool return_softmax_lse, int64_t layout)
 {
     // ============================================================
     // 0. Device guard + stream + AIC core count
@@ -179,8 +177,7 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     }
 
     // 4b. Layout (FwdLayout, resolved by the Python caller; Q/K/V share one layout)
-    TORCH_CHECK(layout >= static_cast<int64_t>(FwdLayout::TND) &&
-                    layout <= static_cast<int64_t>(FwdLayout::BNSD),
+    TORCH_CHECK(layout >= static_cast<int64_t>(FwdLayout::TND) && layout <= static_cast<int64_t>(FwdLayout::BNSD),
                 "950 backend (v3) received an unsupported layout code (", layout, ")");
     const FwdLayout layout_enum = static_cast<FwdLayout>(layout);
     TORCH_CHECK((layout_enum == FwdLayout::TND) == is_varlen_q,
@@ -221,9 +218,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     const int page_block_size = !paged_KV ? 128 : static_cast<int>(k.size(1));
     // k is 3D TND for flash_attn_varlen_func, but 4D
     // (batch/num_blocks, seqlen/block, kv_heads, head) for flash_attn_with_kvcache.
-    const int num_heads_k = layout_enum == FwdLayout::BNSD
-                                ? static_cast<int>(k.size(1))
-                                : static_cast<int>(k.dim() == 3 ? k.size(1) : k.size(2));
+    const int num_heads_k = layout_enum == FwdLayout::BNSD ? static_cast<int>(k.size(1))
+                                                           : static_cast<int>(k.dim() == 3 ? k.size(1) : k.size(2));
     const int head_size_v = static_cast<int>(v.size(-1));
 
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
@@ -340,11 +336,9 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
                         "950 backend (v3) BNSD KV sequence dimension (", kv_seqlen_allocated,
                         ") is too small to cover the actual KV length (", max_kv_seqlen, ")");
         }
-        const int64_t declared_k =
-            max_seqlen_k_.value_or(paged_KV ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
-                                            : (layout_enum == FwdLayout::BNSD
-                                                   ? k.size(2)
-                                                   : (k.dim() == 4 ? k.size(1) : k.size(0))));
+        const int64_t declared_k = max_seqlen_k_.value_or(
+            paged_KV ? static_cast<int64_t>(max_num_blocks_per_seq) * page_block_size
+                     : (layout_enum == FwdLayout::BNSD ? k.size(2) : (k.dim() == 4 ? k.size(1) : k.size(0))));
         if (declared_k > 0 && window_size_left >= declared_k) {
             window_size_left = -1;
         }
@@ -491,8 +485,8 @@ std::vector<at::Tensor> mha_fwd(at::Tensor q, at::Tensor k, at::Tensor v, std::o
     auto seqUsedQDev = seqused_q_.has_value() ? static_cast<uint8_t*>(seqused_q_.value().data_ptr()) : nullptr;
     auto seqUsedKvDev = seqused_k_.has_value() ? static_cast<uint8_t*>(seqused_k_.value().data_ptr()) : nullptr;
     auto blockTableDev = paged_KV ? static_cast<uint8_t*>(page_table.data_ptr()) : nullptr;
-    const bool enableDN = !flashDecodeEnabled && (!is_causal) && (!is_local) && (head_size_q <= 256) &&
-                          (head_size_v <= 256);
+    const bool enableDN =
+        !flashDecodeEnabled && (!is_causal) && (!is_local) && (head_size_q <= 256) && (head_size_v <= 256);
 
     const float softmax_scale = softmax_scale_.value_or(1.0f / std::sqrt(static_cast<float>(head_size_q)));
     const float scale_value = is_softcap ? softmax_scale / softcap : softmax_scale;

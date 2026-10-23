@@ -889,8 +889,8 @@ class FAInferKernel {
                                      layoutO, layoutOTmp, layoutUpdate, layoutLse, actualBlockShapePV, qSBlockSize,
                                      qNBlockSize, (stackSeqCount - PRE_LAUNCH == 0), nowkvSIdx + 1 >= kvSLoopNumTotal,
                                      curStackTileMod, static_cast<uint32_t>(oHeadStride),
-                                     typename EpilogueRescaleO::SplitKVParams(), delStartRow,
-                                     delEndRow, qSeqlen, qSBlockIdx, curQNBlockTile);
+                                     typename EpilogueRescaleO::SplitKVParams(), delStartRow, delEndRow, qSeqlen,
+                                     qSBlockIdx, curQNBlockTile);
                 }
 #endif
             }
@@ -956,11 +956,10 @@ template <typename InputDtypeQ = half, typename InputDtypeKv = half, typename In
           bool PagedCacheFlag = false, FaiKenel::MaskType maskCategory = FaiKenel::MaskType::NO_MASK,
           FaiKenel::inputLayout inLayout = FaiKenel::inputLayout::TND,
           Epilogue::LseModeT lseMode = Epilogue::LseModeT::NONE, bool HAS_SOFTCAP = false>
-__global__ __aicore__ void FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask,
-                                   GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse, GM_ADDR actualQseqlen,
-                                   GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling, GM_ADDR runtime,
-                                   uint64_t blockTableStride, GM_ADDR seqUsedQ, GM_ADDR seqUsedKv,
-                                   int64_t kvSeqlenAllocated)
+__global__ __aicore__ void
+FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables, GM_ADDR o, GM_ADDR lse,
+        GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen, GM_ADDR workspace, GM_ADDR tiling, GM_ADDR runtime,
+        uint64_t blockTableStride, GM_ADDR seqUsedQ, GM_ADDR seqUsedKv, int64_t kvSeqlenAllocated)
 {
     AscendC::SetSyncBaseAddr(fftsAddr);
 
@@ -1018,9 +1017,9 @@ __global__ __aicore__ void FAInfer(uint64_t fftsAddr, GM_ADDR q, GM_ADDR k, GM_A
     using FAInferKernelType = FAInferKernel<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax, EpilogueRescaleO,
                                             PagedCacheFlag, maskCategory, inLayout, CombineScale>;
 
-    FAIKernelParams params{q,   k,         v,      mask,    blockTables,      actualQseqlen, actualKvseqlen, o,
-                           lse, workspace, tiling, runtime, blockTableStride, seqUsedQ,      seqUsedKv,
-                           kvSeqlenAllocated};
+    FAIKernelParams params{
+        q,   k,         v,      mask,    blockTables,      actualQseqlen, actualKvseqlen, o,
+        lse, workspace, tiling, runtime, blockTableStride, seqUsedQ,      seqUsedKv,      kvSeqlenAllocated};
     FAInferKernelType flashAttnInfer;
     flashAttnInfer(params);
 }

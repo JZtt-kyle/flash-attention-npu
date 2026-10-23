@@ -1042,9 +1042,8 @@ CATLASS_GLOBAL void FAInfer(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_AD
 
     using Kernel = FAIKernel950<BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, kvFormat,
                                 kvcacheType, kvcacheShape, maskCategory, cacheLayout, false, LseMode>;
-    FAIKernelParams params{q,        k,         v, mask, blockTables, actualQseqlen, actualKvseqlen,
-                           seqUsedQ, seqUsedKv, o, lse,  workspace,   tiling,        runtimeTiling,
-                           kvSeqlenAllocated};
+    FAIKernelParams params{q,         k, v,   mask,      blockTables, actualQseqlen, actualKvseqlen,   seqUsedQ,
+                           seqUsedKv, o, lse, workspace, tiling,      runtimeTiling, kvSeqlenAllocated};
     Kernel faInfer;
     faInfer(params);
 }
@@ -1108,9 +1107,8 @@ CATLASS_GLOBAL void FAInferDn(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_
 
     using Kernel = FAIKernel950<BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, kvFormat,
                                 kvcacheType, kvcacheShape, maskCategory, cacheLayout, true, LseMode>;
-    FAIKernelParams params{q,        k,         v, mask, blockTables, actualQseqlen, actualKvseqlen,
-                           seqUsedQ, seqUsedKv, o, lse,  workspace,   tiling,        runtimeTiling,
-                           kvSeqlenAllocated};
+    FAIKernelParams params{q,         k, v,   mask,      blockTables, actualQseqlen, actualKvseqlen,   seqUsedQ,
+                           seqUsedKv, o, lse, workspace, tiling,      runtimeTiling, kvSeqlenAllocated};
     Kernel faInfer;
     faInfer(params);
 }
